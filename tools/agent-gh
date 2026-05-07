@@ -54,6 +54,33 @@ PR_VIEW_FIELDS = ",".join(
 
 PR_SEARCH_FIELDS = "number,title,state,url,repository,author,isDraft,updatedAt,commentsCount,labels"
 
+ENV_VAR_RE = re.compile(r"\b([A-Z][A-Z0-9_]*[A-Z0-9])\b")
+INTERESTING_ENV_PREFIXES = (
+    "SENTRY",
+    "NEXT_PUBLIC",
+    "RENDER",
+    "VERCEL",
+    "SUPABASE",
+    "DATABASE",
+    "REDIS",
+    "AUTH",
+    "NEXTAUTH",
+    "OKTA",
+    "OPENAI",
+    "ANTHROPIC",
+    "GEMINI",
+    "RESEND",
+    "SLACK",
+)
+OPTIONAL_PROVIDER_ENV_NAMES = {
+    "CI",
+    "NODE_ENV",
+    "RENDER",
+    "RENDER_SERVICE_NAME",
+    "VERCEL",
+    "VERCEL_ENV",
+}
+
 
 class GhError(RuntimeError):
     pass
@@ -386,6 +413,10 @@ def pr_checks(ref: PrRef) -> list[dict[str, Any]]:
     return payload or []
 
 
+def pr_diff_text(ref: PrRef) -> str:
+    return run_gh(["pr", "diff", *pr_gh_args(ref)])
+
+
 def pr_threads(ref: PrRef, *, all_threads: bool = False) -> list[dict[str, Any]]:
     if not ref.repo or not ref.number:
         raise GhError("threads requires an explicit PR reference")
@@ -611,6 +642,394 @@ def build_awaiting(args: argparse.Namespace) -> dict[str, Any]:
     return {"viewer": viewer, "count": len(details), "items": details[: args.limit], "scope_note": scope_note}
 
 
+def add_finding(
+    findings: list[dict[str, Any]],
+    *,
+    severity: str,
+    title: str,
+    evidence: str,
+    fix: str,
+    category: str = "review",
+) -> None:
+    findings.append(
+        {
+            "severity": severity,
+            "category": category,
+            "title": title,
+            "evidence": evidence,
+            "fix": fix,
+        }
+    )
+
+
+def changed_file(detail: dict[str, Any], suffix: str) -> dict[str, Any] | None:
+    for file in detail.get("files") or []:
+        path = str(file.get("path") or "")
+        if path.endswith(suffix):
+            return file
+    return None
+
+
+def changed_paths(detail: dict[str, Any]) -> list[str]:
+    return [str(file.get("path") or "") for file in detail.get("files") or [] if file.get("path")]
+
+
+def extract_interesting_env_vars(text: str) -> list[str]:
+    envs: set[str] = set()
+    for value in ENV_VAR_RE.findall(text):
+        if value in OPTIONAL_PROVIDER_ENV_NAMES or value in {"SENTRY", "NEXT_PUBLIC", "RENDER", "VERCEL"}:
+            continue
+        if value.startswith(INTERESTING_ENV_PREFIXES):
+            envs.add(value)
+    if ("SENTRY_ORG" in envs or "SENTRY_PROJECT" in envs) and "SENTRY_AUTH_TOKEN" not in envs:
+        envs.add("SENTRY_AUTH_TOKEN")
+    return sorted(envs)
+
+
+def command_available(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def run_optional(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def parse_env_keys(output_text: str) -> set[str]:
+    keys: set[str] = set()
+    for line in output_text.splitlines():
+        match = re.search(r"\b([A-Z][A-Z0-9_]{2,})=", line)
+        if match:
+            keys.add(match.group(1))
+    return keys
+
+
+def repo_slug(repo: str | None) -> str | None:
+    if not repo or "/" not in repo:
+        return None
+    return repo.split("/", 1)[1].lower()
+
+
+def deployment_target_kind(paths: list[str]) -> str:
+    web = any(path.startswith("presentation/") or path == "Dockerfile.web" or path.endswith("Dockerfile.web") for path in paths)
+    worker = any(path.startswith("orchestrator/") or path == "Dockerfile.worker" or path.endswith("Dockerfile.worker") for path in paths)
+    if web and not worker:
+        return "web"
+    if worker and not web:
+        return "worker"
+    return "mixed"
+
+
+def service_matches_target(service_name: str, target_kind: str) -> bool:
+    lower = service_name.lower()
+    if target_kind == "web":
+        return "worker" not in lower
+    if target_kind == "worker":
+        return "worker" in lower
+    return True
+
+
+def probe_deployment_env(detail: dict[str, Any], env_vars: list[str], *, target_kind: str = "mixed") -> dict[str, Any]:
+    """Best-effort local provider probe. Values are never returned, only key presence."""
+    slug = repo_slug(detail.get("repo"))
+    result: dict[str, Any] = {
+        "enabled": True,
+        "env_vars": env_vars,
+        "render": {"services": []},
+        "vercel": {"projects": []},
+        "notes": [],
+    }
+    if not slug or not env_vars:
+        return result
+
+    if command_available("agent-do"):
+        render_services = run_optional(["agent-do", "render", "services"])
+        if render_services and render_services.returncode == 0:
+            for line in render_services.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                service_id, service_name = parts[0], parts[1]
+                if slug not in service_name.lower() or not service_matches_target(service_name, target_kind):
+                    continue
+                env_out = run_optional(["agent-do", "render", "env", service_id])
+                keys = parse_env_keys(env_out.stdout if env_out and env_out.returncode == 0 else "")
+                result["render"]["services"].append(
+                    {
+                        "id": service_id,
+                        "name": service_name,
+                        "present": sorted(set(env_vars) & keys),
+                        "missing": sorted(set(env_vars) - keys),
+                    }
+                )
+        elif render_services:
+            result["notes"].append(f"render probe failed: {(render_services.stderr or render_services.stdout).strip()[:200]}")
+
+        vercel_projects = None if target_kind == "worker" else run_optional(["agent-do", "vercel", "projects"])
+        if vercel_projects and vercel_projects.returncode == 0:
+            for line in vercel_projects.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                project_id, project_name = parts[0], parts[1]
+                if slug != project_name.lower():
+                    continue
+                env_out = run_optional(["agent-do", "vercel", "env", project_name])
+                keys = parse_env_keys(env_out.stdout if env_out and env_out.returncode == 0 else "")
+                result["vercel"]["projects"].append(
+                    {
+                        "id": project_id,
+                        "name": project_name,
+                        "present": sorted(set(env_vars) & keys),
+                        "missing": sorted(set(env_vars) - keys),
+                    }
+                )
+        elif vercel_projects:
+            result["notes"].append(f"vercel probe failed: {(vercel_projects.stderr or vercel_projects.stdout).strip()[:200]}")
+    else:
+        result["notes"].append("agent-do not found; provider env probe skipped")
+    return result
+
+
+def audit_pr(ref: PrRef, *, probe_deploys: bool = False) -> dict[str, Any]:
+    detail = pr_detail(ref)
+    checks = pr_checks(ref)
+    threads = pr_threads(ref)
+    diff = pr_diff_text(ref)
+    paths = changed_paths(detail)
+    findings: list[dict[str, Any]] = []
+
+    failed_checks = [check for check in checks if str(check.get("bucket") or "").lower() in {"fail", "failed", "failure"}]
+    pending_checks = [check for check in checks if str(check.get("bucket") or "").lower() in {"pending", "queued", "in_progress", "waiting"}]
+    if failed_checks:
+        add_finding(
+            findings,
+            severity="high",
+            category="checks",
+            title="Required checks are failing",
+            evidence=", ".join(str(check.get("name") or "unnamed") for check in failed_checks[:5]),
+            fix="Fix the failing checks before review approval. If a check is irrelevant, document why and remove or reconfigure it instead of ignoring the failure.",
+        )
+    if pending_checks:
+        add_finding(
+            findings,
+            severity="medium",
+            category="checks",
+            title="Required signal is still pending",
+            evidence=", ".join(str(check.get("name") or "unnamed") for check in pending_checks[:5]),
+            fix="Wait for the pending checks to settle before merge, or rerun/debug stuck checks so review is based on final CI state.",
+        )
+    if threads:
+        add_finding(
+            findings,
+            severity="medium",
+            category="review",
+            title="Unresolved review threads exist",
+            evidence=f"{len(threads)} unresolved thread(s)",
+            fix="Resolve the review threads in code or reply with a concrete reason they are intentionally left open.",
+        )
+    if detail.get("merge_state") and str(detail.get("merge_state")).upper() not in {"CLEAN", "UNKNOWN"}:
+        add_finding(
+            findings,
+            severity="high",
+            category="merge",
+            title="PR is not cleanly mergeable",
+            evidence=f"merge_state={detail.get('merge_state')} mergeable={detail.get('mergeable')}",
+            fix="Rebase or merge the base branch, resolve conflicts, and rerun checks before review approval.",
+        )
+
+    lock_files = [file for file in detail.get("files") or [] if str(file.get("path") or "").endswith(("package-lock.json", "pnpm-lock.yaml", "yarn.lock"))]
+    package_files = [file for file in detail.get("files") or [] if str(file.get("path") or "").endswith("package.json")]
+    for file in lock_files:
+        churn = int(file.get("additions") or 0) + int(file.get("deletions") or 0)
+        if churn >= 1000:
+            add_finding(
+                findings,
+                severity="medium",
+                category="dependencies",
+                title="Lockfile blast radius is large",
+                evidence=f"{file.get('path')} changed by +{file.get('additions')} -{file.get('deletions')}",
+                fix="Regenerate the lockfile with only the intended dependency change. If the broad dependency refresh is intentional, split it into a separate PR with its own validation notes.",
+            )
+        elif churn >= 250 and package_files:
+            add_finding(
+                findings,
+                severity="low",
+                category="dependencies",
+                title="Lockfile churn needs review",
+                evidence=f"{file.get('path')} changed by +{file.get('additions')} -{file.get('deletions')}",
+                fix="Confirm the lockfile changes correspond to the manifest change and do not silently upgrade unrelated runtime packages.",
+            )
+
+    if re.search(r"tracesSampleRate\s*:\s*1(?:\.0)?", diff):
+        add_finding(
+            findings,
+            severity="medium",
+            category="observability",
+            title="Production trace sampling appears too high",
+            evidence="Diff contains tracesSampleRate: 1.0",
+            fix='Make sampling env-driven or lower the production default, for example `Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? "0.1")`, and use it consistently across runtime configs.',
+        )
+
+    if "SENTRY_ORG" in diff or "SENTRY_PROJECT" in diff:
+        if "SENTRY_AUTH_TOKEN" not in diff:
+            add_finding(
+                findings,
+                severity="medium",
+                category="observability",
+                title="Source-map upload looks partially wired",
+                evidence="Diff references SENTRY_ORG/SENTRY_PROJECT without SENTRY_AUTH_TOKEN",
+                fix="Either fully wire build-time source-map upload env, including SENTRY_AUTH_TOKEN, or remove/disable source-map upload config until that path is ready.",
+            )
+
+    if "captureException" in diff and "process.exit" in diff and "Sentry.flush" not in diff and "Sentry.close" not in diff:
+        add_finding(
+            findings,
+            severity="medium",
+            category="observability",
+            title="Fatal telemetry may be dropped before process exit",
+            evidence="Diff captures exceptions and exits without Sentry.flush()/Sentry.close()",
+            fix="Await `Sentry.flush(2000)` or `Sentry.close(2000)` before fatal `process.exit` paths. Do not let telemetry failure block shutdown indefinitely.",
+        )
+
+    if re.search(r"tags\s*:\s*\{[^}]*\bjobId\b", diff, re.DOTALL) or re.search(r"tags\s*:\s*\{[^}]*\bjobName\b", diff, re.DOTALL):
+        add_finding(
+            findings,
+            severity="medium",
+            category="observability",
+            title="High-cardinality values are used as Sentry tags",
+            evidence="Diff places jobId/jobName in tags",
+            fix="Keep tags low-cardinality. Move jobId/jobName to `extra` or structured context while keeping only stable dimensions, such as worker name, in tags.",
+        )
+
+    if "vitest" in diff.lower():
+        package_json = changed_file(detail, "package.json")
+        if package_json and '"test"' not in diff and "vitest" not in re.sub(r"^\+.*vitest.*$", "", diff, flags=re.MULTILINE).lower():
+            add_finding(
+                findings,
+                severity="medium",
+                category="tests",
+                title="Added Vitest test may not be runnable",
+                evidence="Diff imports/mentions Vitest but does not add an obvious test script or Vitest dependency",
+                fix="Add Vitest to devDependencies and a real test script, rewrite the test for the existing runner, or remove the dead test from this PR.",
+            )
+        elif package_json and '"test"' not in diff:
+            add_finding(
+                findings,
+                severity="medium",
+                category="tests",
+                title="New test runner wiring is unclear",
+                evidence="Diff mentions Vitest but no package.json test script addition was detected",
+                fix="Make the test executable through the package's normal test command so CI and reviewers can run it.",
+            )
+
+    if any(path.endswith((".env.example", "render.yaml", "vercel.json")) or "Dockerfile" in path for path in paths):
+        add_finding(
+            findings,
+            severity="medium",
+            category="deploy",
+            title="Deployment or environment contract changed",
+            evidence=", ".join(path for path in paths if path.endswith((".env.example", "render.yaml", "vercel.json")) or "Dockerfile" in path)[:300],
+            fix="Verify the live deployment provider has the same required env keys and build/runtime semantics as the checked-in config. Keep blueprint state aligned with production or explicitly mark it non-authoritative.",
+        )
+
+    env_vars = extract_interesting_env_vars(diff)
+    target_kind = deployment_target_kind(paths)
+    deploy_probe = probe_deployment_env(detail, env_vars, target_kind=target_kind) if probe_deploys else {"enabled": False, "env_vars": env_vars}
+    deploy_probe["target_kind"] = target_kind
+    if probe_deploys:
+        for service in deploy_probe.get("render", {}).get("services", []):
+            missing = service.get("missing") or []
+            if missing:
+                add_finding(
+                    findings,
+                    severity="medium",
+                    category="deploy",
+                    title=f"Render env may be missing keys on {service.get('name')}",
+                    evidence=", ".join(missing[:12]),
+                    fix="Add the missing keys to the Render service or document why this service should not receive them. Verify build-time NEXT_PUBLIC_* keys separately for Docker builds.",
+                )
+        for project in deploy_probe.get("vercel", {}).get("projects", []):
+            missing = project.get("missing") or []
+            if missing:
+                add_finding(
+                    findings,
+                    severity="low",
+                    category="deploy",
+                    title=f"Vercel env may be missing keys on {project.get('name')}",
+                    evidence=", ".join(missing[:12]),
+                    fix="If Vercel is still an active target, add the missing keys. If it is intentionally disabled/stale, document that so Vercel previews are not treated as production validation.",
+                )
+
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    findings.sort(key=lambda item: (severity_order.get(item.get("severity"), 9), item.get("category") or "", item.get("title") or ""))
+    return {
+        "pr": detail,
+        "checks": {"count": len(checks), "items": checks},
+        "unresolved_threads": {"count": len(threads), "items": threads},
+        "changed_paths": paths,
+        "env_vars_in_diff": env_vars,
+        "deployment_probe": deploy_probe,
+        "findings": findings,
+        "verdict": "request_changes" if any(item.get("severity") in {"high", "medium"} for item in findings) else "no_blockers_found",
+    }
+
+
+def format_audit_reply(audit: dict[str, Any]) -> str:
+    pr = audit.get("pr") or {}
+    findings = audit.get("findings") or []
+    blockers = [finding for finding in findings if finding.get("severity") in {"high", "medium"}]
+    notes = [finding for finding in findings if finding.get("severity") not in {"high", "medium"}]
+    if blockers:
+        lines = [
+            "Do not merge as-is.",
+            "",
+            "Required fixes:",
+            "",
+        ]
+        for finding in blockers:
+            lines.append(f"- {finding.get('title')}. {finding.get('evidence')}.")
+            lines.append(f"  How to address: {finding.get('fix')}")
+        if notes:
+            lines.extend(["", "Lower-priority notes:", ""])
+            for finding in notes:
+                lines.append(f"- {finding.get('title')}. {finding.get('evidence')}.")
+                lines.append(f"  How to address: {finding.get('fix')}")
+        lines.extend(
+            [
+                "",
+                "Current verified signals:",
+                f"- Checks inspected: {(audit.get('checks') or {}).get('count', 0)}",
+                f"- Unresolved review threads: {(audit.get('unresolved_threads') or {}).get('count', 0)}",
+                f"- Files changed: {pr.get('changed_files')}  +{pr.get('additions')} -{pr.get('deletions')}",
+                "",
+                "Requesting changes.",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines = ["No blocking issues found from the automated review audit."]
+    if notes:
+        lines.extend(["", "Lower-priority notes:", ""])
+        for finding in notes:
+            lines.append(f"- {finding.get('title')}. {finding.get('evidence')}.")
+            lines.append(f"  How to address: {finding.get('fix')}")
+    lines.extend(
+        [
+            "",
+            "Current verified signals:",
+            f"- Checks inspected: {(audit.get('checks') or {}).get('count', 0)}",
+            f"- Unresolved review threads: {(audit.get('unresolved_threads') or {}).get('count', 0)}",
+            f"- Files changed: {pr.get('changed_files')}  +{pr.get('additions')} -{pr.get('deletions')}",
+            "",
+            "This is not a substitute for reading the code diff, but there are no automated blockers from the audited signals.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -691,10 +1110,40 @@ def cmd_inbox(args: argparse.Namespace) -> None:
 
 def cmd_awaiting(args: argparse.Namespace) -> None:
     payload = build_awaiting(args)
+    if args.audit or args.replies:
+        audited_items = []
+        for item in payload.get("items", []):
+            ref = PrRef(repo=item.get("repo"), number=str(item.get("number")), original=item.get("ref") or "")
+            audit = audit_pr(ref, probe_deploys=args.probe_deploys)
+            if args.replies:
+                audit["reply"] = format_audit_reply(audit)
+            audited_items.append({**item, "audit": audit})
+        payload = {**payload, "items": audited_items, "audit_enabled": True, "deployment_probe_enabled": args.probe_deploys}
     if args.json:
         print_json(payload)
     else:
-        print_table(payload["items"], ["ref", "reasons", "state", "author", "updated_at", "title"])
+        if args.replies:
+            for item in payload.get("items", []):
+                print(f"## {item.get('ref')}: {item.get('title')}")
+                print()
+                print((item.get("audit") or {}).get("reply") or "")
+                print()
+        elif args.audit:
+            rows = []
+            for item in payload.get("items", []):
+                audit = item.get("audit") or {}
+                findings = audit.get("findings") or []
+                rows.append(
+                    {
+                        "ref": item.get("ref"),
+                        "verdict": audit.get("verdict"),
+                        "findings": len(findings),
+                        "top_finding": findings[0].get("title") if findings else "",
+                    }
+                )
+            print_table(rows, ["ref", "verdict", "findings", "top_finding"])
+        else:
+            print_table(payload["items"], ["ref", "reasons", "state", "author", "updated_at", "title"])
         if payload.get("scope_note"):
             print(f"\nNote: {payload['scope_note']}")
 
@@ -762,6 +1211,29 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
         print(f"State: {detail.get('state')}  Draft: {detail.get('draft')}  Review: {detail.get('review_decision')}")
         print(f"Checks: {len(checks)}  Unresolved threads: {len(threads)}")
         print(f"Files changed: {detail.get('changed_files')}  +{detail.get('additions')} -{detail.get('deletions')}")
+
+
+def cmd_audit(args: argparse.Namespace) -> None:
+    ref = parse_pr_ref(args.pr)
+    audit = audit_pr(ref, probe_deploys=args.probe_deploys)
+    if args.reply:
+        audit["reply"] = format_audit_reply(audit)
+    if args.json:
+        print_json(audit)
+    elif args.reply:
+        print(audit["reply"])
+    else:
+        findings = audit.get("findings") or []
+        pr = audit.get("pr") or {}
+        print(f"{pr.get('ref')}: {pr.get('title')}")
+        print(f"Verdict: {audit.get('verdict')}")
+        print(f"Checks: {(audit.get('checks') or {}).get('count', 0)}  Unresolved threads: {(audit.get('unresolved_threads') or {}).get('count', 0)}")
+        print(f"Files changed: {pr.get('changed_files')}  +{pr.get('additions')} -{pr.get('deletions')}")
+        if findings:
+            print()
+            print_table(findings, ["severity", "category", "title"])
+        else:
+            print("No automated blockers found.")
 
 
 def read_body(args: argparse.Namespace, *, required: bool = False) -> str | None:
@@ -862,6 +1334,9 @@ def build_parser() -> argparse.ArgumentParser:
     awaiting.add_argument("--include-bots", action="store_true")
     awaiting.add_argument("--include-drafts", action="store_true")
     awaiting.add_argument("--include-reviewed", action="store_true")
+    awaiting.add_argument("--audit", action="store_true", help="Audit each awaiting PR for review risks")
+    awaiting.add_argument("--replies", action="store_true", help="Include request-changes-ready engineering replies")
+    awaiting.add_argument("--probe-deploys", action="store_true", help="Best-effort Render/Vercel env-key probe for env vars changed in each PR")
     awaiting.set_defaults(func=cmd_awaiting)
 
     pr = sub.add_parser("pr", help="Show PR detail")
@@ -889,6 +1364,13 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--summary", action="store_true", default=True)
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_review_summary)
+
+    audit = sub.add_parser("audit", help="Audit a PR for review risks and generate fix-oriented review replies")
+    audit.add_argument("pr")
+    audit.add_argument("--json", action="store_true")
+    audit.add_argument("--reply", action="store_true", help="Print a request-changes-ready review reply")
+    audit.add_argument("--probe-deploys", action="store_true", help="Best-effort Render/Vercel env-key probe for env vars changed in the PR")
+    audit.set_defaults(func=cmd_audit)
 
     for name, action, help_text, body_required in [
         ("approve", "--approve", "Approve a pull request", False),
@@ -940,6 +1422,7 @@ Commands:
   threads <pr>                   Show unresolved PR review threads
   checks <pr>                    Show PR checks
   review <pr> --summary          Summarize a PR for review
+  audit <pr> [--reply]           Audit a PR and generate fix-oriented review text
   approve <pr> [--body text]     Approve a PR
   request-changes <pr> --body t  Request changes on a PR
   comment <pr> [--body text]     Comment on a PR
@@ -950,7 +1433,9 @@ Commands:
 Examples:
   agent-do gh inbox
   agent-do gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova
+  agent-do gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova --audit --replies --probe-deploys
   agent-do gh prs --review-requested
+  agent-do gh audit ovachiever/agent-do#3 --reply
   agent-do gh pr ovachiever/agent-do#3 --json
   agent-do gh threads ovachiever/agent-do#3
   agent-do gh approve ovachiever/agent-do#2 --body "LGTM"

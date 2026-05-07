@@ -3,7 +3,8 @@
 ## Unreleased
 
 ### Added
-- `agent-do gh` for GitHub repository, pull request, review, and merge work-state across accessible repos, with `inbox`, `awaiting`, `prs`, `pr`, `diff`, `threads`, `checks`, `review`, `approve`, `request-changes`, `comment`, `merge`, `ready`, and `draft` commands.
+- `agent-do gh` for GitHub repository, pull request, review, and merge work-state across accessible repos, with `inbox`, `awaiting`, `prs`, `pr`, `diff`, `threads`, `checks`, `review`, `audit`, `approve`, `request-changes`, `comment`, `merge`, `ready`, and `draft` commands.
+- `agent-do gh audit <pr>` and `agent-do gh awaiting --audit --replies --probe-deploys` for deterministic PR review-risk scanning and request-changes-ready engineering replies with concrete fix guidance.
 - Optional Sonnet 4.6 adaptive-thinking command selection for `agent-do suggest`, grounded in registry candidates with deterministic fallback and `--ai auto|on|off`.
 - `agent-do notify` as a root-level notification contract over `sms`, `email`, `slack`, `messenger`, and local `pipe`, backed by `bin/notify` and `lib/notify.py` instead of another registry tool.
 - Rule-driven notification emission through `agent-do notify set-rule` and `agent-do notify emit`, with exact fact matching, message templates, fingerprints, and cooldown-aware delivery state.

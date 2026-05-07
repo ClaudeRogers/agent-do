@@ -1465,6 +1465,7 @@ tools:
     - discover accessible GitHub repositories
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
+    - audit PR review risks and generate fix-oriented engineering review replies
     - approve, comment, request changes, mark ready/draft, and merge pull requests
     commands:
       whoami: Show authenticated GitHub user
@@ -1477,6 +1478,7 @@ tools:
       threads: Show unresolved PR review threads
       checks: Show PR checks
       review: Summarize a PR for review
+      audit: Audit a PR for review risks and generate request-changes-ready reply text
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -1488,8 +1490,12 @@ tools:
       command: agent-gh inbox
     - intent: show PRs awaiting my review in VID repos
       command: agent-gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova
+    - intent: deeply review PRs awaiting my review and draft replies
+      command: agent-gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova --audit --replies --probe-deploys
     - intent: list open PRs across my repos
       command: agent-gh prs --state open
+    - intent: audit a pull request and generate a request-changes reply
+      command: agent-gh audit ovachiever/agent-do#3 --reply --probe-deploys
     - intent: review pull request 3 in agent-do
       command: agent-gh review ovachiever/agent-do#3 --summary
     - intent: show unresolved GitHub review comments
@@ -1501,7 +1507,9 @@ tools:
       recommended_entrypoints:
       - agent-do gh inbox
       - agent-do gh awaiting --owner <owner>
+      - agent-do gh awaiting --owner <owner> --audit --replies --probe-deploys
       - agent-do gh prs --state open
+      - agent-do gh audit owner/repo#123 --reply --probe-deploys
       - agent-do gh review owner/repo#123 --summary
       discover_keywords:
       - github pull request

@@ -137,12 +137,18 @@ elif args[:2] == ["pr", "view"]:
         "mergeable": "CONFLICTING",
         "mergeStateStatus": "DIRTY",
         "reviewDecision": "CHANGES_REQUESTED",
-        "changedFiles": 3,
-        "additions": 29,
-        "deletions": 1,
+        "changedFiles": 5,
+        "additions": 2029,
+        "deletions": 201,
         "reviewRequests": [{{"__typename": "User", "login": "ovachiever"}}],
         "latestReviews": [{{"author": {{"login": "ovachiever"}}, "state": "CHANGES_REQUESTED", "submittedAt": "2026-04-29T12:01:00Z"}}],
-        "files": [{{"path": "lib/snapshot.sh", "additions": 5, "deletions": 1}}],
+        "files": [
+            {{"path": "presentation/next.config.ts", "additions": 5, "deletions": 1}},
+            {{"path": "presentation/sentry.client.config.ts", "additions": 15, "deletions": 0}},
+            {{"path": "presentation/__tests__/sentry-config.test.ts", "additions": 50, "deletions": 0}},
+            {{"path": "presentation/package.json", "additions": 1, "deletions": 0}},
+            {{"path": "presentation/package-lock.json", "additions": 1958, "deletions": 200}},
+        ],
         "statusCheckRollup": [{{"name": "test", "state": "SUCCESS", "conclusion": "SUCCESS"}}],
         "createdAt": "2026-04-27T20:37:55Z",
         "updatedAt": "2026-04-29T12:00:00Z",
@@ -158,7 +164,15 @@ elif args[:3] == ["api", "graphql", "-f"]:
         {{"id": "thread2", "isResolved": True, "path": "README.md", "line": 1, "comments": {{"nodes": []}}}}
     ]}}}}}}}}}})
 elif args[:2] == ["pr", "diff"]:
-    print("diff --git a/lib/snapshot.sh b/lib/snapshot.sh")
+    print('''
+diff --git a/presentation/next.config.ts b/presentation/next.config.ts
++  org: process.env.SENTRY_ORG,
++  project: process.env.SENTRY_PROJECT,
+diff --git a/presentation/sentry.client.config.ts b/presentation/sentry.client.config.ts
++Sentry.init({{ tracesSampleRate: 1.0, enabled: !!dsn }});
+diff --git a/presentation/__tests__/sentry-config.test.ts b/presentation/__tests__/sentry-config.test.ts
++import {{ describe, it, expect }} from 'vitest';
+''')
 elif args[:2] == ["pr", "review"]:
     print("reviewed")
 elif args[:2] == ["pr", "merge"]:
@@ -226,10 +240,44 @@ else:
         require(awaiting_payload["items"][0]["ref"] == "Versova-Intelligence-Division/vms.io#9", f"unexpected awaiting refs: {awaiting_payload}")
         require("not_reviewed_by_me" in awaiting_payload["items"][0]["reasons"], f"missing awaiting reason: {awaiting_payload}")
 
+        awaiting_replies = run(
+            [
+                str(AGENT_DO),
+                "gh",
+                "awaiting",
+                "--owner",
+                "Versova-Intelligence-Division",
+                "--author",
+                "ctyrrell-versova",
+                "--audit",
+                "--replies",
+            ],
+            cwd=ROOT,
+            env=env,
+        )
+        require(awaiting_replies.returncode == 0, f"awaiting replies failed: {awaiting_replies.stderr}")
+        require("## Versova-Intelligence-Division/vms.io#9" in awaiting_replies.stdout, f"missing awaiting reply header: {awaiting_replies.stdout}")
+        require("How to address:" in awaiting_replies.stdout, f"missing awaiting fix guidance: {awaiting_replies.stdout}")
+
         threads = run([str(AGENT_DO), "gh", "threads", "ovachiever/agent-do#3", "--json"], cwd=ROOT, env=env)
         require(threads.returncode == 0, f"threads failed: {threads.stderr}")
         threads_payload = json.loads(threads.stdout)
         require(threads_payload["count"] == 1, f"expected unresolved-only thread list: {threads_payload}")
+
+        audit = run([str(AGENT_DO), "gh", "audit", "ovachiever/agent-do#3", "--json"], cwd=ROOT, env=env)
+        require(audit.returncode == 0, f"audit failed: {audit.stderr}")
+        audit_payload = json.loads(audit.stdout)
+        titles = {finding["title"] for finding in audit_payload["findings"]}
+        require(audit_payload["verdict"] == "request_changes", f"expected request_changes audit: {audit_payload}")
+        require("Lockfile blast radius is large" in titles, f"missing lockfile finding: {audit_payload}")
+        require("Production trace sampling appears too high" in titles, f"missing sampling finding: {audit_payload}")
+        require("Source-map upload looks partially wired" in titles, f"missing source-map finding: {audit_payload}")
+        require("Added Vitest test may not be runnable" in titles, f"missing test wiring finding: {audit_payload}")
+
+        audit_reply = run([str(AGENT_DO), "gh", "audit", "ovachiever/agent-do#3", "--reply"], cwd=ROOT, env=env)
+        require(audit_reply.returncode == 0, f"audit reply failed: {audit_reply.stderr}")
+        require("Do not merge as-is." in audit_reply.stdout, f"missing review stance: {audit_reply.stdout}")
+        require("How to address:" in audit_reply.stdout, f"missing fix guidance: {audit_reply.stdout}")
 
         approve = run([str(AGENT_DO), "gh", "approve", "ovachiever/agent-do#3", "--body", "LGTM"], cwd=ROOT, env=env)
         require(approve.returncode == 0, f"approve failed: {approve.stderr}")
