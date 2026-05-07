@@ -36,6 +36,7 @@
 
 ### Changed
 - Compressed the public README into a front-door guide and moved detailed tool workflows into `docs/TOOLS.md`.
+- Moved the standalone Context7 helper from the repository root to `bin/context7` so the root only contains primary project files.
 - UserPromptSubmit tool suggestions now use Sonnet 4.6 adaptive-thinking routing over the compact full `agent-do` catalog and stay silent unless the model returns a high-confidence exact command.
 - UserPromptSubmit coord focus reminders are non-blocking `additionalContext` for active-peer/no-focus workspace prompts, so agents can set focus and continue instead of being stopped by the hook.
 - UserPromptSubmit no longer suggests weak deterministic matches like `agent-do context search` just because a prompt asks to edit local docs, README, or changelog files.
