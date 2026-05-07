@@ -35,6 +35,7 @@
 - `lib/snapshot.sh` honors `AGENT_DO_SNAPSHOT_COMPACT=1` to emit single-line JSON instead of pretty-printed output, for piping to jq, log lines, or other tools that prefer one document per line.
 
 ### Changed
+- Compressed the public README into a front-door guide and moved detailed tool workflows into `docs/TOOLS.md`.
 - UserPromptSubmit tool suggestions now use Sonnet 4.6 adaptive-thinking routing over the compact full `agent-do` catalog and stay silent unless the model returns a high-confidence exact command.
 - UserPromptSubmit coord focus reminders are non-blocking `additionalContext` for active-peer/no-focus workspace prompts, so agents can set focus and continue instead of being stopped by the hook.
 - UserPromptSubmit no longer suggests weak deterministic matches like `agent-do context search` just because a prompt asks to edit local docs, README, or changelog files.
