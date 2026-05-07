@@ -51,14 +51,14 @@ def main() -> int:
     text_result = run_agent_do("harness", "inspect")
     require(text_result.returncode == 0, f"harness inspect failed: {text_result.stderr}")
     require("agent-do harness" in text_result.stdout, f"unexpected text output: {text_result.stdout}")
-    require("Tools: 89" in text_result.stdout, f"expected current tool count in text output: {text_result.stdout}")
+    require("Tools: 90" in text_result.stdout, f"expected current tool count in text output: {text_result.stdout}")
 
     json_result = run_agent_do("harness", "inspect", "--json")
     require(json_result.returncode == 0, f"harness inspect --json failed: {json_result.stderr}")
     payload = json.loads(json_result.stdout)
     require(payload["ok"] is True, f"expected ok payload: {payload}")
-    require(payload["summary"]["tools"] == 89, f"expected 89 tools: {payload['summary']}")
-    require(payload["summary"]["by_type"]["tool"] == 89, f"expected tool component count: {payload['summary']}")
+    require(payload["summary"]["tools"] == 90, f"expected 90 tools: {payload['summary']}")
+    require(payload["summary"]["by_type"]["tool"] == 90, f"expected tool component count: {payload['summary']}")
 
     global_json_result = run_agent_do("harness", "--json", "inspect")
     require(global_json_result.returncode == 0, f"harness global --json failed: {global_json_result.stderr}")
@@ -72,6 +72,7 @@ def main() -> int:
         "tool:harness",
         "tool:context",
         "tool:zpc",
+        "tool:vector",
     ]:
         require(component_id in components, f"missing harness component {component_id}")
 

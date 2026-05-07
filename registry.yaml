@@ -1691,13 +1691,13 @@ tools:
     description: Observable agent-do harness inventory, evidence, and change-manifest front door
     capabilities:
     - inspect the editable agent-do harness surface across tools, hooks, instructions, libraries, tests, and state
-    - summarize hook nudge telemetry and current effectiveness measurement gaps
+    - summarize hook decisions, nudge emissions, tool calls/results, and followed/ignored/expired outcomes
     - build drill-down evidence bundles for sessions, runs, and harness changes
     - create and verify falsifiable harness change manifests
     - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
     commands:
       inspect: Inventory tools, hooks, instructions, libraries, state refs, and tests
-      nudges: Summarize hook nudge telemetry and effectiveness limits
+      nudges: Summarize hook outcome telemetry and nudge effectiveness
       evidence: Build local drill-down evidence bundles
       manifest: Create and verify harness change manifests
     examples:
@@ -2630,6 +2630,79 @@ tools:
         check: agent-do render services
         fix: agent-do creds store RENDER_API_KEY --stdin
         note: Requires a Render API key; agent-do will resolve it from env or secure storage
+    concurrency: write
+  vector:
+    description: Operate Versova Vector portfolio command center
+    capabilities:
+    - read portfolio project status, snapshots, work, support, links, and activity
+    - create snapshots, decisions, work items, support items, links, and asks
+    - manage project bindings and members
+    - launch the local Vector sync package
+    commands:
+      today: Show engineer-owned projects, open work, and commits
+      inbox: Show asks, new intake, and support queue
+      ls: List portfolio projects
+      show: Show one project with live sections
+      snapshot: Create a project snapshot
+      decide: Record a decision
+      work: Add, complete, or block work items
+      support: Add or resolve support items
+      ask: Create an ask-only snapshot
+      link: Add or remove project links
+      open: Open project binding location and primary URLs
+      sync: Run @vector/sync locally
+      bind: Upsert project substrate binding
+      members: List or add members
+      feed: Read project_activity feed
+      intake: List, create, accept, or decline intake
+    examples:
+    - intent: show my vector standup
+      command: agent-vector today
+    - intent: list vector projects
+      command: agent-vector ls
+    - intent: show the VMS project in vector
+      command: agent-vector show vms-io
+    - intent: add a vector snapshot
+      command: agent-vector snapshot versova-research "Research sync is green"
+    - intent: record a vector decision
+      command: agent-vector decide versova-research advance "Ship the sync daemon"
+    - intent: add vector work
+      command: agent-vector work versova-research add "Wire digest route"
+    - intent: resolve vector support
+      command: agent-vector support versova-research resolve <id>
+    - intent: add a vector project link
+      command: agent-vector link versova-research add repo "Repository" https://github.com/example/repo
+    - intent: run vector sync
+      command: agent-vector sync --dry-run
+    - intent: bind a vector project
+      command: agent-vector bind versova-research --dir /Users/erik/Documents/AI/Custom_Coding/versova-research
+    credentials:
+      required:
+      - VECTOR_SUPABASE_URL
+      - VECTOR_SUPABASE_SERVICE_KEY
+      optional:
+      - VECTOR_USER_EMAIL
+      - VECTOR_ORG_ID
+    routing:
+      discover_keywords:
+      - vector
+      - versova vector
+      - portfolio command center
+      - project snapshot
+      - project digest
+      prompt_patterns:
+      - \bversova vector\b
+      - \bvector\b.*\b(portfolio|snapshot|sync|digest|work)\b
+      - \bportfolio\b.*\b(command center|snapshot|standup)\b
+      recommended_entrypoints:
+      - agent-do vector today
+      - agent-do vector ls
+      - agent-do vector show <slug>
+      default_command: today
+      readiness:
+        check: agent-do vector ls
+        fix: agent-do creds store VECTOR_SUPABASE_SERVICE_KEY --stdin
+        note: Requires Vector Supabase URL and service role key
     concurrency: write
   vercel:
     description: Control Vercel projects, deployments, domains, and env vars

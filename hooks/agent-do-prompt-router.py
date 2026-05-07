@@ -28,8 +28,9 @@ except ModuleNotFoundError:
     get_recommended_entrypoints = None
 
 try:
-    from telemetry import record_nudge_event
+    from telemetry import record_hook_decision, record_nudge_event
 except ModuleNotFoundError:
+    record_hook_decision = None
     record_nudge_event = None
 
 try:
@@ -516,17 +517,18 @@ def coord_required_context(prompt: str, cwd: str | None, coord_state: dict, deci
     return None
 
 
-def ai_tool_suggestion_context(decision: dict | None, registry: dict) -> tuple[str, list[str]]:
+def ai_tool_suggestion_context(decision: dict | None, registry: dict) -> tuple[str, list[str], list[str]]:
     if not isinstance(decision, dict) or decision.get("emit_tools") is not True:
-        return "", []
+        return "", [], []
 
     threshold = hook_confidence_threshold()
     raw_suggestions = decision.get("tool_suggestions") or []
     if not isinstance(raw_suggestions, list):
-        return "", []
+        return "", [], []
 
     lines = []
     tools = []
+    commands = []
     seen_commands = set()
     for item in raw_suggestions:
         if not isinstance(item, dict):
@@ -543,11 +545,12 @@ def ai_tool_suggestion_context(decision: dict | None, registry: dict) -> tuple[s
             continue
         seen_commands.add(command)
         tools.append(tool)
+        commands.append(command)
         suffix = f" - {why}" if why else ""
         lines.append(f"- `{command}`{suffix}")
 
     if not lines:
-        return "", []
+        return "", [], []
 
     return (
         "## agent-do Tool Suggestion\n\n"
@@ -555,6 +558,7 @@ def ai_tool_suggestion_context(decision: dict | None, registry: dict) -> tuple[s
         + "\n".join(lines)
         + "\n",
         tools,
+        commands,
     )
 
 
@@ -589,9 +593,13 @@ def load_coord_state(cwd: str | None) -> dict:
     if not agent_do:
         return state
 
+    hook_env = os.environ.copy()
+    hook_env["AGENT_DO_TELEMETRY_SUPPRESS"] = "1"
+
     touched = subprocess.run(
         [agent_do, "coord", "touch", "--json"],
         cwd=cwd,
+        env=hook_env,
         text=True,
         capture_output=True,
         check=False,
@@ -606,6 +614,7 @@ def load_coord_state(cwd: str | None) -> dict:
     interrupts_run = subprocess.run(
         [agent_do, "coord", "interrupts", "--json", "--limit", "5"],
         cwd=cwd,
+        env=hook_env,
         text=True,
         capture_output=True,
         check=False,
@@ -649,13 +658,38 @@ def main():
     coord_state = load_coord_state(cwd)
     ai_decision = ai_route_prompt(prompt, cwd=cwd, coord_state=coord_state, registry=registry)
     coord_required = coord_required_context(prompt, cwd, coord_state, ai_decision)
-    tool_context, tool_tools = ai_tool_suggestion_context(ai_decision, registry)
+    tool_context, tool_tools, tool_commands = ai_tool_suggestion_context(ai_decision, registry)
     coord_context, coord_tools = coord_advisory_context(prompt, coord_state)
     is_design = detect_frontend_design(prompt)
 
     needs_completion = needs_completion_check(prompt)
 
-    if coord_required or tool_context or is_design or needs_completion or coord_context:
+    should_emit = bool(coord_required or tool_context or is_design or needs_completion or coord_context)
+    if record_hook_decision is not None:
+        try:
+            decision_tools = []
+            decision_commands = []
+            if coord_required or coord_context:
+                decision_tools.append("coord")
+            if tool_tools:
+                decision_tools.extend(tool_tools)
+                decision_commands.extend(tool_commands)
+            if is_design:
+                decision_tools.extend(["browse", "dpt"])
+            record_hook_decision(
+                "UserPromptSubmit",
+                "prompt_router",
+                "emit" if should_emit else "suppress",
+                prompt=prompt,
+                cwd=cwd,
+                tools=list(dict.fromkeys(decision_tools)),
+                commands=decision_commands,
+                reason="context_emitted" if should_emit else "no_high_confidence_context",
+            )
+        except Exception:
+            pass
+
+    if should_emit:
         context = ""
 
         if coord_required:
@@ -667,6 +701,7 @@ def main():
                         "prompt_router",
                         tools=["coord"],
                         prompt=prompt[:240],
+                        cwd=cwd,
                     )
                 except Exception:
                     pass
@@ -681,7 +716,9 @@ def main():
                         "prompt_tool_suggestion",
                         "prompt_router",
                         tools=tool_tools,
+                        commands=tool_commands,
                         prompt=prompt[:240],
+                        cwd=cwd,
                     )
                 except Exception:
                     pass
@@ -695,6 +732,7 @@ def main():
                         "prompt_router",
                         tools=["browse", "dpt"],
                         prompt=prompt[:240],
+                        cwd=cwd,
                     )
                 except Exception:
                     pass
@@ -709,6 +747,7 @@ def main():
                         "prompt_completion_check",
                         "prompt_router",
                         prompt=prompt[:240],
+                        cwd=cwd,
                     )
                 except Exception:
                     pass
@@ -724,6 +763,7 @@ def main():
                         "prompt_router",
                         tools=coord_tools,
                         prompt=prompt[:240],
+                        cwd=cwd,
                     )
                 except Exception:
                     pass

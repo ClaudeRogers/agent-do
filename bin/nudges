@@ -32,6 +32,15 @@ def render_stats(summary: dict) -> None:
         for tool, count in list(summary["tools"].items())[:10]:
             print(f"    - {tool}: {count}")
 
+    outcomes = summary.get("outcomes") or {}
+    if outcomes:
+        print("  Outcomes:")
+        print(f"    - followed: {outcomes.get('followed', 0)}")
+        print(f"    - ignored: {outcomes.get('ignored', 0)}")
+        print(f"    - expired: {outcomes.get('expired', 0)}")
+        if outcomes.get("follow_through_rate") is not None:
+            print(f"    - follow-through: {outcomes['follow_through_rate']:.0%}")
+
 
 def render_recent(events: list[dict]) -> None:
     print("agent-do nudges recent")

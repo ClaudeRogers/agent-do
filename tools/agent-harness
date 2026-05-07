@@ -108,7 +108,25 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 10) -> subp
 
 
 def agent_do_cmd(*args: str, cwd: Path | None = None, timeout: int = 10) -> subprocess.CompletedProcess[str]:
-    return run_cmd([str(REPO_ROOT / "agent-do"), *args], cwd=cwd, timeout=timeout)
+    env = os.environ.copy()
+    env["AGENT_DO_TELEMETRY_SUPPRESS"] = "1"
+    try:
+        return subprocess.run(
+            [str(REPO_ROOT / "agent-do"), *args],
+            cwd=cwd or Path.cwd(),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            [str(REPO_ROOT / "agent-do"), *args],
+            124,
+            stdout=exc.stdout or "",
+            stderr=f"Command timed out after {timeout}s",
+        )
 
 
 def load_registry() -> dict[str, Any]:
@@ -379,15 +397,50 @@ def nudge_events(since: str | None = None) -> list[dict[str, Any]]:
     return filtered
 
 
+def telemetry_events(since: str | None = None) -> list[dict[str, Any]]:
+    cutoff = parse_since(since)
+    events = read_jsonl(agent_do_home() / "telemetry" / "events.jsonl")
+    if cutoff is None:
+        return events
+    filtered = []
+    for event in events:
+        timestamp = parse_iso(str(event.get("timestamp") or ""))
+        if timestamp and timestamp >= cutoff:
+            filtered.append(event)
+    return filtered
+
+
+def report_relevant_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    relevant = []
+    for event in events:
+        if (
+            event.get("event_type") == "agent_tool_call"
+            and event.get("tool") == "harness"
+            and (event.get("args_shape") or [])[:2] == ["nudges", "effectiveness"]
+        ):
+            continue
+        relevant.append(event)
+    return relevant
+
+
+def summarize_hook_outcomes(events: list[dict[str, Any]]) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from telemetry import summarize_hook_outcomes as summarize  # noqa: WPS433
+
+    return summarize(events)
+
+
 def nudge_effectiveness(since: str | None = None) -> dict[str, Any]:
-    events = nudge_events(since)
-    by_type = Counter(str(event.get("event_type") or "unknown") for event in events)
-    by_source = Counter(str(event.get("source") or "unknown") for event in events)
+    legacy_events = nudge_events(since)
+    events = report_relevant_events(telemetry_events(since))
+    outcome_summary = summarize_hook_outcomes(events)
+    by_type = Counter(str(event.get("event_type") or "unknown") for event in legacy_events)
+    by_source = Counter(str(event.get("source") or "unknown") for event in legacy_events)
     by_tool: Counter[str] = Counter()
     emitted = 0
     suppressed = 0
 
-    for event in events:
+    for event in legacy_events:
         event_type = str(event.get("event_type") or "")
         if any(token in event_type for token in ("suppress", "silent", "skip")):
             suppressed += 1
@@ -404,21 +457,36 @@ def nudge_effectiveness(since: str | None = None) -> dict[str, Any]:
         "command": "nudges effectiveness",
         "generated_at": now_iso(),
         "since": since,
-        "log": str(agent_do_home() / "telemetry" / "nudges.jsonl"),
+        "log": str(agent_do_home() / "telemetry" / "events.jsonl"),
+        "legacy_log": str(agent_do_home() / "telemetry" / "nudges.jsonl"),
         "summary": {
-            "events": len(events),
+            "events": outcome_summary["events"] if events else len(legacy_events),
+            "telemetry_events": outcome_summary["events"],
+            "legacy_nudge_events": len(legacy_events),
             "emitted": emitted,
             "suppressed": suppressed,
+            "decisions": outcome_summary["decisions"],
+            "followed": outcome_summary["followed"],
+            "ignored": outcome_summary["ignored"],
+            "expired": outcome_summary["expired"],
+            "pending": outcome_summary["pending"],
+            "resolved": outcome_summary["resolved"],
+            "follow_through_rate": outcome_summary["follow_through_rate"],
             "by_type": dict(by_type.most_common()),
+            "by_outcome_type": outcome_summary["by_type"],
+            "by_hook": outcome_summary["by_hook"],
             "by_source": dict(by_source.most_common()),
-            "by_tool": dict(by_tool.most_common()),
+            "by_tool": outcome_summary["by_tool"] or dict(by_tool.most_common()),
         },
         "compliance": {
-            "status": "not_yet_available",
-            "reason": "Current telemetry records hook emissions but does not yet join next tool calls or outcomes.",
-            "next_required_surface": "harness event stream with tool_call/tool_result events",
+            "status": "available" if events else "legacy_only",
+            "reason": (
+                "Hook decisions are correlated with observed agent-do tool calls/results."
+                if events
+                else "Only legacy nudge events were found; run current hooks and agent-do commands to collect outcome telemetry."
+            ),
         },
-        "events": events[-25:],
+        "events": events[-25:] if events else legacy_events[-25:],
     }
 
 
@@ -428,6 +496,11 @@ def render_nudge_effectiveness(payload: dict[str, Any]) -> None:
     print(f"  Events: {summary['events']}")
     print(f"  Emitted: {summary['emitted']}")
     print(f"  Suppressed: {summary['suppressed']}")
+    print(f"  Followed: {summary['followed']}")
+    print(f"  Ignored: {summary['ignored']}")
+    print(f"  Expired: {summary['expired']}")
+    if summary["follow_through_rate"] is not None:
+        print(f"  Follow-through rate: {summary['follow_through_rate']:.0%}")
     if summary["by_type"]:
         print("  Event types:")
         for key, count in summary["by_type"].items():
@@ -490,6 +563,7 @@ def build_evidence(target: str, out_dir: Path | None = None) -> dict[str, Any]:
         )
 
     nudges = nudge_events()
+    events_log = telemetry_events()
     if nudges:
         events.append(
             {
@@ -515,6 +589,7 @@ def build_evidence(target: str, out_dir: Path | None = None) -> dict[str, Any]:
     write_json(root / "session_context.json", session_payload)
     write_json(root / "coord.json", coord_payload)
     write_jsonl(root / "nudges.jsonl", nudges)
+    write_jsonl(root / "events.jsonl", events_log)
     write_jsonl(root / "timeline.jsonl", events)
 
     overview = f"""# Harness Evidence: {target}
@@ -532,6 +607,7 @@ Generated: {now_iso()}
 
 - session context: {'available' if session_payload['available'] else 'unavailable'}
 - nudge events: {len(nudges)}
+- telemetry events: {len(events_log)}
 - coord status: {'available' if coord_payload['available'] else 'unavailable'}
 - git status: `git_status.txt`
 - git diff: `diff.patch`
@@ -541,6 +617,7 @@ Generated: {now_iso()}
 - `timeline.jsonl`
 - `session_context.json`
 - `nudges.jsonl`
+- `events.jsonl`
 - `coord.json`
 - `git_status.txt`
 - `diff.patch`
@@ -564,6 +641,7 @@ Generated: {now_iso()}
         "summary": {
             "events": len(events),
             "nudge_events": len(nudges),
+            "telemetry_events": len(events_log),
             "session_available": session_payload["available"],
             "coord_available": coord_payload["available"],
         },

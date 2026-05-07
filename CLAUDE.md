@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-agent-do is a universal automation CLI for AI agents with 89 specialized tools. Two modes:
+agent-do is a universal automation CLI for AI agents with 90 specialized tools. Two modes:
 - **Structured API** (AI/scripts): `agent-do <tool> <command> [args...]` (instant, no LLM)
 - **Natural Language** (humans): `agent-do -n "what you want"` (LLM-routed via Claude)
 
@@ -35,7 +35,7 @@ agent-do is a universal automation CLI for AI agents with 89 specialized tools. 
 ./agent-do spec init                   # Initialize repo-local spec storage
 ./agent-do spec status --change id     # Check one change package
 ./agent-do harness inspect --json      # Inspect tools/hooks/docs/tests/state as one harness
-./agent-do harness nudges effectiveness --since 7d  # Review hook nudge telemetry and measurement gaps
+./agent-do harness nudges effectiveness --since 7d  # Review hook follow/ignore/expire telemetry
 ./agent-do harness evidence build <session-or-run>  # Build drill-down evidence bundle
 ./agent-do harness manifest new <change-id>         # Start falsifiable harness change manifest
 ./agent-do nudges stats                # Local nudge telemetry summary
@@ -119,7 +119,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # filterEntries: removes static assets, CDN, deduplicates
 │       ├── auth.js         # extractAuth: identifies auth patterns in captured traffic
 │       └── generator.js    # generateSkill: writes skill package to ~/.agent-do/skills/
-├── tools/agent-*           # 89 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 90 tools (standalone scripts + directory-based tools)
 └── registry.yaml           # Master tool catalog: tool descriptions, commands, examples
 ```
 

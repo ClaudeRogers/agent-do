@@ -208,7 +208,46 @@ exec_tool() {
     fi
 
     load_tool_credentials "$tool"
-    exec "$tool_exec" "$@"
+    local telemetry_id=""
+    if [[ "${AGENT_DO_TELEMETRY_SUPPRESS:-0}" != "1" ]]; then
+        telemetry_id="$(python3 - "$SCRIPT_DIR" "$tool" "$@" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+script_dir = Path(sys.argv[1])
+tool = sys.argv[2]
+args = sys.argv[3:]
+sys.path.insert(0, str(script_dir / "lib"))
+
+from telemetry import record_tool_call  # noqa: E402
+
+print(record_tool_call(tool, args))
+PY
+)"
+    fi
+
+    set +e
+    "$tool_exec" "$@"
+    local status=$?
+    set -e
+
+    if [[ -n "$telemetry_id" && "${AGENT_DO_TELEMETRY_SUPPRESS:-0}" != "1" ]]; then
+        python3 - "$SCRIPT_DIR" "$telemetry_id" "$status" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+script_dir = Path(sys.argv[1])
+invocation_id = sys.argv[2]
+exit_code = int(sys.argv[3])
+sys.path.insert(0, str(script_dir / "lib"))
+
+from telemetry import record_tool_result  # noqa: E402
+
+record_tool_result(invocation_id, exit_code)
+PY
+    fi
+
+    exit "$status"
 }
 
 # Natural language routing (uses LLM)

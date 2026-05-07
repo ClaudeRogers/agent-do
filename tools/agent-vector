@@ -1,0 +1,549 @@
+#!/usr/bin/env bash
+# agent-vector - Versova Vector portfolio command center
+
+set -euo pipefail
+
+VECTOR_REPO="${VECTOR_REPO:-/Users/erik/Documents/AI/Custom_Coding/versova-vector}"
+VECTOR_ENV_FILE="${VECTOR_ENV_FILE:-$HOME/.config/vector/sync.env}"
+
+if [[ -f "$VECTOR_ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$VECTOR_ENV_FILE"
+    set +a
+fi
+
+show_help() {
+    cat <<'EOF'
+agent-vector - Versova Vector portfolio command center
+
+TODAY
+  today [--engineer <email>]       Show owned projects, open work, and commits
+  inbox [--engineer <email>]       Show asks, intake, and support needing attention
+
+PROJECTS
+  ls [--phase <phase>] [--pulse <pulse>] [--owner <email>] [--mine]
+  show <slug> [--with sections]    Show project plus snapshots/work/support/links
+  open <slug>                      Open project directory and primary URLs
+
+SNAPSHOTS AND DECISIONS
+  snapshot <slug> "<summary>" [--now <txt>] [--next <txt>] [--blockers <txt>] [--asks <txt>] [--confidence <level>] [--type <type>]
+  decide <slug> <type> "<summary>" [--rationale <txt>] [--salvageable <txt>]
+  ask <slug> "<text>"              Create an ask-only snapshot
+
+WORK, SUPPORT, LINKS
+  work <slug> add "<title>" [--owner <email>] [--details <txt>]
+  work <slug> done <id>
+  work <slug> block <id> "<reason>"
+  support <slug> add "<title>" [--priority <p>] [--requester <email>]
+  support <slug> resolve <id>
+  link <slug> add <kind> "<label>" <url>
+  link <slug> rm <id>
+
+BINDINGS, MEMBERS, FEED, OPS
+  bind <slug> --dir <path> [--repo <url>] [--render-svc <id>] [--supabase-ref <ref>]
+  members list
+  members add <email> [name]
+  feed [--project <slug>] [--since <iso>] [--limit <n>]
+  intake list
+  intake new "<title>" [--description <txt>]
+  intake accept <id> <slug> "<name>"
+  intake decline <id> "<reason>"
+  sync [--all|--slug <slug>] [--dry-run]
+
+Environment:
+  VECTOR_SUPABASE_URL          Supabase project URL
+  VECTOR_SUPABASE_SERVICE_KEY  Supabase service role key
+  VECTOR_USER_EMAIL            Default engineer email
+  VECTOR_ORG_ID                Organization id
+EOF
+}
+
+need_env() {
+    local name="$1"
+    if [[ -z "${!name:-}" ]]; then
+        echo "Error: $name is required" >&2
+        return 1
+    fi
+}
+
+urlencode() {
+    python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+json_string() {
+    python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+vector_request() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    need_env VECTOR_SUPABASE_URL
+    need_env VECTOR_SUPABASE_SERVICE_KEY
+
+    local url="${VECTOR_SUPABASE_URL%/}/rest/v1/${path}"
+    local args=(-sS -X "$method" "$url" \
+        -H "apikey: ${VECTOR_SUPABASE_SERVICE_KEY}" \
+        -H "Authorization: Bearer ${VECTOR_SUPABASE_SERVICE_KEY}" \
+        -H "Content-Type: application/json" \
+        -H "Prefer: return=representation")
+    if [[ -n "$data" ]]; then
+        args+=(-d "$data")
+    fi
+    curl "${args[@]}"
+}
+
+project_by_slug() {
+    local slug="$1"
+    local encoded
+    encoded=$(urlencode "$slug")
+    vector_request GET "projects?slug=eq.${encoded}&select=*&limit=1" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+if not rows:
+    print(f"Project not found", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(rows[0]))
+'
+}
+
+project_id_by_slug() {
+    project_by_slug "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
+}
+
+print_table_projects() {
+    python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+for p in rows:
+    print("{:<26} {:<12} {:<10} {}  {}".format(p.get("slug",""), p.get("phase",""), p.get("pulse",""), p.get("owner") or "", p.get("name","")))
+'
+}
+
+cmd_ls() {
+    local filters=("select=slug,name,phase,pulse,owner,next_milestone" "order=sort_order.asc")
+    local mine=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --phase) filters+=("phase=eq.$(urlencode "$2")"); shift 2 ;;
+            --pulse) filters+=("pulse=eq.$(urlencode "$2")"); shift 2 ;;
+            --owner) filters+=("owner=eq.$(urlencode "$2")"); shift 2 ;;
+            --mine) mine=1; shift ;;
+            *) echo "Unknown ls option: $1" >&2; return 1 ;;
+        esac
+    done
+    if [[ "$mine" -eq 1 ]]; then
+        filters+=("owner=eq.$(urlencode "${VECTOR_USER_EMAIL:-}")")
+    fi
+    local query
+    query=$(IFS='&'; echo "${filters[*]}")
+    vector_request GET "projects?${query}" | print_table_projects
+}
+
+cmd_show() {
+    local slug="${1:-}"
+    [[ -n "$slug" ]] || { echo "Usage: agent-vector show <slug>" >&2; return 1; }
+    local project pid
+    project=$(project_by_slug "$slug")
+    pid=$(echo "$project" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+    python3 -c 'import json,sys; p=json.loads(sys.argv[1]); print("{} ({})\nphase={} pulse={}\n{}".format(p["name"], p["slug"], p["phase"], p["pulse"], p.get("status_headline") or p.get("description") or ""))' "$project"
+    echo
+    vector_request GET "project_updates?project_id=eq.${pid}&select=title,summary,confidence,created_at&order=created_at.desc&limit=5" | python3 -c '
+import json,sys
+print("Snapshots:")
+for r in json.load(sys.stdin):
+    print("- {} {}: {}".format(r.get("created_at","")[:10], r.get("title",""), r.get("summary","")))
+'
+    vector_request GET "project_work_items?project_id=eq.${pid}&select=id,title,status,owner,due_at&order=created_at.desc&limit=10" | python3 -c '
+import json,sys
+print("\nWork:")
+for r in json.load(sys.stdin):
+    print("- {} {}: {} ({})".format(r.get("id","")[:8], r.get("status",""), r.get("title",""), r.get("owner") or "unowned"))
+'
+}
+
+cmd_today() {
+    local email="${VECTOR_USER_EMAIL:-}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --engineer) email="$2"; shift 2 ;;
+            *) echo "Unknown today option: $1" >&2; return 1 ;;
+        esac
+    done
+    [[ -n "$email" ]] || { echo "Set VECTOR_USER_EMAIL or pass --engineer" >&2; return 1; }
+    echo "Today: $email"
+    echo
+    vector_request GET "project_work_items?owner=eq.$(urlencode "$email")&status=neq.done&select=id,title,status,due_at,project_id&order=due_at.asc" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+print("Open work:")
+for r in rows:
+    print("- {}: {} due {}".format(r.get("status",""), r.get("title",""), r.get("due_at") or "n/a"))
+if not rows: print("- none")
+'
+    local today
+    today=$(date -u +"%Y-%m-%dT00:00:00Z")
+    echo
+    vector_request GET "project_activity?kind=eq.commit&actor=eq.$(urlencode "$email")&occurred_at=gte.${today}&select=title,summary,occurred_at,project_id&order=occurred_at.desc&limit=20" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+print("Commits:")
+for r in rows:
+    print("- {} {}".format(r.get("occurred_at","")[:16], r.get("title","")))
+if not rows: print("- none")
+'
+}
+
+cmd_inbox() {
+    local email="${VECTOR_USER_EMAIL:-}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --engineer) email="$2"; shift 2 ;;
+            *) echo "Unknown inbox option: $1" >&2; return 1 ;;
+        esac
+    done
+    echo "Inbox: ${email:-all}"
+    vector_request GET "project_support_items?status=neq.resolved&select=id,title,priority,status,requester,project_id&order=requested_at.desc&limit=25" | python3 -c '
+import json,sys
+print("Open support:")
+for r in json.load(sys.stdin):
+    print("- {}: {} ({})".format(r.get("priority",""), r.get("title",""), r.get("status","")))
+'
+    echo
+    vector_request GET "intake?status=eq.new&select=id,title,submitted_by,submitted_at&order=submitted_at.desc&limit=25" | python3 -c '
+import json,sys
+print("New intake:")
+for r in json.load(sys.stdin):
+    print("- {} {} by {}".format(r.get("id","")[:8], r.get("title",""), r.get("submitted_by","")))
+'
+}
+
+cmd_snapshot() {
+    local slug="${1:-}"
+    local summary="${2:-}"
+    [[ -n "$slug" && -n "$summary" ]] || { echo "Usage: agent-vector snapshot <slug> \"summary\"" >&2; return 1; }
+    shift 2
+    local now="" next="" blockers="" asks="" confidence="medium" update_type="status"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --now) now="$2"; shift 2 ;;
+            --next) next="$2"; shift 2 ;;
+            --blockers) blockers="$2"; shift 2 ;;
+            --asks) asks="$2"; shift 2 ;;
+            --confidence) confidence="$2"; shift 2 ;;
+            --type) update_type="$2"; shift 2 ;;
+            *) echo "Unknown snapshot option: $1" >&2; return 1 ;;
+        esac
+    done
+    local pid payload
+    pid=$(project_id_by_slug "$slug")
+    payload=$(python3 - "$pid" "$summary" "$now" "$next" "$blockers" "$asks" "$confidence" "$update_type" "${VECTOR_USER_EMAIL:-agent-do}" <<'PY'
+import json,sys
+pid,summary,now,next_,blockers,asks,confidence,update_type,author=sys.argv[1:]
+print(json.dumps({
+  "project_id": pid,
+  "title": summary[:80] or "Snapshot",
+  "summary": summary,
+  "now_text": now or None,
+  "next_text": next_ or None,
+  "blockers_text": blockers or None,
+  "asks_text": asks or None,
+  "confidence": confidence,
+  "update_type": update_type,
+  "authored_by": author,
+}))
+PY
+)
+    vector_request POST "project_updates" "$payload" | python3 -c 'import json,sys; print("snapshot", json.load(sys.stdin)[0]["id"])'
+}
+
+cmd_decide() {
+    local slug="${1:-}" type="${2:-}" summary="${3:-}"
+    [[ -n "$slug" && -n "$type" && -n "$summary" ]] || { echo "Usage: agent-vector decide <slug> <type> \"summary\"" >&2; return 1; }
+    shift 3
+    local rationale="" salvageable=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rationale) rationale="$2"; shift 2 ;;
+            --salvageable) salvageable="$2"; shift 2 ;;
+            *) echo "Unknown decide option: $1" >&2; return 1 ;;
+        esac
+    done
+    local pid payload
+    pid=$(project_id_by_slug "$slug")
+    payload=$(python3 - "$pid" "$type" "$summary" "$rationale" "$salvageable" "${VECTOR_USER_EMAIL:-agent-do}" <<'PY'
+import json,sys
+pid,type_,summary,rationale,salvageable,author=sys.argv[1:]
+print(json.dumps({"project_id":pid,"type":type_,"summary":summary,"rationale":rationale or None,"salvageable_assets":salvageable or None,"decided_by":author}))
+PY
+)
+    vector_request POST "decisions" "$payload" | python3 -c 'import json,sys; print("decision", json.load(sys.stdin)[0]["id"])'
+}
+
+cmd_work() {
+    local slug="${1:-}" action="${2:-}"
+    [[ -n "$slug" && -n "$action" ]] || { echo "Usage: agent-vector work <slug> add|done|block ..." >&2; return 1; }
+    shift 2
+    local pid
+    pid=$(project_id_by_slug "$slug")
+    case "$action" in
+        add)
+            local title="${1:-}" owner="" details=""
+            [[ -n "$title" ]] || { echo "Usage: agent-vector work <slug> add \"title\"" >&2; return 1; }
+            shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --owner) owner="$2"; shift 2 ;;
+                    --details) details="$2"; shift 2 ;;
+                    *) echo "Unknown work add option: $1" >&2; return 1 ;;
+                esac
+            done
+            local payload
+            payload=$(python3 - "$pid" "$title" "$owner" "$details" <<'PY'
+import json,sys
+pid,title,owner,details=sys.argv[1:]
+print(json.dumps({"project_id":pid,"title":title,"type":"todo","status":"queued","owner":owner or None,"details":details or None}))
+PY
+)
+            vector_request POST "project_work_items" "$payload" ;;
+        done)
+            vector_request PATCH "project_work_items?id=eq.$(urlencode "${1:-}")" '{"status":"done"}' ;;
+        block)
+            local id="${1:-}" reason="${2:-blocked}"
+            vector_request PATCH "project_work_items?id=eq.$(urlencode "$id")" "$(python3 -c 'import json,sys; print(json.dumps({"status":"blocked","details":sys.argv[1]}))' "$reason")" ;;
+        *) echo "Unknown work action: $action" >&2; return 1 ;;
+    esac
+}
+
+cmd_support() {
+    local slug="${1:-}" action="${2:-}"
+    [[ -n "$slug" && -n "$action" ]] || { echo "Usage: agent-vector support <slug> add|resolve ..." >&2; return 1; }
+    shift 2
+    local pid
+    pid=$(project_id_by_slug "$slug")
+    case "$action" in
+        add)
+            local title="${1:-}" priority="medium" requester="${VECTOR_USER_EMAIL:-}"
+            shift || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --priority) priority="$2"; shift 2 ;;
+                    --requester) requester="$2"; shift 2 ;;
+                    *) echo "Unknown support add option: $1" >&2; return 1 ;;
+                esac
+            done
+            local payload
+            payload=$(python3 - "$pid" "$title" "$priority" "$requester" <<'PY'
+import json,sys
+pid,title,priority,requester=sys.argv[1:]
+print(json.dumps({"project_id":pid,"title":title,"priority":priority,"status":"queued","requester":requester or None}))
+PY
+)
+            vector_request POST "project_support_items" "$payload" ;;
+        resolve)
+            vector_request PATCH "project_support_items?id=eq.$(urlencode "${1:-}")" "$(python3 -c 'import json,datetime; print(json.dumps({"status":"resolved","resolved_at":datetime.datetime.utcnow().isoformat()+"Z"}))')" ;;
+        *) echo "Unknown support action: $action" >&2; return 1 ;;
+    esac
+}
+
+cmd_ask() {
+    local slug="${1:-}" text="${2:-}"
+    [[ -n "$slug" && -n "$text" ]] || { echo "Usage: agent-vector ask <slug> \"text\"" >&2; return 1; }
+    cmd_snapshot "$slug" "Ask: $text" --asks "$text" --confidence medium --type ask
+}
+
+cmd_link() {
+    local slug="${1:-}" action="${2:-}"
+    [[ -n "$slug" && -n "$action" ]] || { echo "Usage: agent-vector link <slug> add|rm ..." >&2; return 1; }
+    shift 2
+    local pid
+    pid=$(project_id_by_slug "$slug")
+    case "$action" in
+        add)
+            local kind="${1:-}" label="${2:-}" url="${3:-}"
+            local payload
+            payload=$(python3 - "$pid" "$kind" "$label" "$url" <<'PY'
+import json,sys
+pid,kind,label,url=sys.argv[1:]
+print(json.dumps({"project_id":pid,"kind":kind,"label":label,"url":url}))
+PY
+)
+            vector_request POST "project_links" "$payload" ;;
+        rm)
+            vector_request DELETE "project_links?id=eq.$(urlencode "${1:-}")" ;;
+        *) echo "Unknown link action: $action" >&2; return 1 ;;
+    esac
+}
+
+cmd_feed() {
+    local filters=("select=kind,title,summary,actor,occurred_at,project_id" "order=occurred_at.desc" "limit=50")
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) filters+=("project_id=eq.$(project_id_by_slug "$2")"); shift 2 ;;
+            --since) filters+=("occurred_at=gte.$(urlencode "$2")"); shift 2 ;;
+            --limit) filters+=("limit=$2"); shift 2 ;;
+            *) echo "Unknown feed option: $1" >&2; return 1 ;;
+        esac
+    done
+    local query
+    query=$(IFS='&'; echo "${filters[*]}")
+    vector_request GET "project_activity?${query}" | python3 -c '
+import json,sys
+for r in json.load(sys.stdin):
+    print("{:<16} {:<14} {}".format(r.get("occurred_at","")[:16], r.get("kind",""), r.get("title","")))
+'
+}
+
+cmd_bind() {
+    local slug="${1:-}"
+    [[ -n "$slug" ]] || { echo "Usage: agent-vector bind <slug> --dir <path>" >&2; return 1; }
+    shift
+    local dir="" repo="" render_svc="" supabase_ref=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir) dir="$2"; shift 2 ;;
+            --repo) repo="$2"; shift 2 ;;
+            --render-svc) render_svc="$2"; shift 2 ;;
+            --supabase-ref) supabase_ref="$2"; shift 2 ;;
+            *) echo "Unknown bind option: $1" >&2; return 1 ;;
+        esac
+    done
+    [[ -n "$dir" ]] || { echo "--dir is required" >&2; return 1; }
+    local pid payload
+    pid=$(project_id_by_slug "$slug")
+    payload=$(python3 - "$pid" "$dir" "$repo" "$render_svc" "$supabase_ref" <<'PY'
+import json,sys
+pid,dir_,repo,render_svc,supabase_ref=sys.argv[1:]
+print(json.dumps({"project_id":pid,"directory_path":dir_,"repo_url":repo or None,"render_service_id":render_svc or None,"supabase_ref":supabase_ref or None}))
+PY
+)
+    vector_request POST "project_bindings?on_conflict=project_id" "$payload"
+}
+
+cmd_members() {
+    local action="${1:-list}"
+    shift || true
+    case "$action" in
+        list)
+            vector_request GET "project_members?select=email,name,is_active&order=email.asc" | python3 -c 'import json,sys; [print("{:<34} {}".format(r.get("email",""), r.get("name") or "")) for r in json.load(sys.stdin)]' ;;
+        add)
+            local email="${1:-}" name="${2:-}"
+            [[ -n "$email" ]] || { echo "Usage: agent-vector members add <email> [name]" >&2; return 1; }
+            local org="${VECTOR_ORG_ID:-00000000-0000-0000-0000-000000000001}"
+            vector_request POST "project_members?on_conflict=email" "$(python3 - "$org" "$email" "$name" <<'PY'
+import json,sys
+org,email,name=sys.argv[1:]
+print(json.dumps({"org_id":org,"email":email,"name":name or None,"is_active":True}))
+PY
+)" ;;
+        *) echo "Unknown members action: $action" >&2; return 1 ;;
+    esac
+}
+
+cmd_intake() {
+    local action="${1:-list}"
+    shift || true
+    case "$action" in
+        list)
+            vector_request GET "intake?select=id,title,status,submitted_by,submitted_at&order=submitted_at.desc&limit=50" | python3 -c 'import json,sys; [print("{:<8} {:<10} {}".format(r.get("id","")[:8], r.get("status",""), r.get("title",""))) for r in json.load(sys.stdin)]' ;;
+        new)
+            local title="${1:-}" description=""
+            shift || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --description) description="$2"; shift 2 ;;
+                    *) echo "Unknown intake new option: $1" >&2; return 1 ;;
+                esac
+            done
+            local org="${VECTOR_ORG_ID:-00000000-0000-0000-0000-000000000001}"
+            vector_request POST "intake" "$(python3 - "$org" "$title" "$description" "${VECTOR_USER_EMAIL:-agent-do}" <<'PY'
+import json,sys
+org,title,description,by=sys.argv[1:]
+print(json.dumps({"org_id":org,"title":title,"description":description or None,"submitted_by":by}))
+PY
+)" ;;
+        accept)
+            local id="${1:-}" slug="${2:-}" name="${3:-}"
+            local org="${VECTOR_ORG_ID:-00000000-0000-0000-0000-000000000001}"
+            local project
+            project=$(vector_request POST "projects" "$(python3 - "$org" "$slug" "$name" <<'PY'
+import json,sys
+org,slug,name=sys.argv[1:]
+print(json.dumps({"org_id":org,"slug":slug,"name":name,"phase":"shape","pulse":"steady"}))
+PY
+)")
+            local pid
+            pid=$(echo "$project" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])')
+            vector_request PATCH "intake?id=eq.$(urlencode "$id")" "$(python3 - "$pid" <<'PY'
+import json,sys
+print(json.dumps({"status":"accepted","accepted_as_project_id":sys.argv[1]}))
+PY
+)" ;;
+        decline)
+            vector_request PATCH "intake?id=eq.$(urlencode "${1:-}")" "$(python3 - "${2:-}" <<'PY'
+import json,sys
+print(json.dumps({"status":"declined","declined_reason":sys.argv[1]}))
+PY
+)" ;;
+        *) echo "Unknown intake action: $action" >&2; return 1 ;;
+    esac
+}
+
+cmd_open() {
+    local slug="${1:-}"
+    [[ -n "$slug" ]] || { echo "Usage: agent-vector open <slug>" >&2; return 1; }
+    local pid
+    pid=$(project_id_by_slug "$slug")
+    local info
+    info=$(vector_request GET "project_bindings?project_id=eq.${pid}&select=directory_path,repo_url,render_service_id,supabase_ref&limit=1")
+    echo "$info" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print(json.dumps(rows[0] if rows else {}))'
+    if command -v open >/dev/null 2>&1; then
+        local dir
+        dir=$(echo "$info" | python3 -c 'import json,sys; rows=json.load(sys.stdin); print((rows[0] if rows else {}).get("directory_path",""))')
+        [[ -n "$dir" ]] && open "$dir" >/dev/null 2>&1 || true
+    fi
+}
+
+cmd_sync() {
+    local args=(--once)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all) shift ;;
+            --slug) args+=(--slug "$2"); shift 2 ;;
+            --dry-run) args+=(--dry-run); shift ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    (cd "$VECTOR_REPO" && pnpm --filter @vector/sync start "${args[@]}")
+}
+
+main() {
+    local cmd="${1:-}"
+    if [[ -z "$cmd" || "$cmd" == "--help" || "$cmd" == "-h" ]]; then
+        show_help
+        return 0
+    fi
+    shift
+    case "$cmd" in
+        today) cmd_today "$@" ;;
+        inbox) cmd_inbox "$@" ;;
+        ls|projects) cmd_ls "$@" ;;
+        show) cmd_show "$@" ;;
+        snapshot) cmd_snapshot "$@" ;;
+        decide) cmd_decide "$@" ;;
+        work) cmd_work "$@" ;;
+        support) cmd_support "$@" ;;
+        ask) cmd_ask "$@" ;;
+        link) cmd_link "$@" ;;
+        feed) cmd_feed "$@" ;;
+        bind) cmd_bind "$@" ;;
+        members) cmd_members "$@" ;;
+        intake) cmd_intake "$@" ;;
+        open) cmd_open "$@" ;;
+        sync) cmd_sync "$@" ;;
+        *) echo "Unknown command: $cmd" >&2; show_help; return 1 ;;
+    esac
+}
+
+main "$@"

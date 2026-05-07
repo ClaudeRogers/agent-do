@@ -14,7 +14,7 @@ Claude Code, Cursor, and similar agents are strong inside a codebase. They read 
 agent-do <tool> <command> [args...]
 ```
 
-That is the center of gravity. Around it, `agent-do` adds discovery, nudging, health checks, bootstrap flows, secure credential resolution, auth-state orchestration, repo-local spec management, harness observability, and natural-language routing. The result is simple to remember, easy to enforce through hooks, and broad enough to cover 89 tools.
+That is the center of gravity. Around it, `agent-do` adds discovery, nudging, health checks, bootstrap flows, secure credential resolution, auth-state orchestration, repo-local spec management, harness observability, and natural-language routing. The result is simple to remember, easy to enforce through hooks, and broad enough to cover 90 tools.
 
 When a command needs permission to control the visible local machine, `agent-do` uses an explicit runtime modifier instead of a wrapper tool:
 
@@ -258,7 +258,9 @@ agent-do context annotate stripe-llms "Use idempotency keys"
 
 ### `harness`
 
-Observable front door for the agent-do harness: tools, hooks, instructions, shared libraries, state refs, linked tests, hook nudge telemetry, evidence bundles, and falsifiable change manifests.
+Observable front door for the agent-do harness: tools, hooks, instructions, shared libraries, state refs, linked tests, hook outcome telemetry, evidence bundles, and falsifiable change manifests.
+
+Hook outcome telemetry records hook decisions, emitted nudges, structured `agent-do` tool calls, tool results, and deterministic follow/ignore/expire verdicts. That lets you measure whether a hook suggestion was actually followed instead of only counting that a hook fired.
 
 ```bash
 agent-do harness inspect
@@ -439,7 +441,7 @@ agent-do gh approve ovachiever/agent-do#2 --body "LGTM"
 
 ## Tool Surface
 
-There are 89 tools today. A few are deep subsystems. Many are focused adapters. Together they cover most of the operational edges an AI coding agent runs into.
+There are 90 tools today. A few are deep subsystems. Many are focused adapters. Together they cover most of the operational edges an AI coding agent runs into.
 
 | Category | Tools | What They Do |
 |----------|-------|--------------|
@@ -448,7 +450,7 @@ There are 89 tools today. A few are deep subsystems. Many are focused adapters. 
 | Credentials | `creds` | Secure secret storage and tool credential checks |
 | Auth | `auth` | Site-level authenticated state orchestration and session reuse |
 | Specification | `spec` | Repo-local intended behavior specs and change packages |
-| Harness | `harness` | Observable harness inventory, nudge telemetry, evidence bundles, and change manifests |
+| Harness | `harness` | Observable harness inventory, hook outcome telemetry, evidence bundles, and change manifests |
 | Memory | `zpc` | Lessons, decisions, patterns, checkpointing |
 | Design | `dpt` | UI scoring and design critique |
 | Tracking | `manna` | Git-backed issue tracking and coordination |

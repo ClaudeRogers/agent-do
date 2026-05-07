@@ -27,8 +27,9 @@ except ModuleNotFoundError:
     get_tool_readiness = None
 
 try:
-    from telemetry import record_nudge_event
+    from telemetry import record_hook_decision, record_nudge_event
 except ModuleNotFoundError:
+    record_hook_decision = None
     record_nudge_event = None
 
 # Patterns that have agent-do equivalents — grouped by tool
@@ -113,6 +114,7 @@ SKIP_PATTERNS = [
     r'--version\s*$',
 ]
 
+
 def is_codex_runtime() -> bool:
     runtime = os.environ.get("AGENT_DO_HOOK_RUNTIME", "").strip().lower()
     if runtime == "codex":
@@ -140,6 +142,7 @@ def emit_context(nudge: str) -> None:
     }
     print(json.dumps(output))
 
+
 def main():
     try:
         input_data = json.load(sys.stdin)
@@ -156,6 +159,11 @@ def main():
     # Skip known-safe commands
     for pattern in SKIP_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
+            if record_hook_decision is not None:
+                try:
+                    record_hook_decision("PreToolUse", "pretool", "suppress", reason="skip_pattern")
+                except Exception:
+                    pass
             sys.exit(0)
 
     # Check for agent-do matches
@@ -181,12 +189,26 @@ def main():
                 nudge += f"{note} "
             nudge += "Proceeding with your raw command is allowed, but agent-do should be the default choice here."
 
+            if record_hook_decision is not None:
+                try:
+                    record_hook_decision(
+                        "PreToolUse",
+                        "pretool",
+                        "emit",
+                        tools=[shared_match["tool"]],
+                        commands=[replacement, example],
+                        reason="registry_raw_cli_equivalent",
+                    )
+                except Exception:
+                    pass
             if record_nudge_event is not None:
                 try:
                     record_nudge_event(
                         "pretool_hard_nudge",
                         "pretool",
                         tool=shared_match["tool"],
+                        tools=[shared_match["tool"]],
+                        commands=[replacement, example],
                         replacement=replacement,
                         command=command[:240],
                     )
@@ -203,12 +225,26 @@ def main():
                 f"Run `{hint} --help` for commands. "
                 f"Proceeding with your command is fine, but next time prefer agent-do."
             )
+            if record_hook_decision is not None:
+                try:
+                    record_hook_decision(
+                        "PreToolUse",
+                        "pretool",
+                        "emit",
+                        tools=[tool],
+                        commands=[hint],
+                        reason="legacy_pattern_match",
+                    )
+                except Exception:
+                    pass
             if record_nudge_event is not None:
                 try:
                     record_nudge_event(
                         "pretool_legacy_nudge",
                         "pretool",
                         tool=tool,
+                        tools=[tool],
+                        commands=[hint],
                         replacement=hint,
                         command=command[:240],
                     )
@@ -217,6 +253,11 @@ def main():
             emit_context(nudge)
             sys.exit(0)
 
+    if record_hook_decision is not None:
+        try:
+            record_hook_decision("PreToolUse", "pretool", "suppress", reason="no_agent_do_match")
+        except Exception:
+            pass
     sys.exit(0)
 
 if __name__ == "__main__":

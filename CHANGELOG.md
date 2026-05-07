@@ -19,6 +19,7 @@
 - `agent-do hardware` as a family-level surface over serial, bluetooth, USB, printer, and MIDI commands, with a combined hardware snapshot and delegated subdomain commands.
 - `agent-do meetings` as a family-level meeting surface over Zoom, Google Meet, and Microsoft Teams, with provider snapshots, auto-detected join routing, active-provider controls, and explicit passthroughs.
 - `agent-do harness` as the first harness-observability surface, with `inspect`, `nudges effectiveness`, `evidence build`, and `manifest new/verify` for inventory graphs, hook telemetry, drill-down evidence bundles, and falsifiable change manifests.
+- Hook outcome telemetry under `~/.agent-do/telemetry/events.jsonl`, correlating hook emissions with subsequent `agent-do` tool calls/results and classifying nudges as followed, ignored, expired, or pending.
 - `agent-do coord` as a project-local state-and-interrupt broker for parallel agents, with presence leases, focus declarations, advisory claims, dependency tracking, published artifacts, and derived contention/dependency/novelty interrupts.
 - interrupt-aware coord nudges at session start and prompt time, so agents only get coordination context when a real interrupt exists or when active peers exist and the current agent has not declared focus yet.
 - `hooks/agent-do-pretooluse-codex.py` as a Codex-compatible PreToolUse wrapper that runs the shared check for telemetry while suppressing unsupported PreToolUse `additionalContext` output.
