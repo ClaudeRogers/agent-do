@@ -241,7 +241,7 @@ agent-do +live(scope=desktop,ttl=15m) macos click @g5
 
 ## Tool Surface
 
-There are 90 tools in the current catalog. Use `agent-do --list` for the complete
+There are 91 tools in the current catalog. Use `agent-do --list` for the complete
 inventory and `agent-do <tool> --help` for command details.
 
 | Category | Tools | What They Do |
