@@ -1248,6 +1248,15 @@ tools:
       - agent-do obsidian daily read
       - agent-do obsidian search <query>
       default_command: snapshot
+      raw_cli_equivalents:
+      - pattern: \bobsidian\s+(read|create|append|search|daily|tasks|tags|backlinks)\b
+        replacement: agent-do obsidian
+        example: agent-do obsidian search "review"
+        reason: agent-do wraps the obsidian CLI with structured discovery, doctor diagnostics, and +live gating
+      - pattern: \bobsidian\s+--help\b
+        replacement: agent-do obsidian --help
+        example: agent-do obsidian --help
+        reason: agent-do obsidian surfaces all commands with consistent help formatting
       project_signals:
       - .obsidian
       - obsidian

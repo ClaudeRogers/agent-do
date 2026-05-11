@@ -20,9 +20,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Optional: pretty-print snapshot output via lib/snapshot.sh helpers if
-# available. We only use json-output.sh's --json plumbing for non-snapshot
-# commands; snapshot itself is always JSON.
+# Optional: json-output.sh helpers for --json plumbing in doctor/snapshot.
+# Passthrough commands return the obsidian CLI's native output format.
 # shellcheck source=/dev/null
 source "$REPO_ROOT/lib/json-output.sh" 2>/dev/null || true
 
@@ -69,7 +68,7 @@ ENVIRONMENT
 
 COMMON OPTIONS
   --vault <name>             Target a specific vault (default: most recent)
-  --json                     Structured JSON output (most commands)
+  --json                     Structured JSON output (doctor and snapshot)
   --copy                     Copy command output to clipboard (read commands)
   --content <text>           Inline content (create / daily append)
   --template <name>          Use a template (create)
@@ -293,6 +292,9 @@ REMAINING_ARGS=()
 
 _parse_global_args() {
     REMAINING_ARGS=()
+    # Only consume *leading* global flags. Stop at the first token that is
+    # not a recognised global so that content arguments like "--vault" or
+    # "--json" inside note bodies are never reinterpreted as wrapper flags.
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --vault)
@@ -309,14 +311,14 @@ _parse_global_args() {
                 ;;
             --)
                 shift
-                while [[ $# -gt 0 ]]; do
-                    REMAINING_ARGS+=("$1")
-                    shift
-                done
+                REMAINING_ARGS+=("$@")
+                return
                 ;;
             *)
-                REMAINING_ARGS+=("$1")
-                shift
+                # First non-global token — everything from here on belongs
+                # to the subcommand. Do not consume any further arguments.
+                REMAINING_ARGS+=("$@")
+                return
                 ;;
         esac
     done
@@ -411,7 +413,7 @@ EOF
 import json, sys
 cli, source, runs, app, app_present, linked, link_attempted, fix = sys.argv[1:]
 payload = {
-    "ok": bool(cli),
+    "ok": bool(cli) and runs == "true",
     "cli_path": cli or None,
     "cli_source": source,
     "cli_runs": runs == "true",
@@ -429,9 +431,11 @@ if not cli:
             "install Obsidian from https://obsidian.md/download, then "
             "Settings → General → Command line interface → Register CLI"
         )
+elif runs != "true":
+    payload["recommendation"] = "open Obsidian and re-run; CLI did not respond to 'help'"
 print(json.dumps(payload, indent=2))
 PY
-        if [[ -n "$cli" ]]; then return 0; fi
+        if [[ "$cli_runs" == "true" ]]; then return 0; fi
         return 1
     fi
 
@@ -440,7 +444,8 @@ PY
         echo "✓ obsidian CLI: $cli ($cli_source)"
         [[ "$cli_runs" == "true" ]] || echo "⚠ obsidian binary did not respond to 'help'"
         [[ "$linked" == "true" ]]  && echo "✓ created symlink $cli"
-        return 0
+        if [[ "$cli_runs" == "true" ]]; then return 0; fi
+        return 1
     fi
 
     if [[ "$app_present" == "true" ]]; then
@@ -499,7 +504,7 @@ tags = lines(tags_raw)
 
 payload = {
     "tool": "obsidian",
-    "ok": cli_status == "present",
+    "ok": cli_status == "present" and cli_runs == "true",
     "cli": {
         "path": cli or None,
         "status": cli_status,
@@ -733,7 +738,7 @@ cmd_daily() {
 
 cmd_prop() {
     local sub="${1:-}"
-    [[ -n "$sub" ]] || { echo "Usage: agent-obsidian prop {get|set|list} ..." >&2; return 2; }
+    [[ -n "$sub" ]] || { echo "Usage: agent-obsidian prop {get|set} ..." >&2; return 2; }
     shift
     local file_target=""
     case "$sub" in
@@ -955,8 +960,8 @@ cmd_plugin() {
 # ─── Dispatch ────────────────────────────────────────────────────────────────
 
 main() {
-    # Global args (--vault, --json) can appear before OR after the subcommand,
-    # so we scan the whole argv first and let REMAINING_ARGS carry the rest.
+    # Global args (--vault, --json) must appear *before* the subcommand.
+    # The parser stops at the first non-flag token so note content is preserved.
     _parse_global_args "$@"
     set -- "${REMAINING_ARGS[@]+"${REMAINING_ARGS[@]}"}"
 

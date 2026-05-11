@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -90,13 +89,24 @@ def base_env(tmp: Path, log_file: Path, *, fake_cli: Path | None) -> dict[str, s
     env["AGENT_OBSIDIAN_NO_AUTO_INSTALL"] = "1"
     if fake_cli is not None:
         env["OBSIDIAN_BIN"] = str(fake_cli)
-    # Keep PATH but make sure no real `obsidian` binary on it can be picked up.
-    sanitized = []
-    for entry in env.get("PATH", "").split(os.pathsep):
-        if entry and shutil.which("obsidian", path=entry):
-            continue
-        sanitized.append(entry)
-    env["PATH"] = os.pathsep.join(sanitized)
+        # Shadow any real `obsidian` on PATH so it can't interfere.
+        # OBSIDIAN_BIN takes priority in resolution, but this prevents
+        # accidental real-CLI usage. Uses a shim instead of removing PATH
+        # directories (which could also remove python3 or other needed
+        # binaries from the same directory).
+        shim_dir = str(tmp / "obsidian-shim")
+        Path(shim_dir).mkdir(parents=True, exist_ok=True)
+        shim_path = Path(shim_dir) / "obsidian"
+        shim_path.write_text("#!/bin/sh\nexit 127\n")
+        shim_path.chmod(0o755)
+        env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
+    else:
+        # No CLI wanted — point OBSIDIAN_BIN at a nonexistent path so the
+        # wrapper's _find_obsidian_cli returns 1 immediately (early exit
+        # bypasses PATH lookup AND hardcoded candidate checks like
+        # /usr/local/bin/obsidian which exist on machines with Obsidian
+        # installed).
+        env["OBSIDIAN_BIN"] = str(tmp / "nonexistent-obsidian")
     return env
 
 
@@ -167,11 +177,12 @@ def test_help_and_unknown(env: dict[str, str]) -> None:
 
 
 def test_doctor_missing(env_no_cli: dict[str, str]) -> None:
-    # Doctor with no obsidian binary present anywhere → exit 1, JSON has
-    # recommendation, ok=false.
-    env = dict(env_no_cli)
-    env.pop("OBSIDIAN_BIN", None)
-    r = run(str(AGENT_OBSIDIAN), "doctor", "--json", env=env)
+    # Doctor with no working obsidian binary → exit 1, JSON has
+    # recommendation, ok=false. env_no_cli already has OBSIDIAN_BIN set to a
+    # nonexistent path, which makes _find_obsidian_cli return 1 immediately
+    # (skipping PATH lookup and hardcoded-candidate checks that would find a
+    # real Obsidian installation on dev machines).
+    r = run(str(AGENT_OBSIDIAN), "doctor", "--json", env=env_no_cli)
     require(r.returncode == 1, f"doctor with no CLI should exit 1: {r.stdout} / {r.stderr}")
     payload = json.loads(r.stdout)
     require(payload["ok"] is False, f"doctor.ok should be False: {payload}")
@@ -211,6 +222,57 @@ def test_snapshot(env_with_cli: dict[str, str], env_no_cli: dict[str, str]) -> N
     payload = json.loads(r.stdout)
     require(payload["ok"] is False, f"snapshot.ok should be False: {payload}")
     require("recommendation" in payload, f"snapshot should suggest a fix: {payload}")
+
+
+def test_non_responsive_cli(tmp: Path, log_file: Path) -> None:
+    """Doctor and snapshot must exit 1 / ok=false when the CLI exists but
+    fails the 'help' responsiveness probe (broken binary, wrong version, etc.).
+    """
+    broken_cli = tmp / "obsidian-broken"
+    broken_cli.write_text("#!/bin/sh\nexit 1\n")  # always fails
+    broken_cli.chmod(0o755)
+    env = base_env(tmp, log_file, fake_cli=broken_cli)
+
+    # Doctor should report ok=false and exit 1.
+    r = run(str(AGENT_OBSIDIAN), "doctor", "--json", env=env)
+    require(r.returncode == 1,
+            f"doctor should exit 1 for non-responsive CLI: {r.returncode}")
+    payload = json.loads(r.stdout)
+    require(payload["ok"] is False,
+            f"doctor.ok should be False for non-responsive CLI: {payload}")
+    require(payload["cli_runs"] is False,
+            f"doctor.cli_runs should be False: {payload}")
+    require("recommendation" in payload,
+            f"doctor should recommend a fix for non-responsive CLI: {payload}")
+
+    # Snapshot should also report ok=false and exit 1.
+    r = run(str(AGENT_OBSIDIAN), "snapshot", env=env)
+    require(r.returncode == 1,
+            f"snapshot should exit 1 for non-responsive CLI: {r.returncode}")
+    payload = json.loads(r.stdout)
+    require(payload["ok"] is False,
+            f"snapshot.ok should be False for non-responsive CLI: {payload}")
+    require(payload["cli"]["responsive"] is False,
+            f"snapshot.cli.responsive should be False: {payload}")
+
+
+def test_content_with_flag_literals(env_with_cli: dict[str, str], log_file: Path) -> None:
+    """Content containing literal --vault and --json must not be eaten by the
+    global parser. Regression guard for the leading-flags-only parsing change.
+    """
+    # Append with positional body text that includes "--vault" and "--json".
+    r = run(str(AGENT_OBSIDIAN), "append", "TestNote",
+            "set --vault=secret --json output", env=env_with_cli)
+    require(r.returncode == 0,
+            f"append with flag-like content should succeed: {r.stderr}")
+    argv = json.loads(log_file.read_text())
+    # The obsidian CLI should receive the full body as content, not have
+    # --vault or --json stripped from it.
+    body = " ".join(argv[2:]) if len(argv) > 2 else ""
+    require("--vault=secret" in body,
+            f"--vault in content body was incorrectly consumed: argv={argv}")
+    require("--json" in body,
+            f"--json in content body was incorrectly consumed: argv={argv}")
 
 
 def test_argv_passthrough(env_with_cli: dict[str, str], log_file: Path) -> None:
@@ -368,6 +430,8 @@ def main() -> int:
         test_doctor_missing(env_no_cli)
         test_doctor_present(env_with_cli)
         test_snapshot(env_with_cli, env_no_cli)
+        test_non_responsive_cli(tmp, log_file)
+        test_content_with_flag_literals(env_with_cli, log_file)
         test_argv_passthrough(env_with_cli, log_file)
         test_live_gating(env_with_cli, log_file)
 
