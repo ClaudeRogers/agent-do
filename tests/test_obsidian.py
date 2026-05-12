@@ -256,6 +256,44 @@ def test_non_responsive_cli(tmp: Path, log_file: Path) -> None:
             f"snapshot.cli.responsive should be False: {payload}")
 
 
+def test_snapshot_app_not_running(tmp: Path, log_file: Path) -> None:
+    """Snapshot must return ok=false when the CLI responds to 'help' but the
+    Obsidian app isn't running (simulated by `tags` returning non-zero).
+    The Obsidian CLI's `help` is a static dump that works without the app,
+    but actual commands like `tags` require the IPC connection to the running
+    app.
+    """
+    # Fake CLI: help succeeds, everything else fails (app not running).
+    help_only_cli = tmp / "obsidian-help-only"
+    help_only_cli.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            if [[ "${1:-}" == "help" ]]; then
+                exit 0
+            fi
+            exit 1
+            """
+        ),
+        encoding="utf-8",
+    )
+    help_only_cli.chmod(0o755)
+    env = base_env(tmp, log_file, fake_cli=help_only_cli)
+
+    r = run(str(AGENT_OBSIDIAN), "snapshot", env=env)
+    require(r.returncode == 1,
+            f"snapshot should exit 1 when app not running: {r.returncode}")
+    payload = json.loads(r.stdout)
+    require(payload["ok"] is False,
+            f"snapshot.ok should be False when tags fails: {payload}")
+    require(payload["cli"]["responsive"] is True,
+            f"snapshot.cli.responsive should be True (help works): {payload}")
+    require("recommendation" in payload,
+            f"snapshot should recommend opening Obsidian: {payload}")
+    require("open Obsidian" in payload["recommendation"],
+            f"recommendation should mention opening Obsidian: {payload['recommendation']}")
+
+
 def test_content_with_flag_literals(env_with_cli: dict[str, str], log_file: Path) -> None:
     """Content containing literal --vault and --json must not be eaten by the
     global parser. Regression guard for the leading-flags-only parsing change.
@@ -285,13 +323,13 @@ def test_argv_passthrough(env_with_cli: dict[str, str], log_file: Path) -> None:
         (["read", "--path", "folder/note.md"], ["read", "path=folder/note.md"],
          "read by path"),
         (["create", "Inbox/Idea", "--content", "Pricing experiment"],
-         ["create", "name=Inbox/Idea", "content=Pricing experiment", "silent"],
-         "create with content (silent by default)"),
+         ["create", "name=Inbox/Idea", "content=Pricing experiment"],
+         "create with content (silent by default — no flag needed)"),
         (["create", "Inbox/Idea", "--content", "X", "--open"],
-         ["create", "name=Inbox/Idea", "content=X"],
-         "create --open drops silent"),
+         ["create", "name=Inbox/Idea", "content=X", "open"],
+         "create --open reveals note"),
         (["create", "Doc", "--template", "Meeting", "--overwrite"],
-         ["create", "name=Doc", "template=Meeting", "overwrite", "silent"],
+         ["create", "name=Doc", "template=Meeting", "overwrite"],
          "create with template + overwrite"),
         (["append", "Note", "Hello", "world"],
          ["append", "file=Note", "content=Hello world"],
@@ -314,7 +352,7 @@ def test_argv_passthrough(env_with_cli: dict[str, str], log_file: Path) -> None:
          ["daily:append", "content=- [ ] Ship PR"],
          "daily append"),
         (["prop", "get", "status", "--file", "Note"],
-         ["property:get", "name=status", "file=Note"],
+         ["property:read", "name=status", "file=Note"],
          "prop get with --file"),
         (["prop", "set", "status", "done", "--file", "Note"],
          ["property:set", "name=status", "value=done", "file=Note"],
@@ -431,6 +469,7 @@ def main() -> int:
         test_doctor_present(env_with_cli)
         test_snapshot(env_with_cli, env_no_cli)
         test_non_responsive_cli(tmp, log_file)
+        test_snapshot_app_not_running(tmp, log_file)
         test_content_with_flag_literals(env_with_cli, log_file)
         test_argv_passthrough(env_with_cli, log_file)
         test_live_gating(env_with_cli, log_file)

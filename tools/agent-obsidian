@@ -34,7 +34,7 @@ agent-obsidian — Obsidian vault integration (via the official Obsidian CLI)
 NOTES
   read <name>                Read a note by wikilink-style name
   read --path <path>         Read a note by exact vault-relative path
-  create <name> [opts]       Create a new note (silent by default)
+  create <name> [opts]       Create a new note
   append <name> <text>       Append text to a note
   search <query> [opts]      Search the active vault
 
@@ -113,8 +113,8 @@ EOF
 # behaving consistently inside sandboxes.
 _app_bundle_path() {
     local candidates=(
-        "/Applications/Obsidian.app/Contents/MacOS/obsidian"
-        "$HOME/Applications/Obsidian.app/Contents/MacOS/obsidian"
+        "/Applications/Obsidian.app/Contents/MacOS/obsidian-cli"
+        "$HOME/Applications/Obsidian.app/Contents/MacOS/obsidian-cli"
     )
     local candidate
     for candidate in "${candidates[@]}"; do
@@ -483,28 +483,39 @@ cmd_snapshot() {
         fi
     fi
 
-    # Tag enumeration requires a running Obsidian. Capture stderr to avoid
-    # leaking it into the JSON output; an empty result simply yields count: 0.
+    # Tag enumeration requires the running Obsidian app (not just the CLI
+    # binary). If the tags command fails, the app isn't running — snapshot
+    # must report ok: false so orchestrators know the tool isn't usable.
+    local tags_ok="false"
     if [[ "$cli_runs" == "true" ]]; then
         if [[ -n "$OBSIDIAN_VAULT" ]]; then
-            tags_raw="$("$cli" "vault=$OBSIDIAN_VAULT" tags 2>/dev/null || true)"
+            if tags_raw="$("$cli" "vault=$OBSIDIAN_VAULT" tags 2>/dev/null)"; then
+                tags_ok="true"
+            fi
         else
-            tags_raw="$("$cli" tags 2>/dev/null || true)"
+            if tags_raw="$("$cli" tags 2>/dev/null)"; then
+                tags_ok="true"
+            fi
         fi
     fi
 
-    python3 - "$cli" "$cli_status" "$cli_runs" "$OBSIDIAN_VAULT" "$tags_raw" <<'PY'
+    python3 - "$cli" "$cli_status" "$cli_runs" "$OBSIDIAN_VAULT" "$tags_raw" "$tags_ok" <<'PY'
 import json, sys
-cli, cli_status, cli_runs, vault_arg, tags_raw = sys.argv[1:]
+cli, cli_status, cli_runs, vault_arg, tags_raw, tags_ok = sys.argv[1:]
 
 def lines(blob):
     return [line for line in (blob or "").splitlines() if line.strip()]
 
 tags = lines(tags_raw)
 
+# ok requires: CLI present, CLI responds to help, AND the app is actually
+# running (verified by a successful `tags` command — help alone can succeed
+# even when Obsidian isn't running).
+ok = cli_status == "present" and cli_runs == "true" and tags_ok == "true"
+
 payload = {
     "tool": "obsidian",
-    "ok": cli_status == "present" and cli_runs == "true",
+    "ok": ok,
     "cli": {
         "path": cli or None,
         "status": cli_status,
@@ -517,6 +528,8 @@ if cli_status == "missing":
     payload["recommendation"] = "run: agent-do obsidian doctor --fix"
 elif cli_runs != "true":
     payload["recommendation"] = "open Obsidian and re-run; CLI did not respond to 'help'"
+elif tags_ok != "true":
+    payload["recommendation"] = "open Obsidian — the CLI is present but the app is not running"
 print(json.dumps(payload, indent=2))
 sys.exit(0 if payload["ok"] else 1)
 PY
@@ -579,8 +592,9 @@ cmd_create() {
     [[ -n "$content" ]]  && args+=("content=$content")
     [[ -n "$template" ]] && args+=("template=$template")
     [[ "$overwrite" -eq 1 ]] && args+=("overwrite")
-    # `silent` keeps the agent from accidentally switching the user's view.
-    [[ "$reveal" -eq 0 ]] && args+=("silent")
+    # The Obsidian CLI's create is silent by default; only reveal when
+    # the user explicitly passes --open.
+    [[ "$reveal" -eq 1 ]] && args+=("open")
 
     _run_obsidian create "${args[@]}"
 }
@@ -756,7 +770,7 @@ cmd_prop() {
             [[ -n "$name" ]] || { echo "Error: prop get requires <name>" >&2; return 2; }
             local args=("name=$name")
             [[ -n "$file_target" ]] && args+=("file=$file_target")
-            _run_obsidian "property:get" "${args[@]}"
+            _run_obsidian "property:read" "${args[@]}"
             ;;
         set)
             local name="" value=""

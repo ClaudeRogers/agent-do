@@ -189,8 +189,8 @@ check_tool() {
                     status="OK"; note="/opt/homebrew/bin/obsidian"
                 elif [[ -x "$HOME/.local/bin/obsidian" ]]; then
                     status="OK"; note="$HOME/.local/bin/obsidian"
-                elif [[ -x "/Applications/Obsidian.app/Contents/MacOS/obsidian" || \
-                        -x "$HOME/Applications/Obsidian.app/Contents/MacOS/obsidian" ]]; then
+                elif [[ -x "/Applications/Obsidian.app/Contents/MacOS/obsidian-cli" || \
+                        -x "$HOME/Applications/Obsidian.app/Contents/MacOS/obsidian-cli" ]]; then
                     status="WARN"; note="Obsidian.app present — run: agent-do obsidian doctor --fix"
                 else
                     status="WARN"; note="obsidian CLI not found — install Obsidian then run doctor --fix"
