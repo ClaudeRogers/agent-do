@@ -162,12 +162,31 @@ agent-do browse session load mysite
 
 ### External Docs And Project Memory
 
-Use `context` for external reference material:
+Use `context` for external reference material. `retrieve` is the agent-facing
+entry point because it returns bounded snippets with freshness, trust, and
+provenance metadata:
 
 ```bash
+agent-do context retrieve "Stripe idempotency docs" --fresh --max-tokens 8000
+agent-do context retrieve "TanStack Query v5 migration" --require-fresh --require-official
 agent-do context fetch-llms stripe.com
 agent-do context fetch-repo vercel/next.js docs/
 agent-do context search "payments api"
+```
+
+Register high-value sources when agents should be able to keep them current:
+
+```bash
+agent-do context add-source stripe https://stripe.com/llms.txt --kind llms --trust official --ttl 7d
+agent-do context add-source next-docs https://github.com/vercel/next.js/tree/canary/docs --kind github-dir --trust official
+agent-do context sources sync --all
+agent-do context maintain --limit 10
+```
+
+Background maintenance is opt-in. Print the launchd job before installing it:
+
+```bash
+agent-do context maintain schedule print
 ```
 
 Use `zpc` for lessons learned in real work:
@@ -320,6 +339,10 @@ agent-do creds store RENDER_API_KEY --stdin
 agent-do creds store VERCEL_ACCESS_TOKEN --stdin
 agent-do creds check --tool render
 ```
+
+`agent-do context` fetches public reference material without browser cookies or
+saved auth state. Agent-facing context output redacts common token, key, secret,
+signature, password, auth, and credential query parameters.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

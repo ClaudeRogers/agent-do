@@ -4,6 +4,8 @@ tools:
     capabilities:
     - fetch documentation from any URL, llms.txt, or GitHub repo
     - search across all indexed content with FTS5 BM25 + trust-tier ranking
+    - retrieve query-specific context with freshness, provenance, and trust metadata
+    - refresh stale WAN-backed packages with conditional HTTP, ETag/Last-Modified, and last-good cache preservation
     - index local project files and Claude skills
     - token-aware context budgeting for agents (knapsack packing)
     - persistent annotations and feedback-influenced search ranking
@@ -12,15 +14,17 @@ tools:
     - global storage at ~/.agent-do/context/ (per-user, not per-project)
     commands:
       search: Search across all indexed content
+      retrieve: 'Return token-budgeted context for agents: retrieve <query> [--fresh|--require-fresh|--require-official|--offline]'
       get: 'Fetch doc/skill by ID: get <id> [--file F] [--full]'
       list: 'List available packages: list [--source S] [--tags T]'
-      fetch: 'Fetch markdown from URL: fetch <url>'
-      fetch-llms: 'Fetch llms.txt from domain: fetch-llms <domain>'
-      fetch-repo: 'Fetch docs from GitHub: fetch-repo <owner/repo> [path]'
+      fetch: 'Fetch markdown from URL: fetch <url> [--register-source]'
+      fetch-llms: 'Fetch llms.txt from domain: fetch-llms <domain> [--register-source]'
+      fetch-repo: 'Fetch docs from GitHub: fetch-repo <owner/repo> [path] [--register-source]'
+      refresh: 'Refresh WAN-backed packages: refresh <id|name> | --due | --all'
       scan-local: 'Index project files: scan-local [path]'
       scan-skills: Index ~/.claude/skills/
-      sources: List configured content sources
-      add-source: 'Register a source: add-source <name> <url|path>'
+      sources: 'List/sync configured content sources: sources [sync <name|--all>]'
+      add-source: 'Register a source: add-source <name> <url|path> [--kind K] [--trust T] [--ttl 7d]'
       remove-source: 'Unregister a source: remove-source <name>'
       cache: 'Cache management: cache [list|clear|pin|stats]'
       annotate: 'Attach note: annotate <id> <note>'
@@ -30,12 +34,16 @@ tools:
       build: 'Package content directory: build <dir> [-o output]'
       validate: 'Check frontmatter + structure: validate <dir>'
       status: Sources, cache stats, index freshness
+      stale: Show stale or failed packages
+      maintain: 'Run bounded maintenance: maintain [--limit N] [--max-mb N]'
       init: Initialize ~/.agent-do/context/
     examples:
     - intent: fetch stripe documentation
       command: agent-context fetch-llms stripe.com
     - intent: search for authentication docs
       command: agent-context search authentication
+    - intent: retrieve fresh context for latest auth docs
+      command: agent-context retrieve "latest auth docs" --fresh --max-tokens 8000
     - intent: get the supabase docs
       command: agent-context get supabase-llms
     - intent: what docs do I have
@@ -45,7 +53,11 @@ tools:
     - intent: index my claude skills
       command: agent-context scan-skills
     - intent: fetch docs from a github repo
-      command: agent-context fetch-repo vercel/next.js docs/README.md
+      command: agent-context fetch-repo vercel/next.js docs/ --register-source
+    - intent: keep docs fresh
+      command: agent-context maintain --limit 10
+    - intent: sync configured docs sources
+      command: agent-context sources sync --all
     - intent: add a note to a doc
       command: agent-context annotate stripe-llms 'Use idempotency keys for POST'
     routing:
@@ -63,10 +75,11 @@ tools:
       - \breference docs?\b
       - \bknowledge library\b
       recommended_entrypoints:
-      - agent-do context search authentication
+      - agent-do context retrieve "<query>" --fresh --max-tokens 8000
+      - agent-do context sources sync --all
+      - agent-do context maintain --limit 10
       - agent-do context fetch-llms stripe.com
-      - agent-do context status
-      default_command: search
+      default_command: retrieve
       project_signals:
       - docs
       - knowledge
@@ -74,7 +87,7 @@ tools:
         check: agent-do context status
         fix: agent-do context init
         note: Global context storage may need initialization
-    concurrency: read
+    concurrency: mixed
   creds:
     description: Secure credential storage and resolution for agent-do tools
     capabilities:
@@ -1466,7 +1479,7 @@ tools:
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
     - audit PR review risks and generate fix-oriented engineering review replies
-    - approve, comment, request changes, mark ready/draft, and merge pull requests
+    - approve, comment, request changes, close/reopen, edit, check out, update branches, mark ready/draft, and merge pull requests
     commands:
       whoami: Show authenticated GitHub user
       repos: List or sync accessible repositories
@@ -1482,6 +1495,11 @@ tools:
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
+      close: Close a PR
+      reopen: Reopen a PR
+      checkout: Check out a PR locally
+      edit: Edit PR metadata
+      update-branch: Update a PR branch from its base branch
       merge: Merge a PR
       ready: Mark a PR ready for review
       draft: Convert a PR to draft
@@ -1502,6 +1520,12 @@ tools:
       command: agent-gh threads ovachiever/agent-do#3
     - intent: approve this GitHub PR
       command: agent-gh approve ovachiever/agent-do#3 --body "LGTM"
+    - intent: close accidental pull request and delete branch
+      command: agent-gh close ovachiever/agent-do#4 --delete-branch --comment "Closing accidental PR"
+    - intent: check out pull request for local review
+      command: agent-gh checkout ovachiever/agent-do#5 --branch review/pr-5
+    - intent: add reviewer and label to pull request
+      command: agent-gh edit ovachiever/agent-do#5 --add-reviewer @me --add-label review-needed
     routing:
       default_command: inbox
       recommended_entrypoints:
