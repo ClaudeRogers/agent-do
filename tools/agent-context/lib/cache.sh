@@ -144,6 +144,7 @@ pkg_id = sys.argv[2]
 conn.execute("DELETE FROM packages WHERE id = ?", (pkg_id,))
 conn.execute("DELETE FROM package_meta WHERE id = ?", (pkg_id,))
 conn.execute("DELETE FROM package_files WHERE package_id = ?", (pkg_id,))
+conn.execute("DELETE FROM package_currency WHERE package_id = ?", (pkg_id,))
 conn.commit()
 conn.close()
 PYTHON
@@ -168,6 +169,7 @@ conn.execute("PRAGMA busy_timeout = 5000")
 conn.execute("DELETE FROM packages")
 conn.execute("DELETE FROM package_meta")
 conn.execute("DELETE FROM package_files")
+conn.execute("DELETE FROM package_currency")
 conn.commit()
 conn.close()
 PYTHON

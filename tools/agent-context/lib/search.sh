@@ -24,6 +24,10 @@ MAX_INDEX_CHARS = 1_000_000
 
 def infer_source_kind(pkg_id, name, ptype, source):
     blob = " ".join(str(item or "").lower() for item in (pkg_id, name, source))
+    if ptype in {"html", "html-page"}:
+        return "html-page"
+    if ptype in {"html-site", "html-crawl"}:
+        return "html-site"
     if ptype == "skill":
         return "local-skill"
     if ptype == "local":
@@ -37,6 +41,13 @@ def infer_source_kind(pkg_id, name, ptype, source):
     if str(source or "").startswith(("http://", "https://")):
         return "url"
     return "local-project"
+
+def infer_content_format(ptype, source_kind, cache_path):
+    if ptype in {"html", "html-page", "html-site", "html-crawl"} or source_kind.startswith("html"):
+        return "html"
+    if cache_path and os.path.exists(os.path.join(cache_path, "extracted.json")):
+        return "html"
+    return "text"
 
 def freshness(ptype, source_kind, fetched_at):
     if source_kind.startswith("local") or ptype in {"skill", "local"}:
@@ -53,6 +64,8 @@ def read_index_text(root):
             path = os.path.join(dirpath, filename)
             rel = os.path.relpath(path, root)
             if rel == "meta.json":
+                continue
+            if rel.startswith(("raw/", "_raw/")) or rel.endswith("/raw.html") or filename in {"headers.txt", "extracted.json", "crawl.json", "metadata.json"}:
                 continue
             ext = os.path.splitext(filename)[1].lower()
             if ext not in TEXT_EXTENSIONS:
@@ -101,6 +114,7 @@ conn.execute(
 now_dt = datetime.now(timezone.utc).replace(microsecond=0)
 now = now_dt.isoformat()
 source_kind = infer_source_kind(pkg_id, name, ptype, source)
+content_format = infer_content_format(ptype, source_kind, cache_path)
 refresh_status, expires_at, refresh_policy = freshness(ptype, source_kind, now_dt)
 conn.execute(
     """
@@ -108,14 +122,14 @@ conn.execute(
         id, name, type, trust, token_count, source, cache_path, fetched_at,
         last_accessed, access_count, tags, source_kind, canonical_url,
         content_hash, checked_at, expires_at, refresh_status, refresh_error,
-        refresh_policy
+        refresh_policy, content_format, version_status, version_policy
     )
-    VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?)
     """,
     (
         pkg_id, name, ptype, trust, int(tokens), source, cache_path, now, now,
         tags, source_kind, source, content_hash, now, expires_at, refresh_status,
-        "", refresh_policy,
+        "", refresh_policy, content_format, "unknown", "auto",
     )
 )
 
@@ -124,10 +138,10 @@ for item in files:
     conn.execute(
         """
         INSERT OR REPLACE INTO package_files
-        (package_id, rel_path, source_url, content_hash, token_count, fetched_at, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (package_id, rel_path, source_url, content_hash, token_count, fetched_at, indexed_at, content_format)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (pkg_id, item["rel_path"], source, item["hash"], item["tokens"], now, now),
+        (pkg_id, item["rel_path"], source, item["hash"], item["tokens"], now, now, content_format),
     )
 
 conn.commit()
@@ -400,6 +414,8 @@ for dirpath, _, filenames in os.walk(root):
         rel = os.path.relpath(path, root)
         if rel == "meta.json":
             continue
+        if rel.startswith(("raw/", "_raw/")) or rel.endswith("/raw.html") or filename in {"headers.txt", "extracted.json", "crawl.json", "metadata.json"}:
+            continue
         if os.path.splitext(filename)[1].lower() not in extensions:
             continue
         print(f"--- {rel} ---")
@@ -504,6 +520,8 @@ for dirpath, _, filenames in os.walk(cache_path):
         fp = os.path.join(dirpath, filename)
         rel = os.path.relpath(fp, cache_path)
         if rel == "meta.json":
+            continue
+        if rel.startswith(("raw/", "_raw/")) or rel.endswith("/raw.html") or filename in {"headers.txt", "extracted.json", "crawl.json", "metadata.json"}:
             continue
         if os.path.splitext(filename)[1].lower() not in extensions:
             continue

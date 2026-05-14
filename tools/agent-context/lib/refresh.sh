@@ -278,6 +278,11 @@ PYTHON
         return
     fi
 
+    if [[ "$source_kind" == "html-site" || "$ptype" == "html-site" || "$source_kind" == "html-crawl" || "$ptype" == "html-crawl" ]]; then
+        _context_refresh_html_site "$pkg_id" "$name" "$ptype" "$trust" "$tags" "$url" "$cache_path"
+        return
+    fi
+
     if [[ -z "$url" || "$url" != http* ]]; then
         _context_mark_refresh_failed "$pkg_id" "No refreshable URL for $pkg_id"
         die "No refreshable URL for $pkg_id"
@@ -318,29 +323,64 @@ _context_refresh_url() {
         die "Refresh failed for $pkg_id: HTTP $http_code"
     fi
 
-    content_type=$(_context_header_value "$headers_file" "content-type")
-    if [[ "$content_type" == *text/html* ]]; then
-        rm -rf "$tmp_dir"
-        _context_mark_refresh_failed "$pkg_id" "URL returned HTML while refreshing $safe_url"
-        die "Refresh failed for $pkg_id: URL returned HTML"
-    fi
-
-    local first_bytes
-    first_bytes=$(head -c 20 "$content_file")
-    if [[ "$first_bytes" == "<!DOCTYPE"* || "$first_bytes" == "<html"* ]]; then
-        rm -rf "$tmp_dir"
-        _context_mark_refresh_failed "$pkg_id" "URL returned HTML while refreshing $safe_url"
-        die "Refresh failed for $pkg_id: URL returned HTML"
-    fi
-
     mkdir -p "$cache_path"
-    cp "$content_file" "$cache_path/content.md"
+    find "$cache_path" -mindepth 1 ! -name meta.json -exec rm -rf {} + 2>/dev/null || true
+    local content_kind="$ptype" description canonical_url
+    description="Refreshed from $url"
+    canonical_url="$url"
+    if type _context_is_html_response &>/dev/null && _context_is_html_response "$headers_file" "$content_file"; then
+        content_kind="html-page"
+        _context_store_html_file "$url" "$content_file" "$headers_file" "$cache_path"
+        if [[ -f "$cache_path/metadata.json" ]]; then
+            description=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("description",""))' "$cache_path/metadata.json" 2>/dev/null || true)
+            canonical_url=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("canonical_url",""))' "$cache_path/metadata.json" 2>/dev/null || true)
+        fi
+        [[ -n "$description" ]] || description="Refreshed from $url"
+        [[ -n "$canonical_url" ]] || canonical_url="$url"
+    else
+        cp "$content_file" "$cache_path/content.md"
+    fi
     local token_count
-    token_count=$(count_tokens "$cache_path/content.md")
-    write_meta "$cache_path" "$name" "$ptype" "Refreshed from $url" "$url" "$token_count" "$trust" "$tags"
-    _index_package "$pkg_id" "$name" "$ptype" "Refreshed from $url" "$tags" "$trust" "$token_count" "$cache_path" "$url"
+    token_count=$(_context_count_tree_tokens "$cache_path")
+    write_meta "$cache_path" "$name" "$content_kind" "$description" "$url" "$token_count" "$trust" "$tags"
+    _index_package "$pkg_id" "$name" "$content_kind" "$description" "$tags" "$trust" "$token_count" "$cache_path" "$canonical_url"
     _context_record_http_headers "$pkg_id" "$headers_file"
     rm -rf "$tmp_dir"
+    _context_refresh_result "$pkg_id" "$name" "fresh" "refreshed"
+}
+
+_context_refresh_html_site() {
+    local pkg_id="$1" name="$2" ptype="$3" trust="$4" tags="$5" url="$6" cache_path="$7"
+    local safe_url crawl_limit description token_count
+    safe_url=$(redact_url "$url")
+    crawl_limit=$(python3 - "$CONTEXT_INDEX_DB" "$pkg_id" << 'PYTHON'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA busy_timeout = 5000")
+row = conn.execute("SELECT COALESCE(crawl_limit, 20) FROM package_meta WHERE id = ?", (sys.argv[2],)).fetchone()
+conn.close()
+print(row[0] if row else 20)
+PYTHON
+    )
+
+    mkdir -p "$cache_path"
+    find "$cache_path" -mindepth 1 ! -name meta.json -exec rm -rf {} + 2>/dev/null || true
+    if ! _context_crawl_html_site "$url" "$cache_path" "$crawl_limit"; then
+        _context_mark_refresh_failed "$pkg_id" "HTML crawl failed while refreshing $safe_url"
+        die "Refresh failed for $pkg_id: HTML crawl failed"
+    fi
+    description="Refreshed HTML site from $url"
+    if [[ -f "$cache_path/metadata.json" ]]; then
+        local extracted_description
+        extracted_description=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("description",""))' "$cache_path/metadata.json" 2>/dev/null || true)
+        [[ -n "$extracted_description" ]] && description="$extracted_description"
+    fi
+    token_count=$(_context_count_tree_tokens "$cache_path")
+    write_meta "$cache_path" "$name" "html-site" "$description" "$url" "$token_count" "$trust" "$tags"
+    _index_package "$pkg_id" "$name" "html-site" "$description" "$tags" "$trust" "$token_count" "$cache_path" "$url"
+    _context_mark_refresh_fresh "$pkg_id"
     _context_refresh_result "$pkg_id" "$name" "fresh" "refreshed"
 }
 
@@ -644,6 +684,9 @@ extensions = {
 total = 0
 for dirpath, _, filenames in os.walk(root):
     for filename in filenames:
+        rel = os.path.relpath(os.path.join(dirpath, filename), root)
+        if rel.startswith(("raw/", "_raw/")) or rel.endswith("/raw.html") or filename in {"headers.txt", "extracted.json", "crawl.json", "metadata.json"}:
+            continue
         if os.path.splitext(filename)[1].lower() not in extensions:
             continue
         path = os.path.join(dirpath, filename)

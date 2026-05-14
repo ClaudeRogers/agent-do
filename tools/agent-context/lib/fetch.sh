@@ -41,44 +41,45 @@ cmd_fetch() {
         return 1
     fi
 
-    # Check if content is actually markdown-like (not HTML error page)
-    local first_bytes
-    first_bytes=$(head -c 20 "$content_file")
-    if [[ "$first_bytes" == "<!DOCTYPE"* ]] || [[ "$first_bytes" == "<html"* ]]; then
-        rm -rf "$pkg_dir"
-        local safe_url
-        safe_url=$(redact_url "$url")
-        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-            json_error "URL returned HTML, not markdown: $safe_url"
-        else
-            die "URL returned HTML, not markdown. Use a raw content URL."
-        fi
-        return 1
+    local is_html=false source_type="reference"
+    if type _context_is_html_response &>/dev/null && _context_is_html_response "$headers_file" "$content_file"; then
+        is_html=true
+        source_type="html-page"
+        _context_store_html_file "$url" "$content_file" "$headers_file" "$pkg_dir"
+        content_file="$pkg_dir/content.md"
     fi
 
     # Extract frontmatter if present, otherwise generate
-    local meta_json
-    meta_json=$(extract_frontmatter "$content_file")
-    local name
-    name=$(echo "$meta_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null || true)
+    local meta_json name description canonical_url
+    if [[ "$is_html" == "true" && -f "$pkg_dir/metadata.json" ]]; then
+        meta_json="{}"
+        name=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("title",""))' "$pkg_dir/metadata.json" 2>/dev/null || true)
+        description=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("description",""))' "$pkg_dir/metadata.json" 2>/dev/null || true)
+        canonical_url=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("canonical_url",""))' "$pkg_dir/metadata.json" 2>/dev/null || true)
+    else
+        meta_json=$(extract_frontmatter "$content_file")
+        name=$(echo "$meta_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null || true)
+        description=$(echo "$meta_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description',''))" 2>/dev/null || true)
+    fi
     [[ -n "$name" ]] || name="$id"
 
-    local description
-    description=$(echo "$meta_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('description',''))" 2>/dev/null || true)
     [[ -n "$description" ]] || description="Fetched from $url"
+    [[ -n "${canonical_url:-}" ]] || canonical_url="$url"
 
     local token_count
     token_count=$(count_tokens "$content_file")
 
     # Write meta.json
-    write_meta "$pkg_dir" "$name" "reference" "$description" "$url" "$token_count" "$trust" "$tags"
+    write_meta "$pkg_dir" "$name" "$source_type" "$description" "$url" "$token_count" "$trust" "$tags"
 
     # Index into FTS5
-    _index_package "$id" "$name" "reference" "$description" "$tags" "$trust" "$token_count" "$pkg_dir" "$url"
+    _index_package "$id" "$name" "$source_type" "$description" "$tags" "$trust" "$token_count" "$pkg_dir" "$canonical_url"
     type _context_record_http_headers &>/dev/null && _context_record_http_headers "$id" "$headers_file"
     if [[ "$register_source" == "true" ]] && type _context_sources_run &>/dev/null; then
         [[ -n "$source_name" ]] || source_name="$name"
-        _context_sources_run add "$source_name" "$url" "$trust" "url" "7d" "$tags" "" "true" "200" "on-use" >/dev/null
+        local registered_kind="url"
+        [[ "$is_html" == "true" ]] && registered_kind="html-page"
+        _context_sources_run add "$source_name" "$url" "$trust" "$registered_kind" "7d" "$tags" "" "true" "200" "on-use" >/dev/null
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then

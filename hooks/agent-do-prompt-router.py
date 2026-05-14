@@ -319,7 +319,7 @@ def looks_like_context_retrieval_prompt(prompt: str) -> bool:
 
 
 def context_retrieve_command(prompt: str) -> str:
-    return f"agent-do context retrieve {shlex.quote(prompt.strip())} --fresh --max-tokens 8000"
+    return f"agent-do context retrieve {shlex.quote(prompt.strip())} --fresh --prefer-latest --max-tokens 8000"
 
 
 def context_retrieval_context(prompt: str) -> tuple[str, list[str], list[str]]:

@@ -22,28 +22,42 @@ cmd_maintain() {
     ensure_init
     [[ -n "$max_mb" ]] || max_mb=$(_context_default_cache_max_mb)
 
-    local refresh_output refresh_rc pruned_json counts_json
+    local refresh_output refresh_rc versions_output versions_rc pruned_json counts_json
     if refresh_output=$(cmd_refresh --due --limit "$limit" 2>&1); then
         refresh_rc=0
     else
         refresh_rc=$?
     fi
+    if type _context_versions_check &>/dev/null; then
+        if versions_output=$(_context_versions_check --due --limit "$limit" --quiet 2>&1); then
+            versions_rc=0
+        else
+            versions_rc=$?
+        fi
+    else
+        versions_output=""
+        versions_rc=0
+    fi
     pruned_json=$(_context_prune_cache "$max_mb")
     counts_json=$(_context_maintenance_counts)
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        python3 - "$refresh_rc" "$refresh_output" "$pruned_json" "$counts_json" << 'PYTHON'
+        python3 - "$refresh_rc" "$refresh_output" "$versions_rc" "$versions_output" "$pruned_json" "$counts_json" << 'PYTHON'
 import json
 import sys
 
 refresh_rc = int(sys.argv[1])
 refresh_output = sys.argv[2]
-pruned = json.loads(sys.argv[3])
-counts = json.loads(sys.argv[4])
+versions_rc = int(sys.argv[3])
+versions_output = sys.argv[4]
+pruned = json.loads(sys.argv[5])
+counts = json.loads(sys.argv[6])
 print(json.dumps({
-    "success": refresh_rc == 0,
+    "success": refresh_rc == 0 and versions_rc == 0,
     "refresh_success": refresh_rc == 0,
     "refresh_output": refresh_output,
+    "versions_success": versions_rc == 0,
+    "versions_output": versions_output,
     "pruned": pruned,
     "freshness": counts,
 }, indent=2))
@@ -51,6 +65,11 @@ PYTHON
     else
         echo "agent-context maintenance"
         echo "$refresh_output"
+        if [[ -n "$versions_output" ]]; then
+            echo "$versions_output"
+        elif [[ "$versions_rc" -eq 0 ]]; then
+            echo "Version check: due packages checked."
+        fi
         python3 - "$pruned_json" "$counts_json" << 'PYTHON'
 import json
 import sys
@@ -67,7 +86,7 @@ print(
 PYTHON
     fi
 
-    return "$refresh_rc"
+    [[ "$refresh_rc" -eq 0 && "$versions_rc" -eq 0 ]]
 }
 
 _context_default_cache_max_mb() {
@@ -173,6 +192,7 @@ if total > max_bytes:
         conn.execute("DELETE FROM packages WHERE id = ?", (entry["id"],))
         conn.execute("DELETE FROM package_meta WHERE id = ?", (entry["id"],))
         conn.execute("DELETE FROM package_files WHERE package_id = ?", (entry["id"],))
+        conn.execute("DELETE FROM package_currency WHERE package_id = ?", (entry["id"],))
         total -= entry["size"]
         bytes_removed += entry["size"]
         removed.append(entry["id"])

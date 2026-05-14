@@ -2,10 +2,13 @@ tools:
   context:
     description: Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal).
     capabilities:
-    - fetch documentation from any URL, llms.txt, or GitHub repo
+    - fetch documentation from markdown/text URLs, HTML pages/sites, llms.txt, or GitHub repos
     - search across all indexed content with FTS5 BM25 + trust-tier ranking
-    - retrieve query-specific context with freshness, provenance, and trust metadata
+    - retrieve query-specific context with freshness, provenance, trust, and version-currency metadata
     - refresh stale WAN-backed packages with conditional HTTP, ETag/Last-Modified, and last-good cache preservation
+    - preserve raw HTML while indexing extracted readable content
+    - check package documentation currency against npm, PyPI, crates.io, pub.dev, or GitHub releases
+    - serve a local read-only HTML dashboard for agents and humans
     - index local project files and Claude skills
     - token-aware context budgeting for agents (knapsack packing)
     - persistent annotations and feedback-influenced search ranking
@@ -14,17 +17,18 @@ tools:
     - global storage at ~/.agent-do/context/ (per-user, not per-project)
     commands:
       search: Search across all indexed content
-      retrieve: 'Return token-budgeted context for agents: retrieve <query> [--fresh|--require-fresh|--require-official|--offline]'
+      retrieve: 'Return token-budgeted context for agents: retrieve <query> [--fresh|--require-fresh|--require-official|--prefer-latest|--require-current|--offline]'
       get: 'Fetch doc/skill by ID: get <id> [--file F] [--full]'
       list: 'List available packages: list [--source S] [--tags T]'
-      fetch: 'Fetch markdown from URL: fetch <url> [--register-source]'
+      fetch: 'Fetch markdown/text or single HTML page from URL: fetch <url> [--register-source]'
+      crawl: 'Crawl bounded same-origin HTML docs: crawl <url> [--limit N]'
       fetch-llms: 'Fetch llms.txt from domain: fetch-llms <domain> [--register-source]'
       fetch-repo: 'Fetch docs from GitHub: fetch-repo <owner/repo> [path] [--register-source]'
       refresh: 'Refresh WAN-backed packages: refresh <id|name> | --due | --all'
       scan-local: 'Index project files: scan-local [path]'
       scan-skills: Index ~/.claude/skills/
       sources: 'List/sync configured content sources: sources [sync <name|--all>]'
-      add-source: 'Register a source: add-source <name> <url|path> [--kind K] [--trust T] [--ttl 7d]'
+      add-source: 'Register a source: add-source <name> <url|path> [--kind K] [--trust T] [--ttl 7d] [--ecosystem npm --package name --doc-version latest]'
       remove-source: 'Unregister a source: remove-source <name>'
       cache: 'Cache management: cache [list|clear|pin|stats]'
       annotate: 'Attach note: annotate <id> <note>'
@@ -35,6 +39,8 @@ tools:
       validate: 'Check frontmatter + structure: validate <dir>'
       status: Sources, cache stats, index freshness
       stale: Show stale or failed packages
+      versions: 'Check/list version currency: versions check [--all|--due|id] | versions outdated'
+      serve: 'Serve local context dashboard: serve [--port N]'
       maintain: 'Run bounded maintenance: maintain [--limit N] [--max-mb N]'
       init: Initialize ~/.agent-do/context/
     examples:
@@ -43,7 +49,9 @@ tools:
     - intent: search for authentication docs
       command: agent-context search authentication
     - intent: retrieve fresh context for latest auth docs
-      command: agent-context retrieve "latest auth docs" --fresh --max-tokens 8000
+      command: agent-context retrieve "latest auth docs" --fresh --prefer-latest --max-tokens 8000
+    - intent: crawl an HTML docs site
+      command: agent-context crawl https://docs.example.com --limit 25
     - intent: get the supabase docs
       command: agent-context get supabase-llms
     - intent: what docs do I have
@@ -56,6 +64,8 @@ tools:
       command: agent-context fetch-repo vercel/next.js docs/ --register-source
     - intent: keep docs fresh
       command: agent-context maintain --limit 10
+    - intent: show outdated docs
+      command: agent-context versions outdated
     - intent: sync configured docs sources
       command: agent-context sources sync --all
     - intent: add a note to a doc
@@ -75,7 +85,7 @@ tools:
       - \breference docs?\b
       - \bknowledge library\b
       recommended_entrypoints:
-      - agent-do context retrieve "<query>" --fresh --max-tokens 8000
+      - agent-do context retrieve "<query>" --fresh --prefer-latest --max-tokens 8000
       - agent-do context sources sync --all
       - agent-do context maintain --limit 10
       - agent-do context fetch-llms stripe.com

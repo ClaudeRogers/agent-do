@@ -30,6 +30,9 @@ Security concerns for this project include:
 ## Reference Fetching Boundaries
 
 `agent-do context` is designed for public reference material, not private data ingestion.
+For HTML sources it preserves raw downloaded HTML in the local cache for
+provenance and indexes extracted readable text for retrieval. Do not register
+private authenticated pages as context sources.
 
 - WAN fetches use plain `curl` with curl config disabled, no browser cookies, no saved auth state, and bounded connection/request timeouts.
 - GitHub directory fetches are bounded by crawl limits and text-file allowlists.

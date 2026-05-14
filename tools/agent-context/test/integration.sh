@@ -102,11 +102,121 @@ check "remove-source" "$TOOL" remove-source test-source
 check_output "sources empty after remove" "No sources" "$TOOL" sources
 
 echo ""
-echo "10. Scan local"
+echo "10. HTML and version currency"
+html_script=$(mktemp)
+cat > "$html_script" <<'BASH'
+set -euo pipefail
+tool="$1"
+html_home=$(mktemp -d)
+html_root=$(mktemp -d)
+port_file=$(mktemp)
+server_pid=""
+cleanup() {
+    [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null || true
+    rm -rf "$html_home" "$html_root" "$port_file"
+}
+trap cleanup EXIT
+
+cat > "$html_root/index.html" <<'HTML'
+<!doctype html>
+<html>
+<head>
+  <title>Next 14 Docs</title>
+  <meta name="description" content="HTML docs extraction fixture">
+  <script>hidden-script-token</script>
+  <style>.ignored { color: red; }</style>
+</head>
+<body>
+  <nav>nav-only-token</nav>
+  <main>
+    <h1>Next 14 Docs</h1>
+    <p>html-root-token</p>
+    <a href="/guide.html">Guide</a>
+  </main>
+</body>
+</html>
+HTML
+cat > "$html_root/guide.html" <<'HTML'
+<!doctype html>
+<html>
+<head><title>Guide</title></head>
+<body><main><h1>Guide</h1><p>html-guide-token</p><pre>const htmlCodeToken = true</pre></main></body>
+</html>
+HTML
+
+python3 - "$html_root" "$port_file" <<'PYTHON' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+port_file = Path(sys.argv[2])
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/npm/next":
+            body = json.dumps({"dist-tags": {"latest": "16.0.0"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        path = self.path
+        if path == "/":
+            path = "/index.html"
+        file_path = root / path.lstrip("/")
+        if not file_path.exists():
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("ETag", '"' + file_path.name + '"')
+        self.end_headers()
+        self.wfile.write(file_path.read_bytes())
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_file.write_text(str(server.server_address[1]))
+server.serve_forever()
+PYTHON
+server_pid=$!
+
+for _ in $(seq 1 50); do
+    [[ -s "$port_file" ]] && break
+    sleep 0.1
+done
+[[ -s "$port_file" ]]
+port=$(cat "$port_file")
+base="http://127.0.0.1:${port}"
+
+AGENT_DO_HOME="$html_home" "$tool" init >/dev/null
+AGENT_DO_HOME="$html_home" "$tool" fetch "$base/" >/dev/null
+AGENT_DO_HOME="$html_home" "$tool" search html-root-token | grep -q "Next 14 Docs"
+hidden_out=$(AGENT_DO_HOME="$html_home" "$tool" search hidden-script-token)
+! grep -q "Next 14 Docs" <<<"$hidden_out"
+find "$html_home/context/cache" -path "*/raw/raw.html" | grep -q raw.html
+
+AGENT_DO_HOME="$html_home" "$tool" add-source next "$base/" --kind html-site --trust official --crawl-limit 3 --tags html-test --ecosystem npm --package next --doc-version 14 --registry npm --registry-url "$base/npm" >/dev/null
+AGENT_DO_HOME="$html_home" "$tool" sources sync next >/dev/null
+AGENT_DO_HOME="$html_home" "$tool" retrieve html-guide-token --max-tokens 2000 | grep -q html-guide-token
+AGENT_DO_HOME="$html_home" "$tool" versions check --all --limit 5 >/dev/null
+AGENT_DO_HOME="$html_home" "$tool" versions outdated | grep -q behind_major
+! AGENT_DO_HOME="$html_home" "$tool" retrieve html-guide-token --require-current --max-tokens 2000 >/dev/null 2>&1
+AGENT_DO_HOME="$html_home" "$tool" serve --print-url --port 9876 | grep -q "http://127.0.0.1:9876/"
+BASH
+check "HTML fetch/crawl extraction and version currency" bash "$html_script" "$TOOL"
+rm -f "$html_script"
+
+echo ""
+echo "11. Scan local"
 check "scan-local" "$TOOL" scan-local "$SCRIPT_DIR/../../.."
 
 echo ""
-echo "11. Schema migration"
+echo "12. Schema migration"
 old_context=$(mktemp -d)
 mkdir -p "$old_context/context/cache/local/old-package"
 cat > "$old_context/context/cache/local/old-package/README.md" <<'OLD'
@@ -156,7 +266,7 @@ check "old schema migrates on status" bash -c "AGENT_DO_HOME='$old_context' '$TO
 rm -rf "$old_context"
 
 echo ""
-echo "12. Refresh"
+echo "13. Refresh"
 refresh_script=$(mktemp)
 cat > "$refresh_script" <<'BASH'
 set -euo pipefail
@@ -327,7 +437,7 @@ check "refresh updates mocked GitHub directory" bash -c "sqlite3 '$gh_home/conte
 rm -rf "$gh_script" "$gh_bin" "$gh_home"
 
 echo ""
-echo "13. Scan skills"
+echo "14. Scan skills"
 skill_home=$(mktemp -d)
 skill_context=$(mktemp -d)
 mkdir -p "$skill_home/.claude/skills/sample-skill/references" "$skill_home/.claude/skills/ignored-skill"
@@ -373,13 +483,13 @@ check "cache clear by package name removes index row" bash -c "HOME='$skill_home
 rm -rf "$skill_home" "$skill_context"
 
 echo ""
-echo "14. Budget"
+echo "15. Budget"
 # Re-fetch something for budget to work with
 "$TOOL" fetch https://raw.githubusercontent.com/anthropics/anthropic-cookbook/main/README.md >/dev/null 2>&1
 check_output "budget" "Budget" "$TOOL" budget 5000 "api documentation"
 
 echo ""
-echo "15. Status (final)"
+echo "16. Status (final)"
 check_output "redact_url hides secret query params" "api_key=%5Bredacted%5D" bash -c "source '$SCRIPT_DIR/../lib/common.sh'; redact_url 'https://example.com/doc.md?api_key=secret&ok=1'"
 check_output "maintain schedule print" "com.agent-do.context-maintain" "$TOOL" maintain schedule print
 check "maintain --json" "$TOOL" maintain --limit 0 --max-mb 500 --json

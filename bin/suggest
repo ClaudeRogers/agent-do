@@ -53,7 +53,7 @@ def looks_like_context_retrieval_query(query: str) -> bool:
 
 
 def context_retrieve_command(query: str) -> str:
-    return f"agent-do context retrieve {shlex.quote(query)} --fresh --max-tokens 8000"
+    return f"agent-do context retrieve {shlex.quote(query)} --fresh --prefer-latest --max-tokens 8000"
 
 
 def find_project_root(cwd: str) -> Path:

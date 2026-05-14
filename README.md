@@ -163,14 +163,16 @@ agent-do browse session load mysite
 ### External Docs And Project Memory
 
 Use `context` for external reference material. `retrieve` is the agent-facing
-entry point because it returns bounded snippets with freshness, trust, and
-provenance metadata:
+entry point because it returns bounded snippets with freshness, version
+currency, trust, and provenance metadata:
 
 ```bash
 agent-do context retrieve "Stripe idempotency docs" --fresh --max-tokens 8000
 agent-do context retrieve "TanStack Query v5 migration" --require-fresh --require-official
+agent-do context retrieve "latest Next.js routing docs" --fresh --prefer-latest --max-tokens 8000
 agent-do context fetch-llms stripe.com
 agent-do context fetch-repo vercel/next.js docs/
+agent-do context crawl https://nextjs.org/docs --limit 25
 agent-do context search "payments api"
 ```
 
@@ -179,14 +181,27 @@ Register high-value sources when agents should be able to keep them current:
 ```bash
 agent-do context add-source stripe https://stripe.com/llms.txt --kind llms --trust official --ttl 7d
 agent-do context add-source next-docs https://github.com/vercel/next.js/tree/canary/docs --kind github-dir --trust official
+agent-do context add-source next-web https://nextjs.org/docs --kind html-site --trust official --ecosystem npm --package next --doc-version latest
 agent-do context sources sync --all
 agent-do context maintain --limit 10
+agent-do context versions outdated
 ```
+
+HTML sources are first-class: raw HTML is preserved in the cache for provenance,
+while extracted readable content is indexed and returned to agents. Version
+currency is separate from HTTP freshness, so a cached page can be fresh but still
+warn if it points at old major-version docs.
 
 Background maintenance is opt-in. Print the launchd job before installing it:
 
 ```bash
 agent-do context maintain schedule print
+```
+
+For a local visual status page:
+
+```bash
+agent-do context serve --port 8765
 ```
 
 Use `zpc` for lessons learned in real work:
@@ -341,8 +356,9 @@ agent-do creds check --tool render
 ```
 
 `agent-do context` fetches public reference material without browser cookies or
-saved auth state. Agent-facing context output redacts common token, key, secret,
-signature, password, auth, and credential query parameters.
+saved auth state. HTML sources are cached locally with raw provenance plus
+extracted searchable text. Agent-facing context output redacts common token, key,
+secret, signature, password, auth, and credential query parameters.
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 

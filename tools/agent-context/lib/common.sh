@@ -239,7 +239,7 @@ TEXT_EXTENSIONS = {
     ".yml", ".py", ".sh", ".css", ".html", ".sql", ".toml",
 }
 DEFAULT_TTL_DAYS = 7
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def now():
@@ -261,6 +261,10 @@ def iso(value):
 
 def infer_source_kind(pkg_id, name, ptype, source):
     blob = " ".join(str(item or "").lower() for item in (pkg_id, name, source))
+    if ptype in {"html", "html-page"}:
+        return "html-page"
+    if ptype in {"html-site", "html-crawl"}:
+        return "html-site"
     if ptype == "skill":
         return "local-skill"
     if ptype == "local":
@@ -274,6 +278,14 @@ def infer_source_kind(pkg_id, name, ptype, source):
     if str(source or "").startswith(("http://", "https://")):
         return "url"
     return "local-project"
+
+
+def infer_content_format(ptype, source_kind, cache_path):
+    if ptype in {"html", "html-page", "html-site", "html-crawl"} or source_kind.startswith("html"):
+        return "html"
+    if cache_path and os.path.exists(os.path.join(cache_path, "extracted.json")):
+        return "html"
+    return "text"
 
 
 def package_status(ptype, source_kind, fetched_at):
@@ -294,6 +306,8 @@ def iter_package_files(root):
             path = os.path.join(dirpath, filename)
             rel = os.path.relpath(path, root)
             if rel == "meta.json":
+                continue
+            if rel.startswith(("raw/", "_raw/")) or rel.endswith("/raw.html") or filename in {"headers.txt", "extracted.json", "crawl.json", "metadata.json"}:
                 continue
             if os.path.splitext(filename)[1].lower() not in TEXT_EXTENSIONS:
                 continue
@@ -362,6 +376,19 @@ columns = {
     "refresh_status": "TEXT",
     "refresh_error": "TEXT",
     "refresh_policy": "TEXT",
+    "content_format": "TEXT",
+    "crawl_limit": "INTEGER",
+    "crawl_depth": "INTEGER",
+    "version_registry": "TEXT",
+    "version_package": "TEXT",
+    "doc_version": "TEXT",
+    "latest_version": "TEXT",
+    "version_status": "TEXT",
+    "version_checked_at": "TEXT",
+    "version_error": "TEXT",
+    "release_url": "TEXT",
+    "migration_url": "TEXT",
+    "version_policy": "TEXT",
 }
 for name, decl in columns.items():
     if name not in existing:
@@ -380,6 +407,57 @@ conn.execute("""
     )
 """)
 
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS package_currency (
+        package_id TEXT PRIMARY KEY,
+        ecosystem TEXT,
+        package_name TEXT,
+        registry TEXT,
+        registry_url TEXT,
+        doc_version TEXT,
+        doc_channel TEXT,
+        version_policy TEXT DEFAULT 'latest-stable',
+        current_version TEXT,
+        latest_version TEXT,
+        currency_status TEXT DEFAULT 'unknown',
+        currency_checked_at TEXT,
+        currency_expires_at TEXT,
+        currency_error TEXT DEFAULT '',
+        release_url TEXT,
+        migration_url TEXT
+    )
+""")
+
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS registry_version_cache (
+        ecosystem TEXT NOT NULL,
+        package_name TEXT NOT NULL,
+        registry TEXT NOT NULL,
+        registry_url TEXT,
+        latest_version TEXT,
+        latest_stable_version TEXT,
+        dist_tag TEXT,
+        checked_at TEXT,
+        expires_at TEXT,
+        status TEXT DEFAULT 'unknown',
+        error TEXT DEFAULT '',
+        etag TEXT,
+        last_modified TEXT,
+        PRIMARY KEY (ecosystem, package_name, registry)
+    )
+""")
+
+existing_file_columns = {row[1] for row in conn.execute("PRAGMA table_info(package_files)")}
+file_columns = {
+    "title": "TEXT",
+    "content_format": "TEXT",
+    "raw_path": "TEXT",
+    "depth": "INTEGER",
+}
+for name, decl in file_columns.items():
+    if name not in existing_file_columns:
+        conn.execute(f"ALTER TABLE package_files ADD COLUMN {name} {decl}")
+
 version = conn.execute("SELECT value FROM context_schema WHERE key = 'version'").fetchone()
 if not version or version[0] != SCHEMA_VERSION:
     indexed_at = iso(now())
@@ -394,6 +472,7 @@ if not version or version[0] != SCHEMA_VERSION:
         status, expires_at, policy = package_status(ptype, source_kind, fetched_at)
         files = iter_package_files(cache_path)
         content_hash = package_hash(files)
+        content_format = infer_content_format(ptype, source_kind, cache_path)
         checked_at = indexed_at
         conn.execute(
             """
@@ -402,6 +481,9 @@ if not version or version[0] != SCHEMA_VERSION:
                 source_kind = COALESCE(source_kind, ?),
                 canonical_url = COALESCE(canonical_url, ?),
                 content_hash = COALESCE(content_hash, ?),
+                content_format = COALESCE(content_format, ?),
+                version_status = COALESCE(version_status, 'unknown'),
+                version_policy = COALESCE(version_policy, 'auto'),
                 checked_at = COALESCE(checked_at, ?),
                 expires_at = COALESCE(expires_at, ?),
                 refresh_status = COALESCE(refresh_status, ?),
@@ -409,16 +491,16 @@ if not version or version[0] != SCHEMA_VERSION:
                 refresh_error = COALESCE(refresh_error, '')
             WHERE id = ?
             """,
-            (tags, source_kind, source, content_hash, checked_at, expires_at, status, policy, pkg_id),
+            (tags, source_kind, source, content_hash, content_format, checked_at, expires_at, status, policy, pkg_id),
         )
         for item in files:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO package_files
-                (package_id, rel_path, source_url, content_hash, token_count, fetched_at, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (package_id, rel_path, source_url, content_hash, token_count, fetched_at, indexed_at, content_format)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (pkg_id, item["rel_path"], source, item["hash"], item["tokens"], fetched_at, indexed_at),
+                (pkg_id, item["rel_path"], source, item["hash"], item["tokens"], fetched_at, indexed_at, content_format),
             )
 
     conn.execute(
@@ -538,12 +620,29 @@ print(
 PYTHON
 }
 
+_context_currency_counts() {
+    python3 - "$CONTEXT_INDEX_DB" << 'PYTHON'
+import sqlite3
+import sys
+from collections import Counter
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA busy_timeout = 5000")
+counts = Counter(status or "unknown" for (status,) in conn.execute("SELECT COALESCE(version_status, 'unknown') FROM package_meta"))
+conn.close()
+current = counts.get("current", 0) + counts.get("floating_fresh", 0)
+behind = counts.get("behind_major", 0) + counts.get("behind_minor", 0) + counts.get("behind_patch", 0)
+print(current, behind, counts.get("registry_failed", 0), counts.get("unknown", 0))
+PYTHON
+}
+
 # Status overview
 cmd_status() {
     ensure_init
 
     local pkg_count cache_size_kb annotations_count feedback_count
     local fresh_count stale_count failed_count local_count unknown_count
+    local current_count behind_count registry_failed_count version_unknown_count
 
     pkg_count=$(python3 -c "
 import sqlite3, sys
@@ -561,6 +660,7 @@ conn.close()
     annotations_count=$(count_lines "$CONTEXT_HOME/annotations.jsonl")
     feedback_count=$(count_lines "$CONTEXT_HOME/feedback.jsonl")
     read -r fresh_count stale_count failed_count local_count unknown_count < <(_context_freshness_counts)
+    read -r current_count behind_count registry_failed_count version_unknown_count < <(_context_currency_counts)
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         snapshot_begin "context"
@@ -570,6 +670,10 @@ conn.close()
         snapshot_num_field "failed_packages" "$failed_count"
         snapshot_num_field "local_packages" "$local_count"
         snapshot_num_field "unknown_packages" "$unknown_count"
+        snapshot_num_field "current_version_packages" "$current_count"
+        snapshot_num_field "behind_version_packages" "$behind_count"
+        snapshot_num_field "registry_failed_version_packages" "$registry_failed_count"
+        snapshot_num_field "unknown_version_packages" "$version_unknown_count"
         snapshot_num_field "cache_size_kb" "$cache_size_kb"
         snapshot_num_field "annotations" "$annotations_count"
         snapshot_num_field "feedback_ratings" "$feedback_count"
@@ -579,6 +683,7 @@ conn.close()
         echo "agent-context status"
         echo "  Packages:    $pkg_count indexed"
         echo "  Freshness:   $fresh_count fresh, $stale_count stale, $failed_count failed, $local_count local, $unknown_count unknown"
+        echo "  Currency:    $current_count current, $behind_count behind, $registry_failed_count registry failed, $version_unknown_count unknown"
         echo "  Cache:       ${cache_size_kb}KB"
         echo "  Annotations: $annotations_count"
         echo "  Feedback:    $feedback_count ratings"

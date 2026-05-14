@@ -217,7 +217,7 @@ def main() -> int:
     docs_top = docs_suggest_payload["results"][0]
     require(docs_top["tool"] == "context", f"expected context suggestion, got: {docs_suggest_payload}")
     require(
-        docs_top["primary"] == "agent-do context retrieve 'use latest TanStack Query docs' --fresh --max-tokens 8000",
+        docs_top["primary"] == "agent-do context retrieve 'use latest TanStack Query docs' --fresh --prefer-latest --max-tokens 8000",
         f"expected query-specific retrieve command, got: {docs_top}",
     )
 
@@ -231,7 +231,7 @@ def main() -> int:
     docs_context = docs_prompt_payload["hookSpecificOutput"]["additionalContext"]
     require("agent-do Context Retrieval" in docs_context, f"expected context retrieval nudge, got: {docs_context}")
     require(
-        "agent-do context retrieve 'use latest TanStack Query docs' --fresh --max-tokens 8000" in docs_context,
+        "agent-do context retrieve 'use latest TanStack Query docs' --fresh --prefer-latest --max-tokens 8000" in docs_context,
         f"expected query-specific retrieve nudge, got: {docs_context}",
     )
 

@@ -216,9 +216,17 @@ if action == "list":
     raise SystemExit(0)
 
 if action == "add":
-    if len(args) != 10:
-        raise SystemExit("Usage: add <name> <location> <trust> <kind> <ttl> <tags> <aliases> <enabled> <crawl_limit> <policy>")
-    name, location, trust, kind, ttl, tags, aliases, enabled, crawl_limit, policy = args
+    if len(args) < 10:
+        raise SystemExit("Usage: add <name> <location> <trust> <kind> <ttl> <tags> <aliases> <enabled> <crawl_limit> <policy> [ecosystem package registry registry_url doc_version version_policy currency_ttl]")
+    name, location, trust, kind, ttl, tags, aliases, enabled, crawl_limit, policy = args[:10]
+    optional = args[10:]
+    ecosystem = optional[0] if len(optional) > 0 else ""
+    package_name = optional[1] if len(optional) > 1 else ""
+    registry = optional[2] if len(optional) > 2 else ""
+    registry_url = optional[3] if len(optional) > 3 else ""
+    doc_version = optional[4] if len(optional) > 4 else ""
+    version_policy = optional[5] if len(optional) > 5 else ""
+    currency_ttl = optional[6] if len(optional) > 6 else ""
     sources = [s for s in sources if s.get("name") != name]
     entry = {
         "name": name,
@@ -229,9 +237,20 @@ if action == "add":
         "tags": tags,
         "aliases": [item.strip() for item in aliases.split(",") if item.strip()],
         "enabled": enabled == "true",
-        "crawl_limit": int(crawl_limit) if crawl_limit else 200,
+        "crawl_limit": int(crawl_limit) if crawl_limit else 20,
         "refresh_policy": policy,
     }
+    for key, value in {
+        "ecosystem": ecosystem,
+        "package_name": package_name,
+        "registry": registry,
+        "registry_url": registry_url,
+        "doc_version": doc_version,
+        "version_policy": version_policy,
+        "currency_ttl": currency_ttl,
+    }.items():
+        if value:
+            entry[key] = value
     if location.startswith(("http://", "https://")):
         entry["url"] = location
     else:
@@ -295,7 +314,8 @@ cmd_sources() {
 }
 
 cmd_add_source() {
-    local name="" location="" trust="community" kind="" ttl="7d" tags="" aliases="" enabled="true" crawl_limit="200" policy="on-use"
+    local name="" location="" trust="community" kind="" ttl="7d" tags="" aliases="" enabled="true" crawl_limit="20" policy="on-use"
+    local ecosystem="" package_name="" registry="" registry_url="" doc_version="" version_policy="" currency_ttl=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --trust)
@@ -326,6 +346,34 @@ cmd_add_source() {
                 policy="${2:-on-use}"
                 shift 2
                 ;;
+            --ecosystem)
+                ecosystem="${2:-}"
+                shift 2
+                ;;
+            --package|--package-name)
+                package_name="${2:-}"
+                shift 2
+                ;;
+            --registry)
+                registry="${2:-}"
+                shift 2
+                ;;
+            --registry-url)
+                registry_url="${2:-}"
+                shift 2
+                ;;
+            --doc-version)
+                doc_version="${2:-}"
+                shift 2
+                ;;
+            --version-policy)
+                version_policy="${2:-}"
+                shift 2
+                ;;
+            --currency-ttl)
+                currency_ttl="${2:-}"
+                shift 2
+                ;;
             --disabled)
                 enabled="false"
                 shift
@@ -344,7 +392,7 @@ cmd_add_source() {
     [[ -n "$name" && -n "$location" ]] || die "Usage: agent-context add-source <name> <url|path> [--kind url|llms|github-file|github-dir|local-project|local-skill] [--trust official|maintainer|community|local]"
     ensure_init
     [[ -n "$kind" ]] || kind=$(_context_infer_source_kind "$location")
-    _context_sources_run add "$name" "$location" "$trust" "$kind" "$ttl" "$tags" "$aliases" "$enabled" "$crawl_limit" "$policy"
+    _context_sources_run add "$name" "$location" "$trust" "$kind" "$ttl" "$tags" "$aliases" "$enabled" "$crawl_limit" "$policy" "$ecosystem" "$package_name" "$registry" "$registry_url" "$doc_version" "$version_policy" "$currency_ttl"
 }
 
 cmd_remove_source() {
@@ -365,6 +413,8 @@ elif "github.com" in location and "/blob/" in location:
     print("github-file")
 elif "llms" in location:
     print("llms")
+elif location.startswith(("http://", "https://")) and not location.endswith((".md", ".mdx", ".txt")):
+    print("html-site")
 elif location.startswith(("http://", "https://")):
     print("url")
 elif location.endswith("/skill.md") or location.endswith("skill.md"):
@@ -415,20 +465,21 @@ PYTHON
     local synced=0 failed=0 skipped=0
     while IFS= read -r source_json; do
         [[ -n "$source_json" ]] || continue
-        local name kind location trust tags enabled
+        local name kind location trust tags enabled crawl_limit
         name=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('name',''))" "$source_json")
         kind=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('kind','url'))" "$source_json")
         location=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('location') or d.get('url') or d.get('path') or '')" "$source_json")
         trust=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('trust','community'))" "$source_json")
         tags=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('tags',''))" "$source_json")
         enabled=$(python3 -c "import json,sys; print('true' if json.loads(sys.argv[1]).get('enabled', True) else 'false')" "$source_json")
+        crawl_limit=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('crawl_limit',20))" "$source_json")
 
         if [[ "$enabled" != "true" ]]; then
             skipped=$((skipped + 1))
             continue
         fi
 
-        if _context_sync_one_source "$kind" "$location" "$tags" "$trust"; then
+        if _context_sync_one_source "$kind" "$location" "$tags" "$trust" "$name" "$crawl_limit"; then
             synced=$((synced + 1))
             _context_sources_run sync-update "$name" ok "" >/dev/null
         else
@@ -462,8 +513,14 @@ PYTHON
 }
 
 _context_sync_one_source() {
-    local kind="$1" location="$2" tags="$3" trust="$4"
+    local kind="$1" location="$2" tags="$3" trust="$4" name="${5:-}" crawl_limit="${6:-20}"
     case "$kind" in
+        html|html-page)
+            cmd_fetch "$location" --tags "$tags" --trust "$trust" --source-name "$name" >/dev/null
+            ;;
+        html-site|html-crawl)
+            cmd_crawl "$location" --source-name "$name" --tags "$tags" --trust "$trust" --limit "$crawl_limit" >/dev/null
+            ;;
         llms)
             cmd_fetch_llms "$location" --tags "$tags" --trust "$trust" >/dev/null
             ;;
@@ -487,7 +544,12 @@ _context_sync_one_source() {
             cmd_scan_local "$location" >/dev/null
             ;;
         url|*)
-            cmd_fetch "$location" --tags "$tags" --trust "$trust" >/dev/null
+            if [[ "$location" == http* ]] && type cmd_crawl &>/dev/null; then
+                cmd_crawl "$location" --source-name "$name" --tags "$tags" --trust "$trust" --limit "$crawl_limit" >/dev/null 2>&1 || \
+                    cmd_fetch "$location" --tags "$tags" --trust "$trust" --source-name "$name" >/dev/null
+            else
+                cmd_fetch "$location" --tags "$tags" --trust "$trust" --source-name "$name" >/dev/null
+            fi
             ;;
     esac
 }
