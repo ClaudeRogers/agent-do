@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- No unreleased changes yet.
+- `lib/snapshot.sh` `snapshot_field` now encodes string values via `python3`'s `json` module when available, covering the full RFC 8259 control range (`U+0000`–`U+001F` plus `\\` and `\"`); a manual fallback covering the named C0 controls is used when `python3` is unavailable. `snapshot_error` now routes its message through the same encoder so error JSON is consistent with snapshot JSON.
+- `lib/snapshot.sh` `snapshot_end` now bounds invalid-UTF-8 failures to the offending value: each string is tried with strict UTF-8 decode and, on failure, re-decoded with `errors="replace"` so its bad bytes become U+FFFD. Sibling string fields keep full encoder semantics, snapshot output remains valid UTF-8 and valid JSON, and the helper no longer silently downgrades the whole snapshot to manual fallback when one value contains invalid bytes.
 
 ## v1.2 (2026-05-14)
 
