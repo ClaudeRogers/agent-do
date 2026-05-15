@@ -184,6 +184,7 @@ agent-do context add-source next-docs https://github.com/vercel/next.js/tree/can
 agent-do context add-source next-web https://nextjs.org/docs --kind html-site --trust official --ecosystem npm --package next --doc-version latest
 agent-do context sources sync --all
 agent-do context maintain --limit 10
+agent-do context versions sources
 agent-do context versions outdated
 ```
 
@@ -191,6 +192,9 @@ HTML sources are first-class: raw HTML is preserved in the cache for provenance,
 while extracted readable content is indexed and returned to agents. Version
 currency is separate from HTTP freshness, so a cached page can be fresh but still
 warn if it points at old major-version docs.
+Use `versions sources` to check the configured source registry itself, including
+sources that have not been crawled yet. Use `versions outdated` to check the
+already indexed docs that agents can retrieve.
 
 Background maintenance is opt-in. Print the launchd job before installing it:
 

@@ -203,6 +203,7 @@ find "$html_home/context/cache" -path "*/raw/raw.html" | grep -q raw.html
 AGENT_DO_HOME="$html_home" "$tool" add-source next "$base/" --kind html-site --trust official --crawl-limit 3 --tags html-test --ecosystem npm --package next --doc-version 14 --registry npm --registry-url "$base/npm" >/dev/null
 AGENT_DO_HOME="$html_home" "$tool" sources sync next >/dev/null
 AGENT_DO_HOME="$html_home" "$tool" retrieve html-guide-token --max-tokens 2000 | grep -q html-guide-token
+AGENT_DO_HOME="$html_home" "$tool" versions sources --outdated | grep -q behind_major
 AGENT_DO_HOME="$html_home" "$tool" versions check --all --limit 5 >/dev/null
 AGENT_DO_HOME="$html_home" "$tool" versions outdated | grep -q behind_major
 ! AGENT_DO_HOME="$html_home" "$tool" retrieve html-guide-token --require-current --max-tokens 2000 >/dev/null 2>&1

@@ -14,10 +14,321 @@ cmd_versions() {
         outdated)
             _context_versions_list --outdated "$@"
             ;;
+        sources|source-coverage)
+            _context_versions_sources "$@"
+            ;;
         *)
-            die "Usage: agent-context versions [check|list|outdated] [--all|--due|id] [--limit N]"
+            die "Usage: agent-context versions [check|list|outdated|sources] [--all|--due|id] [--limit N]"
             ;;
     esac
+}
+
+_context_versions_sources() {
+    local outdated=false limit="500"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --outdated) outdated=true; shift ;;
+            --limit) limit="${2:-500}"; shift 2 ;;
+            --all) shift ;;
+            *) shift ;;
+        esac
+    done
+    ensure_init
+
+    python3 - "$CONTEXT_HOME/config.yaml" "$CONTEXT_INDEX_DB" "$outdated" "$limit" "${OUTPUT_FORMAT:-text}" <<'PY'
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import Counter
+from pathlib import Path
+
+
+config_path, db_path, outdated_raw, limit_raw, output_format = sys.argv[1:6]
+outdated = outdated_raw == "true"
+limit = int(limit_raw)
+now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+USER_AGENT = "agent-do-context/1.0"
+CHANNELS = {"latest", "current", "stable", "main", "head", "floating"}
+OUTDATED = {"behind_major", "behind_minor", "behind_patch", "registry_failed"}
+
+
+def scalar(raw):
+    raw = raw.strip()
+    if raw == "[]":
+        return []
+    if raw in {"null", "~"}:
+        return None
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        return [scalar(part.strip()) for part in inner.split(",")]
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        return raw[1:-1]
+    if re.fullmatch(r"\d+", raw):
+        return int(raw)
+    return raw
+
+
+def parse_sources(path):
+    text = Path(path).read_text() if Path(path).exists() else ""
+    sources = []
+    current = None
+    in_sources = False
+    for line in text.splitlines():
+        if line.startswith("sources:"):
+            in_sources = True
+            continue
+        if in_sources and line and not line.startswith((" ", "\t", "#")):
+            break
+        if not in_sources:
+            continue
+        if line.startswith("  - "):
+            current = {}
+            sources.append(current)
+            m = re.match(r"^  -\s+name:\s*(.*)$", line)
+            if m:
+                current["name"] = scalar(m.group(1))
+            continue
+        if current is None:
+            continue
+        m = re.match(r"^    ([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            current[m.group(1)] = scalar(m.group(2))
+    return sources
+
+
+def iso(value):
+    return value.replace(microsecond=0).isoformat()
+
+
+def parse_ttl(value, default_seconds=86400):
+    if not value:
+        return default_seconds
+    m = re.fullmatch(r"(\d+)\s*([smhdw]?)", str(value).strip().lower())
+    if not m:
+        return default_seconds
+    amount = int(m.group(1))
+    unit = m.group(2) or "s"
+    return amount * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit, 1)
+
+
+def parse_ver(value):
+    if not value:
+        return None
+    value = str(value).strip().lower()
+    value = re.sub(r"^[^0-9]*", "", value)
+    nums = re.findall(r"\d+", value)
+    if not nums:
+        return None
+    return tuple(int(n) for n in nums[:3])
+
+
+def compare_status(doc_version, latest_version, doc_channel):
+    if doc_channel in CHANNELS and not doc_version:
+        return "floating_fresh"
+    latest = parse_ver(latest_version)
+    doc = parse_ver(doc_version)
+    if not latest or not doc:
+        return "unknown"
+    latest = latest + (0,) * (3 - len(latest))
+    doc = doc + (0,) * (3 - len(doc))
+    if doc[0] < latest[0]:
+        return "behind_major"
+    if doc[0] > latest[0]:
+        return "future"
+    if doc[1] < latest[1] and len(parse_ver(doc_version) or ()) > 1:
+        return "behind_minor"
+    if doc[2] < latest[2] and len(parse_ver(doc_version) or ()) > 2:
+        return "behind_patch"
+    return "current"
+
+
+def split_doc_version(value):
+    value = str(value or "").strip()
+    if value.lower() in CHANNELS:
+        return "", value.lower()
+    return value, ""
+
+
+def registry_url(source):
+    registry = str(source.get("registry") or source.get("ecosystem") or "").lower()
+    package = str(source.get("package_name") or source.get("package") or "")
+    explicit = str(source.get("registry_url") or "")
+    if registry == "npm":
+        base = explicit or os.environ.get("AGENT_CONTEXT_NPM_REGISTRY") or "https://registry.npmjs.org"
+        return f"{base.rstrip('/')}/{urllib.parse.quote(package, safe='@')}"
+    if registry == "pypi":
+        base = explicit or os.environ.get("AGENT_CONTEXT_PYPI_REGISTRY") or "https://pypi.org/pypi"
+        return f"{base.rstrip('/')}/{urllib.parse.quote(package)}/json"
+    if registry == "crates":
+        base = explicit or os.environ.get("AGENT_CONTEXT_CRATES_REGISTRY") or "https://crates.io/api/v1/crates"
+        return f"{base.rstrip('/')}/{urllib.parse.quote(package)}"
+    if registry == "pub":
+        base = explicit or os.environ.get("AGENT_CONTEXT_PUB_REGISTRY") or "https://pub.dev/api/packages"
+        return f"{base.rstrip('/')}/{urllib.parse.quote(package)}"
+    if registry == "github":
+        return explicit or f"https://api.github.com/repos/{package}/releases/latest"
+    return ""
+
+
+def latest_from(registry, payload):
+    if registry == "npm":
+        return payload.get("dist-tags", {}).get("latest", "")
+    if registry == "pypi":
+        return payload.get("info", {}).get("version", "")
+    if registry == "crates":
+        crate = payload.get("crate", {})
+        return crate.get("max_stable_version") or crate.get("max_version") or ""
+    if registry == "pub":
+        return payload.get("latest", {}).get("version", "")
+    if registry == "github":
+        return payload.get("tag_name", "")
+    return ""
+
+
+def fetch_latest(conn, source):
+    ecosystem = str(source.get("ecosystem") or source.get("registry") or "").lower()
+    registry = str(source.get("registry") or ecosystem).lower()
+    package = str(source.get("package_name") or source.get("package") or "")
+    url = registry_url(source)
+    if not registry or not package or not url:
+        return "", "unknown", "no version registry configured"
+
+    cached = conn.execute(
+        """
+        SELECT latest_version, status, error, expires_at
+        FROM registry_version_cache
+        WHERE ecosystem = ? AND package_name = ? AND registry = ?
+        """,
+        (ecosystem, package, registry),
+    ).fetchone()
+    if cached and cached["expires_at"]:
+        try:
+            if dt.datetime.fromisoformat(cached["expires_at"].replace("Z", "+00:00")) > now:
+                return cached["latest_version"] or "", cached["status"] or "unknown", cached["error"] or ""
+        except ValueError:
+            pass
+
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        latest = latest_from(registry, payload)
+        status = "ok" if latest else "unknown"
+        error = "" if latest else "latest version missing from registry response"
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        latest = ""
+        status = "failed"
+        error = str(exc)
+
+    expires_at = now + dt.timedelta(seconds=parse_ttl(source.get("currency_ttl"), 86400))
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO registry_version_cache
+        (ecosystem, package_name, registry, registry_url, latest_version, latest_stable_version,
+         dist_tag, checked_at, expires_at, status, error)
+        VALUES (?, ?, ?, ?, ?, ?, 'latest', ?, ?, ?, ?)
+        """,
+        (ecosystem, package, registry, url, latest, latest, iso(now), iso(expires_at), status, error),
+    )
+    return latest, status, error
+
+
+sources = parse_sources(config_path)
+conn = sqlite3.connect(db_path)
+conn.execute("PRAGMA busy_timeout = 5000")
+conn.row_factory = sqlite3.Row
+
+items = []
+for source in sources:
+    name = str(source.get("name") or "")
+    registry = str(source.get("registry") or source.get("ecosystem") or "")
+    package = str(source.get("package_name") or source.get("package") or "")
+    doc_version, doc_channel = split_doc_version(source.get("doc_version"))
+    latest = ""
+    error = ""
+
+    if registry and package:
+        latest, registry_status, registry_error = fetch_latest(conn, source)
+        if registry_status == "failed":
+            status = "registry_failed"
+            error = registry_error
+        else:
+            status = compare_status(doc_version, latest, doc_channel)
+            error = registry_error
+    elif source.get("doc_version"):
+        status = "archived" if str(source.get("doc_version")).lower() == "archived" else "doc_channel"
+    else:
+        status = "untracked"
+
+    item = {
+        "name": name,
+        "kind": source.get("kind") or "",
+        "trust": source.get("trust") or "",
+        "location": source.get("location") or source.get("url") or source.get("path") or "",
+        "registry": registry,
+        "package_name": package,
+        "doc_version": doc_version or doc_channel or str(source.get("doc_version") or ""),
+        "latest_version": latest,
+        "version_status": status,
+        "version_policy": source.get("version_policy") or "",
+        "currency_ttl": source.get("currency_ttl") or "",
+        "error": error,
+    }
+    if outdated and status not in OUTDATED:
+        continue
+    items.append(item)
+    if len(items) >= limit:
+        break
+
+conn.commit()
+conn.close()
+
+counts = Counter(item["version_status"] for item in items)
+summary = {
+    "sources": len(sources),
+    "shown": len(items),
+    "registry_backed": sum(1 for item in items if item["registry"] and item["package_name"]),
+    "doc_only": sum(1 for item in items if item["version_status"] in {"doc_channel", "archived"}),
+    "behind": sum(counts.get(key, 0) for key in ("behind_major", "behind_minor", "behind_patch")),
+    "registry_failed": counts.get("registry_failed", 0),
+    "untracked": counts.get("untracked", 0),
+}
+success = summary["registry_failed"] == 0
+
+if output_format == "json":
+    print(json.dumps({"success": success, "summary": summary, "results": items}, indent=2))
+else:
+    if not items:
+        print("No source version records." if not outdated else "No outdated source docs found.")
+    else:
+        print(
+            f"{len(items)} source version record(s): "
+            f"{summary['registry_backed']} registry-backed, {summary['doc_only']} doc-channel, "
+            f"{summary['behind']} behind, {summary['registry_failed']} registry failed"
+        )
+        print("")
+        for item in items:
+            package = item["package_name"] or "doc-channel"
+            print(
+                f"  {item['version_status']:15s} {item['name']} "
+                f"doc={item['doc_version'] or 'unknown'} latest={item['latest_version'] or 'unknown'} "
+                f"pkg={package}"
+            )
+            if item["error"]:
+                print(f"      {item['error']}")
+PY
 }
 
 _context_versions_check() {

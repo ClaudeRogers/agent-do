@@ -89,6 +89,7 @@ Build:
 Meta:
   versions check [--all|id]         Check doc versions against known registries
   versions outdated                 Show docs behind current major/minor releases
+  versions sources                  Check configured source version metadata
   serve [--port N]                  Serve local HTML dashboard for agents/humans
   status                            Sources, cache stats, index freshness
   stale                             Show stale or failed packages
