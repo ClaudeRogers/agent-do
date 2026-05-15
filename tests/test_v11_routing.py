@@ -221,18 +221,47 @@ def main() -> int:
         f"expected query-specific retrieve command, got: {docs_top}",
     )
 
+    # Intent-bound nudges (docs retrieval, design toolkit, coord advisory) are
+    # gated by the AI classifier. With AI off (test default), the hook must be
+    # SILENT on these even for prompts that look like clear keyword matches.
+    # This was a deliberate structural change: the old keyword paths produced
+    # false positives on forwarded narratives mentioning "docs"/"api" as a
+    # topic. The agent-first audit principle is: emit only when the classifier
+    # confirms intent, otherwise stay silent.
     docs_prompt = run(
         "python3",
         "hooks/agent-do-prompt-router.py",
         input_text=json.dumps({"prompt": "use latest TanStack Query docs"}),
     )
     require(docs_prompt.returncode == 0, f"docs prompt-router failed: {docs_prompt.stderr}")
-    docs_prompt_payload = json.loads(docs_prompt.stdout)
-    docs_context = docs_prompt_payload["hookSpecificOutput"]["additionalContext"]
-    require("agent-do Context Retrieval" in docs_context, f"expected context retrieval nudge, got: {docs_context}")
+    # With AI off, the hook should produce no output (silent fallthrough).
     require(
-        "agent-do context retrieve 'use latest TanStack Query docs' --fresh --prefer-latest --max-tokens 8000" in docs_context,
-        f"expected query-specific retrieve nudge, got: {docs_context}",
+        docs_prompt.stdout.strip() == "",
+        f"expected silent fallthrough with AI off, got: {docs_prompt.stdout!r}",
+    )
+
+    # Forwarded handoff prompts that mention "docs"/"api" as a topic must also
+    # produce no false-positive nudges. This was the live misfire that
+    # motivated the structural fix.
+    forwarded_handoff = (
+        "## For Codex review: the full package\n\n"
+        "Three things, one architecture. The agent-do contracts proposal at "
+        "`.handoff/AGENT-DO-CONTRACTS-PLAN.md` operationalizes the README's "
+        "five-beat mental model. The full session handoff has the api build, "
+        "context redesign, and audit. Team-sharing folds in via scope metadata.\n\n"
+        "### Coord and docs\n\n"
+        "agent-do context retrieve respects scope. Tools declare contracts. "
+        "Review this handoff, then react in writing with blockers.\n"
+    )
+    forwarded = run(
+        "python3",
+        "hooks/agent-do-prompt-router.py",
+        input_text=json.dumps({"prompt": forwarded_handoff}),
+    )
+    require(forwarded.returncode == 0, f"forwarded handoff hook failed: {forwarded.stderr}")
+    require(
+        forwarded.stdout.strip() == "",
+        f"forwarded handoff must produce no nudges with AI off, got: {forwarded.stdout!r}",
     )
 
     find = run("./agent-do", "find", "playwright", "--json")
