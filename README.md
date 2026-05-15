@@ -1,7 +1,7 @@
 # agent-do
 
 <p align="center">
-  <img src="assets/agent-do-logo.jpg" alt="agent-do logo" width="720" />
+  <img src="assets/agent-do-logo.png" alt="agent-do logo" width="720" />
 </p>
 
 <p align="center"><strong>The outer harness for AI coding agents.</strong></p>
