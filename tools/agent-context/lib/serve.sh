@@ -88,17 +88,37 @@ tr:hover{background:#f9fbfd}
 .current,.floating_fresh,.fresh,.local{background:#dff6e6;color:#14532d}
 .behind_major,.failed,.registry_failed{background:#ffe3e3;color:#8a1f1f}
 .behind_minor,.behind_patch,.stale{background:#fff3bf;color:#6b4e00}
-.unknown{background:#e7ebf0;color:#52606d}
+.unknown,.no_version{background:#e7ebf0;color:#52606d}
 a{color:#1261a6;text-decoration:none}a:hover{text-decoration:underline}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 """
+
+
+def is_local_no_version(row):
+    source_kind = row["source_kind"] or ""
+    row_type = row["type"] or ""
+    return source_kind.startswith("local") or row_type in {"skill", "local"}
+
+
+def version_display(row):
+    status = row["version_status"] or "unknown"
+    if status == "unknown" and is_local_no_version(row):
+        if (row["source_kind"] or "") == "local-skill" or (row["type"] or "") == "skill":
+            return "no_version", "local skill - no versioning", "local content; no external package version"
+        return "no_version", "local project - no versioning", "local content; no external package version"
+    return (
+        status,
+        status,
+        f"docs {row['doc_version'] or 'unknown'} / latest {row['latest_version'] or 'unknown'}",
+    )
 
 
 def dashboard():
     items = rows()
     counts = {}
     for row in items:
-        counts[row["version_status"] or "unknown"] = counts.get(row["version_status"] or "unknown", 0) + 1
+        version_class, _, _ = version_display(row)
+        counts[version_class] = counts.get(version_class, 0) + 1
         counts[row["refresh_status"] or "unknown"] = counts.get(row["refresh_status"] or "unknown", 0) + 1
     metric_html = "".join(
         f"<div class='metric'><span>{q(label)}</span><b>{count}</b></div>"
@@ -108,18 +128,19 @@ def dashboard():
             ("stale/failed", counts.get("stale", 0) + counts.get("failed", 0)),
             ("current docs", counts.get("current", 0) + counts.get("floating_fresh", 0)),
             ("behind docs", counts.get("behind_major", 0) + counts.get("behind_minor", 0) + counts.get("behind_patch", 0)),
+            ("not versioned", counts.get("no_version", 0)),
         ]
     )
     table = []
     for row in items:
-        version_status = row["version_status"] or "unknown"
+        version_class, version_label, version_detail = version_display(row)
         refresh_status = row["refresh_status"] or "unknown"
         table.append(
             "<tr>"
             f"<td><a href='/package?id={q(row['id'])}'>{q(row['name'])}</a><br><code>{q(row['id'])}</code></td>"
             f"<td>{q(row['type'])}<br><span class='pill'>{q(row['source_kind'])}</span></td>"
             f"<td><span class='pill {q(refresh_status)}'>{q(refresh_status)}</span><br><small>{q(row['checked_at'])}</small></td>"
-            f"<td><span class='pill {q(version_status)}'>{q(version_status)}</span><br><small>docs {q(row['doc_version'] or 'unknown')} / latest {q(row['latest_version'] or 'unknown')}</small></td>"
+            f"<td><span class='pill {q(version_class)}'>{q(version_label)}</span><br><small>{q(version_detail)}</small></td>"
             f"<td>{q(row['version_package'] or '')}</td>"
             f"<td><a href='{q(row['source'])}'>{q(row['source'])}</a></td>"
             "</tr>"
