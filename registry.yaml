@@ -1204,6 +1204,90 @@ tools:
       required:
       - LINEAR_API_KEY
     concurrency: mixed
+  obsidian:
+    description: Obsidian vault integration via the official Obsidian CLI — notes, daily notes, search, tasks, tags, properties, backlinks, and (under +live) eval / dev tools / plugin reload
+    capabilities:
+    - read, create, append, and search notes in the active vault
+    - manage daily notes (read, append)
+    - read and write YAML frontmatter properties (get, set)
+    - list checkbox tasks, tags, and backlinks
+    - target a specific vault with --vault, or use the most-recently-focused vault
+    - emit structured JSON snapshots and doctor output
+    - one-time CLI link from the Obsidian.app bundle into ~/.local/bin
+    - +live-gated eval / dev / plugin surface for plugin and theme development
+    # concurrency: mixed — read-only: doctor, snapshot, read, search, tasks,
+    # tags, backlinks, prop get. Write/state-changing: create, append,
+    # daily append, prop set, eval, dev:* (some), plugin reload.
+    commands:
+      doctor: 'Check obsidian-cli wiring: doctor [--fix] [--json]'
+      snapshot: 'Integration state as JSON: snapshot [--vault V]'
+      read: 'Read a note: read <name> | --path <path> [--copy] [--vault V]'
+      create: 'Create a note: create <name> [--content T] [--template T] [--overwrite] [--open] [--vault V]'
+      append: 'Append text to a note: append <name> [<text>...] [--content T] [--path] [--vault V]'
+      search: 'Search notes: search <query> [--limit N] [--total] [--vault V]'
+      daily: 'Daily notes: daily read | daily append [<text>...] [--content T]'
+      prop: 'Frontmatter properties: prop get|set [--file F]'
+      tasks: 'List checkbox tasks: tasks [todo|done] [--daily]'
+      tags: 'List tags: tags [--counts] [--sort name|count]'
+      backlinks: 'Backlinks for a note: backlinks <name>'
+      eval: '+live: run JavaScript in Obsidian: eval <code>'
+      dev: '+live: developer surface: dev {errors|screenshot|dom|console|css|mobile}'
+      plugin: '+live: plugin management: plugin reload <id>'
+    examples:
+    - intent: check that the obsidian CLI is wired up
+      command: agent-do obsidian doctor --json
+    - intent: read today's daily note
+      command: agent-do obsidian daily read
+    - intent: append a task to today's daily note
+      command: agent-do obsidian daily append "- [ ] Review PR"
+    - intent: create a new note silently
+      command: agent-do obsidian create "Inbox/Idea" --content "Pricing experiment"
+    - intent: search the active vault
+      command: agent-do obsidian search "review" --limit 5
+    - intent: mark a project as done
+      command: agent-do obsidian prop set status done --file "Projects/agent-obsidian"
+    - intent: list backlinks for a note
+      command: agent-do obsidian backlinks "agent-do roadmap"
+    - intent: run obsidian dev tools (requires +live)
+      command: agent-do +live(scope=desktop,app=Obsidian,ttl=15m) obsidian dev errors
+    routing:
+      discover_keywords:
+      - obsidian
+      - obsidian vault
+      - obsidian note
+      - daily note
+      - backlinks
+      - markdown vault
+      - yaml frontmatter
+      prompt_patterns:
+      - \bobsidian\b
+      - \bdaily note\b
+      - \bbacklinks?\b
+      - \bvault\b
+      - \bfrontmatter\b
+      recommended_entrypoints:
+      - agent-do obsidian doctor
+      - agent-do obsidian snapshot
+      - agent-do obsidian daily read
+      - agent-do obsidian search <query>
+      default_command: snapshot
+      raw_cli_equivalents:
+      - pattern: \bobsidian\s+(read|create|append|search|daily|tasks|tags|backlinks)\b
+        replacement: agent-do obsidian
+        example: agent-do obsidian search "review"
+        reason: agent-do wraps the obsidian CLI with structured discovery, doctor diagnostics, and +live gating
+      - pattern: \bobsidian\s+--help\b
+        replacement: agent-do obsidian --help
+        example: agent-do obsidian --help
+        reason: agent-do obsidian surfaces all commands with consistent help formatting
+      project_signals:
+      - .obsidian
+      - obsidian
+      readiness:
+        check: agent-do obsidian doctor
+        fix: agent-do obsidian doctor --fix
+        note: Requires the Obsidian desktop app; doctor --fix links the bundled CLI into ~/.local/bin
+    concurrency: mixed
   figma:
     description: Control Figma
     capabilities:
