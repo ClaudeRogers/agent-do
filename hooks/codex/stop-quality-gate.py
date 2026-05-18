@@ -19,8 +19,26 @@ from pathlib import Path
 
 
 UI_EXTENSIONS = {".tsx", ".jsx", ".html", ".htm", ".vue", ".svelte", ".astro", ".css", ".scss", ".less"}
-UI_NAME_HINTS = ("theme", "styles", "global")
-UI_SKIP_RE = re.compile(r"(\.test\.|\.\spec\.|\.config\.|tailwind\.|postcss\.|vite\.|\.d\.ts$)", re.I)
+
+# Design-system filename hints for files that DON'T have a UI extension (e.g.
+# theme.ts, tokens.ts, styles.ts in a styled-components or vanilla-extract
+# codebase). Hints must be specific to design files; generic words ("global",
+# "config") cause false positives on test files, build scripts, etc.
+#
+# Match shape: the file's basename must equal one of these (with any extension)
+# OR start with one followed by "." or "-". Substring match was too permissive
+# (test_global_hooks.py matched on "global" — wrong category entirely).
+UI_NAME_HINT_BASENAMES = {"theme", "tokens", "design-tokens", "design-system"}
+
+# Skip patterns that look design-adjacent but aren't:
+# - JS/TS test conventions (foo.test.tsx, foo.spec.js)
+# - Python test conventions (test_foo.py, foo_test.py)  ← added; was missing
+# - Build/tooling configs (tailwind.config.ts, vite.config.ts, postcss.config.js)
+# - TypeScript declaration files (foo.d.ts)
+UI_SKIP_RE = re.compile(
+    r"(\.test\.|\.spec\.|^test_|_test\.py$|\.config\.|tailwind\.|postcss\.|vite\.|\.d\.ts$)",
+    re.I,
+)
 
 WRITING_DIR_HINTS = ("/the_book/", "/novel/", "/manuscript/", "/chapters/", "/writing/")
 WRITING_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -76,9 +94,18 @@ def ui_files(files: list[str]) -> list[str]:
         path = rel.lower()
         name = Path(path).name
         ext = Path(path).suffix.lower()
+        stem = Path(path).stem  # name without extension
         if UI_SKIP_RE.search(name):
             continue
-        if ext in UI_EXTENSIONS or any(hint in name for hint in UI_NAME_HINTS):
+        # Direct UI extension is a positive match.
+        if ext in UI_EXTENSIONS:
+            matches.append(rel)
+            continue
+        # Otherwise the file's STEM (or its first dotted/dashed segment) must
+        # exactly match a design-system filename hint. Substring matching was
+        # too permissive (caught test_global_*, global_config.py, etc.).
+        stem_head = re.split(r"[.\-]", stem, maxsplit=1)[0]
+        if stem in UI_NAME_HINT_BASENAMES or stem_head in UI_NAME_HINT_BASENAMES:
             matches.append(rel)
     return matches
 
