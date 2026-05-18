@@ -81,9 +81,6 @@ uninstall() {
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
-        "screenshot-capture.sh"
-        "annotate.py"
-        "stop-quality-gate.sh"
         "auto-commit.sh"
     )
     for hook in "${hooks[@]}"; do
@@ -98,8 +95,6 @@ uninstall() {
         "agent-do-session-start.py"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
-        "screenshot-capture.sh"
-        "annotate.py"
         "stop-quality-gate.sh"
         "stop-quality-gate.py"
         "auto-commit.sh"
@@ -261,13 +256,15 @@ step "Installing Claude Code hooks (wrapper-based)"
 mkdir -p "$CLAUDE_HOOKS_DIR"
 
 # Map: installed-name | source-relative-to-repo | wrapper-kind
+#
+# Scope: only hooks that nudge agents toward agent-do tools, manage agent-do
+# state, or implement agent-do conventions ship here. Personal productivity
+# hooks (screenshot shorthand, prompt annotation, generic OS notifications)
+# belong in your dotfiles, not in the agent-do repo.
 CLAUDE_HOOK_SPECS=(
     "agent-do-session-start.sh|hooks/agent-do-session-start.sh|sh"
     "agent-do-prompt-router.py|hooks/agent-do-prompt-router.py|py"
     "agent-do-pretooluse-check.py|hooks/agent-do-pretooluse-check.py|py"
-    "screenshot-capture.sh|hooks/screenshot-capture.sh|sh"
-    "annotate.py|hooks/annotate.py|py"
-    "stop-quality-gate.sh|hooks/stop-quality-gate.sh|sh"
     "auto-commit.sh|hooks/auto-commit.sh|sh"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
@@ -300,8 +297,6 @@ if [ "$should_install_codex" = "yes" ]; then
         "agent-do-session-start.py|hooks/codex/agent-do-session-start.py|py"
         "agent-do-prompt-router.py|hooks/codex/agent-do-prompt-router.py|py"
         "agent-do-pretooluse-check.py|hooks/codex/agent-do-pretooluse-check.py|py"
-        "screenshot-capture.sh|hooks/codex/screenshot-capture.sh|sh"
-        "annotate.py|hooks/codex/annotate.py|py"
         "stop-quality-gate.sh|hooks/codex/stop-quality-gate.sh|sh"
         "stop-quality-gate.py|hooks/codex/stop-quality-gate.py|py"
         "auto-commit.sh|hooks/codex/auto-commit.sh|sh"
@@ -404,16 +399,6 @@ cat << 'SETTINGS_JSON'
             "type": "command",
             "command": "~/.claude/hooks/agent-do-prompt-router.py",
             "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/screenshot-capture.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/annotate.py",
-            "timeout": 5
           }
         ]
       }
@@ -436,7 +421,7 @@ cat << 'SETTINGS_JSON'
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/stop-quality-gate.sh",
+            "command": "~/.claude/hooks/auto-commit.sh",
             "timeout": 30
           }
         ]
@@ -445,9 +430,6 @@ cat << 'SETTINGS_JSON'
   }
 }
 SETTINGS_JSON
-echo ""
-echo "Note: stop-quality-gate.sh chains to auto-commit.sh. You don't need to"
-echo "register auto-commit.sh separately."
 echo ""
 
 # 8b. Print Codex hooks.json snippet if Codex install ran

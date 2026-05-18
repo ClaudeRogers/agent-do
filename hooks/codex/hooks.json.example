@@ -22,12 +22,6 @@
             "command": "python3 ~/.codex/hooks/agent-do-prompt-router.py",
             "timeout": 5,
             "statusMessage": "Checking agent-do routing"
-          },
-          {
-            "type": "command",
-            "command": "~/.codex/hooks/screenshot-capture.sh",
-            "timeout": 10,
-            "statusMessage": "Checking screenshot shorthand"
           }
         ]
       }
