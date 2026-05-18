@@ -109,6 +109,23 @@ agent-do zpc decide "Which DB?" --options "postgres,sqlite" --chosen postgres --
 agent-do zpc harvest --auto
 ```
 
+## Obsidian Vaults
+
+Use `obsidian` for local vault reads, saves, queries, tasks, graph hygiene, and
+audits. Local mode uses a derived SQLite index under the vault; legacy commands
+fall back to obsidian-cli when only a live named vault is available.
+
+```bash
+AGENT_OBSIDIAN_VAULT_PATH="$HOME/Obsidian/Main" agent-do obsidian refresh --full --json
+agent-do obsidian search "Trinity Site" --json
+agent-do obsidian save --content "New idea" --related auto --tags idea --json
+agent-do obsidian save-group "Hub" --child "Child A:body" --child "Child B:body" --scope team --json
+agent-do obsidian tasks next --horizon today --json
+agent-do obsidian query "FROM #project WHERE status=active SORT due ASC" --json
+agent-do obsidian move "Old Name" "Projects/New Name" --update-links --json
+agent-do obsidian audit --scope "Projects" --json
+```
+
 ## GitHub Review Work
 
 `gh` is for PR and review state across accessible GitHub repos.

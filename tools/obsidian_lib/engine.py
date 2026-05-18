@@ -30,6 +30,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+    from ai_router import call_json_model  # type: ignore
+except Exception:  # pragma: no cover
+    call_json_model = None
+
 
 NO_LOCAL_VAULT = 3
 NEEDS_CLARIFICATION = 2
@@ -1070,6 +1076,17 @@ def cmd_backlinks(rt: Runtime, args: argparse.Namespace) -> int:
 
 
 def cmd_tags(rt: Runtime, args: argparse.Namespace) -> int:
+    if args.tags_cmd == "rename":
+        values = [v for v in (args.from_tag, args.to_tag) if v]
+        if len(values) != 2:
+            raise AgentObsidianError("tags rename requires <from> <to>", code=NEEDS_CLARIFICATION)
+        return tags_rename(rt, values[0], values[1])
+    if args.tags_cmd == "merge":
+        values = [v for v in [args.from_tag, args.to_tag, *(args.from_tags or [])] if v]
+        if len(values) < 2:
+            raise AgentObsidianError("tags merge requires <from...> <to>", code=NEEDS_CLARIFICATION)
+        return tags_merge(rt, values[:-1], values[-1])
+
     ensure_fresh(rt)
     with connect(rt) as conn:
         rows = list(conn.execute("SELECT tag, COUNT(*) AS count FROM tags GROUP BY tag"))
@@ -1084,6 +1101,87 @@ def cmd_tags(rt: Runtime, args: argparse.Namespace) -> int:
     else:
         for item in items:
             print(item["tag"])
+    return 0
+
+
+def update_note_tags(text: str, replacements: dict[str, str]) -> tuple[str, bool]:
+    fm, body = parse_frontmatter(text)
+    changed = False
+    tags = normalize_tags(fm.get("tags"))
+    if tags:
+        new_tags = []
+        for tag in tags:
+            new_tag = replacements.get(tag, tag)
+            if new_tag != tag:
+                changed = True
+            if new_tag not in new_tags:
+                new_tags.append(new_tag)
+        fm["tags"] = new_tags
+
+    for old, new in replacements.items():
+        pattern = re.compile(rf"(?<![\w/])#{re.escape(old)}\b")
+        body, count = pattern.subn(f"#{new}", body)
+        changed = changed or count > 0
+    if not changed:
+        return text, False
+    return render_note(fm, body), True
+
+
+def note_paths_for_tags(rt: Runtime, tags: list[str]) -> list[str]:
+    ensure_fresh(rt)
+    with connect(rt) as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT note_path FROM tags WHERE tag IN ({','.join('?' for _ in tags)}) ORDER BY note_path",
+            tags,
+        )
+        return [r["note_path"] for r in rows]
+
+
+def rewrite_tags(rt: Runtime, replacements: dict[str, str], operation: str) -> dict[str, Any]:
+    paths = note_paths_for_tags(rt, sorted(replacements))
+    abs_paths = [rt.vault / p for p in paths]
+    preflight = {p: stat_payload(rt.vault / p) for p in paths}
+    changed: list[str] = []
+    with write_lock(rt, operation, paths):
+        move_id, journal, backup_dir = make_operation(rt, operation.replace(" ", "-"), abs_paths)
+        try:
+            for note_path in paths:
+                path = rt.vault / note_path
+                st = path.stat()
+                before = preflight[note_path]
+                if st.st_mtime_ns != before["mtime_ns"] or st.st_size != before["size"]:
+                    raise AgentObsidianError("file changed since preflight", code=NEEDS_CLARIFICATION, path=note_path, operation_id=move_id)
+                backup = backup_dir / note_path
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, backup)
+                updated, did_change = update_note_tags(path.read_text(encoding="utf-8"), replacements)
+                if did_change:
+                    path.write_text(updated, encoding="utf-8")
+                    changed.append(note_path)
+                    append_journal(journal, "apply-tag-rewrite", {"path": note_path})
+            refresh(rt, full=False)
+            append_journal(journal, "verify", {"ok": True, "changed": changed})
+        except Exception:
+            for backup in sorted(backup_dir.rglob("*")):
+                if backup.is_file():
+                    target = rt.vault / backup.relative_to(backup_dir)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup, target)
+            append_journal(journal, "rollback", {"ok": True})
+            raise
+    return {"operation_id": move_id, "changed": changed}
+
+
+def tags_rename(rt: Runtime, from_tag: str, to_tag: str) -> int:
+    result = rewrite_tags(rt, {from_tag.lstrip("#"): to_tag.lstrip("#")}, "tags rename")
+    emit({"success": True, "from": from_tag.lstrip("#"), "to": to_tag.lstrip("#"), **result}, rt.json_mode)
+    return 0
+
+
+def tags_merge(rt: Runtime, from_tags: list[str], to_tag: str) -> int:
+    replacements = {tag.lstrip("#"): to_tag.lstrip("#") for tag in from_tags}
+    result = rewrite_tags(rt, replacements, "tags merge")
+    emit({"success": True, "from": list(replacements), "to": to_tag.lstrip("#"), **result}, rt.json_mode)
     return 0
 
 
@@ -1378,13 +1476,37 @@ def cmd_relate(rt: Runtime, args: argparse.Namespace) -> int:
 
 def cmd_summarize(rt: Runtime, args: argparse.Namespace) -> int:
     hits = search_notes(rt, args.topic, limit=args.limit)
-    bullets = []
+    source_blob = []
     for hit in hits:
         snippet = hit.get("snippet") or hit.get("body_excerpt") or ""
         if snippet:
-            bullets.append(snippet)
-    summary = " ".join(bullets[:3])[:1000]
-    emit({"success": True, "topic": args.topic, "summary": summary, "sources": hits}, rt.json_mode)
+            source_blob.append(f"- {hit['path']}: {snippet}")
+    summary = " ".join(source_blob[:3])[:1000]
+    ai_payload = None
+    if call_json_model is not None and source_blob:
+        prompt = (
+            "Summarize these Obsidian note excerpts for an agent. "
+            "Return JSON with keys summary, bullets, gotchas. Cite source paths inline.\n\n"
+            f"Topic: {args.topic}\n\n"
+            + "\n".join(source_blob[: args.limit])
+        )
+        ai_payload = call_json_model(
+            prompt,
+            flag_name="AGENT_OBSIDIAN_SUMMARIZE_AI",
+            max_tokens=4000,
+            system="You summarize local notes using only provided excerpts. Return strict JSON only.",
+        )
+    if isinstance(ai_payload, dict) and ai_payload.get("summary"):
+        summary = str(ai_payload.get("summary"))
+    emit({
+        "success": True,
+        "topic": args.topic,
+        "summary": summary,
+        "bullets": ai_payload.get("bullets", []) if isinstance(ai_payload, dict) else [],
+        "gotchas": ai_payload.get("gotchas", []) if isinstance(ai_payload, dict) else [],
+        "ai_used": isinstance(ai_payload, dict),
+        "sources": hits,
+    }, rt.json_mode)
     return 0
 
 
@@ -1749,11 +1871,49 @@ def write_audit_ledger(rt: Runtime, findings: list[dict[str, Any]]) -> Path:
 
 def cmd_audit(rt: Runtime, args: argparse.Namespace) -> int:
     if args.audit_cmd == "fix":
-        raise AgentObsidianError("audit fix is not automatic yet; use finding-specific safe verbs", code=NEEDS_CLARIFICATION)
+        if not args.issue_id:
+            raise AgentObsidianError("audit fix requires <issue-id>", code=NEEDS_CLARIFICATION)
+        return audit_fix(rt, args.issue_id, dry_run=args.dry_run)
     findings = audit_findings(rt, args.scope)
     ledger = write_audit_ledger(rt, findings)
     emit({"success": True, "count": len(findings), "findings": findings, "ledger": str(ledger)}, rt.json_mode)
     return 0
+
+
+def audit_fix(rt: Runtime, issue_id: str, *, dry_run: bool) -> int:
+    findings = audit_findings(rt)
+    finding = next((item for item in findings if item["id"] == issue_id), None)
+    if not finding:
+        raise AgentObsidianError(f"audit finding not found: {issue_id}", code=1)
+    kind = finding.get("kind")
+    path = finding.get("path")
+    if kind == "missing-frontmatter" and path:
+        abs_path = rt.vault / str(path)
+        text = abs_path.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(text)
+        if not fm:
+            fm = {"title": abs_path.stem, "created": today(), "scope": "local"}
+        if dry_run:
+            emit({"success": True, "dry_run": True, "finding": finding, "would_set": fm}, rt.json_mode)
+            return 0
+        with write_lock(rt, "audit fix", [str(path)]):
+            abs_path.write_text(render_note(fm, body), encoding="utf-8")
+            record = full_note_record(rt, abs_path)
+        emit({"success": True, "fixed": issue_id, "record": record}, rt.json_mode)
+        return 0
+    if kind == "broken-link":
+        raise AgentObsidianError(
+            "broken-link fixes require an explicit target; use move --update-links or edit the note",
+            code=NEEDS_CLARIFICATION,
+            finding=finding,
+        )
+    if kind == "orphan-note":
+        raise AgentObsidianError(
+            "orphan-note findings require editorial judgment; add related/up links explicitly",
+            code=NEEDS_CLARIFICATION,
+            finding=finding,
+        )
+    raise AgentObsidianError(f"no safe automatic fix for finding kind: {kind}", code=NEEDS_CLARIFICATION, finding=finding)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1816,6 +1976,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
 
     p = sub.add_parser("tags")
+    p.add_argument("tags_cmd", nargs="?", default="list", choices=["list", "rename", "merge"])
+    p.add_argument("from_tag", nargs="?")
+    p.add_argument("to_tag", nargs="?")
+    p.add_argument("from_tags", nargs="*")
     p.add_argument("--counts", action="store_true")
     p.add_argument("--total", action="store_true")
     p.add_argument("--sort", choices=["name", "count"], default="name")

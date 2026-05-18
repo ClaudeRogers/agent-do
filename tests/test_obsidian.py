@@ -494,6 +494,7 @@ def make_local_vault(tmp: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    (vault / "Loose.md").write_text("Loose body with no frontmatter.\n", encoding="utf-8")
     return vault
 
 
@@ -511,7 +512,7 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     r = run(str(AGENT_OBSIDIAN), "refresh", "--full", "--json", env=env)
     require(r.returncode == 0, f"refresh failed: {r.stdout} / {r.stderr}")
     payload = json.loads(r.stdout)
-    require(payload["note_count"] == 2, f"expected 2 indexed notes: {payload}")
+    require(payload["note_count"] == 3, f"expected 3 indexed notes: {payload}")
     require(payload["task_count"] == 1, f"expected 1 indexed task: {payload}")
 
     r = run(str(AGENT_OBSIDIAN), "search", "Saoshyant", "--json", env=env)
@@ -538,6 +539,14 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     payload = json.loads(r.stdout)
     require(payload["count"] == 1 and payload["rows"][0]["title"] == "Alpha",
             f"DQL subset query should return Alpha: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "tags", "rename", "project", "active-project", "--json", env=env)
+    require(r.returncode == 0, f"tags rename failed: {r.stdout} / {r.stderr}")
+    r = run(str(AGENT_OBSIDIAN), "tags", "--counts", "--json", env=env)
+    payload = json.loads(r.stdout)
+    tags = {item["tag"] for item in payload["tags"]}
+    require("active-project" in tags and "project" not in tags,
+            f"tags rename should rewrite indexed tags: {payload}")
 
     r = run(str(AGENT_OBSIDIAN), "save", "--content", "New idea about Alpha",
             "--related", "auto", "--tags", "note", "--json", env=env)
@@ -569,6 +578,12 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     payload = json.loads(r.stdout)
     require((vault / ".agent-do" / "context" / "ledger" / "vault-audit.jsonl").exists(),
             f"audit should write ledger: {payload}")
+    missing = next(item for item in payload["findings"] if item["kind"] == "missing-frontmatter")
+    r = run(str(AGENT_OBSIDIAN), "audit", "fix", missing["id"], "--json", env=env)
+    require(r.returncode == 0, f"audit fix missing-frontmatter failed: {r.stdout} / {r.stderr}")
+    fixed = json.loads(r.stdout)
+    require(fixed["record"]["frontmatter"]["scope"] == "local",
+            f"audit fix should add safe frontmatter: {fixed}")
 
 
 def main() -> int:

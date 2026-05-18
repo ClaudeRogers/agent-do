@@ -1032,6 +1032,12 @@ cmd_tasks() {
 
 cmd_tags() {
     local sort_by="" counts=0 total=0
+    case "${1:-}" in
+        rename|merge)
+            _run_local_required tags "$@"
+            return $?
+            ;;
+    esac
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --counts) counts=1; shift ;;
