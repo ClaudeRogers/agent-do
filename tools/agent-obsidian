@@ -526,6 +526,12 @@ cmd_snapshot() {
         esac
     done
 
+    _try_local_then_cli snapshot
+    local local_status=$?
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
+
     local cli="" cli_runs="false" tags_raw=""
     local cli_status="missing"
 
@@ -608,12 +614,21 @@ cmd_read() {
     done
 
     local args=()
+    local local_args=(read)
     if [[ -n "$path_arg" ]]; then
         args+=("path=$path_arg")
+        local_args+=("--path" "$path_arg")
     elif [[ -n "$name" ]]; then
         args+=("file=$name")
+        local_args+=("$name")
     fi
     [[ -n "$copy_flag" ]] && args+=("$copy_flag")
+    [[ -n "$copy_flag" ]] && local_args+=("--copy")
+    _try_local_then_cli "${local_args[@]}"
+    local local_status=$?
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian read "${args[@]}"
 }
 
@@ -642,13 +657,23 @@ cmd_create() {
     [[ -n "$name" ]] || { echo "Error: create requires a note name" >&2; return 2; }
 
     local args=("name=$name")
+    local local_args=(create "$name")
     [[ -n "$content" ]]  && args+=("content=$content")
+    [[ -n "$content" ]]  && local_args+=("--content" "$content")
     [[ -n "$template" ]] && args+=("template=$template")
+    [[ -n "$template" ]] && local_args+=("--template" "$template")
     [[ "$overwrite" -eq 1 ]] && args+=("overwrite")
+    [[ "$overwrite" -eq 1 ]] && local_args+=("--overwrite")
     # The Obsidian CLI's create is silent by default; only reveal when
     # the user explicitly passes --open.
     [[ "$reveal" -eq 1 ]] && args+=("open")
+    [[ "$reveal" -eq 1 ]] && local_args+=("--open")
 
+    _try_local_then_cli "${local_args[@]}"
+    local local_status=$?
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian create "${args[@]}"
 }
 
@@ -710,12 +735,19 @@ EOF
         return 2; }
 
     local args=()
+    local local_args=(append "$target" "--content" "$body")
     if [[ "$target_is_path" -eq 1 ]]; then
         args+=("path=$target")
+        local_args+=("--path")
     else
         args+=("file=$target")
     fi
     args+=("content=$body")
+    _try_local_then_cli "${local_args[@]}"
+    local local_status=$?
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian append "${args[@]}"
 }
 
@@ -738,8 +770,16 @@ cmd_search() {
     [[ -n "$query" ]] || { echo "Error: search requires a query" >&2; return 2; }
 
     local args=("query=$query")
+    local local_args=(search "$query")
     [[ -n "$limit" ]]  && args+=("limit=$limit")
+    [[ -n "$limit" ]]  && local_args+=("--limit" "$limit")
     [[ "$total" -eq 1 ]] && args+=("total")
+    [[ "$total" -eq 1 ]] && local_args+=("--total")
+    _try_local_then_cli "${local_args[@]}"
+    local local_status=$?
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian search "${args[@]}"
 }
 
