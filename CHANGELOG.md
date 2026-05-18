@@ -14,6 +14,7 @@
 - The public repo is cleaner. Local notes and non-release material belong under `.dev/`.
 
 ### Added
+- `agent-do psql` for PostgreSQL CLI operations via the native `psql`/`pg_dump`/`pg_restore` binaries. Connection management with macOS Keychain-backed profiles, schema exploration (snapshot, tables, views, describe, schemas, extensions, sizes, relations), data operations (query with auto-LIMIT, sample, count, exec), admin commands (connections, locks, stats, indexes, version), and backup/restore. All output is structured JSON. Complementary to `agent-db` (which uses Python drivers for multi-database support). Table name validation prevents SQL injection in identifier interpolation. Schema-qualified table references (`schema.table`) are parsed correctly across all table commands. Snapshot integration on connect, query, and exec for audit trail.
 - Fresh docs support in `agent-do context`, including refresh, stale checks, HTML docs, local docs serving, source version checks, and last-good fallback when the network fails.
 - GitHub PR work commands in `agent-do gh`, including inbox, awaiting review, diffs, review threads, checks, audits, replies, approvals, merge work, checkout, ready, and draft.
 - Auth flow support in `agent-do auth`, with encrypted auth bundles, browser import, SSO, TOTP, email codes, SMS codes, recovery codes, passkeys, and checkpoint advance.
