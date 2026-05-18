@@ -16,7 +16,9 @@ import sys
 from shutil import which
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+# File lives at <repo>/hooks/claude/agent-do-prompt-router.py, so the repo
+# root is two parents up and lib/ is its sibling.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 
 try:
     from registry import (

@@ -18,7 +18,9 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
+# File lives at <repo>/hooks/claude/agent-do-pretooluse-check.py, so the repo
+# root is two parents up and lib/ is its sibling.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
 
 try:
     from registry import load_registry, find_raw_cli_equivalent, get_tool_readiness
