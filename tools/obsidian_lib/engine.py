@@ -334,11 +334,15 @@ def normalize_tags(value: Any) -> list[str]:
     if isinstance(value, list):
         raw_items = value
     elif isinstance(value, str):
-        raw_items = re.split(r"[,\s]+", value)
+        stripped = value.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            raw_items = [item.strip() for item in stripped[1:-1].split(",")]
+        else:
+            raw_items = re.split(r"[,\s]+", value)
     else:
         raw_items = []
     for item in raw_items:
-        tag = str(item).strip().lstrip("#")
+        tag = str(item).strip().strip("[]").strip().lstrip("#")
         if tag and tag not in tags:
             tags.append(tag)
     return tags
@@ -945,10 +949,12 @@ def cmd_save(rt: Runtime, args: argparse.Namespace) -> int:
         related = [item["title"] for item in search_notes(rt, args.content[:200], limit=int(cfg.get("save", {}).get("auto_related_limit", 5)))]
     tags = normalize_tags(args.tags or [])
     defaults = dict(cfg.get("default_frontmatter") or {})
-    fm = {
-        key: (today() if value == "{today}" else utc_now() if value == "{now}" else value)
-        for key, value in defaults.items()
-    }
+    def expand(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace("{today}", today()).replace("{now}", utc_now())
+        return value
+
+    fm = {key: expand(value) for key, value in defaults.items()}
     fm.update({"title": title, "created": fm.get("created") or today(), "scope": args.scope or fm.get("scope") or "local"})
     if args.up:
         fm["up"] = args.up

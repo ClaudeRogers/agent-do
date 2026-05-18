@@ -29,7 +29,7 @@ source "$REPO_ROOT/lib/json-output.sh" 2>/dev/null || true
 
 show_help() {
     cat << 'EOF'
-agent-obsidian — Obsidian vault integration (via the official Obsidian CLI)
+agent-obsidian — Obsidian vault integration and local vault index
 
 NOTES
   read <name>                Read a note by wikilink-style name
@@ -37,19 +37,42 @@ NOTES
   create <name> [opts]       Create a new note
   append <name> <text>       Append text to a note
   search <query> [opts]      Search the active vault
+  query <dql-subset>          Safe DQL-to-SQL query over the local index
+  relate <name-or-content>    Ranked backlink candidates
+  summarize <topic>           Summarize matching notes with citations
+  move <from> <to>            Move note; --update-links rewrites wikilinks
+  delete <name> --confirm     Move note to .trash/
 
 DAILY NOTES
   daily read                 Read today's daily note
   daily append <text>        Append text to today's daily note
+  daily list                 List recent daily notes
+  weekly read|append|list     Weekly notes
+  period read --from D --to D Aggregate notes modified in a date window
 
 PROPERTIES (YAML frontmatter)
   prop get <name>            Get a property value
   prop set <name> <value>    Set a property value
+  prop list <file>            Dump frontmatter
+  prop batch <query> --set k=v
+                             Bulk frontmatter update
 
 TASKS & METADATA
-  tasks [todo|done] [opts]   List checkbox tasks
+  tasks list [opts]          Unified task listing
+  tasks add|complete|update  Create or update tasks
+  tasks next [opts]          Ranked next-action recommendations
   tags [opts]                List tags (optionally with counts)
   backlinks <name>           List backlinks to a note
+  graph orphans|broken-links|clusters|cluster|tag-usage
+                             Vault graph and hygiene queries
+  audit [--scope folder]     Persist vault-health findings to ledger
+
+SAVE
+  save --content <text>      Save content with conventions frontmatter
+  save-group <hub> --child name:body
+                             Save a linked group of notes
+  templates list|show|apply|register
+                             Manage local vault templates
 
 INSPECTION (+live-gated — require +live(scope=desktop,app=Obsidian,ttl=15m))
   eval <code>                Run JavaScript in the Obsidian app context
@@ -68,7 +91,8 @@ ENVIRONMENT
 
 COMMON OPTIONS
   --vault <name>             Target a specific vault (default: most recent)
-  --json                     Structured JSON output (doctor and snapshot)
+                             If this is a filesystem path, local index mode is used
+  --json                     Structured JSON output
   --copy                     Copy command output to clipboard (read commands)
   --content <text>           Inline content (create / daily append)
   --template <name>          Use a template (create)
@@ -84,6 +108,7 @@ COMMON OPTIONS
 
 ENVIRONMENT VARIABLES
   OBSIDIAN_BIN               Override path to the obsidian executable
+  AGENT_OBSIDIAN_VAULT_PATH  Filesystem path to local Obsidian vault
   AGENT_OBSIDIAN_NO_AUTO_INSTALL=1
                              Disable the one-time symlink into ~/.local/bin
                              when only the app bundle is detected
@@ -94,6 +119,10 @@ EXAMPLES
   agent-obsidian create "Inbox/Idea" --content "Pricing experiment"
   agent-obsidian append "Inbox/Idea" "Follow-up: talk to Erik"
   agent-obsidian search "review" --limit 5
+  agent-obsidian refresh --full --json
+  agent-obsidian save --content "Pricing experiment" --related auto --json
+  agent-obsidian tasks next --horizon today --json
+  agent-obsidian query 'FROM #project WHERE status=active SORT due ASC' --json
   agent-obsidian daily append "- [ ] Ship agent-obsidian PR"
   agent-obsidian prop set status done --file "Projects/agent-obsidian"
   agent-obsidian tasks todo --daily
@@ -348,8 +377,10 @@ _run_local_engine() {
 }
 
 _run_local_required() {
+    set +e
     _run_local_engine "$@"
     local status=$?
+    set -e
     if [[ "$status" -eq 3 ]]; then
         if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
             python3 - <<'PY'
@@ -368,13 +399,13 @@ PY
     return "$status"
 }
 
+LOCAL_ENGINE_STATUS=0
 _try_local_then_cli() {
+    set +e
     _run_local_engine "$@"
-    local status=$?
-    if [[ "$status" -eq 3 ]]; then
-        return 3
-    fi
-    return "$status"
+    LOCAL_ENGINE_STATUS=$?
+    set -e
+    return 0
 }
 
 # ─── doctor ──────────────────────────────────────────────────────────────────
@@ -401,6 +432,14 @@ EOF
             *) echo "Error: unknown doctor flag: $1" >&2; return 2 ;;
         esac
     done
+
+    if [[ "$fix" -eq 0 ]]; then
+        _try_local_then_cli doctor
+        local local_status="$LOCAL_ENGINE_STATUS"
+        if [[ "$local_status" -ne 3 ]]; then
+            return "$local_status"
+        fi
+    fi
 
     local cli=""
     local cli_source="not_found"
@@ -527,7 +566,7 @@ cmd_snapshot() {
     done
 
     _try_local_then_cli snapshot
-    local local_status=$?
+    local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
     fi
@@ -603,6 +642,7 @@ cmd_read() {
             --path)   path_arg="${2:-}"; shift 2 ;;
             --path=*) path_arg="${1#--path=}"; shift ;;
             --copy)   copy_flag="--copy"; shift ;;
+            --json)   OUTPUT_FORMAT="json"; shift ;;
             -h|--help) echo "Usage: agent-obsidian read <name> | --path <path> [--vault V] [--copy]"; return 0 ;;
             -*) echo "Error: unknown read flag: $1" >&2; return 2 ;;
             *)
@@ -625,7 +665,7 @@ cmd_read() {
     [[ -n "$copy_flag" ]] && args+=("$copy_flag")
     [[ -n "$copy_flag" ]] && local_args+=("--copy")
     _try_local_then_cli "${local_args[@]}"
-    local local_status=$?
+    local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
     fi
@@ -643,6 +683,7 @@ cmd_create() {
             --template=*) template="${1#--template=}"; shift ;;
             --overwrite)  overwrite=1; shift ;;
             --open)       reveal=1; shift ;;
+            --json)       OUTPUT_FORMAT="json"; shift ;;
             -h|--help)
                 echo "Usage: agent-obsidian create <name> [--content T] [--template T] [--overwrite] [--open] [--vault V]"
                 return 0 ;;
@@ -670,7 +711,7 @@ cmd_create() {
     [[ "$reveal" -eq 1 ]] && local_args+=("--open")
 
     _try_local_then_cli "${local_args[@]}"
-    local local_status=$?
+    local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
     fi
@@ -693,6 +734,8 @@ cmd_append() {
             case "$1" in
                 --path)
                     target_is_path=1; shift; continue ;;
+                --json)
+                    OUTPUT_FORMAT="json"; shift; continue ;;
                 --content)
                     explicit_content="${2:-}"; has_explicit_content=1
                     shift 2; continue ;;
@@ -744,7 +787,7 @@ EOF
     fi
     args+=("content=$body")
     _try_local_then_cli "${local_args[@]}"
-    local local_status=$?
+    local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
     fi
@@ -758,6 +801,7 @@ cmd_search() {
             --limit)   limit="${2:-}"; shift 2 ;;
             --limit=*) limit="${1#--limit=}"; shift ;;
             --total)   total=1; shift ;;
+            --json)    OUTPUT_FORMAT="json"; shift ;;
             -h|--help)
                 echo "Usage: agent-obsidian search <query> [--limit N] [--total] [--vault V]"
                 return 0 ;;
@@ -776,7 +820,7 @@ cmd_search() {
     [[ "$total" -eq 1 ]] && args+=("total")
     [[ "$total" -eq 1 ]] && local_args+=("--total")
     _try_local_then_cli "${local_args[@]}"
-    local local_status=$?
+    local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
     fi
@@ -792,15 +836,26 @@ cmd_daily() {
     case "$sub" in
         read)
             local copy=""
+            local date_arg=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --copy) copy="--copy"; shift ;;
+                    --json) OUTPUT_FORMAT="json"; shift ;;
+                    --date) date_arg="${2:-}"; shift 2 ;;
+                    --date=*) date_arg="${1#--date=}"; shift ;;
                     -h|--help) echo "Usage: agent-obsidian daily read [--copy] [--vault V]"; return 0 ;;
                     *) echo "Error: unknown daily read flag: $1" >&2; return 2 ;;
                 esac
             done
             local args=()
             [[ -n "$copy" ]] && args+=("$copy")
+            local local_args=(daily read)
+            [[ -n "$date_arg" ]] && local_args+=("--date" "$date_arg")
+            _try_local_then_cli "${local_args[@]}"
+            local local_status="$LOCAL_ENGINE_STATUS"
+            if [[ "$local_status" -ne 3 ]]; then
+                return "$local_status"
+            fi
             _run_obsidian "daily:read" "${args[@]}"
             ;;
         append)
@@ -811,12 +866,23 @@ cmd_daily() {
             # \n sequences; trailing positionals join with single spaces.
             local text="" explicit_content="" has_explicit_content=0
             local seen_dashdash=0
+            local date_arg="" section_arg=""
             while [[ $# -gt 0 ]]; do
                 if [[ "$seen_dashdash" -eq 0 ]]; then
                     case "$1" in
                         -h|--help)
                             echo "Usage: agent-obsidian daily append [<text>...] [--content T] [--vault V]"
                             return 0 ;;
+                        --date)
+                            date_arg="${2:-}"; shift 2; continue ;;
+                        --json)
+                            OUTPUT_FORMAT="json"; shift; continue ;;
+                        --date=*)
+                            date_arg="${1#--date=}"; shift; continue ;;
+                        --section)
+                            section_arg="${2:-}"; shift 2; continue ;;
+                        --section=*)
+                            section_arg="${1#--section=}"; shift; continue ;;
                         --content)
                             explicit_content="${2:-}"; has_explicit_content=1
                             shift 2; continue ;;
@@ -834,7 +900,18 @@ cmd_daily() {
             else body="$text"; fi
             [[ -n "$body" ]] || {
                 echo "Error: daily append requires <text> or --content" >&2; return 2; }
+            local local_args=(daily append --content "$body")
+            [[ -n "$date_arg" ]] && local_args+=("--date" "$date_arg")
+            [[ -n "$section_arg" ]] && local_args+=("--section" "$section_arg")
+            _try_local_then_cli "${local_args[@]}"
+            local local_status="$LOCAL_ENGINE_STATUS"
+            if [[ "$local_status" -ne 3 ]]; then
+                return "$local_status"
+            fi
             _run_obsidian "daily:append" "content=$body"
+            ;;
+        list)
+            _run_local_required daily list "$@"
             ;;
         *)
             echo "Unknown daily subcommand: $sub" >&2; return 2 ;;
@@ -855,6 +932,7 @@ cmd_prop() {
                 case "$1" in
                     --file)   file_target="${2:-}"; shift 2 ;;
                     --file=*) file_target="${1#--file=}"; shift ;;
+                    --json)   OUTPUT_FORMAT="json"; shift ;;
                     -h|--help) echo "Usage: agent-obsidian prop get <name> [--file F] [--vault V]"; return 0 ;;
                     -*) echo "Error: unknown prop get flag: $1" >&2; return 2 ;;
                     *) name="$1"; shift ;;
@@ -863,6 +941,13 @@ cmd_prop() {
             [[ -n "$name" ]] || { echo "Error: prop get requires <name>" >&2; return 2; }
             local args=("name=$name")
             [[ -n "$file_target" ]] && args+=("file=$file_target")
+            if [[ -n "$file_target" ]]; then
+                _try_local_then_cli prop get "$name" --file "$file_target"
+                local local_status="$LOCAL_ENGINE_STATUS"
+                if [[ "$local_status" -ne 3 ]]; then
+                    return "$local_status"
+                fi
+            fi
             _run_obsidian "property:read" "${args[@]}"
             ;;
         set)
@@ -871,6 +956,7 @@ cmd_prop() {
                 case "$1" in
                     --file)   file_target="${2:-}"; shift 2 ;;
                     --file=*) file_target="${1#--file=}"; shift ;;
+                    --json)   OUTPUT_FORMAT="json"; shift ;;
                     -h|--help) echo "Usage: agent-obsidian prop set <name> <value> [--file F] [--vault V]"; return 0 ;;
                     -*) echo "Error: unknown prop set flag: $1" >&2; return 2 ;;
                     *)
@@ -885,7 +971,20 @@ cmd_prop() {
                 echo "Error: prop set requires <name> <value>" >&2; return 2; }
             local args=("name=$name" "value=$value")
             [[ -n "$file_target" ]] && args+=("file=$file_target")
+            if [[ -n "$file_target" ]]; then
+                _try_local_then_cli prop set "$name" "$value" --file "$file_target"
+                local local_status="$LOCAL_ENGINE_STATUS"
+                if [[ "$local_status" -ne 3 ]]; then
+                    return "$local_status"
+                fi
+            fi
             _run_obsidian "property:set" "${args[@]}"
+            ;;
+        list)
+            _run_local_required prop list "$@"
+            ;;
+        batch)
+            _run_local_required prop batch "$@"
             ;;
         *) echo "Unknown prop subcommand: $sub (expected: get|set)" >&2; return 2 ;;
     esac
@@ -895,10 +994,18 @@ cmd_prop() {
 
 cmd_tasks() {
     local kind="" daily=0
+    local first="${1:-}"
+    case "$first" in
+        list|add|complete|update|next)
+            _run_local_required tasks "$@"
+            return $?
+            ;;
+    esac
     while [[ $# -gt 0 ]]; do
         case "$1" in
             todo|done) kind="$1"; shift ;;
             --daily)   daily=1; shift ;;
+            --json)    OUTPUT_FORMAT="json"; shift ;;
             -h|--help) echo "Usage: agent-obsidian tasks [todo|done] [--daily] [--vault V]"; return 0 ;;
             -*) echo "Error: unknown tasks flag: $1" >&2; return 2 ;;
             *) echo "Error: tasks accepts only todo|done as positional: $1" >&2; return 2 ;;
@@ -906,8 +1013,19 @@ cmd_tasks() {
     done
 
     local args=()
+    local local_args=(tasks list)
     [[ "$daily" -eq 1 ]] && args+=("daily")
-    [[ -n "$kind" ]]     && args+=("$kind")
+    [[ "$daily" -eq 1 ]] && local_args+=("--daily")
+    if [[ -n "$kind" ]]; then
+        args+=("$kind")
+        [[ "$kind" == "todo" ]] && local_args=(tasks todo)
+        [[ "$kind" == "done" ]] && local_args=(tasks done)
+    fi
+    _try_local_then_cli "${local_args[@]}"
+    local local_status="$LOCAL_ENGINE_STATUS"
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian tasks "${args[@]}"
 }
 
@@ -919,6 +1037,7 @@ cmd_tags() {
         case "$1" in
             --counts) counts=1; shift ;;
             --total)  total=1; shift ;;
+            --json)   OUTPUT_FORMAT="json"; shift ;;
             --sort)   sort_by="${2:-}"; shift 2 ;;
             --sort=*) sort_by="${1#--sort=}"; shift ;;
             -h|--help) echo "Usage: agent-obsidian tags [--counts] [--total] [--sort name|count] [--vault V]"; return 0 ;;
@@ -935,6 +1054,15 @@ cmd_tags() {
             *) echo "Error: --sort accepts name|count" >&2; return 2 ;;
         esac
     fi
+    local local_args=(tags)
+    [[ "$counts" -eq 1 ]] && local_args+=("--counts")
+    [[ "$total" -eq 1 ]] && local_args+=("--total")
+    [[ -n "$sort_by" ]] && local_args+=("--sort" "$sort_by")
+    _try_local_then_cli "${local_args[@]}"
+    local local_status="$LOCAL_ENGINE_STATUS"
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian tags "${args[@]}"
 }
 
@@ -945,11 +1073,17 @@ cmd_backlinks() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) echo "Usage: agent-obsidian backlinks <name> [--vault V]"; return 0 ;;
+            --json) OUTPUT_FORMAT="json"; shift ;;
             -*) echo "Error: unknown backlinks flag: $1" >&2; return 2 ;;
             *) name="$1"; shift ;;
         esac
     done
     [[ -n "$name" ]] || { echo "Error: backlinks requires a note name" >&2; return 2; }
+    _try_local_then_cli backlinks "$name"
+    local local_status="$LOCAL_ENGINE_STATUS"
+    if [[ "$local_status" -ne 3 ]]; then
+        return "$local_status"
+    fi
     _run_obsidian backlinks "file=$name"
 }
 
@@ -1082,15 +1216,28 @@ main() {
 
     case "$cmd" in
         snapshot|snap)        cmd_snapshot "$@" ;;
+        refresh)              _run_local_required refresh "$@" ;;
         read)                 cmd_read "$@" ;;
         create|new)           cmd_create "$@" ;;
         append|add)           cmd_append "$@" ;;
         search|find)          cmd_search "$@" ;;
+        save)                 _run_local_required save "$@" ;;
+        save-group)           _run_local_required save-group "$@" ;;
+        query)                _run_local_required query "$@" ;;
+        relate)               _run_local_required relate "$@" ;;
+        summarize)            _run_local_required summarize "$@" ;;
         daily)                cmd_daily "$@" ;;
+        weekly)               _run_local_required weekly "$@" ;;
+        period)               _run_local_required period "$@" ;;
         prop|property)        cmd_prop "$@" ;;
         tasks)                cmd_tasks "$@" ;;
         tags)                 cmd_tags "$@" ;;
         backlinks|backlink)   cmd_backlinks "$@" ;;
+        move)                 _run_local_required move "$@" ;;
+        delete)               _run_local_required delete "$@" ;;
+        graph)                _run_local_required graph "$@" ;;
+        templates)            _run_local_required templates "$@" ;;
+        audit)                _run_local_required audit "$@" ;;
         eval)                 cmd_eval "$@" ;;
         dev)                  cmd_dev "$@" ;;
         plugin)               cmd_plugin "$@" ;;
