@@ -324,6 +324,59 @@ _parse_global_args() {
     done
 }
 
+_run_local_engine() {
+    local engine="$SCRIPT_DIR/obsidian_lib/engine.py"
+    local args=()
+    local cleaned=()
+    local arg
+
+    [[ -n "$OBSIDIAN_VAULT" ]] && args+=("--vault" "$OBSIDIAN_VAULT")
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            OUTPUT_FORMAT="json"
+        else
+            cleaned+=("$arg")
+        fi
+    done
+    [[ "${OUTPUT_FORMAT:-text}" == "json" ]] && args+=("--json")
+
+    set +e
+    python3 "$engine" "${args[@]}" "${cleaned[@]}"
+    local status=$?
+    set -e
+    return "$status"
+}
+
+_run_local_required() {
+    _run_local_engine "$@"
+    local status=$?
+    if [[ "$status" -eq 3 ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            python3 - <<'PY'
+import json
+print(json.dumps({
+  "success": False,
+  "error": "local Obsidian vault not found; pass --vault /path/to/vault or set AGENT_OBSIDIAN_VAULT_PATH",
+  "code": 2
+}, indent=2))
+PY
+        else
+            echo "Error: local Obsidian vault not found; pass --vault /path/to/vault or set AGENT_OBSIDIAN_VAULT_PATH" >&2
+        fi
+        return 2
+    fi
+    return "$status"
+}
+
+_try_local_then_cli() {
+    _run_local_engine "$@"
+    local status=$?
+    if [[ "$status" -eq 3 ]]; then
+        return 3
+    fi
+    return "$status"
+}
+
 # ─── doctor ──────────────────────────────────────────────────────────────────
 
 cmd_doctor() {
