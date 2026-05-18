@@ -68,7 +68,7 @@ def main() -> int:
     for component_id in [
         "registry:agent-do",
         "hook:user-prompt-submit",
-        "hook:pretooluse-codex",
+        "hook:pretooluse-claude",
         "tool:harness",
         "tool:context",
         "tool:zpc",

@@ -254,12 +254,6 @@ def hook_components() -> list[dict[str, Any]]:
             ["hooks/agent-do-pretooluse-check.py"],
             "Emits Claude-compatible raw-command nudges.",
         ),
-        (
-            "hook:pretooluse-codex",
-            "PreToolUse Codex",
-            ["hooks/agent-do-pretooluse-codex.py"],
-            "Runs the shared PreToolUse check while suppressing Codex-unsupported output.",
-        ),
     ]
     components = []
     for component_id, name, files, summary in hooks:
