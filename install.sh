@@ -1,20 +1,24 @@
 #!/bin/bash
-# install.sh — Idempotent installer for agent-do + Claude Code hooks
+# install.sh — Idempotent installer for agent-do + Claude Code (+ optional Codex) hooks
 #
 # What it does:
 #   1. Symlinks agent-do into ~/.local/bin (adds to PATH)
 #   2. Writes breadcrumb at ~/.agent-do/install-path
-#   3. Copies 3 Claude Code hooks to ~/.claude/hooks/
-#   4. Installs Python dependencies
-#   5. Optional: npm install for browse/unbrowse
-#   6. Optional: cargo build for manna
-#   7. Runs agent-do --health
-#   8. Prints settings.json snippet (doesn't auto-modify)
-#   9. Prints CLAUDE.md snippet for projects
+#   3. Copies Claude Code hooks to ~/.claude/hooks/
+#   4. Optional: Codex hooks to ~/.codex/hooks/ (--codex or auto-detected)
+#   5. Installs Python dependencies
+#   6. Optional: npm install for browse/unbrowse
+#   7. Optional: cargo build for manna
+#   8. Runs agent-do --health
+#   9. Prints Claude settings.json snippet (doesn't auto-modify)
+#  10. Prints Codex hooks.json snippet if Codex install ran
+#  11. Prints CLAUDE.md snippet for projects
 #
 # Usage:
-#   ./install.sh              # Install
-#   ./install.sh --uninstall  # Remove symlink + hooks
+#   ./install.sh              # Install (auto-installs Codex hooks if ~/.codex/ exists)
+#   ./install.sh --codex      # Force Codex install even without ~/.codex/
+#   ./install.sh --no-codex   # Skip Codex install even when ~/.codex/ exists
+#   ./install.sh --uninstall  # Remove symlink + hooks (both Claude and Codex)
 
 set -euo pipefail
 
@@ -23,7 +27,18 @@ SYMLINK_DIR="$HOME/.local/bin"
 SYMLINK_PATH="$SYMLINK_DIR/agent-do"
 AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"
 CLAUDE_HOOKS_DIR="$HOME/.claude/hooks"
+CODEX_HOOKS_DIR="$HOME/.codex/hooks"
 HOOKS_DIR="$REPO_DIR/hooks"
+CODEX_HOOKS_SRC="$HOOKS_DIR/codex"
+
+# Decide whether to install Codex hooks. Default: auto (yes if ~/.codex/ exists).
+INSTALL_CODEX="auto"
+for arg in "$@"; do
+    case "$arg" in
+        --codex)    INSTALL_CODEX="yes" ;;
+        --no-codex) INSTALL_CODEX="no"  ;;
+    esac
+done
 
 # Colors (skip if not a terminal)
 if [ -t 1 ]; then
@@ -61,11 +76,12 @@ uninstall() {
         info "Removed breadcrumb $AGENT_DO_HOME/install-path"
     fi
 
-    # Remove hooks
+    # Remove Claude hooks
     local hooks=(
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
+        "auto-commit.sh"
     )
     for hook in "${hooks[@]}"; do
         if [ -f "$CLAUDE_HOOKS_DIR/$hook" ]; then
@@ -74,9 +90,22 @@ uninstall() {
         fi
     done
 
+    # Remove Codex hooks if installed
+    local codex_hooks=(
+        "agent-do-prompt-router.py"
+        "agent-do-pretooluse-check.py"
+        "auto-commit.sh"
+    )
+    for hook in "${codex_hooks[@]}"; do
+        if [ -f "$CODEX_HOOKS_DIR/$hook" ]; then
+            rm "$CODEX_HOOKS_DIR/$hook"
+            info "Removed Codex hook $CODEX_HOOKS_DIR/$hook"
+        fi
+    done
+
     echo ""
     warn "Remember to remove the agent-do hooks from ~/.claude/settings.json"
-    warn "Search for 'agent-do' in the hooks section and remove those entries."
+    warn "and ~/.codex/hooks.json. Search for 'agent-do' in the hooks sections."
     echo ""
     info "Uninstall complete. Repo at $REPO_DIR is untouched."
     exit 0
@@ -130,6 +159,7 @@ HOOK_FILES=(
     "agent-do-session-start.sh"
     "agent-do-prompt-router.py"
     "agent-do-pretooluse-check.py"
+    "auto-commit.sh"
 )
 for hook in "${HOOK_FILES[@]}"; do
     src="$HOOKS_DIR/$hook"
@@ -146,6 +176,44 @@ for hook in "${HOOK_FILES[@]}"; do
         info "Installed hook: $dst"
     fi
 done
+
+# 3b. Optional: Codex hooks
+should_install_codex="no"
+case "$INSTALL_CODEX" in
+    yes)  should_install_codex="yes" ;;
+    auto) [ -d "$HOME/.codex" ] && should_install_codex="yes" ;;
+esac
+
+if [ "$should_install_codex" = "yes" ]; then
+    step "Installing Codex hooks"
+    mkdir -p "$CODEX_HOOKS_DIR"
+
+    CODEX_HOOK_FILES=(
+        "agent-do-prompt-router.py"
+        "agent-do-pretooluse-check.py"
+        "auto-commit.sh"
+    )
+    for hook in "${CODEX_HOOK_FILES[@]}"; do
+        src="$CODEX_HOOKS_SRC/$hook"
+        dst="$CODEX_HOOKS_DIR/$hook"
+        if [ ! -f "$src" ]; then
+            err "Codex hook source not found: $src"
+            continue
+        fi
+        if [ -f "$dst" ] && diff -q "$src" "$dst" &>/dev/null; then
+            info "Codex hook already up to date: $hook"
+        else
+            cp "$src" "$dst"
+            chmod +x "$dst"
+            info "Installed Codex hook: $dst"
+        fi
+    done
+
+    info "Codex registration template: $CODEX_HOOKS_SRC/hooks.json.example"
+    info "Merge into ~/.codex/hooks.json (see snippet at the end of this run)"
+else
+    info "Skipped Codex install (use --codex to force, or install ~/.codex/ first)"
+fi
 
 # 4. Python dependencies
 step "Installing Python dependencies"
@@ -239,11 +307,38 @@ cat << 'SETTINGS_JSON'
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/auto-commit.sh",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
 SETTINGS_JSON
 echo ""
+
+# 8b. Print Codex hooks.json snippet if Codex install ran
+if [ "$should_install_codex" = "yes" ]; then
+    step "Codex hooks.json configuration"
+    echo ""
+    echo "Codex now supports hookSpecificOutput.additionalContext on PreToolUse"
+    echo "(May 2026 release). The wrappers in ~/.codex/hooks/ runpy-pass-through to"
+    echo "this repo's hooks, so updates flow through automatically."
+    echo ""
+    echo "Merge the following into ~/.codex/hooks.json (full template is at"
+    echo "$CODEX_HOOKS_SRC/hooks.json.example):"
+    echo ""
+    cat "$CODEX_HOOKS_SRC/hooks.json.example"
+    echo ""
+fi
 
 # 9. Print CLAUDE.md snippet
 step "Project CLAUDE.md snippet"

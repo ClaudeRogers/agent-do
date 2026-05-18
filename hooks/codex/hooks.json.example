@@ -1,0 +1,61 @@
+{
+  "_comment": "Codex hook registration template for agent-do. Copy to ~/.codex/hooks.json and merge with existing entries if you already have any. The three wrappers (session-start, prompt-router, pretooluse-check) runpy-pass-through to the checked-in repo hooks, so updates flow through automatically once the wrappers are installed. The Stop hook runs stop-quality-gate.sh which chains to auto-commit.sh. Codex supports hookSpecificOutput.additionalContext on PreToolUse as of the May 2026 hooks release.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.codex/hooks/agent-do-session-start.py",
+            "timeout": 10,
+            "statusMessage": "Loading agent-do project context"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.codex/hooks/agent-do-prompt-router.py",
+            "timeout": 5,
+            "statusMessage": "Checking agent-do routing"
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/screenshot-capture.sh",
+            "timeout": 10,
+            "statusMessage": "Checking screenshot shorthand"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.codex/hooks/agent-do-pretooluse-check.py",
+            "timeout": 10,
+            "statusMessage": "Checking agent-do tool preference"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/stop-quality-gate.sh",
+            "timeout": 30,
+            "statusMessage": "Finalizing turn"
+          }
+        ]
+      }
+    ]
+  }
+}

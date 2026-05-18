@@ -5,16 +5,21 @@ agent-do ships hooks that teach coding agents to prefer `agent-do` tools over ra
 ## Quick Setup
 
 ```bash
-./install.sh
+./install.sh                # Installs Claude hooks; auto-installs Codex hooks if ~/.codex/ exists
+./install.sh --codex        # Force Codex hook install even without ~/.codex/
+./install.sh --no-codex     # Skip Codex install even when ~/.codex/ is present
+./install.sh --uninstall    # Remove all installed hooks (both surfaces)
 ```
 
 The installer:
 1. Symlinks `agent-do` into `~/.local/bin`
-2. Copies hooks to `~/.claude/hooks/`
-3. Installs Python dependencies
-4. Prints a `settings.json` snippet you merge manually
+2. Writes the `~/.agent-do/install-path` breadcrumb (used by Codex wrappers to find the repo)
+3. Copies Claude Code hooks to `~/.claude/hooks/`
+4. Optionally copies Codex hook wrappers to `~/.codex/hooks/`
+5. Installs Python dependencies
+6. Prints a Claude `settings.json` snippet and (when Codex installed) a `~/.codex/hooks.json` template
 
-## The 3-Layer Hook System
+## The 4-Layer Hook System
 
 ### Layer 1: SessionStart: PATH + Context Injection
 
@@ -48,22 +53,20 @@ Use `AGENT_DO_HOOK_AI=off` for deterministic-only hook behavior, `auto` for best
 
 ### Layer 3: PreToolUse: Command Interception
 
-**Claude file:** `hooks/agent-do-pretooluse-check.py`
+**File:** `hooks/agent-do-pretooluse-check.py` (shared by Claude Code and Codex)
 
-**Codex file:** `hooks/agent-do-pretooluse-codex.py`
+Watches every `Bash` tool call. When an agent tries to run a raw command that has an agent-do equivalent (e.g., `xcrun simctl`, `vercel deploy`, `kubectl`), it injects a hard nudge with the closest native replacement command and any relevant setup hint.
 
-Watches every `Bash` tool call. When an agent tries to run a raw command that has an agent-do equivalent (e.g., `xcrun simctl`, `vercel deploy`, `kubectl`), it injects a hard nudge with the closest native replacement command and any relevant setup hint where the host supports that output.
+**Codex compatibility:** Codex supports `hookSpecificOutput.additionalContext` on PreToolUse as of the May 2026 hooks release. The same hook works in both runtimes; the prior `agent-do-pretooluse-codex.py` suppress-stdout wrapper is obsolete and was removed. Codex users install a thin runpy pass-through at `~/.codex/hooks/agent-do-pretooluse-check.py` (shipped under `hooks/codex/`); the install handles this automatically.
 
-**Claude nudge mode (default):** Adds `additionalContext`. Claude sees the reminder but the command still runs.
-
-**Codex compatibility mode:** Runs the same shared PreToolUse check and records the same telemetry, but suppresses stdout because Codex rejects `additionalContext` for PreToolUse.
+**Nudge mode (default):** Adds `additionalContext`. The agent sees the reminder but the command still runs.
 
 Examples:
 - `npx playwright test` → `agent-do browse ...` + browser-install hint when relevant
 - `xcrun simctl io booted screenshot` → `agent-do ios screenshot`
 - `psql ...` → `agent-do db ...`
 
-**Block mode (opt-in, Claude only):** Change `additionalContext` to `permissionDecision: "deny"` in the hook output to block raw commands entirely. Use this carefully; blocking stops the current agent turn.
+**Block mode (opt-in):** Change `additionalContext` to `permissionDecision: "deny"` in the hook output to block raw commands entirely. Claude Code supports the block decision; Codex parses it but does not enforce it yet (per the May 2026 hooks docs), so block mode is effectively Claude-only.
 
 Intercepted commands include:
 - `vercel`, `npx vercel`, `curl api.vercel.com`
@@ -78,6 +81,23 @@ Intercepted commands include:
 - ImageMagick, ffmpeg (image/video/audio)
 
 Safe commands are skipped (git, npm, python, basic shell tools, localhost curl, etc.).
+
+### Layer 4: Stop: Safe Auto-Commit
+
+**Claude file:** `hooks/auto-commit.sh`
+**Codex file:** `hooks/codex/auto-commit.sh` (adds coord-focus and env-var scoping)
+
+Runs at the end of every agent turn. Auto-commits the work the agent just shipped so it never gets lost between sessions, tagged with the agent's session id for clean bisectable history.
+
+**Safety: respects pre-commit hooks.** Never uses `--no-verify`. The flow:
+
+1. Try a clean commit. If pre-commit passes, done.
+2. If pre-commit auto-fixed files in place (black, ruff, prettier, eslint --fix), re-stage the modified files and retry once.
+3. If commit still fails, leave the work staged, write a recovery breadcrumb at `.handoff/auto-commit-blocked-<session>.md`, fire a macOS notification (Basso sound), and exit non-zero.
+
+The breadcrumb has the full pre-commit output, the staged file list, and recovery instructions. Work is recoverable; nothing is silently bypassed. Pre-commit hooks exist to catch real things (leaked secrets, broken syntax, lint violations); silently bypassing them is exactly the worst kind of automation failure.
+
+**Codex scoping:** the Codex version restricts auto-commit to paths declared in `CODEX_AUTO_COMMIT_PATHS` / `AGENT_AUTO_COMMIT_PATHS` env vars or the current `agent-do coord focus` paths. A repo-wide focus is treated as a coordination signal, not a commit allowlist; the hook falls back to "commit staged files only" or "skip" rather than ever bulk-committing the whole tree.
 
 ## Registering Hooks in settings.json
 
@@ -121,26 +141,15 @@ Claude Code hooks must be registered in `~/.claude/settings.json`. They are NOT 
           }
         ]
       }
-    ]
-  }
-}
-```
-
-If you already have hooks in `settings.json`, merge the agent-do entries into the existing arrays for each event.
-
-For Codex PreToolUse, point the Bash matcher at the tracked compatibility wrapper:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
+    ],
+    "Stop": [
       {
-        "matcher": "Bash",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/agent-do/hooks/agent-do-pretooluse-codex.py",
-            "timeout": 10
+            "command": "~/.claude/hooks/auto-commit.sh",
+            "timeout": 30
           }
         ]
       }
@@ -148,6 +157,58 @@ For Codex PreToolUse, point the Bash matcher at the tracked compatibility wrappe
   }
 }
 ```
+
+If you already have hooks in `settings.json`, merge the agent-do entries into the existing arrays for each event.
+
+### Codex registration
+
+Codex uses `~/.codex/hooks.json` instead of Claude's `settings.json`. The installer copies wrappers to `~/.codex/hooks/` and prints the registration template. The full template lives at `hooks/codex/hooks.json.example` and looks like:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.codex/hooks/agent-do-prompt-router.py",
+            "timeout": 5,
+            "statusMessage": "Checking agent-do routing"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.codex/hooks/agent-do-pretooluse-check.py",
+            "timeout": 10,
+            "statusMessage": "Checking agent-do tool preference"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/stop-quality-gate.sh",
+            "timeout": 30,
+            "statusMessage": "Finalizing turn"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The Codex wrappers under `~/.codex/hooks/` are thin: each one uses `runpy.run_path` to forward stdin/stdout to the matching repo hook at `<repo>/hooks/`. The repo is resolved via `AGENT_DO_REPO`, the `~/.agent-do/install-path` breadcrumb, or a `~/Custom-Coding/agent-do` fallback. Edits to the repo hooks flow through to Codex automatically; no reinstall needed.
 
 ## CLAUDE.md Integration
 
@@ -204,13 +265,22 @@ Coding Agent Session
     │   └─ Adds agent-do to PATH + injects project-aware tool reminder
     │
     ├─ UserPromptSubmit ──→ agent-do-prompt-router.py
-    │   └─ AI-ranks the full catalog and emits only exact high-confidence suggestions
+    │   └─ AI-classifies prompt intent (coord / tools / docs / design /
+    │     completion) and emits high-confidence context only. Silent when
+    │     AI router is unavailable; state-grounded paths still fire.
     │
-    └─ PreToolUse (Bash) ──→ agent-do-pretooluse-check.py        # Claude
-        └─ agent-do-pretooluse-codex.py                         # Codex
+    ├─ PreToolUse (Bash) ──→ agent-do-pretooluse-check.py
+    │   └─ One hook, both runtimes. Codex supports additionalContext as
+    │     of May 2026; same nudge shows up in both Claude Code and Codex.
+    │     Codex install adds a thin runpy wrapper at ~/.codex/hooks/.
+    │
+    └─ Stop ──→ auto-commit.sh
+        └─ Safe-commit pattern: respects pre-commit hooks, retries once
+          after auto-fix, fails loudly with .handoff breadcrumb + macOS
+          notification. Codex variant adds coord-focus / env scoping.
 ```
 
-All three hooks work independently. You can install any subset.
+All four hooks work independently. You can install any subset.
 
 ## Uninstalling
 
