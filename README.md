@@ -216,6 +216,23 @@ agent-do zpc learn "deploying" "missing env var" "added .env.example" "always sh
 agent-do zpc decide "Which DB?" --options "postgres,sqlite" --chosen postgres --rationale "team expertise" --confidence 0.9
 ```
 
+### Obsidian Vault Management
+
+`obsidian` is the agent-facing vault surface. With a local vault path it builds a
+SQLite FTS5 index under `<vault>/.agent-do/obsidian/index.db`, then reads,
+searches, saves, queries, audits, and rewrites notes without requiring
+Obsidian.app to be open. If no local vault path is available, legacy commands
+fall back to the official Obsidian CLI.
+
+```bash
+AGENT_OBSIDIAN_VAULT_PATH="$HOME/Obsidian/Main" agent-do obsidian refresh --full --json
+agent-do obsidian search "Trinity Site" --json
+agent-do obsidian save --content "New idea" --related auto --tags idea --json
+agent-do obsidian tasks next --horizon today --json
+agent-do obsidian query "FROM #project WHERE status=active SORT due ASC" --json
+agent-do obsidian audit --scope "Projects" --json
+```
+
 ### Cloud And Service Operations
 
 ```bash

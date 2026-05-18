@@ -139,9 +139,12 @@ def test_static_artifacts() -> None:
 
 def test_registry_entry() -> None:
     """The registry.yaml entry must be present and well-formed."""
-    import yaml  # type: ignore
+    import sys
 
-    registry = yaml.safe_load((ROOT / "registry.yaml").read_text())
+    sys.path.insert(0, str(ROOT / "lib"))
+    from registry import load_registry  # type: ignore
+
+    registry = load_registry()
     require("obsidian" in registry["tools"], "registry.yaml must declare tools.obsidian")
     entry = registry["tools"]["obsidian"]
     for key in ("description", "capabilities", "commands", "examples", "routing", "concurrency"):
@@ -149,6 +152,8 @@ def test_registry_entry() -> None:
     require(entry["concurrency"] == "mixed", f"unexpected concurrency: {entry['concurrency']}")
     for cmd in ("doctor", "snapshot", "read", "create", "append", "search",
                 "daily", "prop", "tasks", "tags", "backlinks",
+                "refresh", "save", "save-group", "query", "relate", "summarize",
+                "weekly", "period", "graph", "templates", "audit", "move", "delete",
                 "eval", "dev", "plugin"):
         require(cmd in entry["commands"], f"obsidian registry missing command: {cmd}")
     # Subcommands we deliberately do NOT ship in v1: `open` (semantics
@@ -163,6 +168,13 @@ def test_registry_entry() -> None:
             f"unexpected readiness.check: {routing['readiness']}")
     require(routing["readiness"]["fix"] == "agent-do obsidian doctor --fix",
             f"unexpected readiness.fix: {routing['readiness']}")
+    intents = {item["label"] for item in routing.get("intents", [])}
+    for label in ("vault_save_intent", "vault_find_intent", "vault_ask_intent",
+                  "vault_organize_intent", "vault_refactor_intent"):
+        require(label in intents, f"obsidian routing missing intent label: {label}")
+    contracts = entry.get("contracts") or {}
+    for beat in ("connect", "snapshot", "interact", "verify", "save"):
+        require(beat in contracts, f"obsidian contracts missing beat: {beat}")
 
 
 def test_help_and_unknown(env: dict[str, str]) -> None:
@@ -451,6 +463,114 @@ def test_live_gating(env_with_cli: dict[str, str], log_file: Path) -> None:
             assert_argv(read_log(log_file), expected, f"approved {argv}")
 
 
+def make_local_vault(tmp: Path) -> Path:
+    vault = tmp / "vault"
+    (vault / ".obsidian").mkdir(parents=True)
+    (vault / "Projects").mkdir()
+    (vault / "Projects" / "Alpha.md").write_text(
+        textwrap.dedent(
+            """\
+            ---
+            tags: [project]
+            status: active
+            scope: local
+            ---
+            # Alpha
+            This is about Saoshyant and [[Beta]].
+            - [ ] Ship thing 📅 2026-05-19 🔼
+            """
+        ),
+        encoding="utf-8",
+    )
+    (vault / "Beta.md").write_text(
+        textwrap.dedent(
+            """\
+            ---
+            tags: [project]
+            ---
+            # Beta
+            Back to [[Alpha]].
+            """
+        ),
+        encoding="utf-8",
+    )
+    return vault
+
+
+def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
+    """The v2 local-vault surface works without Obsidian.app or obsidian-cli."""
+    vault = make_local_vault(tmp)
+    env = base_env(tmp, log_file, fake_cli=None)
+    env["AGENT_OBSIDIAN_VAULT_PATH"] = str(vault)
+
+    r = run(str(AGENT_OBSIDIAN), "doctor", "--json", env=env)
+    require(r.returncode == 0, f"local doctor should work without CLI: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["mode"] == "local-index", f"doctor should report local mode: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "refresh", "--full", "--json", env=env)
+    require(r.returncode == 0, f"refresh failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["note_count"] == 2, f"expected 2 indexed notes: {payload}")
+    require(payload["task_count"] == 1, f"expected 1 indexed task: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "search", "Saoshyant", "--json", env=env)
+    require(r.returncode == 0, f"search failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["results"][0]["path"] == "Projects/Alpha.md",
+            f"search should find Alpha: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "read", "Alpha", "--json", env=env)
+    require(r.returncode == 0, f"read failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["note"]["backlinks_count"] == 1,
+            f"Alpha should have one backlink from Beta: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "tasks", "list", "--json", env=env)
+    require(r.returncode == 0, f"tasks list failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["tasks"][0]["priority"] == "high",
+            f"task priority emoji should parse: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "query",
+            "FROM #project WHERE status=active SORT title ASC LIMIT 5", "--json", env=env)
+    require(r.returncode == 0, f"query failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["count"] == 1 and payload["rows"][0]["title"] == "Alpha",
+            f"DQL subset query should return Alpha: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "save", "--content", "New idea about Alpha",
+            "--related", "auto", "--tags", "note", "--json", env=env)
+    require(r.returncode == 0, f"save failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    fm = payload["record"]["frontmatter"]
+    require(payload["record"]["path"].startswith("+/"), f"save should use inbox folder: {payload}")
+    require(fm["log"] != "[[{today}]]", f"save should expand date tokens: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "save-group", "Hub",
+            "--child", "Child A:body a", "--child", "Child B:body b",
+            "--scope", "team", "--child-scope", "Child B:local", "--json", env=env)
+    require(r.returncode == 0, f"save-group failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    scopes = {item["title"]: item["frontmatter"]["scope"] for item in payload["records"]}
+    require(scopes["Hub"] == "team" and scopes["Child A"] == "team" and scopes["Child B"] == "local",
+            f"save-group should inherit and override scope: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "move", "Alpha", "Projects/Renamed Alpha",
+            "--update-links", "--json", env=env)
+    require(r.returncode == 0, f"move failed: {r.stdout} / {r.stderr}")
+    r = run(str(AGENT_OBSIDIAN), "read", "Beta", "--json", env=env)
+    payload = json.loads(r.stdout)
+    require("[[Renamed Alpha]]" in payload["note"]["body"],
+            f"move --update-links should rewrite Beta backlink: {payload}")
+
+    r = run(str(AGENT_OBSIDIAN), "audit", "--json", env=env)
+    require(r.returncode == 0, f"audit failed: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require((vault / ".agent-do" / "context" / "ledger" / "vault-audit.jsonl").exists(),
+            f"audit should write ledger: {payload}")
+
+
 def main() -> int:
     test_static_artifacts()
     test_registry_entry()
@@ -473,6 +593,7 @@ def main() -> int:
         test_content_with_flag_literals(env_with_cli, log_file)
         test_argv_passthrough(env_with_cli, log_file)
         test_live_gating(env_with_cli, log_file)
+        test_local_vault_v2_surface(tmp, log_file)
 
     print("obsidian tests passed")
     return 0

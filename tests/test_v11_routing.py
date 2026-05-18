@@ -73,9 +73,8 @@ def main() -> int:
         input_text='{"prompt":"check the design quality of this page"}',
     )
     require(dpt_result.returncode == 0, f"dpt prompt-router failed: {dpt_result.stderr}")
-    dpt_payload = json.loads(dpt_result.stdout)
-    dpt_context = dpt_payload["hookSpecificOutput"]["additionalContext"]
-    require("agent-do dpt score" in dpt_context, f"expected DPT routing context, got: {dpt_context}")
+    require(dpt_result.stdout.strip() == "",
+            f"expected no non-AI design keyword route, got: {dpt_result.stdout}")
 
     mail_result = run(
         "python3",
@@ -159,17 +158,12 @@ def main() -> int:
     docs_fetch_context = docs_fetch_payload["hookSpecificOutput"]["additionalContext"]
     require("agent-do context fetch https://raw.githubusercontent.com/example/project/main/docs/api.md" in docs_fetch_context, f"expected context fetch nudge, got: {docs_fetch_context}")
 
-    codex_prewrap = run(
-        "python3",
-        "hooks/agent-do-pretooluse-codex.py",
-        input_text='{"tool_name":"Bash","tool_input":{"command":"npx playwright test"}}',
-    )
-    require(codex_prewrap.returncode == 0, f"codex pretool wrapper failed: {codex_prewrap.stderr}")
-    require(
-        codex_prewrap.stdout.strip() == "",
-        f"codex pretool wrapper must suppress unsupported additionalContext, got: {codex_prewrap.stdout}",
-    )
-
+    # Codex now supports `hookSpecificOutput.additionalContext` on PreToolUse
+    # (May 2026 hooks release). The Codex-specific wrapper file was deleted;
+    # Codex's `~/.codex/hooks/agent-do-pretooluse-check.py` runpy-passes
+    # through to this repo's hook directly. AGENT_DO_HOOK_RUNTIME=codex no
+    # longer suppresses output: the hook emits the same nudge in both
+    # runtimes, and Codex consumes it.
     codex_direct = run(
         "python3",
         "hooks/agent-do-pretooluse-check.py",
@@ -177,9 +171,11 @@ def main() -> int:
         env={"AGENT_DO_HOOK_RUNTIME": "codex"},
     )
     require(codex_direct.returncode == 0, f"codex direct pretool failed: {codex_direct.stderr}")
+    codex_payload = json.loads(codex_direct.stdout)
+    codex_context = codex_payload["hookSpecificOutput"]["additionalContext"]
     require(
-        codex_direct.stdout.strip() == "",
-        f"codex direct pretool must suppress unsupported additionalContext, got: {codex_direct.stdout}",
+        "agent-do browse" in codex_context,
+        f"codex runtime should emit the same browse nudge as claude, got: {codex_context}",
     )
 
     offline = run("python3", "bin/pattern-matcher", "--json", "deploy this on vercel")

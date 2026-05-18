@@ -372,7 +372,6 @@ _run_local_engine() {
     set +e
     python3 "$engine" "${args[@]}" "${cleaned[@]}"
     local status=$?
-    set -e
     return "$status"
 }
 

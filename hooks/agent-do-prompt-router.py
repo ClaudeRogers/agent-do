@@ -146,6 +146,21 @@ def build_ai_catalog(registry: dict) -> list[dict]:
             command = example.get("command")
             if intent and command:
                 examples.append({"intent": intent, "command": command})
+        routing_intents = []
+        routing = info.get("routing") or {}
+        for item in (routing.get("intents") or [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            if not label:
+                continue
+            routing_intents.append(
+                {
+                    "label": str(label),
+                    "examples": [str(ex) for ex in (item.get("examples") or [])[:4]],
+                    "recommended_entrypoint": str(item.get("recommended_entrypoint") or ""),
+                }
+            )
 
         catalog.append(
             {
@@ -155,6 +170,7 @@ def build_ai_catalog(registry: dict) -> list[dict]:
                 "commands": commands,
                 "recommended_entrypoints": get_recommended_entrypoints(info) if get_recommended_entrypoints else [],
                 "examples": examples,
+                "routing_intents": routing_intents,
             }
         )
     return catalog
@@ -398,6 +414,7 @@ Rules:
 - "Workspace work" for coord includes editing files, debugging, testing, reviewing code/PRs, committing, pushing, deploying, or "do it/go" continuation of work.
 - Pure discussion, status questions, explanations, model choice, and "no touching" prompts should not be blocked.
 - For tool suggestions, inspect the full catalog and emit only if one or two agent-do commands are clearly stellar and exact.
+- Tools may declare routing_intents with labels and examples. Treat those as classifier labels, not keyword rules. If a prompt matches one, suggest the recommended entrypoint only when it is the right immediate action.
 - Do not emit generic setup/search/status suggestions unless the prompt directly asks for that operation.
 - It is good to emit nothing. Be conservative on every classification. False positives are worse than false negatives.
 - Never invent tools. Commands must start with `agent-do <tool>`.
@@ -434,6 +451,7 @@ Respond with JSON only:
   "needs_docs_retrieval": false,
   "docs_query": "",
   "is_design_work": false,
+  "matched_intents": ["optional catalog routing intent labels"],
   "emit_tools": true,
   "tool_suggestions": [
     {{
