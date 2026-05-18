@@ -31,11 +31,19 @@ cp hooks/codex/hooks.json.example ~/.codex/hooks.json
 | `auto-commit.sh` | Stop-event auto-commit with **safe-commit pattern**: no `--no-verify`, retries once after pre-commit auto-fix, fails loudly with `.handoff/auto-commit-blocked-<session>.md` breadcrumb + macOS notification when pre-commit really blocks. Includes coord-focus / env-var scoping so it never commits the whole repo on accident. |
 | `hooks.json.example` | The Codex hook registration template. Copy to `~/.codex/hooks.json` and merge with existing entries. |
 
-## Not bundled here
+## What's in this bundle
 
-- `agent-do-session-start.py` — Codex's session-start is a fuller Python implementation than the repo's `hooks/agent-do-session-start.sh`. Use your existing one or ship it separately.
-- `screenshot-capture.sh` — same script for Claude and Codex; copy from `hooks/` or `~/.claude/hooks/`.
-- `stop-quality-gate.sh` — the Stop dispatcher that chains to `auto-commit.sh`. Same script for both surfaces.
+| File | Role |
+|---|---|
+| `agent-do-session-start.py` | Codex SessionStart: project context, tooling reminder, bootstrap dialog with macOS notification + log on completion. |
+| `agent-do-prompt-router.py` | Codex UserPromptSubmit: AI-classified routing nudges. |
+| `agent-do-pretooluse-check.py` | Codex PreToolUse: raw-command nudges (`agent-do api` instead of `from anthropic import` etc.). |
+| `screenshot-capture.sh` | Codex UserPromptSubmit: detects `ss` shorthand, attaches the latest screenshot. |
+| `annotate.py` | Codex UserPromptSubmit: saves `#tag` / `#note` prompts as annotations. |
+| `stop-quality-gate.sh` | Codex Stop dispatcher: runs `stop-quality-gate.py` for advisory DPT scoring, then chains to `auto-commit.sh`. |
+| `stop-quality-gate.py` | Codex DPT scoring helper used by the dispatcher. |
+| `auto-commit.sh` | Codex Stop: safe-commit pattern with coord-focus / env-var scoping. |
+| `hooks.json.example` | The Codex hook registration template. Copy to `~/.codex/hooks.json` and merge with existing entries. |
 
 ## Repo resolution
 

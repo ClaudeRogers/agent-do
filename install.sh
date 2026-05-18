@@ -76,11 +76,14 @@ uninstall() {
         info "Removed breadcrumb $AGENT_DO_HOME/install-path"
     fi
 
-    # Remove Claude hooks
+    # Remove Claude hooks (wrappers + any legacy full copies)
     local hooks=(
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
+        "screenshot-capture.sh"
+        "annotate.py"
+        "stop-quality-gate.sh"
         "auto-commit.sh"
     )
     for hook in "${hooks[@]}"; do
@@ -92,8 +95,13 @@ uninstall() {
 
     # Remove Codex hooks if installed
     local codex_hooks=(
+        "agent-do-session-start.py"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
+        "screenshot-capture.sh"
+        "annotate.py"
+        "stop-quality-gate.sh"
+        "stop-quality-gate.py"
         "auto-commit.sh"
     )
     for hook in "${codex_hooks[@]}"; do
@@ -151,33 +159,133 @@ mkdir -p "$AGENT_DO_HOME"
 echo "$REPO_DIR" > "$AGENT_DO_HOME/install-path"
 info "Wrote $AGENT_DO_HOME/install-path"
 
-# 3. Copy hooks to ~/.claude/hooks/
-step "Installing Claude Code hooks"
+# 3. Install hooks (wrapper-based, so `git pull` updates flow through)
+#
+# Installed hooks are thin wrappers that delegate to the canonical files
+# under `<repo>/hooks/`. This means:
+#   - `git pull` on the repo immediately changes hook behavior on the next
+#     event. No re-install needed unless the wrapper itself changes (rare).
+#   - Hooks that import from `<repo>/lib/` work correctly because the wrapper
+#     resolves the repo root and sets sys.path before delegating.
+#   - The wrappers themselves are version-tagged so re-running install.sh
+#     refreshes them when the wrapper format changes.
+#
+# The canonical hook files stay in `hooks/` (Claude defaults) and
+# `hooks/codex/` (Codex-specific variants). install.sh writes the
+# corresponding wrapper at the installed path.
+
+WRAPPER_VERSION="1"
+
+install_py_wrapper() {
+    local repo_hook_rel="$1"  # e.g. "hooks/agent-do-prompt-router.py"
+    local installed="$2"      # e.g. "$CLAUDE_HOOKS_DIR/agent-do-prompt-router.py"
+    local hook_name
+    hook_name=$(basename "$installed")
+    cat > "$installed" <<WRAPPER
+#!/usr/bin/env python3
+# agent-do hook wrapper v$WRAPPER_VERSION (managed by install.sh; do not edit).
+# Delegates to the canonical hook under the agent-do repo so that future
+# \`git pull\` updates flow through without re-running install.sh.
+import os
+import runpy
+import sys
+from pathlib import Path
+
+
+def _resolve_repo():
+    env_root = os.environ.get("AGENT_DO_REPO")
+    if env_root:
+        candidate = Path(env_root).expanduser()
+        if candidate.is_dir():
+            return candidate
+    breadcrumb = Path.home() / ".agent-do" / "install-path"
+    if breadcrumb.is_file():
+        try:
+            candidate = Path(breadcrumb.read_text().strip()).expanduser()
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            pass
+    return None
+
+
+def main():
+    repo = _resolve_repo()
+    if repo is None:
+        sys.stderr.write(
+            "[$hook_name wrapper] could not resolve agent-do repo; "
+            "set AGENT_DO_REPO or run install.sh\\n"
+        )
+        return
+    hook = repo / "$repo_hook_rel"
+    if not hook.is_file():
+        sys.stderr.write(f"[$hook_name wrapper] canonical hook missing: {hook}\\n")
+        return
+    sys.path.insert(0, str(repo / "lib"))
+    runpy.run_path(str(hook), run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()
+WRAPPER
+    chmod +x "$installed"
+}
+
+install_sh_wrapper() {
+    local repo_hook_rel="$1"
+    local installed="$2"
+    local hook_name
+    hook_name=$(basename "$installed")
+    cat > "$installed" <<WRAPPER
+#!/usr/bin/env bash
+# agent-do hook wrapper v$WRAPPER_VERSION (managed by install.sh; do not edit).
+# Delegates to the canonical hook under the agent-do repo so that future
+# \`git pull\` updates flow through without re-running install.sh.
+set -uo pipefail
+repo="\${AGENT_DO_REPO:-\$(cat "\$HOME/.agent-do/install-path" 2>/dev/null)}"
+if [ -z "\$repo" ] || [ ! -d "\$repo" ]; then
+    echo "[$hook_name wrapper] could not resolve agent-do repo; set AGENT_DO_REPO or run install.sh" >&2
+    exit 0
+fi
+canonical="\$repo/$repo_hook_rel"
+if [ ! -x "\$canonical" ]; then
+    echo "[$hook_name wrapper] canonical hook missing or not executable: \$canonical" >&2
+    exit 0
+fi
+exec "\$canonical" "\$@"
+WRAPPER
+    chmod +x "$installed"
+}
+
+step "Installing Claude Code hooks (wrapper-based)"
 mkdir -p "$CLAUDE_HOOKS_DIR"
 
-HOOK_FILES=(
-    "agent-do-session-start.sh"
-    "agent-do-prompt-router.py"
-    "agent-do-pretooluse-check.py"
-    "auto-commit.sh"
+# Map: installed-name | source-relative-to-repo | wrapper-kind
+CLAUDE_HOOK_SPECS=(
+    "agent-do-session-start.sh|hooks/agent-do-session-start.sh|sh"
+    "agent-do-prompt-router.py|hooks/agent-do-prompt-router.py|py"
+    "agent-do-pretooluse-check.py|hooks/agent-do-pretooluse-check.py|py"
+    "screenshot-capture.sh|hooks/screenshot-capture.sh|sh"
+    "annotate.py|hooks/annotate.py|py"
+    "stop-quality-gate.sh|hooks/stop-quality-gate.sh|sh"
+    "auto-commit.sh|hooks/auto-commit.sh|sh"
 )
-for hook in "${HOOK_FILES[@]}"; do
-    src="$HOOKS_DIR/$hook"
-    dst="$CLAUDE_HOOKS_DIR/$hook"
+for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
+    IFS='|' read -r name rel kind <<< "$spec"
+    src="$REPO_DIR/$rel"
+    dst="$CLAUDE_HOOKS_DIR/$name"
     if [ ! -f "$src" ]; then
         err "Hook source not found: $src"
         continue
     fi
-    if [ -f "$dst" ] && diff -q "$src" "$dst" &>/dev/null; then
-        info "Hook already up to date: $hook"
-    else
-        cp "$src" "$dst"
-        chmod +x "$dst"
-        info "Installed hook: $dst"
-    fi
+    case "$kind" in
+        py) install_py_wrapper "$rel" "$dst" ;;
+        sh) install_sh_wrapper "$rel" "$dst" ;;
+    esac
+    info "Installed Claude wrapper: $name → $rel"
 done
 
-# 3b. Optional: Codex hooks
+# 3b. Optional: Codex hooks (also wrapper-based, same upgrade model)
 should_install_codex="no"
 case "$INSTALL_CODEX" in
     yes)  should_install_codex="yes" ;;
@@ -185,28 +293,32 @@ case "$INSTALL_CODEX" in
 esac
 
 if [ "$should_install_codex" = "yes" ]; then
-    step "Installing Codex hooks"
+    step "Installing Codex hooks (wrapper-based)"
     mkdir -p "$CODEX_HOOKS_DIR"
 
-    CODEX_HOOK_FILES=(
-        "agent-do-prompt-router.py"
-        "agent-do-pretooluse-check.py"
-        "auto-commit.sh"
+    CODEX_HOOK_SPECS=(
+        "agent-do-session-start.py|hooks/codex/agent-do-session-start.py|py"
+        "agent-do-prompt-router.py|hooks/codex/agent-do-prompt-router.py|py"
+        "agent-do-pretooluse-check.py|hooks/codex/agent-do-pretooluse-check.py|py"
+        "screenshot-capture.sh|hooks/codex/screenshot-capture.sh|sh"
+        "annotate.py|hooks/codex/annotate.py|py"
+        "stop-quality-gate.sh|hooks/codex/stop-quality-gate.sh|sh"
+        "stop-quality-gate.py|hooks/codex/stop-quality-gate.py|py"
+        "auto-commit.sh|hooks/codex/auto-commit.sh|sh"
     )
-    for hook in "${CODEX_HOOK_FILES[@]}"; do
-        src="$CODEX_HOOKS_SRC/$hook"
-        dst="$CODEX_HOOKS_DIR/$hook"
+    for spec in "${CODEX_HOOK_SPECS[@]}"; do
+        IFS='|' read -r name rel kind <<< "$spec"
+        src="$REPO_DIR/$rel"
+        dst="$CODEX_HOOKS_DIR/$name"
         if [ ! -f "$src" ]; then
             err "Codex hook source not found: $src"
             continue
         fi
-        if [ -f "$dst" ] && diff -q "$src" "$dst" &>/dev/null; then
-            info "Codex hook already up to date: $hook"
-        else
-            cp "$src" "$dst"
-            chmod +x "$dst"
-            info "Installed Codex hook: $dst"
-        fi
+        case "$kind" in
+            py) install_py_wrapper "$rel" "$dst" ;;
+            sh) install_sh_wrapper "$rel" "$dst" ;;
+        esac
+        info "Installed Codex wrapper: $name → $rel"
     done
 
     info "Codex registration template: $CODEX_HOOKS_SRC/hooks.json.example"
@@ -292,6 +404,16 @@ cat << 'SETTINGS_JSON'
             "type": "command",
             "command": "~/.claude/hooks/agent-do-prompt-router.py",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/screenshot-capture.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/annotate.py",
+            "timeout": 5
           }
         ]
       }
@@ -314,7 +436,7 @@ cat << 'SETTINGS_JSON'
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/auto-commit.sh",
+            "command": "~/.claude/hooks/stop-quality-gate.sh",
             "timeout": 30
           }
         ]
@@ -323,6 +445,9 @@ cat << 'SETTINGS_JSON'
   }
 }
 SETTINGS_JSON
+echo ""
+echo "Note: stop-quality-gate.sh chains to auto-commit.sh. You don't need to"
+echo "register auto-commit.sh separately."
 echo ""
 
 # 8b. Print Codex hooks.json snippet if Codex install ran

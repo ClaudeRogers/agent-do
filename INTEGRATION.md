@@ -13,11 +13,50 @@ agent-do ships hooks that teach coding agents to prefer `agent-do` tools over ra
 
 The installer:
 1. Symlinks `agent-do` into `~/.local/bin`
-2. Writes the `~/.agent-do/install-path` breadcrumb (used by Codex wrappers to find the repo)
-3. Copies Claude Code hooks to `~/.claude/hooks/`
-4. Optionally copies Codex hook wrappers to `~/.codex/hooks/`
+2. Writes the `~/.agent-do/install-path` breadcrumb (used by wrappers to find the repo)
+3. Installs Claude Code hook wrappers to `~/.claude/hooks/`
+4. Optionally installs Codex hook wrappers to `~/.codex/hooks/`
 5. Installs Python dependencies
 6. Prints a Claude `settings.json` snippet and (when Codex installed) a `~/.codex/hooks.json` template
+
+## Upgrade Model: Thin Wrappers
+
+Installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are NOT full
+copies of the repo files. They are tiny **wrappers** (Python `runpy.run_path`
+for `.py`, `exec` for `.sh`) that resolve the repo root and delegate to the
+canonical hook at `<repo>/hooks/<file>` or `<repo>/hooks/codex/<file>`.
+
+This means:
+
+- **`git pull` updates flow through automatically.** Fixes to the canonical
+  hooks (registry routing, safe-commit logic, bootstrap feedback) take effect
+  on the next event without re-running `install.sh`.
+- **Hook imports work.** Wrappers add `<repo>/lib/` to `sys.path` before
+  delegating, so `from registry import ...` resolves correctly.
+- **The wrapper format is versioned** (`WRAPPER_VERSION` in `install.sh`).
+  When the wrapper logic itself needs to change (rare), bump the version and
+  re-run `install.sh` to refresh the wrappers. The canonical hooks below
+  don't need to know or care.
+
+Repo resolution order inside each wrapper:
+
+1. `AGENT_DO_REPO` environment variable
+2. `~/.agent-do/install-path` breadcrumb (written by `install.sh`)
+3. Wrapper bails with a clear stderr message if neither resolves
+
+What you typically do after `git pull`:
+
+```bash
+git pull
+# Done. Next hook event uses the new behavior.
+```
+
+When you'd re-run `install.sh`:
+
+- After bumping `WRAPPER_VERSION` in the installer (repo will announce this)
+- When a new hook is added (new file in `hooks/` that needs a corresponding wrapper)
+- When you move the repo to a different path (re-running rewrites the breadcrumb)
+- After `--uninstall` if you change your mind
 
 ## The 4-Layer Hook System
 
