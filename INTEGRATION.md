@@ -58,11 +58,39 @@ When you'd re-run `install.sh`:
 - When you move the repo to a different path (re-running rewrites the breadcrumb)
 - After `--uninstall` if you change your mind
 
-## The 4-Layer Hook System
+## Repo Layout
+
+Canonical hooks live under symmetric per-runtime directories:
+
+```
+hooks/
+  claude/                          # Claude Code canonical hooks (.sh / .py)
+    agent-do-session-start.sh
+    agent-do-prompt-router.py
+    agent-do-pretooluse-check.py
+  codex/                           # Codex canonical hooks + Codex-only helpers
+    agent-do-session-start.py
+    agent-do-prompt-router.py
+    agent-do-pretooluse-check.py
+    stop-quality-gate.sh           # advisory DPT scoring at Stop
+    stop-quality-gate.py
+    hooks.json.example
+    README.md
+```
+
+The installer writes thin wrappers at `~/.claude/hooks/` and `~/.codex/hooks/`
+that delegate to these canonical files. See "Upgrade Model" above.
+
+## The 3-Layer Hook System
+
+agent-do scopes itself to three hook events: SessionStart, UserPromptSubmit,
+PreToolUse. (Codex adds an advisory Stop hook for DPT scoring.) Anything else
+you might want at Stop (auto-commit, notifications, formatters) is personal
+workflow and belongs in your dotfiles, not in agent-do.
 
 ### Layer 1: SessionStart: PATH + Context Injection
 
-**File:** `hooks/agent-do-session-start.sh`
+**File:** `hooks/claude/agent-do-session-start.sh` (Claude), `hooks/codex/agent-do-session-start.py` (Codex)
 
 Runs once per Claude Code session. Two jobs:
 - **Adds agent-do to PATH** via `CLAUDE_ENV_FILE` so all `Bash` tool calls can find it
@@ -78,7 +106,7 @@ Path auto-detection chain (no hardcoded paths):
 
 ### Layer 2: UserPromptSubmit: Prompt Routing
 
-**File:** `hooks/agent-do-prompt-router.py`
+**File:** `hooks/claude/agent-do-prompt-router.py` (Claude) and `hooks/codex/agent-do-prompt-router.py` (Codex)
 
 Analyzes every user prompt and suggests relevant agent-do tools only when the match is strong enough to be useful. When `ANTHROPIC_API_KEY` is available, the hook can use Sonnet 4.6 adaptive thinking over the compact full `agent-do` catalog. The model chooses from real registered tools and returns concise, exact commands; weak matches stay silent.
 
@@ -92,7 +120,7 @@ Use `AGENT_DO_HOOK_AI=off` for deterministic-only hook behavior, `auto` for best
 
 ### Layer 3: PreToolUse: Command Interception
 
-**File:** `hooks/agent-do-pretooluse-check.py` (shared by Claude Code and Codex)
+**File:** `hooks/claude/agent-do-pretooluse-check.py` (Claude) and `hooks/codex/agent-do-pretooluse-check.py` (Codex; runpy wrapper at `~/.codex/hooks/` forwards to the same canonical logic).
 
 Watches every `Bash` tool call. When an agent tries to run a raw command that has an agent-do equivalent (e.g., `xcrun simctl`, `vercel deploy`, `kubectl`), it injects a hard nudge with the closest native replacement command and any relevant setup hint.
 
@@ -121,22 +149,13 @@ Intercepted commands include:
 
 Safe commands are skipped (git, npm, python, basic shell tools, localhost curl, etc.).
 
-### Layer 4: Stop: Safe Auto-Commit
+### Codex-only Stop hook: advisory DPT scoring
 
-**Claude file:** `hooks/auto-commit.sh`
-**Codex file:** `hooks/codex/auto-commit.sh` (adds coord-focus and env-var scoping)
+**File:** `hooks/codex/stop-quality-gate.sh` (dispatcher) + `hooks/codex/stop-quality-gate.py` (scoring helper)
 
-Runs at the end of every agent turn. Auto-commits the work the agent just shipped so it never gets lost between sessions, tagged with the agent's session id for clean bisectable history.
+Runs at the end of every Codex turn. The Python helper looks for an active `agent-do browse` session, calls `agent-do dpt score` against the current page, and returns a structured DPT report. The dispatcher emits that as `additionalContext` so the model sees the score before its next move. Pure advisory; never blocks.
 
-**Safety: respects pre-commit hooks.** Never uses `--no-verify`. The flow:
-
-1. Try a clean commit. If pre-commit passes, done.
-2. If pre-commit auto-fixed files in place (black, ruff, prettier, eslint --fix), re-stage the modified files and retry once.
-3. If commit still fails, leave the work staged, write a recovery breadcrumb at `.handoff/auto-commit-blocked-<session>.md`, fire a macOS notification (Basso sound), and exit non-zero.
-
-The breadcrumb has the full pre-commit output, the staged file list, and recovery instructions. Work is recoverable; nothing is silently bypassed. Pre-commit hooks exist to catch real things (leaked secrets, broken syntax, lint violations); silently bypassing them is exactly the worst kind of automation failure.
-
-**Codex scoping:** the Codex version restricts auto-commit to paths declared in `CODEX_AUTO_COMMIT_PATHS` / `AGENT_AUTO_COMMIT_PATHS` env vars or the current `agent-do coord focus` paths. A repo-wide focus is treated as a coordination signal, not a commit allowlist; the hook falls back to "commit staged files only" or "skip" rather than ever bulk-committing the whole tree.
+No Claude equivalent ships. If you want DPT scoring at Claude Stop too, register `hooks/codex/stop-quality-gate.sh` under a Claude Stop entry yourself; nothing about the script is Codex-specific beyond the install path.
 
 ## Registering Hooks in settings.json
 
@@ -181,21 +200,11 @@ Claude Code hooks must be registered in `~/.claude/settings.json`. They are NOT 
         ]
       }
     ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/auto-commit.sh",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
   }
 }
 ```
+
+agent-do does not register a Claude Stop hook. If you want auto-commit, DPT scoring at turn end, formatters, or notifications, register your own scripts under Stop separately. agent-do scopes itself to agent-first tooling nudges and project bootstrap; everything else is your call.
 
 If you already have hooks in `settings.json`, merge the agent-do entries into the existing arrays for each event.
 
@@ -300,8 +309,11 @@ To switch Claude PreToolUse to **block mode**, edit `hooks/agent-do-pretooluse-c
 ```
 Coding Agent Session
     │
-    ├─ SessionStart ──→ agent-do-session-start.sh
-    │   └─ Adds agent-do to PATH + injects project-aware tool reminder
+    ├─ SessionStart ──→ agent-do-session-start
+    │   └─ Adds agent-do to PATH + injects project-aware tool reminder.
+    │     Prompts to bootstrap project-local agent-do state (zpc / manna /
+    │     context) with a macOS dialog. Reports bootstrap result with a
+    │     notification + log on completion.
     │
     ├─ UserPromptSubmit ──→ agent-do-prompt-router.py
     │   └─ AI-classifies prompt intent (coord / tools / docs / design /
@@ -309,17 +321,16 @@ Coding Agent Session
     │     AI router is unavailable; state-grounded paths still fire.
     │
     ├─ PreToolUse (Bash) ──→ agent-do-pretooluse-check.py
-    │   └─ One hook, both runtimes. Codex supports additionalContext as
-    │     of May 2026; same nudge shows up in both Claude Code and Codex.
-    │     Codex install adds a thin runpy wrapper at ~/.codex/hooks/.
+    │   └─ Same hook in both runtimes. Codex supports additionalContext as
+    │     of May 2026; the wrapper at ~/.codex/hooks/ delegates to the
+    │     same canonical logic.
     │
-    └─ Stop ──→ auto-commit.sh
-        └─ Safe-commit pattern: respects pre-commit hooks, retries once
-          after auto-fix, fails loudly with .handoff breadcrumb + macOS
-          notification. Codex variant adds coord-focus / env scoping.
+    └─ Stop (Codex only) ──→ stop-quality-gate.sh
+        └─ Optional advisory DPT scoring of the current agent-do browse
+          session, surfaced as additionalContext. Never blocks.
 ```
 
-All four hooks work independently. You can install any subset.
+All hooks work independently. You can install any subset.
 
 ## Uninstalling
 

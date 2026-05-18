@@ -35,17 +35,16 @@ cp hooks/codex/hooks.json.example ~/.codex/hooks.json
 
 Only hooks that nudge agents toward agent-do tools, manage agent-do state, or
 implement agent-do conventions ship here. Personal productivity hooks
-(screenshot shorthand, prompt annotation, generic OS notifications) belong in
-your own dotfiles, not in this repo.
+(screenshot shorthand, prompt annotation, git auto-commit, generic OS
+notifications) belong in your own dotfiles, not in this repo.
 
 | File | Role |
 |---|---|
 | `agent-do-session-start.py` | Codex SessionStart: agent-do project context, tooling reminder, bootstrap dialog with macOS notification + log on completion. |
 | `agent-do-prompt-router.py` | Codex UserPromptSubmit: AI-classified routing nudges toward agent-do tools. |
 | `agent-do-pretooluse-check.py` | Codex PreToolUse: raw-command nudges (`agent-do api` instead of `from anthropic import` etc.). |
-| `stop-quality-gate.sh` | Codex Stop dispatcher: runs `stop-quality-gate.py` for advisory DPT scoring (uses `agent-do browse`+`agent-do dpt`), then chains to `auto-commit.sh`. |
-| `stop-quality-gate.py` | Codex DPT scoring helper used by the dispatcher; calls `agent-do dpt score` against the active `agent-do browse` session. |
-| `auto-commit.sh` | Codex Stop: safe-commit pattern (no `--no-verify`, retry-on-auto-fix, loud-fail with `.handoff/` breadcrumb) plus `agent-do coord focus` / env-var scoping. |
+| `stop-quality-gate.sh` | Codex Stop: advisory DPT scoring of the current agent-do browse session, surfaced as additionalContext for the model. Does not block. |
+| `stop-quality-gate.py` | DPT scoring helper called by `stop-quality-gate.sh`; uses `agent-do browse` and `agent-do dpt`. |
 | `hooks.json.example` | The Codex hook registration template. Copy to `~/.codex/hooks.json` and merge with existing entries. |
 
 ## Repo resolution

@@ -1,15 +1,18 @@
 #!/bin/bash
-# Stop hook: advisory quality report + auto-commit + notification when Codex finishes
+# Stop hook: advisory DPT quality report when Codex finishes a turn.
 #
-# Normal workflow hooks must not block. Missing verification is surfaced as
-# context; auto-commit and notification should still run.
+# Runs stop-quality-gate.py which scores the current agent-do browse session
+# via agent-do dpt and surfaces the result as additionalContext for the model.
+# This hook does not block; missing verification is surfaced as context only.
+#
+# Auto-commit is not chained here. agent-do does not ship git automation.
+# If you want auto-commit at Stop, register your own auto-commit script under
+# a separate Stop hook entry in ~/.codex/hooks.json.
 
 set -euo pipefail
 
 INPUT=$(cat)
 RESULT=$(printf '%s' "$INPUT" | python3 ~/.codex/hooks/stop-quality-gate.py)
-
-~/.codex/hooks/auto-commit.sh 2>/dev/null || true
 
 printf '%s\n' "$RESULT"
 
