@@ -1863,10 +1863,68 @@ tools:
     commands:
       convert: Convert format
       trim: Trim audio
-      transcribe: Transcribe audio
+      transcribe: Transcribe audio (local file, local Whisper only — for URL/API/batch use agent-transcribe)
     examples:
     - intent: transcribe recording.mp3
       command: agent-audio transcribe recording.mp3
+    concurrency: mixed
+  transcribe:
+    description: Source-to-transcript ingestion pipeline (YouTube URLs, authenticated downloads, Whisper API + local Whisper + caption fallbacks, batch, cost preflight, structured JSON)
+    capabilities:
+    - transcribe YouTube videos by URL or ID (public and members-only)
+    - transcribe local audio/video files
+    - use authenticated agent-do browse sessions for members-only content
+    - call OpenAI Whisper API with automatic ffmpeg chunking for large audio
+    - fall back to local Whisper, YouTube auto-captions, or yt-dlp VTT subtitles
+    - batch transcribe from stdin or a file of URLs
+    - estimate API cost before committing (preflight, never blocks)
+    - cache results per source/method to skip repeat work
+    commands:
+      doctor: Report dependency, credential, and browse-session readiness
+      snapshot: Report cache state, available browse sessions, default method order
+      cost: Estimate Whisper API cost for one source or a batch (informational preflight)
+      transcribe: Transcribe a source to text+JSON (default verb when first arg is a URL/ID/path)
+    examples:
+    - intent: transcribe a public YouTube video
+      command: agent-do transcribe https://youtube.com/watch?v=dQw4w9WgXcQ
+    - intent: transcribe a members-only YouTube video using saved auth
+      command: agent-do transcribe https://youtube.com/watch?v=XXX --browse-session youtube
+    - intent: estimate cost for a batch before transcribing
+      command: agent-do transcribe cost --batch-file urls.txt --json
+    - intent: batch transcribe with structured output
+      command: agent-do transcribe --batch-file urls.txt --browse-session youtube --output-dir ./transcripts --json
+    - intent: free fallback only (no Whisper API)
+      command: agent-do transcribe <url> --prefer-free
+    - intent: check tool readiness as JSON
+      command: agent-do transcribe doctor --json
+    routing:
+      discover_keywords:
+      - transcribe
+      - transcription
+      - youtube transcript
+      - video transcript
+      - audio transcript
+      - speech to text
+      - whisper
+      - caption
+      - subtitle
+      - yt-dlp
+      prompt_patterns:
+      - \btranscrib\w*\b
+      - \btranscript\b
+      - \byoutube.*(transcript|caption|subtitle|transcribe)\b
+      - \b(speech|audio|video).*to.*text\b
+      - \bwhisper\s+api\b
+      - \bcaption\w*\b
+      recommended_entrypoints:
+      - agent-do transcribe doctor --json
+      - agent-do transcribe cost <url> --json
+      - agent-do transcribe <url> --browse-session youtube --json
+      - agent-do transcribe --batch-file urls.txt --browse-session youtube --output-dir transcripts --json
+      default_command: doctor
+    credentials:
+      optional:
+      - OPENAI_API_KEY
     concurrency: mixed
   hardware:
     description: Unified hardware device control across serial, bluetooth, USB, printers, and MIDI
