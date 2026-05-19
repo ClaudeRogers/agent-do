@@ -40,6 +40,33 @@ UI_SKIP_RE = re.compile(
     re.I,
 )
 
+# HTML files that are PLUMBING, not user-visible UI. Browser extensions have a
+# pile of host pages (chrome.offscreen, service-worker hosts, message-relay
+# iframes) that satisfy the .html extension but contain no visual surface to
+# evaluate. Same for popup/sidepanel host shells that exist purely so the
+# extension API has a frame to attach to.
+NON_UI_HTML_BASENAMES = {
+    "offscreen.html",       # chrome.offscreen.createDocument host
+    "background.html",      # MV2 background page
+    "service-worker.html",  # MV3 SW host
+    "sw.html",
+    "worker.html",
+    "iframe.html",          # message-relay iframes
+    "inject.html",          # content-script bootstrap
+    "sandbox.html",         # extension sandbox frame
+    "capture.html",         # tabCapture/displayMedia capture host (common name)
+    "relay.html",
+}
+
+# Whole-directory exclusions: paths inside browser extensions or other
+# non-visual artefact trees. We're not running design checks on
+# `*-extension/`, `chrome-extension/`, `firefox-extension/`, etc.
+NON_UI_DIR_RE = re.compile(
+    r"(?:^|/)(?:[a-z0-9_-]+-extension|chrome-extension|firefox-extension|"
+    r"webextension|web-ext|browser-extension|extension)/",
+    re.I,
+)
+
 WRITING_DIR_HINTS = ("/the_book/", "/novel/", "/manuscript/", "/chapters/", "/writing/")
 WRITING_EXTENSIONS = {".md", ".markdown", ".txt"}
 WRITING_SKIP_RE = re.compile(r"(BRIEF|REPORT|README|OUTLINE)", re.I)
@@ -96,6 +123,13 @@ def ui_files(files: list[str]) -> list[str]:
         ext = Path(path).suffix.lower()
         stem = Path(path).stem  # name without extension
         if UI_SKIP_RE.search(name):
+            continue
+        # Skip browser-extension trees outright — no visual surface to evaluate.
+        if NON_UI_DIR_RE.search(path):
+            continue
+        # Skip known plumbing HTML basenames (offscreen.html, background.html,
+        # etc.) even when they live outside an extension directory.
+        if ext in {".html", ".htm"} and name in NON_UI_HTML_BASENAMES:
             continue
         # Direct UI extension is a positive match.
         if ext in UI_EXTENSIONS:
