@@ -2837,35 +2837,98 @@ tools:
       - OKTA_API_TOKEN
     concurrency: mixed
   render:
-    description: Control Render.com services, deploys, databases, and env vars
+    description: Full-surface Render.com control — services (create/update/delete/lifecycle), deploys (trigger/show/cancel/rollback), one-off jobs, cron runs, env vars + secret files, env groups, postgres lifecycle + creds + recovery, key value, blueprints, custom domains + headers + routes, persistent disks + snapshots, dedicated IPs, registry credentials, projects + environments, webhooks, notifications, maintenance, audit logs, owners, observability (logs + metrics)
     capabilities:
-    - list and manage services
-    - trigger and view deploys
-    - view logs and metrics
-    - manage environment variables
-    - manage PostgreSQL databases
-    - view custom domains and projects
+    - create and manage services (web, worker, static, private, cron)
+    - trigger, view, cancel, and roll back deploys
+    - run and cancel one-off jobs
+    - trigger and cancel cron job runs
+    - manage env vars and secret files at service and env-group scope
+    - link env groups to services
+    - full PostgreSQL lifecycle (create, update, delete, suspend, resume, restart, failover, recovery, exports, credentials, connection info)
+    - full Key Value (Redis-compatible) lifecycle
+    - validate render.yaml blueprints, manage existing blueprints, view sync history
+    - custom domains add/show/verify/delete; HTTP headers and static-site routes
+    - persistent disks with snapshots and restore
+    - dedicated IPs, registry credentials for private Docker registries
+    - projects and environments with resource linking
+    - webhooks for deploy and lifecycle events
+    - notification settings and per-service overrides
+    - audit log retrieval and maintenance windows
+    - structured logs and metrics with filters
+    - cross-account snapshot
     commands:
-      services: List all services
-      show: Detailed service info
-      deploy: Trigger deploy
-      deploys: List recent deploys
-      logs: View service logs
+      owners: List workspaces (for --owner resolution)
+      whoami: Show authenticated user
+      audit: Audit log entries
+      services: List services
+      show: Service details
+      create: 'Create service: create <web|worker|static|private|cron> <name> [opts]'
+      update: Update service settings
+      delete: Delete a service (--yes required)
+      cache-purge: Purge build cache
+      events: Recent service events
+      instances: Running instance list
       restart: Restart service
       suspend: Suspend service
       resume: Resume service
-      scale: Scale instances
+      scale: Scale instance count
+      autoscaling: 'Autoscaling: show|enable|disable'
+      deploy: 'Trigger deploy, or deploy {show|cancel} for sub-ops'
+      deploys: List recent deploys
+      rollback: Roll back to a prior deploy
+      jobs: List one-off jobs
+      job: 'One-off job ops: run|show|cancel'
+      cron: 'Cron job ops: run|cancel'
       env: List env vars
-      env-set: Set env var
+      env-set: Upsert env var
       env-del: Delete env var
-      db: PostgreSQL management (list, show)
+      secret: 'Per-service secret files: list|get|set|del'
+      env-group: 'Env groups: list|show|create|delete|rename|link|unlink|set|get|del-var|secret'
+      db: 'Postgres: list|show|create|update|delete|suspend|resume|restart|failover|connect-info|backup|backups|recover|creds'
+      kv: 'Key Value: list|show|create|update|delete|connect-info|suspend|resume'
       domains: List custom domains
-      metrics: View service metrics
-      projects: List projects
+      domain: 'Custom domain ops: add|show|del|verify'
+      header: 'HTTP header rules: list|add|del'
+      route: 'Static-site routes: list|add|del'
+      blueprint: 'Blueprints: list|show|validate|update|delete|syncs'
+      disk: 'Persistent disks: list|show|create|update|delete|snapshots|restore'
+      dedicated-ip: 'Dedicated IPs: list|show|create|delete'
+      registry: 'Docker registry creds: list|show|add|delete'
+      projects: List projects (shorthand)
+      project: 'Project ops: list|show|create|update|delete'
+      environment: 'Environment ops: list|show|create|delete|link|unlink'
+      webhook: 'Webhooks: list|show|create|update|delete|events'
+      notify: 'Notifications: show|update|overrides|override'
+      maintenance: 'Maintenance windows: list|show|reschedule|trigger'
+      metrics: Service metrics
+      logs: Structured logs with filters
       snapshot: Full account state as JSON
     examples:
     - intent: list my render services
       command: agent-render services
+    - intent: create a new web service on render from a github repo
+      command: agent-render create web my-api --repo https://github.com/me/api --build "npm ci && npm run build" --start "npm start"
+    - intent: create a render cron job
+      command: agent-render create cron daily-task --repo https://github.com/me/jobs --schedule "0 12 * * *" --start "node daily.js"
+    - intent: dry-run a render service create to see the request body
+      command: agent-render create web my-api --repo https://github.com/me/api --build "npm ci" --start "npm start" --dry-run
+    - intent: create a render postgres database
+      command: agent-render db create main-db --plan basic_1gb --version 16 --region oregon
+    - intent: list render env groups
+      command: agent-render env-group list
+    - intent: link a render env group to a service
+      command: agent-render env-group link shared-env my-api
+    - intent: validate a render.yaml blueprint
+      command: agent-render blueprint validate render.yaml
+    - intent: roll back a render deploy
+      command: agent-render rollback my-api dep-xxxxx
+    - intent: trigger a render cron job manually
+      command: agent-render cron run daily-task
+    - intent: add a custom domain on render
+      command: agent-render domain add my-api example.com
+    - intent: create a webhook for render deploys
+      command: agent-render webhook create --name slack --url https://hooks.slack.com/... --event deploy_ended
     - intent: deploy my-api on render
       command: agent-render deploy my-api
     - intent: show render service details
