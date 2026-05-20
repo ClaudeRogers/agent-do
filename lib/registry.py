@@ -132,7 +132,7 @@ def get_tool_readiness(info: dict) -> dict:
 def get_tool_credentials(info: dict) -> dict:
     """Return credential metadata for a tool."""
     credentials = info.get('credentials') or {}
-    return {
+    result = {
         'required': [item for item in credentials.get('required', []) if item],
         'optional': [item for item in credentials.get('optional', []) if item],
         'one_of': [
@@ -141,6 +141,13 @@ def get_tool_credentials(info: dict) -> dict:
             if group
         ],
     }
+    features = credentials.get('features')
+    if isinstance(features, dict):
+        result['features'] = features
+    notes = credentials.get('notes')
+    if isinstance(notes, list):
+        result['notes'] = [str(note) for note in notes if str(note).strip()]
+    return result
 
 
 def get_tool_secret_envs(info: dict) -> list[str]:

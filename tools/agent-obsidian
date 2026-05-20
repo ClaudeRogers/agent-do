@@ -117,12 +117,27 @@ ENVIRONMENT VARIABLES
   AGENT_OBSIDIAN_VAULT_PATH  Filesystem path to local Obsidian vault
   VOYAGE_API_KEY             Required for default voyage-4-large embeddings
   OPENAI_API_KEY             Required for GPT-5.5 chat and OpenAI embedding fallback
+  COHERE_API_KEY             Optional future multimodal embedding provider
   AGENT_OBSIDIAN_EMBED_MODEL Override embedding model
   AGENT_OBSIDIAN_SYNTHESIS_MODEL
                              Override synthesis model
   AGENT_OBSIDIAN_NO_AUTO_INSTALL=1
                              Disable the one-time symlink into ~/.local/bin
                              when only the app bundle is detected
+
+API KEYS
+  No key is needed for read, save, keyword search, tasks, graph, audit,
+  templates, or local indexing.
+
+  For semantic search:
+    agent-do creds store VOYAGE_API_KEY --stdin
+    agent-do obsidian embed refresh --json
+
+  For vault chat and OpenAI embedding fallback:
+    agent-do creds store OPENAI_API_KEY --stdin
+
+  To inspect the full credential contract:
+    agent-do creds required obsidian
 
 EXAMPLES
   agent-obsidian doctor --json
@@ -147,8 +162,9 @@ EXAMPLES
   agent-do +live(scope=desktop,app=Obsidian,ttl=15m) obsidian eval 'app.vault.getFiles().length'
   agent-do +live(scope=desktop,app=Obsidian,ttl=15m) obsidian plugin reload templater-obsidian
 
-Requires Obsidian to be installed locally; many commands also require it to
-be running. See https://help.obsidian.md/cli for the underlying CLI.
+Local-index commands require a readable vault path. Live app/plugin/dev
+commands require Obsidian and its CLI. See https://help.obsidian.md/cli for
+the underlying CLI.
 EOF
 }
 
@@ -431,16 +447,16 @@ cmd_doctor() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --fix)   fix=1; shift ;;
-            --json)  format="json"; shift ;;
+            --json)  format="json"; OUTPUT_FORMAT="json"; shift ;;
             -h|--help)
                 cat <<'EOF'
-agent-obsidian doctor — Check the obsidian-cli wiring
+agent-obsidian doctor — Check local vault index mode and obsidian-cli wiring
 
   --fix     If only the Obsidian.app bundle is present, create a symlink
             at ~/.local/bin/obsidian. No downloads, no sudo.
   --json    Emit JSON.
 
-Exit code: 0 when the CLI is reachable, 1 otherwise.
+Exit code: 0 when local vault index mode or the CLI is reachable, 1 otherwise.
 EOF
                 return 0
                 ;;

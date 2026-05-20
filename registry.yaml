@@ -1294,6 +1294,32 @@ tools:
       - VOYAGE_API_KEY
       - OPENAI_API_KEY
       - COHERE_API_KEY
+      features:
+        VOYAGE_API_KEY:
+          unlocks: default voyage-4-large semantic embeddings and Voyage rerank-2.5 reranking
+          required_for:
+          - embed refresh
+          - semantic search with default model
+          - hybrid search reranking
+          recommended: true
+          setup: agent-do creds store VOYAGE_API_KEY --stdin
+        OPENAI_API_KEY:
+          unlocks: GPT-5.5 vault chat and text-embedding-3-large fallback embeddings
+          required_for:
+          - chat
+          - OpenAI embedding fallback
+          recommended: true
+          setup: agent-do creds store OPENAI_API_KEY --stdin
+        COHERE_API_KEY:
+          unlocks: future multimodal vault embeddings with Cohere embed-v4.0
+          required_for:
+          - multimodal asset indexing
+          recommended: false
+          setup: agent-do creds store COHERE_API_KEY --stdin
+      notes:
+      - Obsidian read, save, keyword search, tasks, graph, audit, and local indexing work without API keys.
+      - Add VOYAGE_API_KEY for the recommended semantic vault index.
+      - Add OPENAI_API_KEY for vault chat and the OpenAI embedding fallback.
     routing:
       discover_keywords:
       - obsidian

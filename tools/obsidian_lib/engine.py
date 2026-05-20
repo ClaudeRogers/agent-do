@@ -344,6 +344,58 @@ def credential_status(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def credential_contract(rt: Runtime) -> dict[str, Any]:
+    registry = model_registry(rt)
+    keys: dict[str, dict[str, Any]] = {}
+    for role, profile in registry.items():
+        if not isinstance(profile, dict):
+            continue
+        env_name = str(profile.get("env") or "")
+        if not env_name:
+            continue
+        entry = keys.setdefault(
+            env_name,
+            {
+                "present": bool(os.environ.get(env_name)),
+                "source": "env" if os.environ.get(env_name) else "missing",
+                "roles": [],
+                "models": [],
+            },
+        )
+        entry["roles"].append(role)
+        model = profile.get("model")
+        if model and model not in entry["models"]:
+            entry["models"].append(model)
+    return keys
+
+
+def feature_readiness(rt: Runtime) -> dict[str, Any]:
+    primary = model_profile(rt, "embedding")
+    fallback = model_profile(rt, "embedding_fallback")
+    synthesis = model_profile(rt, "synthesis")
+    multimodal = model_profile(rt, "multimodal_embedding")
+    primary_count = embedding_current_count(rt, primary)
+    fallback_count = embedding_current_count(rt, fallback)
+    return {
+        "read_save_keyword_index": {"ready": True, "requires": []},
+        "semantic_search": {
+            "ready": primary_count > 0 or fallback_count > 0 or credential_status(primary)["available"] or credential_status(fallback)["available"],
+            "requires_any": [str(primary.get("env")), str(fallback.get("env"))],
+            "current_embeddings": primary_count or fallback_count,
+        },
+        "vault_chat": {
+            "ready": credential_status(synthesis)["available"],
+            "requires": [str(synthesis.get("env"))],
+            "model": synthesis.get("model"),
+        },
+        "multimodal_assets": {
+            "ready": credential_status(multimodal)["available"],
+            "requires": [str(multimodal.get("env"))],
+            "model": multimodal.get("model"),
+        },
+    }
+
+
 def require_api_key(profile: dict[str, Any]) -> str:
     env_name = str(profile.get("env") or "")
     value = os.environ.get(env_name) if env_name else ""
@@ -459,8 +511,28 @@ def raise_walk_errors(vault: Path, diagnostics: dict[str, Any]) -> None:
 
 def vault_access_error(vault: Path) -> dict[str, Any] | None:
     try:
-        with os.scandir(vault):
-            return None
+        if not vault.exists():
+            return {
+                "path": str(vault),
+                "error": "vault path does not exist",
+                "errno": None,
+                "type": "FileNotFoundError",
+            }
+        if not vault.is_dir():
+            return {
+                "path": str(vault),
+                "error": "vault path is not a directory",
+                "errno": None,
+                "type": "NotADirectoryError",
+            }
+        if not os.access(vault, os.R_OK):
+            return {
+                "path": str(vault),
+                "error": "vault path is not readable",
+                "errno": None,
+                "type": "PermissionError",
+            }
+        return None
     except OSError as exc:
         return walk_error_payload(exc)
 
@@ -1156,6 +1228,8 @@ def cmd_doctor(rt: Runtime, args: argparse.Namespace) -> int:
         "index_path": str(rt.db_path),
         "conventions_path": str(rt.agent_root / "conventions.yaml"),
         "write_lock": str(rt.lock_path),
+        "credentials": credential_contract(rt),
+        "features": feature_readiness(rt),
         **counts,
     }
     if access_error:

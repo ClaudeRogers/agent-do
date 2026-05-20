@@ -128,6 +128,10 @@ agent-do creds store RENDER_API_KEY --stdin
 agent-do creds check --tool render
 ```
 
+`creds required` is the public setup contract for every tool. It shows required
+keys, optional keys, and feature-specific notes when a tool can run partially
+without a key.
+
 When a human or harness wants natural-language routing:
 
 ```bash
@@ -159,6 +163,37 @@ agent-do browse login https://app.example.com
 agent-do browse login done --save mysite
 agent-do browse session load mysite
 ```
+
+### Obsidian Vaults
+
+`agent-do obsidian` can run in local-index mode without the Obsidian app or
+CLI. Point it at a vault path, build the SQLite/FTS index, then add semantic
+embeddings if you want hybrid retrieval.
+
+```bash
+export AGENT_OBSIDIAN_VAULT_PATH="$HOME/path/to/My Vault"
+
+agent-do obsidian doctor --json
+agent-do obsidian refresh --full --json
+agent-do obsidian search "project decision" --mode keyword --json
+```
+
+API keys are feature-specific:
+
+```bash
+agent-do creds required obsidian
+
+# Recommended for semantic search and reranking
+agent-do creds store VOYAGE_API_KEY --stdin
+agent-do obsidian embed refresh --json
+
+# Required for vault chat and OpenAI embedding fallback
+agent-do creds store OPENAI_API_KEY --stdin
+```
+
+No API key is needed for read, save, keyword search, tasks, graph, audit,
+templates, or local indexing. The Obsidian CLI is only needed for named live
+vault fallback and `+live` app/plugin/dev commands.
 
 ### External Docs And Project Memory
 

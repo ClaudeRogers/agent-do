@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `agent-do obsidian` is now release-ready for local vault usage: `doctor --json` reports local-index mode, note/chunk/embedding counts, feature readiness, and credential readiness without exposing secret values. `agent-do --health obsidian` now treats a readable vault path as ready even when the Obsidian CLI is not installed.
+- `agent-do creds required <tool>` now supports feature-level credential presentation from `registry.yaml`, so tools can explain which API keys are required, optional, or only needed for specific capabilities. The Obsidian registry entry now documents no-key vault operations plus `VOYAGE_API_KEY`, `OPENAI_API_KEY`, and `COHERE_API_KEY` setup.
+- The README now documents Obsidian local-index setup, semantic vault search setup, vault chat setup, and the public credential-discovery contract through `agent-do creds required <tool>`.
 - `lib/snapshot.sh` `snapshot_field` now encodes string values via `python3`'s `json` module when available, covering the full RFC 8259 control range (`U+0000`–`U+001F` plus `\\` and `\"`); a manual fallback covering the named C0 controls is used when `python3` is unavailable. `snapshot_error` now routes its message through the same encoder so error JSON is consistent with snapshot JSON.
 - `lib/snapshot.sh` `snapshot_end` now bounds invalid-UTF-8 failures to the offending value: each string is tried with strict UTF-8 decode and, on failure, re-decoded with `errors="replace"` so its bad bytes become U+FFFD. Sibling string fields keep full encoder semantics, snapshot output remains valid UTF-8 and valid JSON, and the helper no longer silently downgrades the whole snapshot to manual fallback when one value contains invalid bytes.
 

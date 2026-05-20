@@ -529,6 +529,15 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     require(r.returncode == 0, f"local doctor should work without CLI: {r.stdout} / {r.stderr}")
     payload = json.loads(r.stdout)
     require(payload["mode"] == "local-index", f"doctor should report local mode: {payload}")
+    require(payload["features"]["read_save_keyword_index"]["ready"] is True,
+            f"doctor should mark local read/save/index feature ready: {payload}")
+    require("VOYAGE_API_KEY" in payload["credentials"],
+            f"doctor should expose semantic credential readiness without values: {payload}")
+
+    r = run(str(AGENT_DO), "--health", "obsidian", env=env)
+    require(r.returncode == 0, f"health obsidian should accept local-index mode: {r.stdout} / {r.stderr}")
+    require("OK" in r.stdout and "local vault index mode" in r.stdout,
+            f"health should report local-index readiness: {r.stdout}")
 
     r = run(str(AGENT_OBSIDIAN), "refresh", "--full", "--verbose", "--json", env=env)
     require(r.returncode == 0, f"refresh failed: {r.stdout} / {r.stderr}")
