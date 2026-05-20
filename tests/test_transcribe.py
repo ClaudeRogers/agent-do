@@ -19,11 +19,15 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_DIR = ROOT / "tools" / "agent-transcribe"
+LIB_DIR = ROOT / "lib"
 sys.path.insert(0, str(TOOL_DIR))
+sys.path.insert(0, str(LIB_DIR))
 
 from lib.cookies import safe_cookie_file, list_sessions  # noqa: E402
 from lib.engines import order_methods  # noqa: E402
 from lib.sources import classify_source, source_hash  # noqa: E402
+from lib.ytdlp import normalize_extractor_args  # noqa: E402
+from registry import load_registry  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +142,44 @@ def test_prefer_captions_promotes_captions_above_local_whisper():
 
 
 # ---------------------------------------------------------------------------
+# yt-dlp extractor args
+# ---------------------------------------------------------------------------
+
+def test_youtube_player_client_maps_to_extractor_args():
+    args = normalize_extractor_args([], "ios")
+    require(args == ["youtube:player_client=ios"], f"unexpected args: {args}")
+
+
+def test_raw_and_shortcut_extractor_args_combine():
+    args = normalize_extractor_args(["youtube:skip=dash"], "ios,android")
+    require(args == ["youtube:skip=dash", "youtube:player_client=ios,android"],
+            f"unexpected combined args: {args}")
+
+
+def test_extractor_args_reject_flag_smuggling():
+    try:
+        normalize_extractor_args(["--cookies=/tmp/secret"], None)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for flag-shaped extractor args")
+
+
+def test_cli_accepts_youtube_player_client_option():
+    proc = run_tool("--youtube-player-client", "ios", "--json")
+    require(proc.returncode == 2, f"missing source should still exit 2, got {proc.returncode}")
+    data = json.loads(proc.stdout)
+    require("no source" in data.get("error", ""), f"flag should parse before no-source error: {data}")
+
+
+def test_browser_capture_requires_browse_session():
+    proc = run_tool("https://youtube.com/watch?v=dQw4w9WgXcQ", "--browser-capture", "--json")
+    require(proc.returncode == 2, f"browser capture without session should exit 2, got {proc.returncode}")
+    data = json.loads(proc.stdout)
+    require("--browser-capture requires --browse-session" in data.get("error", ""),
+            f"missing browse-session error should be explicit: {data}")
+
+
+# ---------------------------------------------------------------------------
 # Cookie handoff — security-critical
 # ---------------------------------------------------------------------------
 
@@ -241,8 +283,7 @@ def test_no_source_exits_2_with_clarification():
 # ---------------------------------------------------------------------------
 
 def test_registry_entry_exists():
-    import yaml
-    registry = yaml.safe_load((ROOT / "registry.yaml").read_text())
+    registry = load_registry()
     require("transcribe" in registry["tools"], "transcribe missing from registry")
     entry = registry["tools"]["transcribe"]
     require("doctor" in entry["commands"], "doctor command not declared")
@@ -250,6 +291,13 @@ def test_registry_entry_exists():
     require(entry["concurrency"] == "mixed", "concurrency should be mixed")
     require("OPENAI_API_KEY" in entry.get("credentials", {}).get("optional", []),
             "OPENAI_API_KEY should be declared optional credential")
+    contracts = entry.get("contracts") or {}
+    require("snapshot" in contracts and "cost" in contracts["snapshot"],
+            f"cost should be declared as a snapshot contract: {contracts}")
+    require("interact" in contracts and "transcribe" in contracts["interact"],
+            f"transcribe should be declared as an interact contract: {contracts}")
+    require("save" in contracts and "transcribe" in contracts["save"],
+            f"transcribe should be declared as a save contract: {contracts}")
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +336,11 @@ def main() -> int:
         ("prefer_free_reorders", test_prefer_free_reorders, ()),
         ("explicit_method_single", test_explicit_method_single, ()),
         ("prefer_captions_promotes_captions", test_prefer_captions_promotes_captions_above_local_whisper, ()),
+        ("youtube_player_client_maps_to_extractor_args", test_youtube_player_client_maps_to_extractor_args, ()),
+        ("raw_and_shortcut_extractor_args_combine", test_raw_and_shortcut_extractor_args_combine, ()),
+        ("extractor_args_reject_flag_smuggling", test_extractor_args_reject_flag_smuggling, ()),
+        ("cli_accepts_youtube_player_client_option", test_cli_accepts_youtube_player_client_option, ()),
+        ("browser_capture_requires_browse_session", test_browser_capture_requires_browse_session, ()),
         ("cookie_file_written_and_cleaned_up", test_cookie_file_written_and_cleaned_up, (monkeypatch_set,)),
         ("cookie_values_never_in_output", test_cookie_values_never_appear_in_stdout_or_stderr, (monkeypatch_set,)),
         ("missing_session_raises", test_missing_session_raises, ()),

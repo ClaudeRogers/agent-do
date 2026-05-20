@@ -221,12 +221,20 @@ agent-do zpc decide "Which DB?" --options "postgres,sqlite" --chosen postgres --
 `obsidian` is the agent-facing vault surface. With a local vault path it builds a
 SQLite FTS5 index under `<vault>/.agent-do/obsidian/index.db`, then reads,
 searches, saves, queries, audits, and rewrites notes without requiring
-Obsidian.app to be open. If no local vault path is available, legacy commands
-fall back to the official Obsidian CLI.
+Obsidian.app to be open. It also supports a semantic chunk index: `embed refresh`
+stores Voyage `voyage-4-large` embeddings by default, `search --mode hybrid`
+combines keyword and semantic retrieval with Voyage `rerank-2.5` when available,
+and `context build` returns cited chunks for an agent. If no local vault path is
+available, legacy commands fall back to the official Obsidian CLI.
 
 ```bash
 AGENT_OBSIDIAN_VAULT_PATH="$HOME/Obsidian/Main" agent-do obsidian refresh --full --json
+agent-do obsidian embed status --json
+agent-do obsidian embed refresh --json
 agent-do obsidian search "Trinity Site" --json
+agent-do obsidian search "what did I decide about voice" --mode hybrid --json
+agent-do obsidian context build "what did I decide about voice" --json
+agent-do obsidian chat "what is on my plate today?" --json
 agent-do obsidian save --content "New idea" --related auto --tags idea --json
 agent-do obsidian tasks next --horizon today --json
 agent-do obsidian query "FROM #project WHERE status=active SORT due ASC" --json
@@ -286,6 +294,17 @@ agent-do notify set-recipient me --sms +15551234567 --email me@example.com --pre
 agent-do notify me "Deploy complete" --via sms
 agent-do notify templates
 agent-do notify apply-template build_failed --recipient me
+```
+
+Slack supports both app/bot delivery and user-token delivery. Store a Slack User
+OAuth token once, then `slack dm --as-user` can resolve a person by name, email,
+user ID, or existing DM ID and post as the authenticated Slack user.
+
+```bash
+agent-do creds store SLACK_USER_TOKEN --stdin
+agent-do slack resolve-user --as-user teammate@example.com
+agent-do slack dm --as-user teammate@example.com "Deploy complete"
+agent-do slack send --as-bot "#engineering" "Deploy complete"
 ```
 
 For visible desktop control, use the explicit live modifier:

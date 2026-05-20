@@ -15,6 +15,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ import signal
 import sqlite3
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -50,6 +53,57 @@ EXCLUDED_DIRS = {
     ".trash",
     ".agent-do",
     "node_modules",
+}
+
+
+MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+    "synthesis": {
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "env": "OPENAI_API_KEY",
+        "reasoning_effort": "high",
+        "source": "https://developers.openai.com/api/docs/guides/latest-model",
+        "reason": "current OpenAI latest-model guidance for complex grounded assistants",
+    },
+    "embedding": {
+        "provider": "voyage",
+        "model": "voyage-4-large",
+        "env": "VOYAGE_API_KEY",
+        "dimension": 1024,
+        "max_input_tokens": 32000,
+        "max_batch_items": 1000,
+        "max_batch_tokens": 120000,
+        "max_batch_chars": 120000,
+        "source": "https://docs.voyageai.com/docs/embeddings",
+        "reason": "best general-purpose and multilingual retrieval quality in Voyage 4 family",
+    },
+    "embedding_fallback": {
+        "provider": "openai",
+        "model": "text-embedding-3-large",
+        "env": "OPENAI_API_KEY",
+        "dimension": 3072,
+        "max_input_tokens": 8192,
+        "source": "https://developers.openai.com/api/docs/guides/embeddings",
+        "reason": "OpenAI high-quality fallback embedding model",
+    },
+    "reranker": {
+        "provider": "voyage",
+        "model": "rerank-2.5",
+        "env": "VOYAGE_API_KEY",
+        "max_query_tokens": 8000,
+        "max_document_tokens": 32000,
+        "max_documents": 1000,
+        "source": "https://docs.voyageai.com/docs/reranker",
+        "reason": "Voyage generalist reranker optimized for quality",
+    },
+    "multimodal_embedding": {
+        "provider": "cohere",
+        "model": "embed-v4.0",
+        "env": "COHERE_API_KEY",
+        "dimension": 1024,
+        "source": "https://docs.cohere.com/docs/embeddings",
+        "reason": "content-rich image and text embedding path for future multimodal vault assets",
+    },
 }
 
 
@@ -145,6 +199,7 @@ def ensure_storage(rt: Runtime) -> None:
     (rt.obsidian_root / "operations" / "journals").mkdir(parents=True, exist_ok=True)
     (rt.obsidian_root / "operations" / "backups").mkdir(parents=True, exist_ok=True)
     (rt.obsidian_root / "templates").mkdir(parents=True, exist_ok=True)
+    (rt.obsidian_root / "chat").mkdir(parents=True, exist_ok=True)
     gitignore = rt.agent_root / ".gitignore"
     wanted = [
         "obsidian/index.db",
@@ -152,6 +207,7 @@ def ensure_storage(rt: Runtime) -> None:
         "obsidian/embeddings.db",
         "obsidian/embeddings.db-*",
         "obsidian/.write-lock",
+        "obsidian/chat/",
         "obsidian/operations/",
         "obsidian/relate-validation.jsonl",
     ]
@@ -219,6 +275,7 @@ def default_conventions() -> dict[str, Any]:
             },
             "validation_corpus": ".agent-do/obsidian/relate-validation.jsonl",
         },
+        "models": MODEL_REGISTRY,
         "save": {
             "default_folder_token": "inbox",
             "auto_related": True,
@@ -244,6 +301,61 @@ def load_conventions(rt: Runtime) -> dict[str, Any]:
     cfg = deep_merge(cfg, load_yaml_file(home_default))
     cfg = deep_merge(cfg, load_yaml_file(vault_default))
     return cfg
+
+
+def model_registry(rt: Runtime) -> dict[str, dict[str, Any]]:
+    cfg = load_conventions(rt)
+    configured = cfg.get("models") or {}
+    registry = deep_merge(MODEL_REGISTRY, configured if isinstance(configured, dict) else {})
+    embedding = dict(registry.get("embedding") or {})
+    if os.environ.get("AGENT_OBSIDIAN_EMBED_PROVIDER"):
+        embedding["provider"] = os.environ["AGENT_OBSIDIAN_EMBED_PROVIDER"]
+    if os.environ.get("AGENT_OBSIDIAN_EMBED_MODEL"):
+        embedding["model"] = os.environ["AGENT_OBSIDIAN_EMBED_MODEL"]
+    if os.environ.get("AGENT_OBSIDIAN_EMBED_DIMENSION"):
+        with contextlib.suppress(ValueError):
+            embedding["dimension"] = int(os.environ["AGENT_OBSIDIAN_EMBED_DIMENSION"])
+    registry["embedding"] = embedding
+
+    synthesis = dict(registry.get("synthesis") or {})
+    if os.environ.get("AGENT_OBSIDIAN_SYNTHESIS_MODEL"):
+        synthesis["model"] = os.environ["AGENT_OBSIDIAN_SYNTHESIS_MODEL"]
+    registry["synthesis"] = synthesis
+
+    reranker = dict(registry.get("reranker") or {})
+    if os.environ.get("AGENT_OBSIDIAN_RERANK_MODEL"):
+        reranker["model"] = os.environ["AGENT_OBSIDIAN_RERANK_MODEL"]
+    registry["reranker"] = reranker
+    return registry
+
+
+def model_profile(rt: Runtime, role: str) -> dict[str, Any]:
+    registry = model_registry(rt)
+    if role not in registry:
+        raise AgentObsidianError(f"unknown model role: {role}", code=NEEDS_CLARIFICATION)
+    return dict(registry[role])
+
+
+def credential_status(profile: dict[str, Any]) -> dict[str, Any]:
+    env_name = str(profile.get("env") or "")
+    return {
+        "env": env_name,
+        "available": bool(env_name and os.environ.get(env_name)),
+    }
+
+
+def require_api_key(profile: dict[str, Any]) -> str:
+    env_name = str(profile.get("env") or "")
+    value = os.environ.get(env_name) if env_name else ""
+    if not value:
+        raise AgentObsidianError(
+            f"missing required credential: {env_name}",
+            code=NEEDS_CLARIFICATION,
+            provider=profile.get("provider"),
+            model=profile.get("model"),
+            env=env_name,
+        )
+    return value
 
 
 def dump_frontmatter(data: dict[str, Any]) -> str:
@@ -305,13 +417,88 @@ def relpath(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def note_files(vault: Path) -> Iterable[Path]:
-    for root, dirs, files in os.walk(vault):
+def scan_diagnostics() -> dict[str, Any]:
+    return {
+        "directories_seen": 0,
+        "files_seen": 0,
+        "markdown_files": 0,
+        "non_markdown_files": 0,
+        "excluded_dirs": [],
+        "walk_errors": [],
+    }
+
+
+def walk_error_payload(exc: OSError) -> dict[str, Any]:
+    return {
+        "path": str(getattr(exc, "filename", "") or ""),
+        "error": str(exc),
+        "errno": getattr(exc, "errno", None),
+        "type": exc.__class__.__name__,
+    }
+
+
+def permission_recommendation() -> str:
+    return (
+        "grant this terminal/agent process Files and Folders or Full Disk Access "
+        "for the vault path, or move the vault to a readable location"
+    )
+
+
+def raise_walk_errors(vault: Path, diagnostics: dict[str, Any]) -> None:
+    errors = diagnostics.get("walk_errors") or []
+    if not errors:
+        return
+    raise AgentObsidianError(
+        "vault scan failed",
+        code=1,
+        vault=str(vault),
+        walk_errors=errors,
+        recommendation=permission_recommendation(),
+    )
+
+
+def vault_access_error(vault: Path) -> dict[str, Any] | None:
+    try:
+        with os.scandir(vault):
+            return None
+    except OSError as exc:
+        return walk_error_payload(exc)
+
+
+def note_files(vault: Path, diagnostics: dict[str, Any] | None = None) -> Iterable[Path]:
+    def onerror(exc: OSError) -> None:
+        payload = walk_error_payload(exc)
+        if diagnostics is not None:
+            diagnostics.setdefault("walk_errors", []).append(payload)
+            return
+        raise AgentObsidianError(
+            "vault scan failed",
+            code=1,
+            vault=str(vault),
+            walk_errors=[payload],
+            recommendation=permission_recommendation(),
+        )
+
+    for root, dirs, files in os.walk(vault, onerror=onerror):
         root_path = Path(root)
-        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS and not d.startswith(".")]
+        if diagnostics is not None:
+            diagnostics["directories_seen"] += 1
+            diagnostics["files_seen"] += len(files)
+        kept_dirs = []
+        for dirname in dirs:
+            if dirname in EXCLUDED_DIRS or dirname.startswith("."):
+                if diagnostics is not None:
+                    diagnostics["excluded_dirs"].append(relpath(root_path / dirname, vault))
+                continue
+            kept_dirs.append(dirname)
+        dirs[:] = kept_dirs
         for name in files:
             if name.endswith(NOTE_SUFFIX):
+                if diagnostics is not None:
+                    diagnostics["markdown_files"] += 1
                 yield root_path / name
+            elif diagnostics is not None:
+                diagnostics["non_markdown_files"] += 1
 
 
 def stat_payload(path: Path) -> dict[str, Any]:
@@ -490,6 +677,44 @@ def init_db(conn: sqlite3.Connection) -> None:
           source_line INTEGER,
           style TEXT
         );
+        CREATE TABLE IF NOT EXISTS chunks (
+          chunk_id TEXT PRIMARY KEY,
+          note_path TEXT,
+          ordinal INTEGER,
+          title TEXT,
+          heading_path TEXT,
+          start_line INTEGER,
+          end_line INTEGER,
+          text TEXT,
+          content_hash TEXT,
+          token_estimate INTEGER,
+          mtime_ns INTEGER
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+          chunk_id UNINDEXED,
+          note_path UNINDEXED,
+          title,
+          heading_path,
+          text
+        );
+        CREATE TABLE IF NOT EXISTS embeddings (
+          chunk_id TEXT,
+          provider TEXT,
+          model TEXT,
+          dimension INTEGER,
+          content_hash TEXT,
+          embedding_json TEXT,
+          embedded_at TEXT,
+          PRIMARY KEY (chunk_id, provider, model, dimension)
+        );
+        CREATE TABLE IF NOT EXISTS retrieval_feedback (
+          id TEXT PRIMARY KEY,
+          created_at TEXT,
+          query TEXT,
+          chunk_id TEXT,
+          signal TEXT,
+          payload_json TEXT
+        );
         CREATE TABLE IF NOT EXISTS state (
           key TEXT PRIMARY KEY,
           value TEXT
@@ -502,6 +727,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS tasks_status ON tasks (status);
         CREATE INDEX IF NOT EXISTS tasks_due ON tasks (due);
         CREATE INDEX IF NOT EXISTS tasks_project ON tasks (project);
+        CREATE INDEX IF NOT EXISTS chunks_note ON chunks (note_path);
+        CREATE INDEX IF NOT EXISTS chunks_hash ON chunks (content_hash);
+        CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings (provider, model, dimension);
         """
     )
 
@@ -514,15 +742,19 @@ def connect(rt: Runtime) -> sqlite3.Connection:
     return conn
 
 
-def note_name_maps(vault: Path) -> dict[str, str]:
+def note_name_maps_from_paths(paths: Iterable[Path], vault: Path) -> dict[str, str]:
     mapping: dict[str, str] = {}
-    for path in note_files(vault):
+    for path in paths:
         rp = relpath(path, vault)
         stem = path.stem
         mapping.setdefault(stem.lower(), rp)
         mapping.setdefault(rp.lower(), rp)
         mapping.setdefault(rp[:-3].lower(), rp)
     return mapping
+
+
+def note_name_maps(vault: Path) -> dict[str, str]:
+    return note_name_maps_from_paths(note_files(vault), vault)
 
 
 def resolve_link(target: str, maps: dict[str, str]) -> str:
@@ -559,7 +791,140 @@ def parse_note(path: Path, vault: Path, maps: dict[str, str] | None = None) -> d
     }
 
 
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def estimate_tokens(text: str) -> int:
+    # This is only used to compare a section with provider-published context
+    # limits before sending it to an embedding API. It is not a retrieval budget.
+    return max(1, math.ceil(len(text) / 4))
+
+
+def split_text_for_model(text: str, max_input_tokens: int) -> list[str]:
+    text = text.strip()
+    if not text:
+        return []
+    # The provider publishes a model token window but this tool intentionally
+    # avoids a heavyweight tokenizer dependency. Use a conservative character
+    # guard and prefer natural boundaries when a section is too large.
+    char_limit = max(1, max_input_tokens)
+    if len(text) <= char_limit and estimate_tokens(text) <= max_input_tokens:
+        return [text]
+    min_boundary = max(1, int(char_limit * 0.55))
+    parts: list[str] = []
+    start = 0
+    length = len(text)
+    boundary_markers = ["\n\n", "\n", ". ", "? ", "! ", " "]
+    while start < length:
+        end = min(length, start + char_limit)
+        if end < length:
+            window = text[start:end]
+            boundary = -1
+            marker_len = 0
+            for marker in boundary_markers:
+                pos = window.rfind(marker)
+                if pos >= min_boundary and pos > boundary:
+                    boundary = pos
+                    marker_len = len(marker)
+            if boundary >= 0:
+                end = start + boundary + marker_len
+        part = text[start:end].strip()
+        if part:
+            parts.append(part)
+        start = end
+    return parts
+
+
+def note_chunks(note: dict[str, Any], *, max_input_tokens: int = 32000) -> list[dict[str, Any]]:
+    body = note.get("body") or ""
+    title = note.get("title") or Path(note["path"]).stem
+    lines = body.splitlines()
+    chunks: list[dict[str, Any]] = []
+    heading_stack: list[str] = [str(title)]
+    current_lines: list[str] = []
+    current_start = 1
+    current_heading = " / ".join(heading_stack)
+
+    def flush(end_line: int) -> None:
+        nonlocal current_lines, current_start, current_heading
+        text = "\n".join(current_lines).strip()
+        if not text:
+            current_lines = []
+            return
+        for part in split_text_for_model(text, max_input_tokens):
+            ordinal = len(chunks)
+            chunk_id = hashlib.sha1(f"{note['path']}:{ordinal}:{content_hash(part)}".encode("utf-8")).hexdigest()
+            chunks.append(
+                {
+                    "chunk_id": chunk_id,
+                    "note_path": note["path"],
+                    "ordinal": ordinal,
+                    "title": title,
+                    "heading_path": current_heading,
+                    "start_line": current_start,
+                    "end_line": end_line,
+                    "text": part,
+                    "content_hash": content_hash(part),
+                    "token_estimate": estimate_tokens(part),
+                    "mtime_ns": note["mtime_ns"],
+                }
+            )
+        current_lines = []
+
+    for idx, line in enumerate(lines, start=1):
+        match = HEADING_RE.match(line)
+        if match:
+            flush(idx - 1)
+            level = len(match.group(1))
+            label = match.group(2).strip()
+            heading_stack = heading_stack[:level]
+            while len(heading_stack) < level:
+                heading_stack.append("")
+            if len(heading_stack) == level:
+                heading_stack.append(label)
+            else:
+                heading_stack[level] = label
+            current_heading = " / ".join(part for part in heading_stack if part)
+            current_start = idx
+        elif not current_lines:
+            current_start = idx
+        current_lines.append(line)
+    flush(len(lines))
+    if not chunks and body.strip():
+        part = body.strip()
+        chunk_id = hashlib.sha1(f"{note['path']}:0:{content_hash(part)}".encode("utf-8")).hexdigest()
+        chunks.append(
+            {
+                "chunk_id": chunk_id,
+                "note_path": note["path"],
+                "ordinal": 0,
+                "title": title,
+                "heading_path": str(title),
+                "start_line": 1,
+                "end_line": max(1, len(lines)),
+                "text": part,
+                "content_hash": content_hash(part),
+                "token_estimate": estimate_tokens(part),
+                "mtime_ns": note["mtime_ns"],
+            }
+        )
+    return chunks
+
+
+def delete_chunks_for_note(conn: sqlite3.Connection, path: str) -> None:
+    chunk_ids = [r["chunk_id"] for r in conn.execute("SELECT chunk_id FROM chunks WHERE note_path=?", (path,))]
+    for chunk_id in chunk_ids:
+        conn.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (chunk_id,))
+        conn.execute("DELETE FROM embeddings WHERE chunk_id=?", (chunk_id,))
+    conn.execute("DELETE FROM chunks WHERE note_path=?", (path,))
+
+
 def delete_index_rows(conn: sqlite3.Connection, path: str) -> None:
+    delete_chunks_for_note(conn, path)
     conn.execute("DELETE FROM notes WHERE path = ?", (path,))
     conn.execute("DELETE FROM notes_fts WHERE path = ?", (path,))
     conn.execute("DELETE FROM tags WHERE note_path = ?", (path,))
@@ -567,9 +932,10 @@ def delete_index_rows(conn: sqlite3.Connection, path: str) -> None:
     conn.execute("DELETE FROM tasks WHERE source_note = ?", (path,))
 
 
-def upsert_note(conn: sqlite3.Connection, note: dict[str, Any]) -> None:
+def upsert_note(conn: sqlite3.Connection, note: dict[str, Any], *, delete_existing: bool = True) -> None:
     path = note["path"]
-    delete_index_rows(conn, path)
+    if delete_existing:
+        delete_index_rows(conn, path)
     conn.execute(
         """
         INSERT INTO notes(path,title,folder,mtime_ns,size,frontmatter_json,body_excerpt,body,scope)
@@ -620,26 +986,58 @@ def upsert_note(conn: sqlite3.Connection, note: dict[str, Any]) -> None:
                 task["style"],
             ),
         )
+    max_tokens = int((MODEL_REGISTRY.get("embedding") or {}).get("max_input_tokens") or 32000)
+    for chunk in note_chunks(note, max_input_tokens=max_tokens):
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chunks
+            (chunk_id,note_path,ordinal,title,heading_path,start_line,end_line,text,content_hash,token_estimate,mtime_ns)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                chunk["chunk_id"],
+                chunk["note_path"],
+                chunk["ordinal"],
+                chunk["title"],
+                chunk["heading_path"],
+                chunk["start_line"],
+                chunk["end_line"],
+                chunk["text"],
+                chunk["content_hash"],
+                chunk["token_estimate"],
+                chunk["mtime_ns"],
+            ),
+        )
+        conn.execute(
+            "INSERT INTO chunks_fts(chunk_id,note_path,title,heading_path,text) VALUES(?,?,?,?,?)",
+            (chunk["chunk_id"], chunk["note_path"], chunk["title"], chunk["heading_path"], chunk["text"]),
+        )
 
 
-def refresh(rt: Runtime, *, full: bool = False) -> dict[str, Any]:
-    maps = note_name_maps(rt.vault)
+def refresh(rt: Runtime, *, full: bool = False, verbose: bool = False) -> dict[str, Any]:
+    diagnostics = scan_diagnostics()
+    paths = list(note_files(rt.vault, diagnostics=diagnostics))
+    raise_walk_errors(rt.vault, diagnostics)
+    maps = note_name_maps_from_paths(paths, rt.vault)
     parsed = 0
     deleted = 0
     started = time.time()
     with connect(rt) as conn:
+        if full:
+            for table in ("notes", "notes_fts", "tags", "links", "tasks", "chunks", "chunks_fts", "embeddings"):
+                conn.execute(f"DELETE FROM {table}")
         indexed = {
             row["path"]: (int(row["mtime_ns"]), int(row["size"]))
             for row in conn.execute("SELECT path,mtime_ns,size FROM notes")
         }
         seen: set[str] = set()
-        for path in note_files(rt.vault):
+        for path in paths:
             rp = relpath(path, rt.vault)
             seen.add(rp)
             st = path.stat()
             if not full and indexed.get(rp) == (st.st_mtime_ns, st.st_size):
                 continue
-            upsert_note(conn, parse_note(path, rt.vault, maps))
+            upsert_note(conn, parse_note(path, rt.vault, maps), delete_existing=not full)
             parsed += 1
         for rp in sorted(set(indexed) - seen):
             delete_index_rows(conn, rp)
@@ -647,7 +1045,7 @@ def refresh(rt: Runtime, *, full: bool = False) -> dict[str, Any]:
         conn.execute("INSERT OR REPLACE INTO state(key,value) VALUES('last_refresh',?)", (utc_now(),))
         conn.commit()
         counts = index_counts(conn)
-    return {
+    payload = {
         "success": True,
         "vault": str(rt.vault),
         "full": full,
@@ -656,6 +1054,9 @@ def refresh(rt: Runtime, *, full: bool = False) -> dict[str, Any]:
         "runtime_ms": int((time.time() - started) * 1000),
         **counts,
     }
+    if verbose:
+        payload["scan"] = diagnostics
+    return payload
 
 
 def ensure_fresh(rt: Runtime) -> None:
@@ -674,6 +1075,8 @@ def index_counts(conn: sqlite3.Connection) -> dict[str, Any]:
         "task_count": count("SELECT COUNT(*) FROM tasks"),
         "link_count": count("SELECT COUNT(*) FROM links"),
         "broken_link_count": broken,
+        "chunk_count": count("SELECT COUNT(*) FROM chunks"),
+        "embedding_count": count("SELECT COUNT(*) FROM embeddings"),
         "last_refresh": last["value"] if last else None,
     }
 
@@ -722,36 +1125,48 @@ def cmd_snapshot(rt: Runtime, args: argparse.Namespace) -> int:
     ensure_storage(rt)
     with connect(rt) as conn:
         counts = index_counts(conn)
+    access_error = vault_access_error(rt.vault)
+    ok = access_error is None
     payload = {
         "tool": "obsidian",
-        "ok": True,
+        "ok": ok,
         "mode": "local-index",
         "vault": str(rt.vault),
+        "vault_readable": ok,
         "index": {"path": str(rt.db_path), **counts},
     }
+    if access_error:
+        payload["scan_error"] = access_error
+        payload["recommendation"] = permission_recommendation()
     emit(payload, True)
-    return 0
+    return 0 if ok else 1
 
 
 def cmd_doctor(rt: Runtime, args: argparse.Namespace) -> int:
     ensure_storage(rt)
     with connect(rt) as conn:
         counts = index_counts(conn)
+    access_error = vault_access_error(rt.vault)
+    ok = access_error is None
     payload = {
-        "ok": True,
+        "ok": ok,
         "mode": "local-index",
         "vault": str(rt.vault),
+        "vault_readable": ok,
         "index_path": str(rt.db_path),
         "conventions_path": str(rt.agent_root / "conventions.yaml"),
         "write_lock": str(rt.lock_path),
         **counts,
     }
+    if access_error:
+        payload["scan_error"] = access_error
+        payload["recommendation"] = permission_recommendation()
     emit(payload, rt.json_mode)
-    return 0
+    return 0 if ok else 1
 
 
 def cmd_refresh(rt: Runtime, args: argparse.Namespace) -> int:
-    emit(refresh(rt, full=args.full), rt.json_mode)
+    emit(refresh(rt, full=args.full, verbose=args.verbose), rt.json_mode)
     return 0
 
 
@@ -781,7 +1196,350 @@ def fts_query(query: str) -> str:
     return " ".join(f'"{t}"' for t in terms) or query
 
 
+def api_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            decoded = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise AgentObsidianError("provider API request failed", code=1, status=exc.code, detail=detail[:2000], url=url) from exc
+    except OSError as exc:
+        raise AgentObsidianError("provider API request failed", code=1, detail=str(exc), url=url) from exc
+    try:
+        result = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise AgentObsidianError("provider API returned non-JSON response", code=1, detail=decoded[:2000], url=url) from exc
+    if not isinstance(result, dict):
+        raise AgentObsidianError("provider API returned unexpected response", code=1, url=url)
+    return result
+
+
+def embedding_batches(items: list[dict[str, Any]], profile: dict[str, Any]) -> Iterable[list[dict[str, Any]]]:
+    max_items = int(profile.get("max_batch_items") or 1)
+    max_tokens = int(profile.get("max_batch_tokens") or profile.get("max_input_tokens") or 1)
+    max_chars = int(profile.get("max_batch_chars") or 0)
+    batch: list[dict[str, Any]] = []
+    token_count = 0
+    char_count = 0
+    for item in items:
+        text = item.get("text") or ""
+        item_tokens = int(item.get("token_estimate") or estimate_tokens(text))
+        item_chars = len(text)
+        if batch and (
+            len(batch) >= max_items
+            or token_count + item_tokens > max_tokens
+            or (max_chars and char_count + item_chars > max_chars)
+        ):
+            yield batch
+            batch = []
+            token_count = 0
+            char_count = 0
+        batch.append(item)
+        token_count += item_tokens
+        char_count += item_chars
+    if batch:
+        yield batch
+
+
+def extract_embedding_list(payload: dict[str, Any]) -> list[list[float]]:
+    if isinstance(payload.get("embeddings"), list):
+        return [[float(v) for v in row] for row in payload["embeddings"]]
+    data = payload.get("data")
+    if isinstance(data, list):
+        rows = []
+        for item in data:
+            if isinstance(item, dict) and isinstance(item.get("embedding"), list):
+                rows.append([float(v) for v in item["embedding"]])
+        if rows:
+            return rows
+    raise AgentObsidianError("embedding provider returned no embeddings", code=1, payload=payload)
+
+
+def embed_texts(profile: dict[str, Any], texts: list[str], *, input_type: str) -> list[list[float]]:
+    provider = str(profile.get("provider") or "")
+    model = str(profile.get("model") or "")
+    if provider == "voyage":
+        key = require_api_key(profile)
+        payload: dict[str, Any] = {
+            "input": texts,
+            "model": model,
+            "input_type": input_type,
+            "truncation": False,
+            "output_dtype": "float",
+        }
+        if profile.get("dimension"):
+            payload["output_dimension"] = int(profile["dimension"])
+        response = api_json(
+            "https://api.voyageai.com/v1/embeddings",
+            payload,
+            {"Authorization": f"Bearer {key}"},
+        )
+        return extract_embedding_list(response)
+    if provider == "openai":
+        key = require_api_key(profile)
+        payload = {"input": texts, "model": model, "encoding_format": "float"}
+        if profile.get("dimension"):
+            payload["dimensions"] = int(profile["dimension"])
+        response = api_json(
+            "https://api.openai.com/v1/embeddings",
+            payload,
+            {"Authorization": f"Bearer {key}"},
+        )
+        return extract_embedding_list(response)
+    raise AgentObsidianError(f"unsupported embedding provider: {provider}", code=NEEDS_CLARIFICATION)
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    dot = sum(a[i] * b[i] for i in range(n))
+    mag_a = math.sqrt(sum(a[i] * a[i] for i in range(n)))
+    mag_b = math.sqrt(sum(b[i] * b[i] for i in range(n)))
+    if not mag_a or not mag_b:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def chunk_result(row: sqlite3.Row, *, score: float, source: str) -> dict[str, Any]:
+    text = row["text"] or ""
+    snippet = text.replace("\n", " ").strip()
+    if len(snippet) > 360:
+        snippet = snippet[:357].rstrip() + "..."
+    return {
+        "path": row["note_path"],
+        "title": row["title"],
+        "folder": row["folder"],
+        "scope": row["scope"] or "local",
+        "chunk_id": row["chunk_id"],
+        "heading_path": row["heading_path"],
+        "start_line": row["start_line"],
+        "end_line": row["end_line"],
+        "snippet": snippet,
+        "score": round(float(score), 6),
+        "score_source": source,
+    }
+
+
+def keyword_chunk_candidates(conn: sqlite3.Connection, query: str, *, limit: int) -> list[dict[str, Any]]:
+    rows: list[sqlite3.Row] = []
+    try:
+        rows = list(
+            conn.execute(
+                """
+                SELECT c.*, n.folder, n.scope, bm25(chunks_fts) AS rank
+                FROM chunks_fts
+                JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+                JOIN notes n ON n.path = c.note_path
+                WHERE chunks_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_query(query), limit),
+            )
+        )
+    except sqlite3.Error:
+        rows = []
+    if not rows:
+        like = f"%{query.lower()}%"
+        rows = list(
+            conn.execute(
+                """
+                SELECT c.*, n.folder, n.scope, 0.0 AS rank
+                FROM chunks c JOIN notes n ON n.path = c.note_path
+                WHERE lower(c.title) LIKE ? OR lower(c.heading_path) LIKE ? OR lower(c.text) LIKE ?
+                ORDER BY c.mtime_ns DESC
+                LIMIT ?
+                """,
+                (like, like, like, limit),
+            )
+        )
+    if not rows:
+        return []
+    ranks = [abs(float(row["rank"] or 0.0)) for row in rows]
+    max_rank = max(ranks) if ranks else 0.0
+    results = []
+    for row in rows:
+        rank = abs(float(row["rank"] or 0.0))
+        score = 1.0 if max_rank == 0 else 1.0 - (rank / max_rank)
+        results.append(chunk_result(row, score=max(0.0, score), source="keyword"))
+    return results
+
+
+def stored_embedding_candidates(rt: Runtime, query: str, *, limit: int) -> list[dict[str, Any]]:
+    profile = effective_embedding_profile(rt)
+    provider = str(profile.get("provider") or "")
+    model = str(profile.get("model") or "")
+    dimension = int(profile.get("dimension") or 0)
+    ensure_fresh(rt)
+    with connect(rt) as conn:
+        available = conn.execute(
+            """
+            SELECT COUNT(*) FROM embeddings e
+            JOIN chunks c ON c.chunk_id = e.chunk_id
+            WHERE e.provider=? AND e.model=? AND e.dimension=? AND e.content_hash=c.content_hash
+            """,
+            (provider, model, dimension),
+        ).fetchone()[0]
+        if not available:
+            raise AgentObsidianError(
+                "semantic index is empty or stale; run agent-do obsidian embed refresh --json",
+                code=NEEDS_CLARIFICATION,
+                provider=provider,
+                model=model,
+                dimension=dimension,
+            )
+    query_embedding = embed_texts(profile, [query], input_type="query")[0]
+    with connect(rt) as conn:
+        rows = list(
+            conn.execute(
+                """
+                SELECT c.*, n.folder, n.scope, e.embedding_json
+                FROM embeddings e
+                JOIN chunks c ON c.chunk_id = e.chunk_id
+                JOIN notes n ON n.path = c.note_path
+                WHERE e.provider=? AND e.model=? AND e.dimension=? AND e.content_hash=c.content_hash
+                """,
+                (provider, model, dimension),
+            )
+        )
+    scored = []
+    for row in rows:
+        vector = json.loads(row["embedding_json"] or "[]")
+        scored.append(chunk_result(row, score=cosine(query_embedding, vector), source="semantic"))
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[:limit]
+
+
+def merge_ranked_candidates(keyword: list[dict[str, Any]], semantic: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in keyword:
+        record = dict(item)
+        record["score_components"] = {"keyword": item["score"], "semantic": 0.0, "graph": 0.0}
+        record["score"] = 0.45 * float(item["score"])
+        merged[item["chunk_id"]] = record
+    for item in semantic:
+        record = merged.get(item["chunk_id"], dict(item))
+        components = dict(record.get("score_components") or {"keyword": 0.0, "semantic": 0.0, "graph": 0.0})
+        components["semantic"] = float(item["score"])
+        record.update({k: v for k, v in item.items() if k not in {"score", "score_source"}})
+        record["score_components"] = components
+        record["score"] = 0.45 * float(components.get("keyword") or 0.0) + 0.45 * float(components.get("semantic") or 0.0)
+        record["score_source"] = "hybrid"
+        merged[item["chunk_id"]] = record
+    ranked = list(merged.values())
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked[:limit]
+
+
+def parse_rerank_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    results = payload.get("results") or payload.get("data")
+    if not isinstance(results, list):
+        raise AgentObsidianError("reranker provider returned no results", code=1, payload=payload)
+    parsed = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        score = item.get("relevance_score")
+        if idx is None or score is None:
+            continue
+        parsed.append({"index": int(idx), "score": float(score)})
+    return parsed
+
+
+def rerank_candidates(rt: Runtime, query: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    profile = model_profile(rt, "reranker")
+    if not credential_status(profile)["available"]:
+        return [{**item, "rerank_used": False, "rerank_reason": f"missing {profile.get('env')}"} for item in candidates]
+    max_documents = int(profile.get("max_documents") or len(candidates))
+    hydrated = hydrate_candidate_text(rt, candidates[:max_documents])
+    documents = [
+        "\n".join(
+            part
+            for part in [
+                str(item.get("title") or ""),
+                str(item.get("heading_path") or ""),
+                str(item.get("text") or item.get("snippet") or ""),
+            ]
+            if part
+        )
+        for item in hydrated
+    ]
+    key = require_api_key(profile)
+    try:
+        payload = api_json(
+            "https://api.voyageai.com/v1/rerank",
+            {
+                "query": query,
+                "documents": documents,
+                "model": profile.get("model"),
+                "top_k": len(documents),
+                "truncation": False,
+            },
+            {"Authorization": f"Bearer {key}"},
+        )
+    except AgentObsidianError as exc:
+        return [
+            {
+                **item,
+                "rerank_used": False,
+                "rerank_reason": f"{profile.get('provider')} {profile.get('model')} unavailable: {exc.message}",
+            }
+            for item in candidates
+        ]
+    indexed = {idx: item for idx, item in enumerate(hydrated)}
+    reranked = []
+    for result in parse_rerank_results(payload):
+        item = indexed.get(result["index"])
+        if not item:
+            continue
+        updated = dict(item)
+        updated["rerank_used"] = True
+        updated["rerank_model"] = profile.get("model")
+        updated["rerank_score"] = result["score"]
+        updated["score"] = result["score"]
+        updated.pop("text", None)
+        reranked.append(updated)
+    if len(candidates) > max_documents:
+        reranked.extend({**item, "rerank_used": False, "rerank_reason": "outside provider max_documents"} for item in candidates[max_documents:])
+    return reranked or candidates
+
+
+def search_chunks(rt: Runtime, query: str, *, limit: int, mode: str) -> list[dict[str, Any]]:
+    ensure_fresh(rt)
+    candidate_limit = max(limit, min(1000, limit * 10))
+    if mode in {"keyword", "fts", "exact"}:
+        with connect(rt) as conn:
+            return keyword_chunk_candidates(conn, query, limit=limit)
+    if mode == "semantic":
+        return rerank_candidates(rt, query, stored_embedding_candidates(rt, query, limit=limit))[:limit]
+    if mode == "hybrid":
+        with connect(rt) as conn:
+            keyword = keyword_chunk_candidates(conn, query, limit=candidate_limit)
+        semantic = stored_embedding_candidates(rt, query, limit=candidate_limit)
+        return rerank_candidates(rt, query, merge_ranked_candidates(keyword, semantic, limit=candidate_limit))[:limit]
+    raise AgentObsidianError(f"unknown search mode: {mode}", code=NEEDS_CLARIFICATION)
+
+
 def search_notes(rt: Runtime, query: str, *, limit: int = 10, folder: str = "", tag: str = "", mode: str = "fts") -> list[dict[str, Any]]:
+    if mode in {"semantic", "hybrid"}:
+        chunks = search_chunks(rt, query, limit=max(limit, limit * 2), mode=mode)
+        if folder:
+            chunks = [item for item in chunks if str(item.get("folder") or "").startswith(folder)]
+        if tag:
+            wanted = tag.lstrip("#")
+            with connect(rt) as conn:
+                tagged = {r["note_path"] for r in conn.execute("SELECT note_path FROM tags WHERE tag=?", (wanted,))}
+            chunks = [item for item in chunks if item["path"] in tagged]
+        chunks = chunks[:limit]
+        return chunks
+    if mode == "keyword":
+        mode = "fts"
     ensure_fresh(rt)
     with connect(rt) as conn:
         rows: list[sqlite3.Row] = []
@@ -1510,6 +2268,338 @@ def cmd_summarize(rt: Runtime, args: argparse.Namespace) -> int:
     return 0
 
 
+def profile_from_args(rt: Runtime, role: str, args: argparse.Namespace) -> dict[str, Any]:
+    if (
+        role == "embedding"
+        and not getattr(args, "provider", None)
+        and not getattr(args, "model", None)
+        and not getattr(args, "dimension", None)
+    ):
+        return effective_embedding_profile(rt)
+    registry = model_registry(rt)
+    profile = dict(registry.get(role) or {})
+    provider_arg = getattr(args, "provider", None)
+    if provider_arg:
+        for candidate in registry.values():
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("provider") == provider_arg
+                and candidate.get("env")
+            ):
+                profile = dict(candidate)
+                break
+        profile["provider"] = provider_arg
+    if getattr(args, "model", None):
+        profile["model"] = args.model
+    if getattr(args, "dimension", None):
+        profile["dimension"] = args.dimension
+    return profile
+
+
+def embedding_current_count(rt: Runtime, profile: dict[str, Any]) -> int:
+    provider = str(profile.get("provider") or "")
+    model = str(profile.get("model") or "")
+    dimension = int(profile.get("dimension") or 0)
+    with connect(rt) as conn:
+        return int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM chunks c
+                JOIN embeddings e ON e.chunk_id=c.chunk_id
+                WHERE e.provider=? AND e.model=? AND e.dimension=? AND e.content_hash=c.content_hash
+                """,
+                (provider, model, dimension),
+            ).fetchone()[0]
+        )
+
+
+def effective_embedding_profile(rt: Runtime) -> dict[str, Any]:
+    primary = model_profile(rt, "embedding")
+    fallback = model_profile(rt, "embedding_fallback")
+    primary_count = embedding_current_count(rt, primary)
+    fallback_count = embedding_current_count(rt, fallback)
+    if fallback_count > 0 and primary_count == 0:
+        return fallback
+    if primary_count > 0 or credential_status(primary)["available"]:
+        return primary
+    if fallback_count > 0 or credential_status(fallback)["available"]:
+        return fallback
+    return primary
+
+
+def embedding_status(rt: Runtime, profile: dict[str, Any]) -> dict[str, Any]:
+    ensure_fresh(rt)
+    provider = str(profile.get("provider") or "")
+    model = str(profile.get("model") or "")
+    dimension = int(profile.get("dimension") or 0)
+    with connect(rt) as conn:
+        total_chunks = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        current = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM chunks c
+                JOIN embeddings e ON e.chunk_id=c.chunk_id
+                WHERE e.provider=? AND e.model=? AND e.dimension=? AND e.content_hash=c.content_hash
+                """,
+                (provider, model, dimension),
+            ).fetchone()[0]
+        )
+        by_model = [
+            {
+                "provider": row["provider"],
+                "model": row["model"],
+                "dimension": int(row["dimension"]),
+                "count": int(row["count"]),
+                "last_embedded_at": row["last_embedded_at"],
+            }
+            for row in conn.execute(
+                """
+                SELECT provider, model, dimension, COUNT(*) AS count, MAX(embedded_at) AS last_embedded_at
+                FROM embeddings
+                GROUP BY provider, model, dimension
+                ORDER BY provider, model, dimension
+                """
+            )
+        ]
+    return {
+        "provider": provider,
+        "model": model,
+        "dimension": dimension,
+        "chunk_count": total_chunks,
+        "current_embedding_count": current,
+        "stale_embedding_count": max(0, total_chunks - current),
+        "by_model": by_model,
+        "credential": credential_status(profile),
+    }
+
+
+def cmd_embed(rt: Runtime, args: argparse.Namespace) -> int:
+    if args.embed_cmd == "status":
+        profile = profile_from_args(rt, "embedding", args)
+        registry = model_registry(rt)
+        emit(
+            {
+                "success": True,
+                "registry": registry,
+                "embedding": embedding_status(rt, profile),
+            },
+            rt.json_mode,
+        )
+        return 0
+    if args.embed_cmd == "refresh":
+        return cmd_embed_refresh(rt, args)
+    raise AgentObsidianError("unknown embed command", code=NEEDS_CLARIFICATION)
+
+
+def cmd_embed_refresh(rt: Runtime, args: argparse.Namespace) -> int:
+    ensure_fresh(rt)
+    profile = profile_from_args(rt, "embedding", args)
+    provider = str(profile.get("provider") or "")
+    model = str(profile.get("model") or "")
+    dimension = int(profile.get("dimension") or 0)
+    require_api_key(profile)
+    started = time.time()
+    with connect(rt) as conn:
+        if args.full:
+            conn.execute(
+                "DELETE FROM embeddings WHERE provider=? AND model=? AND dimension=?",
+                (provider, model, dimension),
+            )
+            conn.commit()
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT c.*
+                FROM chunks c
+                LEFT JOIN embeddings e
+                  ON e.chunk_id=c.chunk_id
+                 AND e.provider=?
+                 AND e.model=?
+                 AND e.dimension=?
+                 AND e.content_hash=c.content_hash
+                WHERE e.chunk_id IS NULL
+                ORDER BY c.note_path, c.ordinal
+                """,
+                (provider, model, dimension),
+            )
+        ]
+    embedded = 0
+    for batch in embedding_batches(rows, profile):
+        vectors = embed_texts(profile, [item["text"] for item in batch], input_type="document")
+        if len(vectors) != len(batch):
+            raise AgentObsidianError("embedding provider returned wrong number of vectors", code=1)
+        with connect(rt) as conn:
+            for item, vector in zip(batch, vectors):
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO embeddings
+                    (chunk_id,provider,model,dimension,content_hash,embedding_json,embedded_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        item["chunk_id"],
+                        provider,
+                        model,
+                        dimension,
+                        item["content_hash"],
+                        json.dumps(vector, ensure_ascii=False),
+                        utc_now(),
+                    ),
+                )
+                embedded += 1
+            conn.commit()
+    status = embedding_status(rt, profile)
+    emit(
+        {
+            "success": True,
+            "provider": provider,
+            "model": model,
+            "dimension": dimension,
+            "embedded": embedded,
+            "runtime_ms": int((time.time() - started) * 1000),
+            "status": status,
+        },
+        rt.json_mode,
+    )
+    return 0
+
+
+def hydrate_candidate_text(rt: Runtime, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    ids = [item["chunk_id"] for item in candidates]
+    placeholders = ",".join("?" for _ in ids)
+    with connect(rt) as conn:
+        rows = {
+            row["chunk_id"]: row
+            for row in conn.execute(
+                f"""
+                SELECT c.*, n.folder, n.scope
+                FROM chunks c JOIN notes n ON n.path=c.note_path
+                WHERE c.chunk_id IN ({placeholders})
+                """,
+                ids,
+            )
+        }
+    hydrated = []
+    for item in candidates:
+        row = rows.get(item["chunk_id"])
+        full = dict(item)
+        if row:
+            full["text"] = row["text"]
+            full["citation"] = f"{row['note_path']}:{row['start_line']}-{row['end_line']}"
+        hydrated.append(full)
+    return hydrated
+
+
+def build_context_payload(rt: Runtime, query: str, *, limit: int, mode: str) -> dict[str, Any]:
+    candidates = hydrate_candidate_text(rt, search_chunks(rt, query, limit=limit, mode=mode))
+    blocks = []
+    sources = []
+    for item in candidates:
+        citation = item.get("citation") or f"{item['path']}:{item.get('start_line')}-{item.get('end_line')}"
+        blocks.append(f"[{citation}] {item.get('heading_path') or item.get('title')}\n{item.get('text') or item.get('snippet')}")
+        sources.append(
+            {
+                "path": item["path"],
+                "title": item["title"],
+                "chunk_id": item["chunk_id"],
+                "heading_path": item.get("heading_path"),
+                "start_line": item.get("start_line"),
+                "end_line": item.get("end_line"),
+                "score": item.get("score"),
+                "score_components": item.get("score_components"),
+            }
+        )
+    return {
+        "success": True,
+        "query": query,
+        "mode": mode,
+        "count": len(candidates),
+        "context": "\n\n---\n\n".join(blocks),
+        "sources": sources,
+    }
+
+
+def cmd_context(rt: Runtime, args: argparse.Namespace) -> int:
+    if args.context_cmd != "build":
+        raise AgentObsidianError("unknown context command", code=NEEDS_CLARIFICATION)
+    payload = build_context_payload(rt, args.query, limit=args.limit, mode=args.mode)
+    emit(payload, rt.json_mode)
+    return 0
+
+
+def extract_openai_text(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+    texts: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict):
+                text = content.get("text") or content.get("value")
+                if text:
+                    texts.append(str(text))
+    return "\n".join(texts).strip()
+
+
+def call_synthesis_model(profile: dict[str, Any], question: str, context: str) -> dict[str, Any]:
+    provider = str(profile.get("provider") or "")
+    if provider != "openai":
+        raise AgentObsidianError(f"unsupported synthesis provider: {provider}", code=NEEDS_CLARIFICATION)
+    key = require_api_key(profile)
+    prompt = (
+        "Answer the question using only the Obsidian vault context below. "
+        "Cite source brackets exactly as provided. If the context is insufficient, say what is missing.\n\n"
+        f"Question:\n{question}\n\nVault context:\n{context}"
+    )
+    payload = {
+        "model": profile.get("model"),
+        "input": prompt,
+        "reasoning": {"effort": profile.get("reasoning_effort") or "high"},
+        "text": {"verbosity": "medium"},
+    }
+    response = api_json(
+        "https://api.openai.com/v1/responses",
+        payload,
+        {"Authorization": f"Bearer {key}"},
+    )
+    return {"model": profile.get("model"), "raw": response, "answer": extract_openai_text(response)}
+
+
+def cmd_chat(rt: Runtime, args: argparse.Namespace) -> int:
+    context_payload = build_context_payload(rt, args.question, limit=args.limit, mode=args.mode)
+    synthesis = call_synthesis_model(model_profile(rt, "synthesis"), args.question, context_payload["context"])
+    record = {
+        "created_at": utc_now(),
+        "question": args.question,
+        "mode": args.mode,
+        "model": synthesis["model"],
+        "answer": synthesis["answer"],
+        "sources": context_payload["sources"],
+    }
+    chat_path = rt.obsidian_root / "chat" / f"{utc_now().replace(':', '').replace('-', '')}.jsonl"
+    with chat_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    emit({"success": True, "answer": synthesis["answer"], "model": synthesis["model"], "sources": context_payload["sources"], "conversation_path": str(chat_path)}, rt.json_mode)
+    return 0
+
+
+def cmd_connections(rt: Runtime, args: argparse.Namespace) -> int:
+    ensure_fresh(rt)
+    note_path = resolve_note_path(rt, args.name, None)
+    with connect(rt) as conn:
+        row = conn.execute("SELECT * FROM notes WHERE path=?", (note_path,)).fetchone()
+        if not row:
+            raise AgentObsidianError(f"note not found: {args.name}", code=1)
+        query = f"{row['title']}\n{row['body']}"
+    candidates = [item for item in search_chunks(rt, query, limit=max(args.limit + 1, args.limit * 2), mode=args.mode) if item["path"] != note_path]
+    emit({"success": True, "path": note_path, "mode": args.mode, "count": len(candidates[: args.limit]), "connections": candidates[: args.limit]}, rt.json_mode)
+    return 0
+
+
 def cmd_daily(rt: Runtime, args: argparse.Namespace) -> int:
     cfg = load_conventions(rt)
     folder = folder_from_token(cfg, "daily")
@@ -1926,6 +3016,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("snapshot")
     p = sub.add_parser("refresh")
     p.add_argument("--full", action="store_true")
+    p.add_argument("--verbose", action="store_true")
 
     p = sub.add_parser("read")
     p.add_argument("name", nargs="?")
@@ -1937,8 +3028,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--folder", default="")
     p.add_argument("--tag", default="")
-    p.add_argument("--mode", choices=["fts", "exact"], default="fts")
+    p.add_argument("--mode", choices=["keyword", "fts", "exact", "semantic", "hybrid"], default="keyword")
     p.add_argument("--total", action="store_true")
+
+    p = sub.add_parser("embed")
+    ep = p.add_subparsers(dest="embed_cmd", required=True)
+    es = ep.add_parser("status")
+    es.add_argument("--provider")
+    es.add_argument("--model")
+    es.add_argument("--dimension", type=int)
+    er = ep.add_parser("refresh")
+    er.add_argument("--full", action="store_true")
+    er.add_argument("--provider")
+    er.add_argument("--model")
+    er.add_argument("--dimension", type=int)
+
+    p = sub.add_parser("context")
+    cp = p.add_subparsers(dest="context_cmd", required=True)
+    cb = cp.add_parser("build")
+    cb.add_argument("query")
+    cb.add_argument("--mode", choices=["keyword", "semantic", "hybrid"], default="hybrid")
+    cb.add_argument("--limit", type=int, default=12)
+
+    p = sub.add_parser("chat")
+    p.add_argument("question")
+    p.add_argument("--mode", choices=["keyword", "semantic", "hybrid"], default="hybrid")
+    p.add_argument("--limit", type=int, default=12)
+
+    p = sub.add_parser("connections")
+    p.add_argument("name")
+    p.add_argument("--mode", choices=["keyword", "semantic", "hybrid"], default="hybrid")
+    p.add_argument("--limit", type=int, default=10)
 
     p = sub.add_parser("save")
     p.add_argument("--content", required=True)
@@ -2156,6 +3276,14 @@ def run(rt: Runtime, args: argparse.Namespace) -> int:
         return cmd_read(rt, args)
     if cmd == "search":
         return cmd_search(rt, args)
+    if cmd == "embed":
+        return cmd_embed(rt, args)
+    if cmd == "context":
+        return cmd_context(rt, args)
+    if cmd == "chat":
+        return cmd_chat(rt, args)
+    if cmd == "connections":
+        return cmd_connections(rt, args)
     if cmd == "save":
         return cmd_save(rt, args)
     if cmd == "save-group":

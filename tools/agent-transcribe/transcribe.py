@@ -21,6 +21,7 @@ sys.path.insert(0, str(TOOL_DIR))
 from lib.cookies import list_sessions, safe_cookie_file  # noqa: E402
 from lib.engines import (  # noqa: E402
     WHISPER_API_RATE_USD_PER_MIN,
+    browser_capture_audio,
     captions_transcribe,
     dependency_check,
     download_audio,
@@ -30,6 +31,7 @@ from lib.engines import (  # noqa: E402
     whisper_api_transcribe,
 )
 from lib.sources import classify_source, probe_metadata, source_hash  # noqa: E402
+from lib.ytdlp import normalize_extractor_args  # noqa: E402
 
 CACHE_ROOT = Path.home() / ".agent-do" / "transcribe"
 SCHEMA_VERSION = 1
@@ -58,6 +60,23 @@ def emit_error(message: str, *, exit_code: int = 1, json_mode: bool = False,
 
 def progress(msg: str) -> None:
     print(f"[transcribe] {msg}", file=sys.stderr, flush=True)
+
+
+def ytdlp_extractor_args(args: argparse.Namespace, *, json_mode: bool) -> list[str]:
+    try:
+        return normalize_extractor_args(
+            getattr(args, "extractor_args", None),
+            getattr(args, "youtube_player_client", None),
+        )
+    except ValueError as exc:
+        emit_error(str(exc), exit_code=2, json_mode=json_mode)
+    return []  # unreachable
+
+
+def auth_recovery_hint(cookies_file: Optional[str]) -> str:
+    if cookies_file:
+        return "cookies are present; for YouTube member-tier player API blocks, retry with --browser-capture and --browse-session"
+    return "pass --browse-session <name> or --cookies <path>"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +167,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         recommendations.append(
             f"use --browse-session {youtube_sessions[0]['name']} for members-only YouTube URLs"
         )
+        recommendations.append(
+            "if yt-dlp cannot extract authenticated YouTube audio, use --browser-capture with that browse session"
+        )
+    if deps.get("macos_screen_capture_current_process") is False:
+        recommendations.append(
+            "browser capture may require Screen & System Audio Recording permission for Chrome or Chrome for Testing"
+        )
     if not creds["OPENAI_API_KEY"]:
         recommendations.append(
             "set OPENAI_API_KEY (or agent-do creds store OPENAI_API_KEY --stdin) for whisper-api"
@@ -234,6 +260,7 @@ def _estimate_cost(meta: dict) -> dict:
 
 
 def cmd_cost(args: argparse.Namespace) -> int:
+    extractor_args = ytdlp_extractor_args(args, json_mode=args.json)
     cookies_file = None
     cookies_cm = None
     if args.browse_session:
@@ -252,7 +279,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
         unknown_count = 0
         for raw in sources:
             src = classify_source(raw)
-            meta = probe_metadata(src, cookies_file)
+            meta = probe_metadata(src, cookies_file, extractor_args)
             estimate = _estimate_cost(meta)
             per_source.append({
                 "source": raw,
@@ -274,6 +301,9 @@ def cmd_cost(args: argparse.Namespace) -> int:
             "total_estimated_usd": round(total, 4),
             "sources_known": len(per_source) - unknown_count,
             "sources_unknown_duration": unknown_count,
+            "yt_dlp": {
+                "extractor_args": extractor_args,
+            },
             "sources": per_source,
         }
 
@@ -312,7 +342,8 @@ def _resolve_sources(args: argparse.Namespace, *, json_mode: bool) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _run_engine(method: str, src: dict, audio_path: Optional[Path],
-                cookies_file: Optional[str]) -> dict:
+                cookies_file: Optional[str],
+                extractor_args: Optional[list[str]]) -> dict:
     if method == "whisper-api":
         if audio_path is None:
             return {"success": False, "error": "whisper-api requires audio (download failed)"}
@@ -328,14 +359,15 @@ def _run_engine(method: str, src: dict, audio_path: Optional[Path],
     if method == "vtt":
         if src["kind"] != "youtube":
             return {"success": False, "error": "vtt method only supports YouTube sources"}
-        return vtt_transcribe(src.get("url") or "", cookies_file, progress=progress)
+        return vtt_transcribe(src.get("url") or "", cookies_file, extractor_args, progress=progress)
     return {"success": False, "error": f"unknown method: {method}"}
 
 
 def transcribe_one(raw_source: str, args: argparse.Namespace,
-                   cookies_file: Optional[str], output_dir: Optional[Path]) -> dict:
+                   cookies_file: Optional[str], output_dir: Optional[Path],
+                   extractor_args: Optional[list[str]]) -> dict:
     src = classify_source(raw_source)
-    meta = probe_metadata(src, cookies_file)
+    meta = probe_metadata(src, cookies_file, extractor_args)
 
     if not meta.get("success") and src["kind"] != "file":
         return {
@@ -343,8 +375,7 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
             "source": {"raw": raw_source, **src},
             "error": meta.get("error", "metadata probe failed"),
             "requires_auth": meta.get("requires_auth"),
-            "hint": ("pass --browse-session <name> or --cookies <path>"
-                     if meta.get("requires_auth") else None),
+            "hint": auth_recovery_hint(cookies_file),
         }
 
     method_order = order_methods(args.method, args.prefer_free, args.prefer)
@@ -352,13 +383,32 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
 
     work_dir: Optional[Path] = None
     audio_path: Optional[Path] = None
+    download_error: Optional[dict] = None
+    download_info: Optional[dict] = None
 
     try:
         if src["kind"] == "file":
             audio_path = Path(src["path"]).expanduser()
         elif needs_audio:
             work_dir = Path(tempfile.mkdtemp(prefix="agent-transcribe-work-"))
-            dl = download_audio(src.get("url") or "", work_dir, cookies_file, progress=progress)
+            if args.browser_capture:
+                if not args.browse_session:
+                    return {
+                        "success": False,
+                        "source": {"raw": raw_source, **src},
+                        "error": "--browser-capture requires --browse-session <name>",
+                        "hint": "save browser auth with agent-do browse login done --save <name>, then pass --browse-session <name>",
+                    }
+                dl = browser_capture_audio(
+                    src.get("url") or "",
+                    work_dir,
+                    args.browse_session,
+                    capture_seconds=args.capture_seconds,
+                    capture_buffer_seconds=args.capture_buffer_seconds,
+                    progress=progress,
+                )
+            else:
+                dl = download_audio(src.get("url") or "", work_dir, cookies_file, extractor_args, progress=progress)
             if not dl["success"]:
                 if dl.get("requires_auth"):
                     return {
@@ -366,11 +416,13 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
                         "source": {"raw": raw_source, **src},
                         "error": dl["error"],
                         "requires_auth": True,
-                        "hint": "pass --browse-session <name> or --cookies <path>",
+                        "hint": auth_recovery_hint(cookies_file),
                     }
                 progress(f"audio download failed: {dl['error'][:120]}")
+                download_error = dl
             else:
                 audio_path = dl["path"]
+                download_info = dl
 
         attempted: list[dict] = []
         engine_result: Optional[dict] = None
@@ -386,7 +438,7 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
                     break
 
             progress(f"trying method: {method}")
-            result = _run_engine(method, src, audio_path, cookies_file)
+            result = _run_engine(method, src, audio_path, cookies_file, extractor_args)
             attempted.append({"method": method, "success": result.get("success"),
                               "error": result.get("error")})
             if result.get("success"):
@@ -400,6 +452,9 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
                 "success": False,
                 "source": {"raw": raw_source, **src},
                 "error": "all transcription methods failed",
+                "download_error": download_error,
+                "download": download_info,
+                "hint": auth_recovery_hint(cookies_file) if src["kind"] == "youtube" else None,
                 "attempted": attempted,
             }
 
@@ -416,6 +471,12 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
                               audio_kept=args.keep_audio, text_path=text_path, json_path=json_path)
         result["attempted_methods"] = attempted
         result["method_used"] = used_method
+        if download_info:
+            result["audio"]["source"] = download_info.get("source") or "yt-dlp"
+            result["audio"]["capture"] = download_info.get("capture")
+        result["yt_dlp"] = {
+            "extractor_args": extractor_args or [],
+        }
 
         if json_path is not None:
             json_path.write_text(json.dumps(result, indent=2, default=str))
@@ -435,6 +496,14 @@ def transcribe_one(raw_source: str, args: argparse.Namespace,
 # ---------------------------------------------------------------------------
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
+    extractor_args = ytdlp_extractor_args(args, json_mode=args.json)
+    if args.browser_capture and not args.browse_session:
+        emit_error(
+            "--browser-capture requires --browse-session <name>",
+            exit_code=2,
+            json_mode=args.json,
+            extra={"hint": "save browser auth with agent-do browse login done --save <name>"},
+        )
     cookies_cm = None
     cookies_file: Optional[str] = None
     if args.browse_session:
@@ -451,7 +520,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         output_dir = Path(args.output_dir).expanduser() if args.output_dir else None
 
         if len(sources) == 1 and output_dir is None and not args.batch and not args.batch_file:
-            result = transcribe_one(sources[0], args, cookies_file, None)
+            result = transcribe_one(sources[0], args, cookies_file, None, extractor_args)
             if not result.get("success"):
                 if args.json:
                     emit_json(result)
@@ -479,7 +548,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         failures = 0
         for i, raw in enumerate(sources, 1):
             progress(f"[{i}/{len(sources)}] {raw}")
-            result = transcribe_one(raw, args, cookies_file, output_dir)
+            result = transcribe_one(raw, args, cookies_file, output_dir, extractor_args)
             results.append(result)
             if result.get("success"):
                 successes += 1
@@ -539,6 +608,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_cost.add_argument("--batch-file")
     p_cost.add_argument("--browse-session")
     p_cost.add_argument("--cookies")
+    p_cost.add_argument("--extractor-args", action="append",
+                        help="pass a yt-dlp extractor args spec, e.g. youtube:player_client=ios")
+    p_cost.add_argument("--youtube-player-client",
+                        help="shortcut for --extractor-args youtube:player_client=<client>")
     p_cost.add_argument("--json", action="store_true")
 
     return parser
@@ -561,6 +634,16 @@ def parse_transcribe_args(rest: list[str]) -> argparse.Namespace:
     parser.add_argument("--batch-file")
     parser.add_argument("--browse-session")
     parser.add_argument("--cookies")
+    parser.add_argument("--extractor-args", action="append",
+                        help="pass a yt-dlp extractor args spec, e.g. youtube:player_client=ios")
+    parser.add_argument("--youtube-player-client",
+                        help="shortcut for --extractor-args youtube:player_client=<client>")
+    parser.add_argument("--browser-capture", action="store_true",
+                        help="capture authenticated tab audio via saved browser session instead of yt-dlp")
+    parser.add_argument("--capture-seconds", type=float,
+                        help="limit browser capture duration; default is video duration plus buffer")
+    parser.add_argument("--capture-buffer-seconds", type=float, default=5.0,
+                        help="extra seconds after detected video duration for browser capture")
     parser.add_argument("--method", default="auto",
                         choices=["auto", "whisper-api", "local-whisper", "captions", "vtt"])
     parser.add_argument("--prefer-free", action="store_true")

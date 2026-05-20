@@ -37,6 +37,10 @@ NOTES
   create <name> [opts]       Create a new note
   append <name> <text>       Append text to a note
   search <query> [opts]      Search the active vault
+  embed status|refresh       Manage semantic embeddings for local vault chunks
+  context build <query>      Build cited retrieval context for an agent
+  chat <question>            Answer from vault context with citations
+  connections <name>         Semantic/graph related-note candidates
   query <dql-subset>          Safe DQL-to-SQL query over the local index
   relate <name-or-content>    Ranked backlink candidates
   summarize <topic>           Summarize matching notes with citations
@@ -99,6 +103,8 @@ COMMON OPTIONS
   --overwrite                Allow create to overwrite an existing note
   --open                     Reveal the note in Obsidian after create
   --limit <n>                Result limit (search)
+  --mode <keyword|semantic|hybrid>
+                             Retrieval mode for search/context/chat/connections
   --total                    Return a count instead of items (search, tags)
   --daily                    Limit tasks to today's daily note
   --counts                   Show counts alongside tags
@@ -109,6 +115,11 @@ COMMON OPTIONS
 ENVIRONMENT VARIABLES
   OBSIDIAN_BIN               Override path to the obsidian executable
   AGENT_OBSIDIAN_VAULT_PATH  Filesystem path to local Obsidian vault
+  VOYAGE_API_KEY             Required for default voyage-4-large embeddings
+  OPENAI_API_KEY             Required for GPT-5.5 chat and OpenAI embedding fallback
+  AGENT_OBSIDIAN_EMBED_MODEL Override embedding model
+  AGENT_OBSIDIAN_SYNTHESIS_MODEL
+                             Override synthesis model
   AGENT_OBSIDIAN_NO_AUTO_INSTALL=1
                              Disable the one-time symlink into ~/.local/bin
                              when only the app bundle is detected
@@ -119,7 +130,12 @@ EXAMPLES
   agent-obsidian create "Inbox/Idea" --content "Pricing experiment"
   agent-obsidian append "Inbox/Idea" "Follow-up: talk to Erik"
   agent-obsidian search "review" --limit 5
-  agent-obsidian refresh --full --json
+  agent-obsidian embed status --json
+  agent-obsidian embed refresh --json
+  agent-obsidian search "old project idea" --mode hybrid --json
+  agent-obsidian context build "what did I decide about voice" --json
+  agent-obsidian chat "what is on my plate today?" --json
+  agent-obsidian refresh --full --verbose --json
   agent-obsidian save --content "Pricing experiment" --related auto --json
   agent-obsidian tasks next --horizon today --json
   agent-obsidian query 'FROM #project WHERE status=active SORT due ASC' --json
@@ -794,15 +810,21 @@ EOF
 }
 
 cmd_search() {
-    local query="" limit="" total=0
+    local query="" limit="" total=0 mode="" folder="" tag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --limit)   limit="${2:-}"; shift 2 ;;
             --limit=*) limit="${1#--limit=}"; shift ;;
+            --mode)    mode="${2:-}"; shift 2 ;;
+            --mode=*)  mode="${1#--mode=}"; shift ;;
+            --folder)  folder="${2:-}"; shift 2 ;;
+            --folder=*) folder="${1#--folder=}"; shift ;;
+            --tag)     tag="${2:-}"; shift 2 ;;
+            --tag=*)   tag="${1#--tag=}"; shift ;;
             --total)   total=1; shift ;;
             --json)    OUTPUT_FORMAT="json"; shift ;;
             -h|--help)
-                echo "Usage: agent-obsidian search <query> [--limit N] [--total] [--vault V]"
+                echo "Usage: agent-obsidian search <query> [--mode keyword|semantic|hybrid] [--limit N] [--total] [--vault V]"
                 return 0 ;;
             -*) echo "Error: unknown search flag: $1" >&2; return 2 ;;
             *)
@@ -816,12 +838,30 @@ cmd_search() {
     local local_args=(search "$query")
     [[ -n "$limit" ]]  && args+=("limit=$limit")
     [[ -n "$limit" ]]  && local_args+=("--limit" "$limit")
+    [[ -n "$mode" ]]   && local_args+=("--mode" "$mode")
+    [[ -n "$folder" ]] && local_args+=("--folder" "$folder")
+    [[ -n "$tag" ]]    && local_args+=("--tag" "$tag")
     [[ "$total" -eq 1 ]] && args+=("total")
     [[ "$total" -eq 1 ]] && local_args+=("--total")
     _try_local_then_cli "${local_args[@]}"
     local local_status="$LOCAL_ENGINE_STATUS"
     if [[ "$local_status" -ne 3 ]]; then
         return "$local_status"
+    fi
+    if [[ "$mode" == "semantic" || "$mode" == "hybrid" ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            python3 - <<'PY'
+import json
+print(json.dumps({
+  "success": False,
+  "error": "semantic and hybrid search require local index mode; pass --vault /path/to/vault or set AGENT_OBSIDIAN_VAULT_PATH",
+  "code": 2
+}, indent=2))
+PY
+        else
+            echo "Error: semantic and hybrid search require local index mode; pass --vault /path/to/vault or set AGENT_OBSIDIAN_VAULT_PATH" >&2
+        fi
+        return 2
     fi
     _run_obsidian search "${args[@]}"
 }
@@ -1226,6 +1266,10 @@ main() {
         create|new)           cmd_create "$@" ;;
         append|add)           cmd_append "$@" ;;
         search|find)          cmd_search "$@" ;;
+        embed)                _run_local_required embed "$@" ;;
+        context)              _run_local_required context "$@" ;;
+        chat)                 _run_local_required chat "$@" ;;
+        connections|conn)     _run_local_required connections "$@" ;;
         save)                 _run_local_required save "$@" ;;
         save-group)           _run_local_required save-group "$@" ;;
         query)                _run_local_required query "$@" ;;

@@ -1010,22 +1010,30 @@ tools:
     description: Control Slack
     capabilities:
     - send messages
+    - send direct messages as a user token
     - read channels
     - manage reactions
     - upload files
     commands:
-      send: Send message
+      send: Send message to channel or conversation
+      dm: Send direct message to a person, email, user ID, or DM ID
+      resolve-user: Resolve Slack user by name, email, or user ID
       read: Read channel
       react: Add reaction
       upload: Upload file
     examples:
     - intent: 'post ''deploy complete'' to #engineering'
       command: agent-slack send '#engineering' 'deploy complete'
+    - intent: DM a teammate as me
+      command: agent-slack dm --as-user teammate@example.com 'hello'
     - intent: 'read #general'
       command: agent-slack read '#general'
     credentials:
-      required:
-      - SLACK_TOKEN
+      one_of:
+      - - SLACK_USER_TOKEN
+        - SLACK_TOKEN
+        - SLACK_BOT_TOKEN
+        - SLACK_WEBHOOK_URL
       optional:
       - SLACK_WEBHOOK_URL
     concurrency: mixed
@@ -1207,7 +1215,9 @@ tools:
   obsidian:
     description: Obsidian vault integration with a local SQLite vault index plus official Obsidian CLI fallback
     capabilities:
-    - index, read, search, query, relate, summarize, and audit local Obsidian vaults
+    - index, read, keyword search, semantic search, hybrid retrieval, query, relate, summarize, and audit local Obsidian vaults
+    - build chunked semantic embeddings with Voyage voyage-4-large by default, OpenAI text-embedding-3-large fallback metadata, and Voyage rerank-2.5 reranking when available
+    - build cited agent context and GPT-5.5 vault chat answers from local chunks
     - save individual notes and linked note groups with per-vault conventions
     - manage daily, weekly, period, template, graph, tag, backlink, and task workflows
     - read and write YAML frontmatter properties, including batch updates
@@ -1222,10 +1232,14 @@ tools:
       doctor: 'Check obsidian-cli wiring: doctor [--fix] [--json]'
       snapshot: 'Integration state as JSON: snapshot [--vault V]'
       refresh: 'Refresh local SQLite index: refresh [--full] [--json]'
+      embed: 'Semantic embedding index: embed status|refresh [--full] [--json]'
       read: 'Read a note: read <name> | --path <path> [--copy] [--vault V]'
       create: 'Create a note: create <name> [--content T] [--template T] [--overwrite] [--open] [--vault V]'
       append: 'Append text to a note: append <name> [<text>...] [--content T] [--path] [--vault V]'
-      search: 'Search notes: search <query> [--limit N] [--total] [--vault V]'
+      search: 'Search notes: search <query> [--mode keyword|semantic|hybrid] [--limit N] [--total] [--vault V]'
+      context: 'Build cited retrieval context: context build <query> [--mode keyword|semantic|hybrid]'
+      chat: 'Answer from vault context with citations: chat <question> [--mode hybrid]'
+      connections: 'Find related notes by semantic/hybrid retrieval: connections <name>'
       query: 'Safe DQL subset over local index: query "FROM #tag WHERE status=active SORT due ASC"'
       relate: 'Rank backlink candidates: relate <name-or-content> [--limit N]'
       summarize: 'Summarize matching notes with cited sources: summarize <topic>'
@@ -1257,6 +1271,12 @@ tools:
       command: agent-do obsidian create "Inbox/Idea" --content "Pricing experiment"
     - intent: search the active vault
       command: agent-do obsidian search "review" --limit 5
+    - intent: build the semantic vault index
+      command: agent-do obsidian embed refresh --json
+    - intent: build cited agent context from the vault
+      command: agent-do obsidian context build "what did I decide about voice" --json
+    - intent: ask the vault a question with citations
+      command: agent-do obsidian chat "what is on my plate today?" --json
     - intent: save a note with related links
       command: agent-do obsidian save --content "Pricing experiment" --related auto --json
     - intent: ask the vault a question
@@ -1269,6 +1289,11 @@ tools:
       command: agent-do obsidian backlinks "agent-do roadmap"
     - intent: run obsidian dev tools (requires +live)
       command: agent-do +live(scope=desktop,app=Obsidian,ttl=15m) obsidian dev errors
+    credentials:
+      optional:
+      - VOYAGE_API_KEY
+      - OPENAI_API_KEY
+      - COHERE_API_KEY
     routing:
       discover_keywords:
       - obsidian
@@ -1295,12 +1320,12 @@ tools:
         examples:
         - find every note about X
         - where did I write about Y
-        recommended_entrypoint: agent-do obsidian search "..." --json
+        recommended_entrypoint: agent-do obsidian search "..." --mode hybrid --json
       - label: vault_ask_intent
         examples:
         - summarize my thinking on X
         - what do my notes say about Y
-        recommended_entrypoint: agent-do obsidian summarize "..." --json
+        recommended_entrypoint: agent-do obsidian context build "..." --json
       - label: vault_organize_intent
         examples:
         - what should I work on next
@@ -1315,8 +1340,13 @@ tools:
       - agent-do obsidian doctor
       - agent-do obsidian snapshot
       - agent-do obsidian refresh --full --json
+      - agent-do obsidian embed status --json
+      - agent-do obsidian embed refresh --json
       - agent-do obsidian daily read
-      - agent-do obsidian search <query>
+      - agent-do obsidian search <query> --mode keyword
+      - agent-do obsidian search <query> --mode hybrid --json
+      - agent-do obsidian context build <query> --json
+      - agent-do obsidian chat <question> --json
       - agent-do obsidian save --content "..." --related auto --json
       default_command: snapshot
       raw_cli_equivalents:
@@ -1342,6 +1372,9 @@ tools:
       - snapshot
       - read
       - search
+      - embed status
+      - context build
+      - connections
       - query
       - relate
       - summarize
@@ -1365,6 +1398,8 @@ tools:
       - templates show
       interact:
       - refresh
+      - embed refresh
+      - chat
       - create
       - append
       - move
@@ -1874,6 +1909,8 @@ tools:
     - transcribe YouTube videos by URL or ID (public and members-only)
     - transcribe local audio/video files
     - use authenticated agent-do browse sessions for members-only content
+    - pass yt-dlp extractor args and YouTube player-client overrides when cookies alone are insufficient
+    - capture authenticated browser tab audio for member-tier/paywalled media that yt-dlp cannot extract
     - call OpenAI Whisper API with automatic ffmpeg chunking for large audio
     - fall back to local Whisper, YouTube auto-captions, or yt-dlp VTT subtitles
     - batch transcribe from stdin or a file of URLs
@@ -1888,11 +1925,15 @@ tools:
     - intent: transcribe a public YouTube video
       command: agent-do transcribe https://youtube.com/watch?v=dQw4w9WgXcQ
     - intent: transcribe a members-only YouTube video using saved auth
-      command: agent-do transcribe https://youtube.com/watch?v=XXX --browse-session youtube
+      command: agent-do transcribe https://youtube.com/watch?v=XXX --browse-session youtube_arc
+    - intent: retry a members-only YouTube video through a mobile player client
+      command: agent-do transcribe https://youtube.com/watch?v=XXX --browse-session youtube_arc --youtube-player-client ios
+    - intent: transcribe browser-only member-tier YouTube content
+      command: agent-do transcribe https://youtube.com/watch?v=XXX --browse-session youtube_arc --browser-capture --json
     - intent: estimate cost for a batch before transcribing
-      command: agent-do transcribe cost --batch-file urls.txt --json
+      command: agent-do transcribe cost --batch-file urls.txt --youtube-player-client ios --json
     - intent: batch transcribe with structured output
-      command: agent-do transcribe --batch-file urls.txt --browse-session youtube --output-dir ./transcripts --json
+      command: agent-do transcribe --batch-file urls.txt --browse-session youtube_arc --browser-capture --output-dir ./transcripts --json
     - intent: free fallback only (no Whisper API)
       command: agent-do transcribe <url> --prefer-free
     - intent: check tool readiness as JSON
@@ -1909,6 +1950,10 @@ tools:
       - caption
       - subtitle
       - yt-dlp
+      - youtube player client
+      - extractor args
+      - browser capture
+      - tab audio
       prompt_patterns:
       - \btranscrib\w*\b
       - \btranscript\b
@@ -1916,15 +1961,33 @@ tools:
       - \b(speech|audio|video).*to.*text\b
       - \bwhisper\s+api\b
       - \bcaption\w*\b
+      - \bplayer_client\b
+      - \bextractor args?\b
+      - \bbrowser capture\b
+      - \btab audio\b
       recommended_entrypoints:
       - agent-do transcribe doctor --json
-      - agent-do transcribe cost <url> --json
-      - agent-do transcribe <url> --browse-session youtube --json
-      - agent-do transcribe --batch-file urls.txt --browse-session youtube --output-dir transcripts --json
+      - agent-do transcribe cost <url> --youtube-player-client ios --json
+      - agent-do transcribe <url> --browse-session youtube_arc --browser-capture --json
+      - agent-do transcribe <url> --browse-session youtube_arc --youtube-player-client ios --json
+      - agent-do transcribe --batch-file urls.txt --browse-session youtube_arc --browser-capture --output-dir transcripts --json
       default_command: doctor
     credentials:
       optional:
       - OPENAI_API_KEY
+    contracts:
+      connect:
+      - doctor
+      snapshot:
+      - snapshot
+      - cost
+      interact:
+      - transcribe
+      verify:
+      - doctor
+      - cost
+      save:
+      - transcribe
     concurrency: mixed
   hardware:
     description: Unified hardware device control across serial, bluetooth, USB, printers, and MIDI
@@ -3022,7 +3085,7 @@ tools:
     - intent: run vector sync
       command: agent-vector sync --dry-run
     - intent: bind a vector project
-      command: agent-vector bind versova-research --dir /Users/erik/Documents/AI/Custom_Coding/versova-research
+      command: agent-vector bind versova-research --dir ~/Custom-Coding/versova-research
     credentials:
       required:
       - VECTOR_SUPABASE_URL

@@ -17,9 +17,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+from .ytdlp import add_ytdlp_auth_args
 
 WHISPER_API_MODEL = "whisper-1"
 WHISPER_API_RATE_USD_PER_MIN = 0.006
@@ -56,6 +59,7 @@ def dependency_check() -> dict:
         "local_whisper": _has_module("whisper") or shutil.which("whisper") is not None,
         "node": shutil.which("node") is not None,
         "npx": shutil.which("npx") is not None,
+        "macos_screen_capture_current_process": _macos_screen_capture_preflight(),
     }
 
 
@@ -65,6 +69,27 @@ def _has_module(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
         return False
+
+
+def _macos_screen_capture_preflight() -> Optional[bool]:
+    if sys.platform != "darwin" or not shutil.which("swift"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["swift", "-e", "import CoreGraphics; print(CGPreflightScreenCaptureAccess())"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = proc.stdout.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +411,7 @@ VTT_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def vtt_transcribe(url: str, cookies_path: Optional[str] = None,
+                   extractor_args: Optional[list[str]] = None,
                    progress=None) -> dict:
     if not shutil.which("yt-dlp"):
         return {"success": False, "error": "yt-dlp not installed"}
@@ -398,8 +424,7 @@ def vtt_transcribe(url: str, cookies_path: Optional[str] = None,
                "--skip-download", "--sub-format", "vtt",
                "--no-warnings", "--socket-timeout", "30",
                "-o", str(work_dir / "sub")]
-        if cookies_path:
-            cmd.extend(["--cookies", cookies_path])
+        add_ytdlp_auth_args(cmd, cookies_path, extractor_args)
         cmd.append(url)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=False)
         if proc.returncode != 0:
@@ -475,6 +500,7 @@ def _parse_vtt(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def download_audio(url: str, work_dir: Path, cookies_path: Optional[str] = None,
+                   extractor_args: Optional[list[str]] = None,
                    progress=None) -> dict:
     if not shutil.which("yt-dlp"):
         return {"success": False, "error": "yt-dlp not installed"}
@@ -482,19 +508,23 @@ def download_audio(url: str, work_dir: Path, cookies_path: Optional[str] = None,
         return {"success": False, "error": "ffmpeg not installed (needed for audio extraction)"}
 
     if progress:
-        progress("downloading audio via yt-dlp")
+        if extractor_args:
+            progress(f"downloading audio via yt-dlp ({', '.join(extractor_args)})")
+        else:
+            progress("downloading audio via yt-dlp")
     out_template = str(work_dir / "audio.%(ext)s")
     cmd = ["yt-dlp", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "5",
            "--no-playlist", "--socket-timeout", "30", "--no-warnings",
            "-o", out_template]
-    if cookies_path:
-        cmd.extend(["--cookies", cookies_path])
+    add_ytdlp_auth_args(cmd, cookies_path, extractor_args)
     cmd.append(url)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
     if proc.returncode != 0:
         stderr = (proc.stderr or "yt-dlp audio download failed").strip()
         auth_required = bool(re.search(
-            r"(members?-only|join this channel|sign in to confirm|login required|private video)",
+            r"(members?-only|join this channel|sign in|login required|private video|"
+            r"not a bot|confirm.*bot|requires.*authentication|available to .*members|"
+            r"HTTP Error 403|Forbidden)",
             stderr, re.IGNORECASE,
         ))
         return {"success": False, "error": stderr[:300], "requires_auth": auth_required}
@@ -504,3 +534,69 @@ def download_audio(url: str, work_dir: Path, cookies_path: Optional[str] = None,
     if audio is None:
         return {"success": False, "error": "yt-dlp succeeded but no audio file produced"}
     return {"success": True, "path": audio, "size_bytes": audio.stat().st_size}
+
+
+def browser_capture_audio(url: str, work_dir: Path, browse_session: str,
+                          capture_seconds: Optional[float] = None,
+                          capture_buffer_seconds: float = 5.0,
+                          progress=None) -> dict:
+    """Capture authenticated tab audio through Chromium and MediaRecorder."""
+    if not shutil.which("node"):
+        return {"success": False, "error": "node not installed (needed for browser capture)"}
+
+    script_path = Path(__file__).resolve().parent / "browser_capture.mjs"
+    if not script_path.exists():
+        return {"success": False, "error": f"browser capture script missing: {script_path}"}
+
+    out_path = work_dir / "browser-capture.webm"
+    cmd = [
+        "node", str(script_path),
+        "--url", url,
+        "--session", browse_session,
+        "--output", str(out_path),
+        "--buffer-seconds", str(capture_buffer_seconds),
+    ]
+    if capture_seconds:
+        cmd.extend(["--duration-seconds", str(capture_seconds)])
+
+    if progress:
+        if capture_seconds:
+            progress(f"capturing browser tab audio for {capture_seconds:g}s")
+        else:
+            progress("capturing browser tab audio until video end")
+
+    timeout = int((capture_seconds or 3600) + 180)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "browser capture timed out"}
+
+    try:
+        payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        stderr = (proc.stderr or "").strip()
+        return {"success": False, "error": f"browser capture returned no JSON: {stderr[:300]}"}
+
+    if proc.returncode != 0 or not payload.get("success"):
+        return {
+            "success": False,
+            "error": payload.get("error") or (proc.stderr or "browser capture failed").strip()[:300],
+            "requires_auth": True,
+        }
+
+    audio_path = Path(payload["path"])
+    if not audio_path.exists() or audio_path.stat().st_size == 0:
+        return {"success": False, "error": "browser capture produced no audio file"}
+
+    duration = _ffprobe_duration(audio_path)
+    if duration <= 0:
+        return {"success": False, "error": "browser capture audio could not be probed by ffprobe"}
+
+    return {
+        "success": True,
+        "path": audio_path,
+        "size_bytes": audio_path.stat().st_size,
+        "duration_seconds": duration,
+        "capture": payload,
+        "source": "browser-capture",
+    }

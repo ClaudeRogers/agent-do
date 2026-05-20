@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .ytdlp import add_ytdlp_auth_args
+
 YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 YOUTUBE_URL_PATTERNS = [
     re.compile(r"(?:youtube\.com/watch\?(?:.*&)?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/shorts/)([A-Za-z0-9_-]{11})"),
@@ -60,7 +62,8 @@ def source_hash(source: dict) -> str:
     return hashlib.sha256(source["canonical"].encode("utf-8")).hexdigest()[:16]
 
 
-def probe_metadata(source: dict, cookies_path: Optional[str] = None) -> dict:
+def probe_metadata(source: dict, cookies_path: Optional[str] = None,
+                   extractor_args: Optional[list[str]] = None) -> dict:
     """Use yt-dlp to fetch title, duration, channel, etc. Local files probed via ffprobe.
 
     Returns: {success, title?, duration_seconds?, channel?, requires_auth?, error?}
@@ -68,7 +71,7 @@ def probe_metadata(source: dict, cookies_path: Optional[str] = None) -> dict:
     """
     if source["kind"] == "file":
         return _probe_file(source["path"])
-    return _probe_yt_dlp(source.get("url") or source["canonical"], cookies_path)
+    return _probe_yt_dlp(source.get("url") or source["canonical"], cookies_path, extractor_args)
 
 
 def _probe_file(path: str) -> dict:
@@ -99,11 +102,11 @@ def _probe_file(path: str) -> dict:
         return {"success": False, "error": f"probe failed: {exc}"}
 
 
-def _probe_yt_dlp(url: str, cookies_path: Optional[str]) -> dict:
+def _probe_yt_dlp(url: str, cookies_path: Optional[str],
+                  extractor_args: Optional[list[str]]) -> dict:
     cmd = ["yt-dlp", "--no-playlist", "--skip-download", "--print-json",
            "--socket-timeout", "20", "--no-warnings"]
-    if cookies_path:
-        cmd.extend(["--cookies", cookies_path])
+    add_ytdlp_auth_args(cmd, cookies_path, extractor_args)
     cmd.append(url)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False)
@@ -115,7 +118,9 @@ def _probe_yt_dlp(url: str, cookies_path: Optional[str]) -> dict:
     if proc.returncode != 0:
         stderr = proc.stderr or ""
         auth_required = bool(re.search(
-            r"(members?-only|join this channel|sign in to confirm|login required|private video)",
+            r"(members?-only|join this channel|sign in|login required|private video|"
+            r"not a bot|confirm.*bot|requires.*authentication|available to .*members|"
+            r"HTTP Error 403|Forbidden)",
             stderr, re.IGNORECASE,
         ))
         return {

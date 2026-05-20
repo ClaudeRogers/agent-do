@@ -12,7 +12,7 @@ Install:
 The repo location is resolved in priority order:
     1. AGENT_DO_REPO env var
     2. ~/.agent-do/install-path breadcrumb
-    3. /Users/<your-user>/Custom-Coding/agent-do (default fallback; edit if needed)
+    3. ~/Custom-Coding/agent-do (default fallback; edit if needed)
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def candidate_roots() -> list[Path]:
 
 def main() -> None:
     for root in candidate_roots():
-        hook = root / "hooks" / "agent-do-pretooluse-check.py"
+        hook = root / "hooks" / "claude" / "agent-do-pretooluse-check.py"
         if hook.exists():
             sys.path.insert(0, str(root / "lib"))
             os.environ["AGENT_DO_HOOK_RUNTIME"] = "codex"

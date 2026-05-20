@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Codex UserPromptSubmit hook wrapper for the checked-in agent-do router.
 
-Runs the repo's `hooks/agent-do-prompt-router.py` with stdin/stdout
+Runs the repo's `hooks/claude/agent-do-prompt-router.py` with stdin/stdout
 pass-through via `runpy.run_path`. The agent sees the same routing nudges
 Claude Code sees: AI-classified coord requirements, tool suggestions,
 docs-retrieval / design-toolkit / completion-check context.
@@ -43,7 +43,7 @@ def candidate_roots() -> list[Path]:
 
 def main() -> None:
     for root in candidate_roots():
-        hook = root / "hooks" / "agent-do-prompt-router.py"
+        hook = root / "hooks" / "claude" / "agent-do-prompt-router.py"
         if hook.exists():
             sys.path.insert(0, str(root / "lib"))
             runpy.run_path(str(hook), run_name="__main__")

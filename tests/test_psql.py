@@ -26,6 +26,8 @@ def run_tool(*args: str, env_override: dict | None = None) -> subprocess.Complet
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
+        if "HOME" in env_override and "AGENT_DO_HOME" not in env_override:
+            env["AGENT_DO_HOME"] = str(Path(env_override["HOME"]) / ".agent-do")
     return subprocess.run(
         [str(TOOL), *args],
         cwd=ROOT,
@@ -40,6 +42,8 @@ def run_bash(script: str, env_override: dict | None = None) -> subprocess.Comple
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
+        if "HOME" in env_override and "AGENT_DO_HOME" not in env_override:
+            env["AGENT_DO_HOME"] = str(Path(env_override["HOME"]) / ".agent-do")
     return subprocess.run(
         ["bash", "-c", script],
         cwd=ROOT,
