@@ -5813,4 +5813,8 @@ tools:
       - agent-do cronitor snapshot
       - agent-do cronitor issues --open
       default_command: monitors
-    concurrency: read
+      readiness:
+        check: agent-do creds check CRONITOR_API_KEY
+        fix: agent-do creds store CRONITOR_API_KEY --stdin
+        note: Requires a Cronitor API key with monitor and issue scopes
+    concurrency: mixed
