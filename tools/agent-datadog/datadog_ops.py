@@ -704,24 +704,36 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     monitors: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     slos: list[dict[str, Any]] = []
+    errors: list[str] = []
 
-    try:
-        d = _request("GET", "/monitor", params={"page_size": 100})
-        monitors = d if isinstance(d, list) else []
-    except SystemExit:
-        pass
+    def _fetch(label: str, fn: Any) -> Any:
+        try:
+            return fn()
+        except SystemExit as exc:
+            errors.append(f"{label}: exit({exc.code})")
+            return None
 
-    try:
-        d = _request("GET", "/events", params={"start": _now_epoch() - 3600, "end": _now_epoch()})
-        events = (d.get("events") or []) if isinstance(d, dict) else []
-    except SystemExit:
-        pass
+    result = _fetch("monitors", lambda: _request("GET", "/monitor", params={"page_size": 100}))
+    if result is not None:
+        monitors = result if isinstance(result, list) else []
 
-    try:
-        d = _request("GET", "/slo")
-        slos = (d.get("data") or []) if isinstance(d, dict) else []
-    except SystemExit:
-        pass
+    result = _fetch("events", lambda: _request("GET", "/events",
+                    params={"start": _now_epoch() - 3600, "end": _now_epoch()}))
+    if result is not None:
+        events = (result.get("events") or []) if isinstance(result, dict) else []
+
+    result = _fetch("slos", lambda: _request("GET", "/slo"))
+    if result is not None:
+        slos = (result.get("data") or []) if isinstance(result, dict) else []
+
+    if errors and not monitors and not events and not slos:
+        # All sections failed — surface the error rather than showing empty data
+        _err(f"Snapshot failed — all API requests errored. Check DD_API_KEY / DD_APP_KEY. "
+             f"Sections: {'; '.join(errors)}")
+
+    if errors:
+        for e in errors:
+            print(f"Warning: {e}", file=sys.stderr)
 
     alerting = [m for m in monitors if (m.get("overall_state") or "").upper() == "ALERT"]
     warning = [m for m in monitors if (m.get("overall_state") or "").upper() == "WARN"]
@@ -756,6 +768,12 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    # Shared parent so --json can appear before OR after the subcommand.
+    # SUPPRESS default prevents subparser from resetting root parser's args.json=True.
+    _common = argparse.ArgumentParser(add_help=False)
+    _common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                         help="Output JSON")
+
     parser = argparse.ArgumentParser(
         prog="agent-datadog",
         description="Datadog observability: monitors, logs, metrics, incidents, dashboards, SLOs",
@@ -763,23 +781,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Output JSON")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def _sub(name: str, **kw: Any) -> argparse.ArgumentParser:
+        return sub.add_parser(name, parents=[_common], **kw)
+
     # monitors
-    p = sub.add_parser("monitors", help="List monitors")
+    p = _sub("monitors", help="List monitors")
     p.add_argument("--tag", help="Filter by tag (e.g. env:prod)")
     p.add_argument("--name", help="Filter by name substring")
     p.add_argument("--state", help="Filter by state: Alert, Warn, OK, No Data")
     p.add_argument("--page-size", dest="page_size", type=int, default=100)
 
     # monitor
-    p = sub.add_parser("monitor", help="Get one monitor by ID")
+    p = _sub("monitor", help="Get one monitor by ID")
     p.add_argument("id", type=int)
 
     # monitor-status
-    p = sub.add_parser("monitor-status", help="Alert state summary across all monitors")
+    p = _sub("monitor-status", help="Alert state summary across all monitors")
     p.add_argument("--tag", help="Filter by tag")
 
     # monitor-mute
-    p = sub.add_parser("monitor-mute", help="Mute a monitor")
+    p = _sub("monitor-mute", help="Mute a monitor")
     p.add_argument("id", type=int)
     p.add_argument("--end", help="Mute until (now-1h, ISO8601, or epoch integer)")
     p.add_argument("--scope", help="Scope to mute (e.g. host:web-01)")
@@ -787,12 +808,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
 
     # monitor-unmute
-    p = sub.add_parser("monitor-unmute", help="Unmute a monitor")
+    p = _sub("monitor-unmute", help="Unmute a monitor")
     p.add_argument("id", type=int)
     p.add_argument("--dry-run", action="store_true")
 
     # monitor-create
-    p = sub.add_parser("monitor-create", help="Create a monitor")
+    p = _sub("monitor-create", help="Create a monitor")
     p.add_argument("--name", required=True)
     p.add_argument("--type", dest="monitor_type", required=True,
                    help="Monitor type (e.g. 'metric alert', 'log alert')")
@@ -803,12 +824,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
 
     # monitor-delete
-    p = sub.add_parser("monitor-delete", help="Delete a monitor")
+    p = _sub("monitor-delete", help="Delete a monitor")
     p.add_argument("id", type=int)
     p.add_argument("--dry-run", action="store_true")
 
     # logs
-    p = sub.add_parser("logs", help="Search logs")
+    p = _sub("logs", help="Search logs")
     p.add_argument("query", nargs="?", default="*", help="Log query (default: *)")
     p.add_argument("--from", dest="from_time", default="now-1h", help="From time (default: now-1h)")
     p.add_argument("--to", dest="to_time", default="now", help="To time (default: now)")
@@ -818,24 +839,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cursor", help="Pagination cursor from previous result")
 
     # metrics
-    p = sub.add_parser("metrics", help="Query metric timeseries")
+    p = _sub("metrics", help="Query metric timeseries")
     p.add_argument("metric", help="Metric query (e.g. avg:system.cpu.user{*})")
     p.add_argument("--from", dest="from_time", default="now-1h", help="From time (default: now-1h)")
     p.add_argument("--to", dest="to_time", default="now", help="To time (default: now)")
 
     # metrics-list
-    p = sub.add_parser("metrics-list", help="List available metrics")
+    p = _sub("metrics-list", help="List available metrics")
     p.add_argument("--prefix", help="Filter metrics by name prefix")
 
     # events
-    p = sub.add_parser("events", help="List events")
+    p = _sub("events", help="List events")
     p.add_argument("--from", dest="from_time", default="now-1h", help="From time (default: now-1h)")
     p.add_argument("--to", dest="to_time", default=None, help="To time (default: now)")
     p.add_argument("--priority", choices=["normal", "low"], help="Filter by priority")
     p.add_argument("--tags", help="Filter by comma-separated tags")
 
     # event-post
-    p = sub.add_parser("event-post", help="Post a Datadog event")
+    p = _sub("event-post", help="Post a Datadog event")
     p.add_argument("--title", required=True, help="Event title")
     p.add_argument("--text", required=True, help="Event body text")
     p.add_argument("--priority", choices=["normal", "low"], default="normal")
@@ -845,22 +866,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
 
     # incidents
-    p = sub.add_parser("incidents", help="List incidents")
+    p = _sub("incidents", help="List incidents")
     p.add_argument("--state", choices=["active", "stable", "resolved"], help="Filter by state")
 
     # incident
-    p = sub.add_parser("incident", help="Get one incident by ID")
+    p = _sub("incident", help="Get one incident by ID")
     p.add_argument("id", help="Incident ID")
 
     # incident-create
-    p = sub.add_parser("incident-create", help="Create an incident")
+    p = _sub("incident-create", help="Create an incident")
     p.add_argument("--title", required=True)
     p.add_argument("--severity", choices=["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "UNKNOWN"])
     p.add_argument("--customer-impacted", dest="customer_impacted", action="store_true", default=False)
     p.add_argument("--dry-run", action="store_true")
 
     # incident-update
-    p = sub.add_parser("incident-update", help="Update an incident")
+    p = _sub("incident-update", help="Update an incident")
     p.add_argument("id", help="Incident ID")
     p.add_argument("--title", help="New title")
     p.add_argument("--status", choices=["active", "stable", "resolved"])
@@ -868,33 +889,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
 
     # incident-resolve
-    p = sub.add_parser("incident-resolve", help="Resolve an incident")
+    p = _sub("incident-resolve", help="Resolve an incident")
     p.add_argument("id", help="Incident ID")
     p.add_argument("--dry-run", action="store_true")
 
     # dashboards
-    sub.add_parser("dashboards", help="List all dashboards")
+    _sub("dashboards", help="List all dashboards")
 
     # dashboard
-    p = sub.add_parser("dashboard", help="Get one dashboard")
+    p = _sub("dashboard", help="Get one dashboard")
     p.add_argument("id", help="Dashboard ID")
 
     # slos
-    p = sub.add_parser("slos", help="List SLOs")
+    p = _sub("slos", help="List SLOs")
     p.add_argument("--tags", help="Filter by tags")
 
     # slo
-    p = sub.add_parser("slo", help="Get SLO history and error budget")
+    p = _sub("slo", help="Get SLO history and error budget")
     p.add_argument("id", help="SLO ID")
     p.add_argument("--from", dest="from_time", default=None, help="From time (default: 30 days ago)")
     p.add_argument("--to", dest="to_time", default=None, help="To time (default: now)")
 
     # services
-    p = sub.add_parser("services", help="List service catalog definitions")
+    p = _sub("services", help="List service catalog definitions")
     p.add_argument("--page-size", dest="page_size", type=int, default=100)
 
     # snapshot
-    sub.add_parser("snapshot", help="Observability snapshot: monitors + events + SLOs")
+    _sub("snapshot", help="Observability snapshot: monitors + events + SLOs")
 
     return parser
 
