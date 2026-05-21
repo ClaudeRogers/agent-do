@@ -1650,6 +1650,48 @@ def main() -> int:
         check("snapshot text mode events=2", "Events (1h): 2" in r.stdout)
         check("snapshot text mode slos=2", "SLOs:        2" in r.stdout)
 
+        # ══════════════════════════════════════════════════════════════════
+        # --json AFTER SUBCOMMAND (flag must work in either position)
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== --json flag position ===\n")
+
+        # --json before subcommand (existing behavior)
+        r = run(["--json", "monitors"], env=env)
+        check("--json before subcommand works", r.returncode == 0 and _try_json(r.stdout) is not None)
+
+        # --json after subcommand (new behavior via shared parent parser)
+        r = run(["monitors", "--json"], env=env)
+        check("--json after subcommand works", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("--json after subcommand produces valid JSON", j is not None, r.stdout[:200])
+        check("--json after subcommand has monitors key", isinstance(j, dict) and "monitors" in j)
+
+        r = run(["monitor", "101", "--json"], env=env)
+        check("monitor <id> --json after subcommand works", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor <id> --json after subcommand is valid JSON", j is not None)
+
+        r = run(["monitor-status", "--json"], env=env)
+        check("monitor-status --json after subcommand works", r.returncode in (0, 1), r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-status --json after subcommand is valid JSON", j is not None)
+
+        r = run(["logs", "--json"], env=env)
+        check("logs --json after subcommand works", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("logs --json after subcommand is valid JSON", j is not None)
+
+        # ══════════════════════════════════════════════════════════════════
+        # SNAPSHOT WITH MISSING CREDENTIALS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== snapshot credential error ===\n")
+
+        bad_env = {**env, "DD_API_KEY": "", "DD_APP_KEY": ""}
+        r = run(["snapshot"], env=bad_env)
+        check("snapshot with missing creds exits non-zero", r.returncode != 0)
+        check("snapshot with missing creds reports error",
+              "DD_API_KEY" in r.stderr or "credential" in r.stderr.lower() or "Missing" in r.stderr)
+
         print(f"\nResults: {PASS} passed, {FAIL} failed")
         return 0 if FAIL == 0 else 1
 
