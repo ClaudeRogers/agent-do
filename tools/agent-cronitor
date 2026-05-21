@@ -1,0 +1,588 @@
+#!/usr/bin/env bash
+# agent-cronitor - Cronitor scheduled job and uptime monitoring
+
+set -euo pipefail
+
+CRONITOR_API="https://cronitor.io/api"
+CRONITOR_TELEMETRY="https://cronitor.link/p"
+CRONITOR_VERSION="2025-11-28"
+
+show_help() {
+    cat << 'EOF'
+agent-cronitor - Cronitor scheduled job and uptime monitoring
+
+MONITORS
+  monitors / ls               List all monitors with status
+  show <key>                  Detailed monitor info
+  create                      Create a monitor (reads JSON from stdin)
+  delete <key>                Delete a monitor
+  pause <key> [hours]         Pause a monitor (indefinitely or for N hours)
+  resume <key>                Resume a paused monitor
+
+ISSUES
+  issues [--open]             List issues (--open = unresolved only)
+  issue <key>                 Detailed issue info
+
+TELEMETRY
+  ping <key> [--state STATE]  Send telemetry event (run|complete|fail|ok)
+
+NOTIFICATIONS
+  notifications               List notification lists
+
+ACCOUNT
+  snapshot                    Full account state as JSON
+
+Monitors are referenced by their key (e.g. TuoCU3, vms-cron-daily).
+
+Environment:
+  CRONITOR_API_KEY            API key (HTTP Basic Auth)
+
+Examples:
+  agent-cronitor monitors
+  agent-cronitor show TuoCU3
+  agent-cronitor issues --open
+  agent-cronitor ping TuoCU3 --state complete
+  agent-cronitor pause vms-cron-daily 4
+  agent-cronitor resume vms-cron-daily
+  agent-cronitor snapshot
+EOF
+}
+
+# --- Helpers ---
+
+cr_api_key() {
+    local key="${CRONITOR_API_KEY:-}"
+    if [[ -z "$key" ]]; then
+        echo "Error: CRONITOR_API_KEY not set" >&2
+        return 1
+    fi
+    printf '%s' "$key"
+}
+
+cr_get() {
+    local url="$1"
+    local key
+    key=$(cr_api_key) || return 1
+    curl -sS -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        -H "Accept: application/json" \
+        "$url"
+}
+
+cr_post() {
+    local url="$1"
+    local data="${2:-}"
+    local key
+    key=$(cr_api_key) || return 1
+    local args=(-sS -X POST -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json")
+    if [[ -n "$data" ]]; then
+        args+=(-d "$data")
+    fi
+    curl "${args[@]}" "$url"
+}
+
+cr_put() {
+    local url="$1"
+    local data="$2"
+    local key
+    key=$(cr_api_key) || return 1
+    curl -sS -X PUT -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d "$data" "$url"
+}
+
+cr_delete() {
+    local url="$1"
+    local key
+    key=$(cr_api_key) || return 1
+    curl -sS -X DELETE -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        -o /dev/null -w "%{http_code}" "$url"
+}
+
+# --- Commands ---
+
+cmd_monitors() {
+    local result
+    result=$(cr_get "${CRONITOR_API}/monitors") || return 1
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else d.get('monitors', [])
+if not items:
+    print('No monitors found.')
+    sys.exit(0)
+fmt = '{:<20} {:<30} {:<10} {:<8} {:<8}'
+print(fmt.format('KEY', 'NAME', 'TYPE', 'PASSING', 'PAUSED'))
+print('-' * 76)
+for m in items:
+    print(fmt.format(
+        m.get('key', '')[:20],
+        (m.get('name', '') or m.get('key', ''))[:30],
+        m.get('type', ''),
+        str(m.get('passing', '?')),
+        str(m.get('paused', False)),
+    ))
+"
+}
+
+cmd_show() {
+    local monitor_key="${1:?Usage: agent-cronitor show <key>}"
+
+    local result
+    result=$(cr_get "${CRONITOR_API}/monitors/${monitor_key}") || return 1
+
+    echo "$result" | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+print(json.dumps({
+    'key': m.get('key', ''),
+    'name': m.get('name', ''),
+    'type': m.get('type', ''),
+    'passing': m.get('passing'),
+    'paused': m.get('paused', False),
+    'running': m.get('running'),
+    'initialized': m.get('initialized', False),
+    'disabled': m.get('disabled', False),
+    'schedules': m.get('schedules', []),
+    'schedule': m.get('schedule', ''),
+    'timezone': m.get('timezone', ''),
+    'assertions': m.get('assertions', []),
+    'notify': m.get('notify', []),
+    'group': m.get('group', ''),
+    'platform': m.get('platform', ''),
+    'grace_seconds': m.get('grace_seconds'),
+    'failure_tolerance': m.get('failure_tolerance'),
+    'note': m.get('note', ''),
+    'latest_event': m.get('latest_event'),
+    'next_expected_at': m.get('next_expected_at'),
+    'created': m.get('created', ''),
+}, indent=2))
+"
+}
+
+cmd_create() {
+    local data
+    if [[ -t 0 ]]; then
+        echo "Error: pipe monitor JSON to stdin" >&2
+        echo "Example: echo '{\"type\":\"job\",\"key\":\"my-job\",\"schedules\":[\"0 * * * *\"]}' | agent-cronitor create" >&2
+        echo "Note: API version 2025-11-28 requires 'schedules' (array), not 'schedule' (string)." >&2
+        return 1
+    fi
+    data=$(cat)
+
+    local key
+    key=$(cr_api_key) || return 1
+
+    local body http_code
+    body=$(curl -sS -X POST -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -w "\n%{http_code}" \
+        -d "$data" "${CRONITOR_API}/monitors")
+
+    http_code=$(echo "$body" | tail -1)
+    body=$(echo "$body" | sed '$d')
+
+    if [[ "$http_code" == "201" || "$http_code" == "200" ]]; then
+        echo "$body" | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+key = m.get('key', '')
+name = m.get('name', '') or key
+mtype = m.get('type', '')
+print(f'Created monitor \"{name}\" (key: {key}, type: {mtype})')
+"
+    else
+        echo "Error (HTTP ${http_code}):" >&2
+        echo "$body" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin),indent=2))" 2>/dev/null || echo "$body" >&2
+        return 1
+    fi
+}
+
+cmd_delete() {
+    local monitor_key="${1:?Usage: agent-cronitor delete <key>}"
+
+    local http_code
+    http_code=$(cr_delete "${CRONITOR_API}/monitors/${monitor_key}") || return 1
+
+    if [[ "$http_code" == "204" ]]; then
+        echo "Deleted monitor: ${monitor_key}"
+    elif [[ "$http_code" == "404" ]]; then
+        echo "Error: Monitor '${monitor_key}' not found" >&2
+        return 1
+    else
+        echo "Error: Unexpected response code ${http_code}" >&2
+        return 1
+    fi
+}
+
+cmd_pause() {
+    local monitor_key="${1:?Usage: agent-cronitor pause <key> [hours]}"
+    local hours="${2:-}"
+
+    local url="${CRONITOR_API}/monitors/${monitor_key}/pause"
+    if [[ -n "$hours" ]]; then
+        url="${url}/${hours}"
+    fi
+
+    # Pause endpoint returns HTML, not JSON — verify via HTTP status code
+    local key
+    key=$(cr_api_key) || return 1
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" "$url")
+
+    if [[ "$http_code" == "200" ]]; then
+        if [[ -n "$hours" ]]; then
+            echo "Monitor \"${monitor_key}\": paused for ${hours} hour(s)"
+        else
+            echo "Monitor \"${monitor_key}\": paused indefinitely"
+        fi
+    elif [[ "$http_code" == "404" ]]; then
+        echo "Error: Monitor '${monitor_key}' not found" >&2
+        return 1
+    else
+        echo "Error: Unexpected response code ${http_code}" >&2
+        return 1
+    fi
+}
+
+cmd_resume() {
+    local monitor_key="${1:?Usage: agent-cronitor resume <key>}"
+
+    local key
+    key=$(cr_api_key) || return 1
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -u "${key}:" \
+        -H "Cronitor-Version: ${CRONITOR_VERSION}" \
+        "${CRONITOR_API}/monitors/${monitor_key}/pause/0")
+
+    if [[ "$http_code" == "200" ]]; then
+        echo "Monitor \"${monitor_key}\": resumed"
+    elif [[ "$http_code" == "404" ]]; then
+        echo "Error: Monitor '${monitor_key}' not found" >&2
+        return 1
+    else
+        echo "Error: Unexpected response code ${http_code}" >&2
+        return 1
+    fi
+}
+
+cmd_issues() {
+    local url="${CRONITOR_API}/issues"
+    local open_only=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --open) open_only=true; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [[ "$open_only" == "true" ]]; then
+        url="${url}?state=unresolved"
+    fi
+
+    local result
+    result=$(cr_get "$url") || return 1
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else d.get('issues', d.get('data', []))
+if not items:
+    print('No issues found.')
+    sys.exit(0)
+fmt = '{:<18} {:<35} {:<12} {:<15} {:<24}'
+print(fmt.format('KEY', 'NAME', 'SEVERITY', 'STATE', 'STARTED'))
+print('-' * 104)
+for item in items:
+    print(fmt.format(
+        (item.get('key', '') or '')[:18],
+        (item.get('name', '') or '')[:35],
+        (item.get('severity', '') or '')[:12],
+        (item.get('state', '') or '')[:15],
+        (item.get('started', '') or '')[:24],
+    ))
+"
+}
+
+cmd_issue() {
+    local issue_key="${1:?Usage: agent-cronitor issue <key>}"
+
+    local result
+    result=$(cr_get "${CRONITOR_API}/issues/${issue_key}") || return 1
+
+    echo "$result" | python3 -c "
+import sys, json
+item = json.load(sys.stdin)
+print(json.dumps({
+    'key': item.get('key', ''),
+    'name': item.get('name', ''),
+    'severity': item.get('severity', ''),
+    'state': item.get('state', ''),
+    'started': item.get('started', ''),
+    'ended': item.get('ended'),
+    'duration': item.get('duration'),
+    'assigned_to': item.get('assigned_to'),
+    'environment': item.get('environment'),
+    'monitors': [m.get('key', '') for m in (item.get('monitors') or [])],
+    'updates': item.get('updates', []),
+    'created': item.get('created', ''),
+}, indent=2))
+"
+}
+
+cmd_ping() {
+    local monitor_key="${1:?Usage: agent-cronitor ping <key> [--state STATE]}"
+    shift
+
+    local state=""
+    local message=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --state) state="$2"; shift 2 ;;
+            --message|-m) message="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    local key
+    key=$(cr_api_key) || return 1
+
+    local url="${CRONITOR_TELEMETRY}/${key}/${monitor_key}"
+    local params=""
+    if [[ -n "$state" ]]; then
+        params="state=${state}"
+    fi
+    if [[ -n "$message" ]]; then
+        local encoded_msg
+        encoded_msg=$(printf '%s' "$message" | python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+        if [[ -n "$params" ]]; then
+            params="${params}&message=${encoded_msg}"
+        else
+            params="message=${encoded_msg}"
+        fi
+    fi
+
+    if [[ -n "$params" ]]; then
+        url="${url}?${params}"
+    fi
+
+    # Telemetry API returns 200 for all requests (auth validated downstream)
+    local http_code
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url")
+
+    if [[ "$http_code" == "200" ]]; then
+        echo "Ping sent: ${monitor_key}${state:+ state=${state}}${message:+ message=${message}}"
+    else
+        echo "Error: Unexpected response code ${http_code}" >&2
+        return 1
+    fi
+}
+
+cmd_notifications() {
+    local result
+    result=$(cr_get "${CRONITOR_API}/notifications") || return 1
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else d.get('templates', d.get('notification_lists', d.get('data', [])))
+if not items:
+    print('No notification lists found.')
+    sys.exit(0)
+for item in items:
+    notifs = item.get('notifications', {})
+    print(json.dumps({
+        'key': item.get('key', ''),
+        'name': item.get('name', ''),
+        'notifications': notifs,
+        'status': item.get('status', ''),
+    }, indent=2))
+"
+}
+
+cmd_snapshot() {
+    local key="${CRONITOR_API_KEY:-}"
+    if [[ -z "$key" ]]; then
+        echo '{"error": "CRONITOR_API_KEY not set"}'
+        return 1
+    fi
+
+    python3 -c "
+import json, sys
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+
+API = 'https://cronitor.io/api'
+KEY = '$key'
+VERSION = '2025-11-28'
+
+def api_get(url):
+    req = Request(url, headers={
+        'Accept': 'application/json',
+        'Cronitor-Version': VERSION,
+    })
+    import base64
+    cred = base64.b64encode((KEY + ':').encode()).decode()
+    req.add_header('Authorization', 'Basic ' + cred)
+    try:
+        with urlopen(req) as resp:
+            return json.loads(resp.read())
+    except HTTPError as e:
+        if e.code == 401:
+            return {'error': 'unauthorized'}
+        return {'error': str(e)}
+    except Exception as e:
+        return {'error': str(e)}
+
+token_valid = True
+
+# Monitors
+raw_monitors = api_get(API + '/monitors')
+if isinstance(raw_monitors, dict) and 'error' in raw_monitors:
+    token_valid = False
+    monitors = []
+    by_type = {}
+    by_status = {}
+else:
+    monitor_list = raw_monitors if isinstance(raw_monitors, list) else raw_monitors.get('monitors', [])
+    monitors = []
+    by_type = {}
+    by_status = {}
+    for m in monitor_list:
+        mtype = m.get('type', '?')
+        by_type[mtype] = by_type.get(mtype, 0) + 1
+        passing = m.get('passing')
+        st = 'passing' if passing is True else ('failing' if passing is False else 'unknown')
+        by_status[st] = by_status.get(st, 0) + 1
+        monitors.append({
+            'key': m.get('key', ''),
+            'name': m.get('name', ''),
+            'type': mtype,
+            'passing': passing,
+            'paused': m.get('paused', False),
+            'running': m.get('running'),
+            'initialized': m.get('initialized', False),
+            'schedule': m.get('schedule', ''),
+            'schedules': m.get('schedules', []),
+            'latest_event': m.get('latest_event'),
+            'next_expected_at': m.get('next_expected_at'),
+        })
+
+# Issues
+raw_issues = api_get(API + '/issues')
+issues = []
+open_issues = 0
+if isinstance(raw_issues, dict) and 'error' not in raw_issues:
+    issue_list = raw_issues if isinstance(raw_issues, list) else raw_issues.get('issues', raw_issues.get('data', []))
+    for item in issue_list:
+        resolved = item.get('ended')
+        if not resolved:
+            open_issues += 1
+        issues.append({
+            'key': item.get('key', ''),
+            'name': item.get('name', ''),
+            'severity': item.get('severity', ''),
+            'state': item.get('state', ''),
+            'started': item.get('started', ''),
+            'ended': resolved,
+            'monitors': [mon.get('key', '') for mon in (item.get('monitors') or [])],
+        })
+
+# Notification lists
+raw_notifs = api_get(API + '/notifications')
+notification_lists = []
+if isinstance(raw_notifs, dict) and 'error' not in raw_notifs:
+    notif_list = raw_notifs if isinstance(raw_notifs, list) else raw_notifs.get('templates', raw_notifs.get('notification_lists', raw_notifs.get('data', [])))
+    for item in notif_list:
+        notification_lists.append({
+            'key': item.get('key', ''),
+            'name': item.get('name', ''),
+            'status': item.get('status', ''),
+        })
+
+snapshot = {
+    'monitors': {
+        'count': len(monitors),
+        'by_type': by_type,
+        'by_status': by_status,
+        'items': monitors,
+    },
+    'issues': {
+        'count': len(issues),
+        'open': open_issues,
+        'items': issues,
+    },
+    'notification_lists': {
+        'count': len(notification_lists),
+        'items': notification_lists,
+    },
+    'token_valid': token_valid,
+}
+
+print(json.dumps(snapshot, indent=2))
+"
+}
+
+# --- Main ---
+
+case "${1:-help}" in
+    monitors|ls|list)
+        cmd_monitors
+        ;;
+    show|get)
+        shift
+        cmd_show "$@"
+        ;;
+    create)
+        cmd_create
+        ;;
+    delete|rm)
+        shift
+        cmd_delete "$@"
+        ;;
+    pause)
+        shift
+        cmd_pause "$@"
+        ;;
+    resume|unpause)
+        shift
+        cmd_resume "$@"
+        ;;
+    issues)
+        shift || true
+        cmd_issues "$@"
+        ;;
+    issue)
+        shift
+        cmd_issue "$@"
+        ;;
+    ping)
+        shift
+        cmd_ping "$@"
+        ;;
+    notifications|notify)
+        cmd_notifications
+        ;;
+    snapshot|snap)
+        cmd_snapshot
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Try: agent-cronitor --help"
+        exit 1
+        ;;
+esac

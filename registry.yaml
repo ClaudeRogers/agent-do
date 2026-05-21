@@ -5756,3 +5756,61 @@ tools:
         build:
         - own_state
     concurrency: read
+  cronitor:
+    description: Cronitor scheduled job and uptime monitoring
+    capabilities:
+    - list and inspect monitors (jobs, heartbeats, checks)
+    - view monitor details including schedule and assertions
+    - create and delete monitors
+    - pause and resume monitors for maintenance windows
+    - send telemetry events (run, complete, fail, ok)
+    - list and inspect issues (incidents)
+    - list notification lists
+    - full account snapshot as JSON
+    commands:
+      monitors: List all monitors with status
+      show: Detailed monitor info by key
+      create: Create a monitor (JSON from stdin)
+      delete: Delete a monitor by key
+      pause: Pause a monitor (indefinitely or for N hours)
+      resume: Resume a paused monitor
+      issues: List issues (--open for unresolved only)
+      issue: Detailed issue info by key
+      ping: Send telemetry event (--state run|complete|fail|ok)
+      notifications: List notification lists
+      snapshot: Full account state as JSON
+    examples:
+    - intent: list my cronitor monitors
+      command: agent-cronitor monitors
+    - intent: show cronitor monitor details
+      command: agent-cronitor show TuoCU3
+    - intent: check open cronitor issues
+      command: agent-cronitor issues --open
+    - intent: send a cronitor telemetry ping
+      command: agent-cronitor ping my-job --state complete
+    - intent: pause a cronitor monitor for maintenance
+      command: agent-cronitor pause my-job 4
+    - intent: resume a paused cronitor monitor
+      command: agent-cronitor resume my-job
+    - intent: get cronitor account snapshot
+      command: agent-cronitor snapshot
+    - intent: create a new cronitor monitor
+      command: echo '{"type":"job","key":"my-job","schedules":["0 * * * *"]}' | agent-cronitor create
+    routing:
+      discover_keywords:
+      - cronitor
+      - cron job monitoring
+      - scheduled job
+      - heartbeat monitor
+      - job monitor
+      prompt_patterns:
+      - \bcronitor\b
+      - \bcron\s+job\s+monitor\b
+      - \bscheduled\s+job\s+monitor\b
+      - \bheartbeat\s+monitor\b
+      recommended_entrypoints:
+      - agent-do cronitor monitors
+      - agent-do cronitor snapshot
+      - agent-do cronitor issues --open
+      default_command: monitors
+    concurrency: read
