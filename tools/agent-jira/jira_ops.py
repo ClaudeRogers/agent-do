@@ -35,6 +35,27 @@ def _print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
 
+def _validate_profile_name(name: str) -> None:
+    """Reject names that would cause path traversal or filesystem issues."""
+    if not name or not name.strip():
+        _err("Profile name cannot be empty")
+    if name != name.strip():
+        _err(f"Profile name cannot have leading or trailing whitespace: {name!r}")
+    if "/" in name or "\\" in name or "\x00" in name:
+        _err(f"Profile name contains invalid characters ('/', '\\\\', or null): {name!r}")
+    if name.startswith("."):
+        _err(f"Profile name cannot start with '.': {name!r}")
+    if len(name) > 64:
+        _err(f"Profile name too long (max 64 chars): {name!r}")
+
+
+def _parse_limit(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        _err(f"--limit must be an integer, got: {value!r}")
+
+
 # ── credential storage ─────────────────────────────────────────────────────────
 
 def _creds_dir() -> Path:
@@ -82,7 +103,8 @@ def _creds_get(profile: str) -> dict[str, str] | None:
         try:
             return json.loads(f.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return None
+            _err(f"Credentials file for profile '{profile}' is corrupted. "
+                 f"Re-add with: agent-do jira connections add {profile} --url ... --email ... --token ...")
     return None
 
 
@@ -166,7 +188,14 @@ class JiraClient:
                     msg = detail.get("message") or str(detail)
             except (json.JSONDecodeError, AttributeError):
                 msg = body_bytes.decode(errors="replace")[:200]
-            _err(f"Jira API {exc.code} {exc.reason}: {msg}")
+            if exc.code == 401:
+                _err(f"Jira API 401 Unauthorized — check your API token and email. {msg}".rstrip(". "))
+            elif exc.code == 403:
+                _err(f"Jira API 403 Forbidden — your account lacks permission for this action. {msg}".rstrip(". "))
+            elif exc.code == 429:
+                _err(f"Jira API 429 Too Many Requests — slow down or check rate limits. {msg}".rstrip(". "))
+            else:
+                _err(f"Jira API {exc.code} {exc.reason}: {msg}")
         except urllib.error.URLError as exc:
             _err(f"Could not connect to Jira: {exc.reason}")
 
@@ -303,6 +332,7 @@ def cmd_connections(argv: list[str]) -> None:
         name = rest[0] if rest else None
         if not name:
             _err("Usage: connections add <name> --url <url> --email <email> --token <token>")
+        _validate_profile_name(name)
         url = email = token = ""
         is_server = is_default = False
         i = 1
@@ -329,6 +359,7 @@ def cmd_connections(argv: list[str]) -> None:
             _err(f"--url must start with http:// or https://, got: {url!r}")
 
         data = _load_profiles()
+        overwriting = name in data["profiles"]
         data["profiles"][name] = {
             "url": url,
             "server": is_server,
@@ -339,7 +370,8 @@ def cmd_connections(argv: list[str]) -> None:
         _creds_store(name, url, email, token)
         _save_profiles(data)
         kind = "Server/DC" if is_server else "Cloud"
-        print(f"Saved profile '{name}' [{kind}]  {url}"
+        verb = "Updated" if overwriting else "Saved"
+        print(f"{verb} profile '{name}' [{kind}]  {url}"
               + (" (default)" if data["default"] == name else ""))
 
     elif sub == "remove":
@@ -348,7 +380,7 @@ def cmd_connections(argv: list[str]) -> None:
             _err("Usage: connections remove <name>")
         data = _load_profiles()
         if name not in data["profiles"]:
-            _err(f"Profile '{name}' not found")
+            _err(f"Profile '{name}' not found. Use 'connections list' to see saved profiles.")
         del data["profiles"][name]
         _creds_delete(name)
         if data.get("default") == name:
@@ -362,7 +394,7 @@ def cmd_connections(argv: list[str]) -> None:
             _err("Usage: connections set-default <name>")
         data = _load_profiles()
         if name not in data["profiles"]:
-            _err(f"Profile '{name}' not found")
+            _err(f"Profile '{name}' not found. Use 'connections list' to see saved profiles.")
         data["default"] = name
         _save_profiles(data)
         print(f"Default connection set to '{name}'")
@@ -437,6 +469,59 @@ def cmd_snapshot(argv: list[str]) -> None:
         for p in projects:
             open_str = str(p["open_issues"]) if p["open_issues"] >= 0 else "?"
             print(f"  {p['key']:<12} {p['name']:<40} {open_str} open")
+
+
+# ── users ──────────────────────────────────────────────────────────────────────
+
+def cmd_user(argv: list[str]) -> None:
+    """Find Jira users by display name, email, or username."""
+    if not argv:
+        _err("Usage: user find <query>  (name, email, or account ID fragment)")
+
+    # Support: user find <query>  OR  user <query>  (shorthand)
+    if argv[0] == "find":
+        rest = argv[1:]
+    else:
+        rest = argv
+
+    if not rest:
+        _err("Usage: user find <query>  (name, email, or account ID fragment)")
+
+    query = None
+    i = 0
+    while i < len(rest):
+        if rest[i] in ("--email", "--query") and i + 1 < len(rest):
+            query = rest[i + 1]; i += 2
+        elif not rest[i].startswith("-") and query is None:
+            query = rest[i]; i += 1
+        else:
+            i += 1
+
+    if not query:
+        _err("Usage: user find <query>  (name, email, or account ID fragment)")
+
+    connection, json_mode, _ = _parse_common(rest)
+    client = _get_client(connection)
+
+    if client.server:
+        users = client.get("user/search", params={"username": query, "maxResults": 10})
+    else:
+        users = client.get("user/search", params={"query": query, "maxResults": 10})
+
+    if not isinstance(users, list):
+        users = []
+
+    if json_mode:
+        _print_json({"users": users})
+    else:
+        if not users:
+            print(f"No users found matching: {query!r}")
+            return
+        for u in users:
+            account_id = u.get("accountId") or u.get("name", "")
+            display = u.get("displayName", "")
+            email_addr = u.get("emailAddress", "")
+            print(f"  {account_id:<36}  {display:<30}  <{email_addr}>")
 
 
 # ── issues ─────────────────────────────────────────────────────────────────────
@@ -516,7 +601,7 @@ def _issue_view(argv: list[str]) -> None:
 
 def _issue_list(argv: list[str]) -> None:
     if not argv:
-        _err("Usage: issue list <PROJECT-KEY> [--status <name>] [--assignee <user>] [--limit N] [--json]")
+        _err("Usage: issue list <PROJECT-KEY> [--status <name>] [--assignee <user>] [--mine] [--limit N] [--json]")
     project = argv[0]
     status = assignee = issue_type = priority = label = None
     limit = 50
@@ -526,6 +611,8 @@ def _issue_list(argv: list[str]) -> None:
             status = argv[i + 1]; i += 2
         elif argv[i] == "--assignee" and i + 1 < len(argv):
             assignee = argv[i + 1]; i += 2
+        elif argv[i] == "--mine":
+            assignee = "currentUser()"; i += 1
         elif argv[i] == "--type" and i + 1 < len(argv):
             issue_type = argv[i + 1]; i += 2
         elif argv[i] == "--priority" and i + 1 < len(argv):
@@ -533,7 +620,7 @@ def _issue_list(argv: list[str]) -> None:
         elif argv[i] == "--label" and i + 1 < len(argv):
             label = argv[i + 1]; i += 2
         elif argv[i] == "--limit" and i + 1 < len(argv):
-            limit = int(argv[i + 1]); i += 2
+            limit = _parse_limit(argv[i + 1]); i += 2
         else:
             i += 1
     connection, json_mode, _ = _parse_common(argv[1:])
@@ -543,7 +630,11 @@ def _issue_list(argv: list[str]) -> None:
     if status:
         jql_parts.append(f'status = "{status}"')
     if assignee:
-        jql_parts.append(f'assignee = "{assignee}"')
+        # Don't quote JQL functions (e.g. currentUser(), membersOf())
+        if "(" in assignee:
+            jql_parts.append(f"assignee = {assignee}")
+        else:
+            jql_parts.append(f'assignee = "{assignee}"')
     if issue_type:
         jql_parts.append(f'issuetype = "{issue_type}"')
     if priority:
@@ -572,7 +663,7 @@ def _issue_create(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue create <PROJECT-KEY> --summary <text> [options]")
     project = argv[0]
-    summary = description = assignee = parent = None
+    summary = description = assignee = parent = sprint_id = None
     issue_type = "Task"
     priority = None
     labels: list[str] = []
@@ -593,6 +684,8 @@ def _issue_create(argv: list[str]) -> None:
             labels.append(argv[i + 1]); i += 2
         elif argv[i] == "--parent" and i + 1 < len(argv):
             parent = argv[i + 1]; i += 2
+        elif argv[i] == "--sprint" and i + 1 < len(argv):
+            sprint_id = argv[i + 1]; i += 2
         elif argv[i] == "--dry-run":
             dry_run = True; i += 1
         else:
@@ -620,20 +713,33 @@ def _issue_create(argv: list[str]) -> None:
         fields["labels"] = labels
     if parent:
         fields["parent"] = {"key": parent}
+    if sprint_id is not None:
+        try:
+            fields["customfield_10020"] = {"id": int(sprint_id)}
+        except ValueError:
+            _err(f"--sprint must be a numeric sprint ID, got: {sprint_id!r}")
 
     body = {"fields": fields}
 
     if dry_run:
-        print(f"[dry-run] would create {issue_type} in {project}:")
-        print(f"  Summary: {summary}")
-        if description:
-            print(f"  Description: {description[:100]}")
-        if assignee:
-            print(f"  Assignee: {assignee}")
-        if priority:
-            print(f"  Priority: {priority}")
-        if labels:
-            print(f"  Labels: {', '.join(labels)}")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_create", "project": project,
+                         "fields": {k: v for k, v in fields.items() if k != "project"}})
+        else:
+            print(f"[dry-run] would create {issue_type} in {project}:")
+            print(f"  Summary: {summary}")
+            if description:
+                print(f"  Description: {description[:100]}")
+            if assignee:
+                print(f"  Assignee: {assignee}")
+            if priority:
+                print(f"  Priority: {priority}")
+            if labels:
+                print(f"  Labels: {', '.join(labels)}")
+            if parent:
+                print(f"  Parent: {parent}")
+            if sprint_id:
+                print(f"  Sprint: {sprint_id}")
         sys.exit(2)
 
     result = client.post("issue", body)
@@ -666,8 +772,11 @@ def _issue_comment(argv: list[str]) -> None:
     client = _get_client(connection)
 
     if dry_run:
-        print(f"[dry-run] would comment on {key}:")
-        print(f"  {body_text[:200]}")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_comment", "key": key, "body": body_text})
+        else:
+            print(f"[dry-run] would comment on {key}:")
+            print(f"  {body_text[:200]}")
         sys.exit(2)
 
     result = client.post(f"issue/{key}/comment", {"body": client._text_body(body_text)})
@@ -699,7 +808,10 @@ def _issue_assign(argv: list[str]) -> None:
 
     if dry_run:
         action = "unassign" if to.lower() == "none" else f"assign to {to}"
-        print(f"[dry-run] would {action} {key}")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_assign", "key": key, "to": to})
+        else:
+            print(f"[dry-run] would {action} {key}")
         sys.exit(2)
 
     if to.lower() == "none":
@@ -747,7 +859,11 @@ def _issue_transition(argv: list[str]) -> None:
         _err(f"Transition '{to_status}' not found for {key}. Available: {', '.join(available)}")
 
     if dry_run:
-        print(f"[dry-run] would transition {key} → '{match['name']}' (id: {match['id']})")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_transition", "key": key,
+                         "transition": match["name"], "id": match["id"]})
+        else:
+            print(f"[dry-run] would transition {key} → '{match['name']}' (id: {match['id']})")
         sys.exit(2)
 
     client.post(f"issue/{key}/transitions", {"transition": {"id": match["id"]}})
@@ -789,9 +905,13 @@ def _issue_label(argv: list[str]) -> None:
             updated.append(l)
 
     if dry_run:
-        print(f"[dry-run] would update labels on {key}:")
-        print(f"  Before: {', '.join(current) or '(none)'}")
-        print(f"  After:  {', '.join(updated) or '(none)'}")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_label", "key": key,
+                         "before": current, "after": updated})
+        else:
+            print(f"[dry-run] would update labels on {key}:")
+            print(f"  Before: {', '.join(current) or '(none)'}")
+            print(f"  After:  {', '.join(updated) or '(none)'}")
         sys.exit(2)
 
     client.put(f"issue/{key}", {"fields": {"labels": updated}})
@@ -833,9 +953,12 @@ def _issue_edit(argv: list[str]) -> None:
         fields["priority"] = {"name": priority}
 
     if dry_run:
-        print(f"[dry-run] would edit {key}:")
-        for k, v in fields.items():
-            print(f"  {k}: {v}")
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_edit", "key": key, "fields": fields})
+        else:
+            print(f"[dry-run] would edit {key}:")
+            for k, v in fields.items():
+                print(f"  {k}: {v}")
         sys.exit(2)
 
     client.put(f"issue/{key}", {"fields": fields})
@@ -876,7 +999,7 @@ def cmd_search(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--limit" and i + 1 < len(argv):
-            limit = int(argv[i + 1]); i += 2
+            limit = _parse_limit(argv[i + 1]); i += 2
         elif argv[i] == "--fields" and i + 1 < len(argv):
             fields = argv[i + 1]; i += 2
         else:
@@ -1003,7 +1126,11 @@ def cmd_sprint(argv: list[str]) -> None:
         client = _get_client(connection)
 
         if dry_run:
-            print(f"[dry-run] would add {key} to sprint {sprint_id}")
+            if json_mode:
+                _print_json({"dry_run": True, "action": "sprint_add",
+                             "key": key, "sprint_id": sprint_id})
+            else:
+                print(f"[dry-run] would add {key} to sprint {sprint_id}")
             sys.exit(2)
 
         client.post(f"sprint/{sprint_id}/issue", {"issues": [key]}, agile=True)
@@ -1027,6 +1154,7 @@ def main(argv: list[str]) -> None:
         "connections": cmd_connections,
         "whoami":      cmd_whoami,
         "snapshot":    cmd_snapshot,
+        "user":        cmd_user,
         "issue":       cmd_issue,
         "transitions": cmd_transitions,
         "search":      cmd_search,
