@@ -440,7 +440,10 @@ cmd_assign() {
     issue_id=$(resolve_issue_id "$short_id") || return 1
 
     local payload
-    payload=$(printf '{"assignedTo":"%s"}' "$email")
+    payload=$(SENTRY_ASSIGN_EMAIL="$email" python3 -c "
+import os, json
+print(json.dumps({'assignedTo': os.environ['SENTRY_ASSIGN_EMAIL']}))
+") || return 1
 
     local result
     result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" "$payload") || return 1
@@ -536,7 +539,21 @@ cmd_releases() {
 
     local url="${base_url}/organizations/${org}/releases/?per_page=25"
     if [[ -n "$project" ]]; then
-        url="${url}&project=${project}"
+        # Sentry releases endpoint requires numeric project ID, not slug
+        local project_id="$project"
+        if [[ ! "$project_id" =~ ^[0-9]+$ ]]; then
+            local proj_json
+            proj_json=$(sentry_get "${base_url}/projects/${org}/${project}/") || {
+                echo "Error: cannot resolve project slug '${project}'" >&2
+                return 1
+            }
+            project_id=$(printf '%s' "$proj_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+            if [[ -z "$project_id" ]]; then
+                echo "Error: cannot resolve project slug '${project}' to numeric ID" >&2
+                return 1
+            fi
+        fi
+        url="${url}&project=${project_id}"
     fi
 
     local result
