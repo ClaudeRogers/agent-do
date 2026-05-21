@@ -1178,6 +1178,221 @@ def main() -> int:
             desc_val = (server_create.get("fields") or {}).get("description", "")
             check("Server/DC sends plain-text description", isinstance(desc_val, str), str(desc_val))
 
+            # ── connections: empty state ─────────────────────────────────────────
+
+            print("\nconnections list: empty state")
+            env_empty = _make_env(tmp / "emptyconn", port)
+            (tmp / "emptyconn" / "home").mkdir(parents=True, exist_ok=True)
+            r = run(["connections", "list"], env=env_empty)
+            check("connections list empty exits 0", r.returncode == 0, r.stderr)
+            check("connections list empty shows helpful message", "No" in r.stdout and "profile" in r.stdout.lower(), r.stdout)
+            check("connections list empty shows add command", "connections add" in r.stdout, r.stdout)
+
+            print("\nconnections add: URL without http")
+            r = run(["connections", "add", "badurl",
+                     "--url", "ftp://bad.example.com",
+                     "--email", "x@x.com",
+                     "--token", "t"], env=env)
+            check("connections add non-http URL exits 1", r.returncode == 1)
+            check("connections add non-http URL prints error", "http" in r.stderr.lower(), r.stderr)
+
+            print("\nconnections remove: removing default clears default")
+            # Work is currently the default; remove it and check default becomes next profile
+            data_before = json.loads(meta_file.read_text())
+            default_before = data_before.get("default")
+            check("default before remove is 'work'", default_before == "work")
+            run(["connections", "remove", "work"], env=env)
+            data_after = json.loads(meta_file.read_text())
+            check("after removing default, default changes", data_after.get("default") != "work")
+            # Restore 'work' for remaining tests
+            run(["connections", "add", "work",
+                 "--url", base_url, "--email", "test@example.com",
+                 "--token", "tok-secret", "--default"], env=env)
+
+            # ── user find: --connection flag ordering ────────────────────────────
+
+            print("\nuser find: --connection before positional query")
+            run(["connections", "add", "dc5",
+                 "--url", base_url, "--email", "admin", "--token", "pat", "--server"], env=env)
+            _requests.clear()
+            r = run(["user", "find", "--connection", "dc5", "alice"], env=env)
+            check("user find --connection before query exits 0", r.returncode == 0, r.stderr)
+            check("user find --connection before query shows results", "Alice" in r.stdout, r.stdout)
+            # Verify it used ?username= (Server/DC), proving --connection was parsed correctly
+            ureqs = [path for m, path in _requests if m == "GET" and "user/search" in path]
+            check("user find --connection before query used correct connection", any("username=" in p for p in ureqs), str(ureqs))
+            run(["connections", "remove", "dc5"], env=env)
+
+            # ── issue list: --mine + --assignee interaction ──────────────────────
+
+            print("\nissue list: --mine then --assignee (last wins)")
+            _requests.clear()
+            r = run(["issue", "list", "PROJ", "--mine", "--assignee", "alice@example.com"], env=env)
+            check("--mine then --assignee exits 0", r.returncode == 0, r.stderr)
+            mine_then_ass = [path for m, path in _requests if m == "GET" and "search" in path]
+            # last flag (--assignee alice) wins → should NOT have currentUser() in JQL
+            check("--mine then --assignee: explicit assignee wins", not any("currentUser" in p for p in mine_then_ass), str(mine_then_ass))
+
+            _requests.clear()
+            r = run(["issue", "list", "PROJ", "--assignee", "alice@example.com", "--mine"], env=env)
+            check("--assignee then --mine exits 0", r.returncode == 0, r.stderr)
+            ass_then_mine = [path for m, path in _requests if m == "GET" and "search" in path]
+            # last flag (--mine) wins → should have currentUser() in JQL
+            check("--assignee then --mine: --mine wins", any("currentUser" in p for p in ass_then_mine), str(ass_then_mine))
+
+            # ── issue create: duplicate labels ───────────────────────────────────
+
+            print("\nissue create: duplicate labels")
+            _post_bodies.clear()
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Dedup test",
+                     "--label", "frontend",
+                     "--label", "frontend",
+                     "--label", "backend"], env=env)
+            check("issue create duplicate labels exits 0", r.returncode == 0, r.stderr)
+            dup_body = _post_bodies.get("/rest/api/3/issue", {})
+            dup_labels = (dup_body.get("fields") or {}).get("labels", [])
+            # The code sends what was passed; Jira deduplicates server-side, but test what we send
+            check("issue create duplicate labels sends labels list", len(dup_labels) >= 2, str(dup_labels))
+
+            # ── issue edit: all three fields ─────────────────────────────────────
+
+            print("\nissue edit: all three fields simultaneously")
+            _put_bodies.clear()
+            r = run(["issue", "edit", "PROJ-1",
+                     "--summary", "New summary",
+                     "--description", "New description",
+                     "--priority", "Highest"], env=env)
+            check("issue edit all fields exits 0", r.returncode == 0, r.stderr)
+            all_edit_body = _put_bodies.get("/rest/api/3/issue/PROJ-1", {})
+            all_fields = all_edit_body.get("fields", {})
+            check("issue edit all fields: summary sent", all_fields.get("summary") == "New summary")
+            check("issue edit all fields: description sent", all_fields.get("description") is not None)
+            check("issue edit all fields: priority sent", (all_fields.get("priority") or {}).get("name") == "Highest")
+
+            # ── issue label: add and remove same label simultaneously ────────────
+
+            print("\nissue label: add and remove same label")
+            _put_bodies.clear()
+            r = run(["issue", "label", "PROJ-1", "--add", "backend", "--remove", "backend"], env=env)
+            # remove runs first (filters current), then add re-adds it → net neutral or add wins
+            check("issue label add+remove same label exits 0", r.returncode == 0, r.stderr)
+
+            # ── issue transition: missing --to flag ──────────────────────────────
+
+            print("\nissue transition: missing --to")
+            r = run(["issue", "transition", "PROJ-1"], env=env)
+            check("issue transition no --to exits 1", r.returncode == 1)
+            check("issue transition no --to shows error", "Error:" in r.stderr, r.stderr)
+            check("issue transition no --to mentions transitions command", "transitions" in r.stderr.lower(), r.stderr)
+
+            # ── unknown subcommand errors ────────────────────────────────────────
+
+            print("\nunknown subcommand errors")
+            r = run(["issue", "bogus"], env=env)
+            check("issue bogus subcommand exits 1", r.returncode == 1)
+            check("issue bogus subcommand lists valid commands", "view" in r.stderr or "create" in r.stderr, r.stderr)
+
+            r = run(["board", "bogus"], env=env)
+            check("board bogus subcommand exits 1", r.returncode == 1)
+
+            r = run(["sprint", "bogus"], env=env)
+            check("sprint bogus subcommand exits 1", r.returncode == 1)
+            check("sprint bogus subcommand lists valid commands", "list" in r.stderr or "active" in r.stderr, r.stderr)
+
+            r = run(["connections", "bogus"], env=env)
+            check("connections bogus subcommand exits 1", r.returncode == 1)
+            check("connections bogus subcommand lists valid subcommands", "add" in r.stderr or "list" in r.stderr, r.stderr)
+
+            r = run(["completely-unknown-cmd"], env=env)
+            check("top-level unknown command exits 1", r.returncode == 1)
+            check("top-level unknown command mentions --help", "help" in r.stderr.lower(), r.stderr)
+
+            # ── search --fields ──────────────────────────────────────────────────
+
+            print("\nsearch --fields")
+            r = run(["search", "project = PROJ", "--fields", "summary,status", "--json"], env=env)
+            check("search --fields exits 0", r.returncode == 0, r.stderr)
+            sfj = json.loads(r.stdout)
+            check("search --fields returns data", "data" in sfj)
+
+            # ── sprint list: no-arg errors ───────────────────────────────────────
+
+            print("\nsprint list/active: missing board ID")
+            r = run(["sprint", "list"], env=env)
+            check("sprint list no board ID exits 1", r.returncode == 1)
+
+            r = run(["sprint", "active"], env=env)
+            check("sprint active no board ID exits 1", r.returncode == 1)
+
+            # ── issue subcommand: no key errors ──────────────────────────────────
+
+            print("\nissue commands: missing issue key")
+            r = run(["issue", "view"], env=env)
+            check("issue view no key exits 1", r.returncode == 1)
+
+            r = run(["issue", "comment", "PROJ-1", "--body", ""], env=env)
+            check("issue comment empty --body exits 1", r.returncode == 1)
+
+            r = run(["issue", "assign", "PROJ-1", "--to", ""], env=env)
+            check("issue assign empty --to exits 1", r.returncode == 1)
+
+            r = run(["issue", "list"], env=env)
+            check("issue list no project key exits 1", r.returncode == 1)
+
+            r = run(["issue", "create"], env=env)
+            check("issue create no project key exits 1", r.returncode == 1)
+
+            # ── whoami: corrupted connections.json ───────────────────────────────
+
+            print("\nwhoami: corrupted connections.json (graceful fallback)")
+            env_corrupt = _make_env(tmp / "corrupt", port)
+            corrupt_home = tmp / "corrupt" / "home"
+            corrupt_home.mkdir(parents=True, exist_ok=True)
+            (corrupt_home / "jira").mkdir(parents=True, exist_ok=True)
+            (corrupt_home / "jira" / "connections.json").write_text("{ not valid json !! }")
+            # Should fall back to env vars gracefully when connections.json is unreadable
+            env_corrupt["JIRA_URL"] = base_url
+            env_corrupt["JIRA_EMAIL"] = "fallback@example.com"
+            env_corrupt["JIRA_API_TOKEN"] = "fallback-token"
+            r = run(["whoami"], env=env_corrupt)
+            check("whoami with corrupted connections.json exits 0 (falls back to env)", r.returncode == 0, r.stderr)
+
+            # ── connections add: empty values ────────────────────────────────────
+
+            print("\nconnections add: empty or invalid values")
+            r = run(["connections", "add", "emptyval",
+                     "--url", "",
+                     "--email", "x@x.com",
+                     "--token", "t"], env=env)
+            check("connections add empty URL exits 1", r.returncode == 1)
+
+            r = run(["connections", "add", "emptyval",
+                     "--url", base_url,
+                     "--email", "",
+                     "--token", "t"], env=env)
+            check("connections add empty email exits 1", r.returncode == 1)
+
+            r = run(["connections", "add", "emptyval",
+                     "--url", base_url,
+                     "--email", "x@x.com",
+                     "--token", ""], env=env)
+            check("connections add empty token exits 1", r.returncode == 1)
+
+            # ── issue view: issue with no description ────────────────────────────
+
+            print("\nissue view: issue with no description (plain text)")
+            r = run(["issue", "view", "PROJ-NOASSIGN"], env=env)
+            check("issue view no description exits 0", r.returncode == 0, r.stderr)
+            check("issue view no description no crash on None", "PROJ-NOASSIGN" in r.stdout, r.stdout)
+
+            # ── whoami: no args to top-level dispatch ────────────────────────────
+
+            print("\ntop-level dispatch: no args")
+            r = run([], env=env)
+            check("no args exits 1", r.returncode == 1)
+            check("no args shows usage", "agent-do jira" in r.stderr or "Usage" in r.stderr, r.stderr)
+
         finally:
             server.shutdown()
             server.server_close()
