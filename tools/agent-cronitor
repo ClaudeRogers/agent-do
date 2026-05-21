@@ -63,7 +63,7 @@ cr_get() {
     local url="$1"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -u "${key}:" \
+    curl -sS -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         "$url"
@@ -74,7 +74,7 @@ cr_post() {
     local data="${2:-}"
     local key
     key=$(cr_api_key) || return 1
-    local args=(-sS -X POST -u "${key}:" \
+    local args=(-sS -X POST -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -89,7 +89,7 @@ cr_put() {
     local data="$2"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -X PUT -u "${key}:" \
+    curl -sS -X PUT -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
@@ -100,7 +100,7 @@ cr_delete() {
     local url="$1"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -X DELETE -u "${key}:" \
+    curl -sS -X DELETE -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -o /dev/null -w "%{http_code}" "$url"
 }
@@ -349,11 +349,27 @@ cmd_ping() {
     local message=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --state) state="$2"; shift 2 ;;
-            --message|-m) message="$2"; shift 2 ;;
+            --state)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --state requires a value (run|complete|fail|ok)" >&2; return 1
+                fi
+                state="$2"; shift 2 ;;
+            --message|-m)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: --message requires a value" >&2; return 1
+                fi
+                message="$2"; shift 2 ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
+
+    # Validate --state against allowed values
+    if [[ -n "$state" ]]; then
+        case "$state" in
+            run|complete|fail|ok) ;;
+            *) echo "Error: --state must be run|complete|fail|ok, got: $state" >&2; return 1 ;;
+        esac
+    fi
 
     local key
     key=$(cr_api_key) || return 1
@@ -418,13 +434,13 @@ cmd_snapshot() {
         return 1
     fi
 
-    python3 -c "
-import json, sys
+    CRONITOR_API_KEY="$key" python3 - <<'PY'
+import json, sys, os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 API = 'https://cronitor.io/api'
-KEY = '$key'
+KEY = os.environ['CRONITOR_API_KEY']
 VERSION = '2025-11-28'
 
 def api_get(url):
@@ -531,7 +547,7 @@ snapshot = {
 }
 
 print(json.dumps(snapshot, indent=2))
-"
+PY
 }
 
 # --- Main ---
