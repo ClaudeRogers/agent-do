@@ -713,13 +713,13 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
     try:
         d = _request("GET", "/events", params={"start": _now_epoch() - 3600, "end": _now_epoch()})
-        events = d.get("events") or [] if isinstance(d, dict) else []
+        events = (d.get("events") or []) if isinstance(d, dict) else []
     except SystemExit:
         pass
 
     try:
         d = _request("GET", "/slo")
-        slos = d.get("data") or [] if isinstance(d, dict) else []
+        slos = (d.get("data") or []) if isinstance(d, dict) else []
     except SystemExit:
         pass
 
