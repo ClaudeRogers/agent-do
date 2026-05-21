@@ -66,7 +66,8 @@ bs_get() {
     local url="$1"
     local token
     token=$(bs_token) || return 1
-    curl -sS -H "Authorization: Bearer $token" -H "Accept: application/json" "$url"
+    curl -sS --connect-timeout 10 --max-time 60 \
+        -H "Authorization: Bearer $token" -H "Accept: application/json" "$url"
 }
 
 bs_patch() {
@@ -74,7 +75,8 @@ bs_patch() {
     local data="$2"
     local token
     token=$(bs_token) || return 1
-    curl -sS -X PATCH -H "Authorization: Bearer $token" \
+    curl -sS --connect-timeout 10 --max-time 60 -X PATCH \
+        -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
         -d "$data" "$url"
@@ -85,7 +87,8 @@ bs_post() {
     local data="${2:-}"
     local token
     token=$(bs_token) || return 1
-    local args=(-sS -X POST -H "Authorization: Bearer $token" \
+    local args=(-sS --connect-timeout 10 --max-time 60 -X POST \
+        -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
     if [[ -n "$data" ]]; then
@@ -429,14 +432,14 @@ cmd_snapshot() {
         return 1
     fi
 
-    python3 -c "
-import json, sys
+    BETTERSTACK_API_TOKEN="$token" python3 -c "
+import json, sys, os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 API_V2 = 'https://uptime.betterstack.com/api/v2'
 API_V3 = 'https://uptime.betterstack.com/api/v3'
-TOKEN = '$token'
+TOKEN = os.environ.get('BETTERSTACK_API_TOKEN', '')
 
 def api_get(url):
     req = Request(url, headers={
@@ -444,7 +447,7 @@ def api_get(url):
         'Accept': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:

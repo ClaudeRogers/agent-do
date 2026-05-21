@@ -5812,4 +5812,18 @@ tools:
       - \bbetter\s*stack\b
       - \buptime\b.*\bmonitor\b
       - \bstatus\s+page\b
+      raw_cli_equivalents:
+      - pattern: \bcurl\b.*\buptime\.betterstack\.com/api\b
+        replacement: agent-do betterstack
+        example: agent-do betterstack snapshot
+        reason: agent-do betterstack provides a stable, structured Better Stack surface
+      project_signals:
+      - uptime
+      - monitoring
+      - incident
+      - on-call
+      readiness:
+        check: agent-do betterstack monitors
+        fix: agent-do creds store BETTERSTACK_API_TOKEN --stdin
+        note: Requires BETTERSTACK_API_TOKEN resolved from env or secure storage
     concurrency: mixed
