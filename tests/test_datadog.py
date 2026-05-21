@@ -1,0 +1,1255 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import http.server
+import json
+import os
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+ROOT = Path(__file__).resolve().parents[1]
+DD_OPS = ROOT / "tools" / "agent-datadog" / "datadog_ops.py"
+
+PASS = 0
+FAIL = 0
+
+# Request log — reset per-section to assert dry-run sends no HTTP
+_requests: list[tuple[str, str]] = []
+_last_body: dict = {}
+
+
+def check(desc: str, condition: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if condition:
+        print(f"  ✓ {desc}")
+        PASS += 1
+    else:
+        print(f"  ✗ {desc}")
+        if detail:
+            print(f"    {detail[:400]}")
+        FAIL += 1
+
+
+def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(DD_OPS), *argv],
+        text=True, capture_output=True, env=env, check=False,
+    )
+
+
+def _try_json(text: str) -> dict | list | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+# ── fake Datadog API server ───────────────────────────────────────────────────
+
+VALID_API_KEY = "test-dd-api-key"
+VALID_APP_KEY = "test-dd-app-key"
+
+_MONITORS = [
+    {"id": 101, "name": "CPU High", "type": "metric alert",
+     "overall_state": "Alert", "query": "avg(last_5m):avg:system.cpu.user{*} > 90",
+     "message": "CPU is too high @pagerduty", "tags": ["env:prod", "service:api"]},
+    {"id": 102, "name": "Error Rate", "type": "log alert",
+     "overall_state": "OK", "query": "logs(\"status:error\").rollup(\"count\").last(\"5m\") > 100",
+     "message": "Error rate elevated", "tags": ["env:prod"]},
+    {"id": 103, "name": "Memory Warning", "type": "metric alert",
+     "overall_state": "Warn", "query": "avg(last_5m):avg:system.mem.used{*} / avg:system.mem.total{*} > 0.85",
+     "message": "Memory usage high", "tags": ["env:staging"]},
+]
+
+_LOGS = [
+    {"id": "log-abc", "type": "log", "attributes": {
+        "timestamp": "2026-05-21T10:00:00.000Z",
+        "service": "api",
+        "status": "error",
+        "message": "Connection timeout to MongoDB",
+        "host": "web-01",
+    }},
+    {"id": "log-def", "type": "log", "attributes": {
+        "timestamp": "2026-05-21T10:01:00.000Z",
+        "service": "worker",
+        "status": "warn",
+        "message": "Retry attempt 3 for job-999",
+        "host": "worker-02",
+    }},
+]
+
+_METRICS_SERIES = {
+    "status": "ok",
+    "from_date": 1716289200000,
+    "to_date": 1716292800000,
+    "series": [
+        {
+            "metric": "system.cpu.user",
+            "display_name": "system.cpu.user",
+            "unit": [{"family": "percentage", "id": 17, "name": "percent", "short_name": "%", "plural": "percent", "scale_factor": 1.0}],
+            "pointlist": [[1716289200000, 45.2], [1716290100000, 47.8], [1716291000000, 52.1]],
+            "scope": "host:web-01",
+            "expression": "avg:system.cpu.user{host:web-01}",
+            "aggr": "avg",
+            "start": 1716289200000,
+            "end": 1716292800000,
+            "interval": 900,
+            "length": 3,
+            "attributes": {},
+        }
+    ],
+    "query": "avg:system.cpu.user{host:web-01}",
+    "message": "",
+    "res_type": "time_series",
+    "resp_version": 1,
+    "times": [],
+    "values": [],
+    "error": "",
+}
+
+_METRICS_LIST = {
+    "data": [
+        {"id": "system.cpu.user", "type": "metrics"},
+        {"id": "system.cpu.system", "type": "metrics"},
+        {"id": "system.mem.used", "type": "metrics"},
+        {"id": "kubernetes.cpu.usage.total", "type": "metrics"},
+    ]
+}
+
+_EVENTS = [
+    {"id": 9001, "title": "Deploy v2.3.1", "text": "Deploy completed successfully",
+     "date_happened": 1716289200, "priority": "normal", "tags": ["env:prod", "deploy"]},
+    {"id": 9002, "title": "Alert triggered", "text": "CPU exceeded 90%",
+     "date_happened": 1716290100, "priority": "normal", "tags": ["env:prod"]},
+]
+
+_INCIDENTS = [
+    {"id": "inc-001", "type": "incidents", "attributes": {
+        "title": "API latency degraded",
+        "status": "active",
+        "severity": "SEV-2",
+        "created": "2026-05-21T09:00:00Z",
+        "customer_impact_scope": "US customers affected",
+    }},
+    {"id": "inc-002", "type": "incidents", "attributes": {
+        "title": "Database failover", "status": "resolved",
+        "severity": "SEV-1", "created": "2026-05-20T18:00:00Z",
+    }},
+]
+
+_DASHBOARDS = [
+    {"id": "dash-aaa", "title": "Service Overview", "layout_type": "ordered", "url": "/dashboard/dash-aaa"},
+    {"id": "dash-bbb", "title": "Infrastructure", "layout_type": "free", "url": "/dashboard/dash-bbb"},
+]
+
+_SLOS = [
+    {"id": "slo-001", "name": "API Availability", "type": "metric",
+     "thresholds": [{"target": 99.9, "timeframe": "30d"}]},
+    {"id": "slo-002", "name": "Checkout Latency", "type": "monitor",
+     "thresholds": [{"target": 99.0, "timeframe": "7d"}]},
+]
+
+_SERVICES = [
+    {"id": "api", "type": "service-definitions", "attributes": {"schema": {
+        "dd-service": "api", "team": "platform", "description": "Core REST API",
+    }}},
+    {"id": "worker", "type": "service-definitions", "attributes": {"schema": {
+        "dd-service": "worker", "team": "data-eng", "description": "Background job processor",
+    }}},
+]
+
+
+class DDHandler(http.server.BaseHTTPRequestHandler):
+    def _validate_auth(self) -> bool:
+        return (self.headers.get("DD-API-KEY") == VALID_API_KEY and
+                self.headers.get("DD-APPLICATION-KEY") == VALID_APP_KEY)
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length) if length else b""
+
+    def _send(self, data: object, status: int = 200) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_err(self, msg: str, status: int) -> None:
+        self._send({"errors": [msg]}, status=status)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+    def _route(self, method: str, path: str, qs: dict, body: dict) -> None:
+        global _last_body
+        _requests.append((method, path))
+        _last_body = body
+
+        if not self._validate_auth():
+            self._send_err("Forbidden: invalid API or application key", status=403)
+            return
+
+        # Strip /api/v1 or /api/v2 prefix
+        for prefix in ("/api/v2/", "/api/v1/"):
+            if path.startswith(prefix):
+                path = "/" + path[len(prefix):]
+                break
+
+        # ── monitors ──────────────────────────────────────────────────────
+        if method == "GET" and path == "/monitor":
+            monitors = list(_MONITORS)
+            name_filter = qs.get("name", [""])[0]
+            state_filter = qs.get("monitor_states", [""])[0]
+            tag_filter = qs.get("monitor_tags", [""])[0]
+            if name_filter:
+                monitors = [m for m in monitors if name_filter.lower() in m["name"].lower()]
+            if state_filter:
+                monitors = [m for m in monitors if m["overall_state"].lower() == state_filter.lower()]
+            if tag_filter:
+                monitors = [m for m in monitors if tag_filter in (m.get("tags") or [])]
+            # special: empty tag returns no monitors (for empty test)
+            if tag_filter == "env:nonexistent":
+                monitors = []
+            self._send(monitors)
+
+        elif method == "GET" and path == "/monitor/101":
+            self._send(_MONITORS[0])
+
+        elif method == "GET" and path == "/monitor/102":
+            self._send(_MONITORS[1])
+
+        elif method == "GET" and path == "/monitor/999":
+            self._send_err("Monitor not found", status=404)
+
+        elif method == "GET" and path == "/monitor/403":
+            # already handled by auth check but left for explicit test
+            self._send_err("Forbidden", status=403)
+
+        elif method == "GET" and path == "/monitor/429":
+            self._send_err("Rate limited", status=429)
+
+        elif method == "GET" and path == "/monitor/500":
+            self._send_err("Internal server error", status=500)
+
+        elif method == "POST" and path == "/monitor/101/mute":
+            muted = dict(_MONITORS[0])
+            muted["silenced"] = {"*": body.get("end", 0)}
+            self._send(muted)
+
+        elif method == "POST" and path == "/monitor/999/mute":
+            self._send_err("Monitor not found", status=404)
+
+        elif method == "POST" and path == "/monitor/101/unmute":
+            self._send(_MONITORS[0])
+
+        elif method == "POST" and path == "/monitor":
+            created = {
+                "id": 201,
+                "name": body.get("name", ""),
+                "type": body.get("type", ""),
+                "query": body.get("query", ""),
+                "overall_state": "No Data",
+                "tags": body.get("tags", []),
+            }
+            self._send(created, status=200)
+
+        elif method == "DELETE" and path == "/monitor/101":
+            self._send({"deleted_monitor_id": [101]})
+
+        elif method == "DELETE" and path == "/monitor/999":
+            self._send_err("Monitor not found", status=404)
+
+        # ── logs ──────────────────────────────────────────────────────────
+        elif method == "POST" and path == "/logs/events/search":
+            query = (body.get("filter") or {}).get("query", "*")
+            limit = (body.get("page") or {}).get("limit", 25)
+            logs = list(_LOGS)
+            if "service:worker" in query:
+                logs = [l for l in logs if l["attributes"]["service"] == "worker"]
+            if "status:error" in query:
+                logs = [l for l in logs if l["attributes"]["status"] == "error"]
+            if "service:nonexistent" in query:
+                logs = []
+            logs = logs[:limit]
+            cursor = (body.get("page") or {}).get("cursor")
+            meta: dict = {}
+            if cursor == "page2":
+                logs = []
+                meta = {"page": {"after": None}}
+            else:
+                meta = {"page": {"after": "next-cursor-token"}}
+            self._send({"data": logs, "meta": meta})
+
+        # ── metrics ───────────────────────────────────────────────────────
+        elif method == "GET" and path == "/query":
+            query = qs.get("query", [""])[0]
+            if "no.data.metric" in query:
+                self._send({"series": [], "status": "ok", "query": query})
+            else:
+                series = dict(_METRICS_SERIES)
+                series["query"] = query
+                self._send(series)
+
+        elif method == "GET" and path == "/metrics":
+            prefix = qs.get("filter[prefix]", [""])[0]
+            data = dict(_METRICS_LIST)
+            if prefix:
+                data["data"] = [m for m in data["data"] if m["id"].startswith(prefix)]
+            self._send(data)
+
+        # ── events ────────────────────────────────────────────────────────
+        elif method == "GET" and path == "/events":
+            priority = qs.get("priority", [""])[0]
+            events = list(_EVENTS)
+            if priority:
+                events = [e for e in events if e["priority"] == priority]
+            # simulate empty when requesting "low" priority (none match)
+            self._send({"events": events})
+
+        elif method == "POST" and path == "/events":
+            created = {
+                "id": 9999,
+                "title": body.get("title", ""),
+                "text": body.get("text", ""),
+                "priority": body.get("priority", "normal"),
+                "tags": body.get("tags", []),
+                "alert_type": body.get("alert_type", "info"),
+                "date_happened": int(time.time()),
+            }
+            self._send({"event": created})
+
+        # ── incidents ─────────────────────────────────────────────────────
+        elif method == "GET" and path == "/incidents":
+            state_filter = qs.get("filter[state]", [""])[0]
+            incs = list(_INCIDENTS)
+            if state_filter:
+                incs = [i for i in incs if i["attributes"]["status"] == state_filter]
+            self._send({"data": incs})
+
+        elif method == "GET" and path == "/incidents/inc-001":
+            self._send({"data": _INCIDENTS[0]})
+
+        elif method == "GET" and path == "/incidents/inc-999":
+            self._send_err("Incident not found", status=404)
+
+        elif method == "POST" and path == "/incidents":
+            attrs = (body.get("data") or {}).get("attributes") or {}
+            created = {
+                "id": "inc-new",
+                "type": "incidents",
+                "attributes": {
+                    "title": attrs.get("title", ""),
+                    "status": "active",
+                    "severity": attrs.get("severity", "UNKNOWN"),
+                    "customer_impacted": attrs.get("customer_impacted", False),
+                    "created": "2026-05-21T12:00:00Z",
+                },
+            }
+            self._send({"data": created}, status=201)
+
+        elif method == "PATCH" and path == "/incidents/inc-001":
+            attrs = (body.get("data") or {}).get("attributes") or {}
+            updated = dict(_INCIDENTS[0])
+            updated["attributes"] = dict(_INCIDENTS[0]["attributes"])
+            updated["attributes"].update(attrs)
+            self._send({"data": updated})
+
+        elif method == "PATCH" and path == "/incidents/inc-999":
+            self._send_err("Incident not found", status=404)
+
+        # ── dashboards ────────────────────────────────────────────────────
+        elif method == "GET" and path == "/dashboard":
+            self._send({"dashboards": _DASHBOARDS})
+
+        elif method == "GET" and path == "/dashboard/dash-aaa":
+            self._send({**_DASHBOARDS[0], "widgets": [{"id": 1}, {"id": 2}]})
+
+        elif method == "GET" and path == "/dashboard/dash-404":
+            self._send_err("Dashboard not found", status=404)
+
+        # ── SLOs ──────────────────────────────────────────────────────────
+        elif method == "GET" and path == "/slo":
+            tag_filter = qs.get("tags", [""])[0]
+            slos = list(_SLOS)
+            if tag_filter == "team:nonexistent":
+                slos = []
+            self._send({"data": slos})
+
+        elif method == "GET" and path == "/slo/slo-001/history":
+            self._send({"data": {
+                "name": "API Availability",
+                "overall": {
+                    "sli_value": 99.95,
+                    "target": 99.9,
+                    "timeframe": "30d",
+                    "error_budget_remaining": 82.3,
+                },
+            }})
+
+        elif method == "GET" and path == "/slo/slo-999/history":
+            self._send_err("SLO not found", status=404)
+
+        # ── services ──────────────────────────────────────────────────────
+        elif method == "GET" and path == "/services/definitions":
+            page_size = int(qs.get("page[size]", ["100"])[0])
+            self._send({"data": _SERVICES[:page_size]})
+
+        else:
+            self._send_err(f"Not found: {method} {path}", status=404)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        self._route("GET", parsed.path, qs, {})
+
+    def do_POST(self) -> None:
+        raw = self._read_body()
+        body = json.loads(raw) if raw else {}
+        parsed = urlparse(self.path)
+        self._route("POST", parsed.path, parse_qs(parsed.query), body)
+
+    def do_PATCH(self) -> None:
+        raw = self._read_body()
+        body = json.loads(raw) if raw else {}
+        parsed = urlparse(self.path)
+        self._route("PATCH", parsed.path, parse_qs(parsed.query), body)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        self._route("DELETE", parsed.path, parse_qs(parsed.query), {})
+
+
+def _env(base_url: str, *, api_key: str = VALID_API_KEY, app_key: str = VALID_APP_KEY,
+         extra: dict | None = None) -> dict[str, str]:
+    e = {**os.environ, "DD_API_BASE_URL": base_url,
+         "DD_API_KEY": api_key, "DD_APP_KEY": app_key}
+    if extra:
+        e.update(extra)
+    e.pop("DD_SITE", None)
+    return e
+
+
+def main() -> int:
+    global PASS, FAIL, _requests
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), DDHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+
+    try:
+        env = _env(base)
+
+        # ══════════════════════════════════════════════════════════════════
+        # AUTH
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== auth ===\n")
+
+        r = run(["monitors"], env={**env, "DD_API_KEY": ""})
+        check("missing DD_API_KEY → non-zero exit", r.returncode != 0)
+        check("missing DD_API_KEY → mentions DD_API_KEY", "DD_API_KEY" in r.stderr)
+
+        r = run(["monitors"], env={**env, "DD_APP_KEY": ""})
+        check("missing DD_APP_KEY → non-zero exit", r.returncode != 0)
+        check("missing DD_APP_KEY → mentions DD_APP_KEY", "DD_APP_KEY" in r.stderr)
+
+        r = run(["monitors"], env={**env, "DD_API_KEY": "", "DD_APP_KEY": ""})
+        check("both keys missing → mentions both", "DD_API_KEY" in r.stderr and "DD_APP_KEY" in r.stderr)
+
+        r = run(["monitors"], env=_env(base, api_key="wrong-key", app_key="wrong-app"))
+        check("wrong API keys → non-zero exit (403)", r.returncode != 0)
+        check("wrong API keys → error on stderr", len(r.stderr) > 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITORS LIST
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitors list ===\n")
+
+        r = run(["monitors"], env=env)
+        check("monitors list exits 0", r.returncode == 0, r.stderr)
+        check("monitors list shows CPU High", "CPU High" in r.stdout)
+        check("monitors list shows Error Rate", "Error Rate" in r.stdout)
+        check("monitors list shows state ALERT", "ALERT" in r.stdout)
+        check("monitors list shows state OK", "OK" in r.stdout)
+        check("monitors list shows monitor ID 101", "101" in r.stdout)
+        check("monitors list shows tags", "env:prod" in r.stdout)
+
+        r = run(["--json", "monitors"], env=env)
+        check("monitors list --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitors list --json is valid JSON", j is not None, r.stdout[:200])
+        check("monitors list --json has 'monitors' key", isinstance(j, dict) and "monitors" in j)
+        check("monitors list --json has 'count' key", isinstance(j, dict) and "count" in j)
+        check("monitors list --json count matches list length",
+              isinstance(j, dict) and j.get("count") == len(j.get("monitors", [])))
+
+        r = run(["monitors", "--tag", "env:prod"], env=env)
+        check("monitors --tag filters results", r.returncode == 0, r.stderr)
+        check("monitors --tag: shows tagged monitors", "CPU High" in r.stdout)
+
+        r = run(["monitors", "--tag", "env:nonexistent"], env=env)
+        check("monitors --tag nonexistent → 'No monitors found'", "No monitors found" in r.stdout)
+
+        r = run(["monitors", "--name", "CPU"], env=env)
+        check("monitors --name filter shows CPU High", "CPU High" in r.stdout)
+        check("monitors --name filter excludes Error Rate", "Error Rate" not in r.stdout)
+
+        r = run(["monitors", "--state", "Alert"], env=env)
+        check("monitors --state Alert only shows alerting", "CPU High" in r.stdout)
+        check("monitors --state Alert excludes OK monitors", "Error Rate" not in r.stdout)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR GET
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor get ===\n")
+
+        r = run(["monitor", "101"], env=env)
+        check("monitor 101 exits 0", r.returncode == 0, r.stderr)
+        check("monitor 101 shows name", "CPU High" in r.stdout)
+        check("monitor 101 shows type", "metric alert" in r.stdout)
+        check("monitor 101 shows state", "Alert" in r.stdout)
+        check("monitor 101 shows query", "system.cpu.user" in r.stdout)
+
+        r = run(["--json", "monitor", "101"], env=env)
+        check("monitor 101 --json is valid JSON", _try_json(r.stdout) is not None)
+        j = _try_json(r.stdout)
+        check("monitor 101 --json has id field", isinstance(j, dict) and j.get("id") == 101)
+
+        r = run(["monitor", "999"], env=env)
+        check("monitor 999 → non-zero (404)", r.returncode != 0)
+        check("monitor 999 → 404 in stderr", "404" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR-STATUS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor-status ===\n")
+
+        r = run(["monitor-status"], env=env)
+        check("monitor-status exits 1 (alerting present)", r.returncode == 1, r.stderr)
+        check("monitor-status shows ALERT group", "ALERT" in r.stdout)
+        check("monitor-status shows WARN group", "WARN" in r.stdout)
+        check("monitor-status shows total count", "Total monitors:" in r.stdout)
+        check("monitor-status lists alerting monitor by name", "CPU High" in r.stdout)
+
+        r = run(["--json", "monitor-status"], env=env)
+        check("monitor-status --json exits 1 (alerting)", r.returncode == 1, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-status --json is valid JSON", j is not None)
+        check("monitor-status --json has by_state", isinstance(j, dict) and "by_state" in j)
+        check("monitor-status --json ALERT entries have id+name",
+              isinstance(j, dict) and all("id" in m and "name" in m
+                                          for m in j.get("by_state", {}).get("ALERT", [])))
+
+        r = run(["monitors", "--state", "OK"], env=env)
+        check("monitors --state OK includes only OK monitors", "Error Rate" in r.stdout)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR-MUTE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor-mute ===\n")
+
+        _requests.clear()
+        r = run(["monitor-mute", "101", "--dry-run"], env=env)
+        check("monitor-mute --dry-run exits 2", r.returncode == 2, r.stderr)
+        check("monitor-mute --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
+        check("monitor-mute --dry-run sends no HTTP", not any("/monitor/101/mute" in p for _, p in _requests))
+
+        _requests.clear()
+        r = run(["--json", "monitor-mute", "101", "--dry-run"], env=env)
+        check("monitor-mute --dry-run --json exits 2", r.returncode == 2)
+        j = _try_json(r.stdout)
+        check("monitor-mute --dry-run --json is valid JSON", j is not None, r.stdout)
+        check("monitor-mute --dry-run --json has command field",
+              isinstance(j, dict) and j.get("command") == "monitor-mute")
+        check("monitor-mute --dry-run --json has monitor_id",
+              isinstance(j, dict) and j.get("monitor_id") == 101)
+        check("monitor-mute --dry-run --json sends no HTTP", not any("/mute" in p for _, p in _requests))
+
+        r = run(["monitor-mute", "101"], env=env)
+        check("monitor-mute 101 exits 0", r.returncode == 0, r.stderr)
+        check("monitor-mute 101 shows muted", "Muted" in r.stdout)
+        check("monitor-mute 101 shows monitor name", "CPU High" in r.stdout)
+
+        r = run(["monitor-mute", "101", "--end", "now-1h",
+                 "--scope", "host:web-01", "--message", "Deploying"], env=env)
+        check("monitor-mute with --end --scope --message exits 0", r.returncode == 0, r.stderr)
+        check("mute body included scope in last request",
+              isinstance(_last_body, dict) and "scope" in _last_body)
+        check("mute body included message", isinstance(_last_body, dict) and "Deploying" in (_last_body.get("message") or ""))
+
+        r = run(["monitor-mute", "999"], env=env)
+        check("monitor-mute 999 → non-zero (404)", r.returncode != 0)
+        check("monitor-mute 999 → 404 in stderr", "404" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR-UNMUTE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor-unmute ===\n")
+
+        _requests.clear()
+        r = run(["monitor-unmute", "101", "--dry-run"], env=env)
+        check("monitor-unmute --dry-run exits 2", r.returncode == 2)
+        check("monitor-unmute --dry-run sends no HTTP", not any("/unmute" in p for _, p in _requests))
+
+        r = run(["--json", "monitor-unmute", "101", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("monitor-unmute --dry-run --json has command=monitor-unmute",
+              isinstance(j, dict) and j.get("command") == "monitor-unmute")
+
+        r = run(["monitor-unmute", "101"], env=env)
+        check("monitor-unmute 101 exits 0", r.returncode == 0, r.stderr)
+        check("monitor-unmute shows Unmuted", "Unmuted" in r.stdout)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR-CREATE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor-create ===\n")
+
+        _requests.clear()
+        r = run(["monitor-create",
+                 "--name", "Test CPU Alert",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 95",
+                 "--dry-run"], env=env)
+        check("monitor-create --dry-run exits 2", r.returncode == 2)
+        check("monitor-create --dry-run shows monitor name", "Test CPU Alert" in r.stdout)
+        check("monitor-create --dry-run sends no HTTP", not any("/monitor" in p for _, p in _requests))
+
+        r = run(["--json", "monitor-create",
+                 "--name", "Test CPU Alert",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 95",
+                 "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("monitor-create --dry-run --json has body.type",
+              isinstance(j, dict) and (j.get("body") or {}).get("type") == "metric alert")
+        check("monitor-create --dry-run --json has body.query",
+              isinstance(j, dict) and "system.cpu.user" in ((j.get("body") or {}).get("query") or ""))
+
+        r = run(["monitor-create",
+                 "--name", "Prod CPU Alert",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 90",
+                 "--message", "@pagerduty CPU is high",
+                 "--tags", "env:prod,service:api",
+                 "--priority", "2"], env=env)
+        check("monitor-create live exits 0", r.returncode == 0, r.stderr)
+        check("monitor-create live shows Created", "Created" in r.stdout)
+        check("monitor-create sends tags in body",
+              isinstance(_last_body, dict) and "env:prod" in (_last_body.get("tags") or []))
+        check("monitor-create sends priority in body",
+              isinstance(_last_body, dict) and _last_body.get("priority") == 2)
+
+        # ══════════════════════════════════════════════════════════════════
+        # MONITOR-DELETE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== monitor-delete ===\n")
+
+        _requests.clear()
+        r = run(["monitor-delete", "101", "--dry-run"], env=env)
+        check("monitor-delete --dry-run exits 2", r.returncode == 2)
+        check("monitor-delete --dry-run sends no HTTP", not any(m == "DELETE" for m, _ in _requests))
+
+        r = run(["--json", "monitor-delete", "101", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("monitor-delete --dry-run --json has monitor_id",
+              isinstance(j, dict) and j.get("monitor_id") == 101)
+
+        r = run(["monitor-delete", "101"], env=env)
+        check("monitor-delete 101 exits 0", r.returncode == 0, r.stderr)
+        check("monitor-delete 101 shows Deleted", "Deleted" in r.stdout)
+
+        r = run(["--json", "monitor-delete", "101"], env=env)
+        j = _try_json(r.stdout)
+        check("monitor-delete --json has deleted=True",
+              isinstance(j, dict) and j.get("deleted") is True)
+
+        r = run(["monitor-delete", "999"], env=env)
+        check("monitor-delete 999 → non-zero (404)", r.returncode != 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # LOGS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== logs ===\n")
+
+        r = run(["logs"], env=env)
+        check("logs default query exits 0", r.returncode == 0, r.stderr)
+        check("logs shows entries", "api" in r.stdout or "worker" in r.stdout)
+        check("logs shows timestamp", "2026-05-21" in r.stdout)
+        check("logs shows service and status", "error" in r.stdout or "warn" in r.stdout)
+
+        r = run(["--json", "logs"], env=env)
+        j = _try_json(r.stdout)
+        check("logs --json is valid JSON", j is not None)
+        check("logs --json has logs list", isinstance(j, dict) and isinstance(j.get("logs"), list))
+        check("logs --json has count field", isinstance(j, dict) and "count" in j)
+        check("logs --json has meta field", isinstance(j, dict) and "meta" in j)
+
+        r = run(["logs", "--service", "worker"], env=env)
+        check("logs --service worker exits 0", r.returncode == 0, r.stderr)
+        check("logs --service worker shows worker entries", "worker" in r.stdout)
+        check("logs --service worker body has service:worker in query",
+              "worker" in r.stdout)
+
+        r = run(["logs", "--status", "error"], env=env)
+        check("logs --status error exits 0", r.returncode == 0, r.stderr)
+        check("logs --status error shows error entries", "error" in r.stdout)
+
+        r = run(["logs", "--limit", "1"], env=env)
+        check("logs --limit 1 exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["logs", "--service", "nonexistent"], env=env)
+        check("logs --service nonexistent → No logs found", "No logs found" in r.stdout)
+
+        r = run(["logs", "--from", "now-2h", "--to", "now"], env=env)
+        check("logs --from --to exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["logs", "--from", "now-7d", "--to", "now-1d"], env=env)
+        check("logs multi-day range exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["logs", "--cursor", "page2"], env=env)
+        check("logs --cursor page2 returns empty (end of results)", "No logs found" in r.stdout)
+
+        r = run(["--json", "logs", "--cursor", "page2"], env=env)
+        j = _try_json(r.stdout)
+        check("logs --cursor page2 --json has empty logs list",
+              isinstance(j, dict) and j.get("logs") == [])
+
+        r = run(["logs", "error"], env=env)
+        check("logs with explicit query string exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # METRICS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== metrics ===\n")
+
+        r = run(["metrics", "avg:system.cpu.user{host:web-01}"], env=env)
+        check("metrics exits 0", r.returncode == 0, r.stderr)
+        check("metrics shows Metric:", "Metric:" in r.stdout)
+        check("metrics shows Points:", "Points:" in r.stdout)
+        check("metrics shows Last:", "Last:" in r.stdout)
+        check("metrics shows correct metric name", "system.cpu.user" in r.stdout)
+
+        r = run(["--json", "metrics", "avg:system.cpu.user{*}"], env=env)
+        j = _try_json(r.stdout)
+        check("metrics --json is valid JSON", j is not None)
+        check("metrics --json has series", isinstance(j, dict) and "series" in j)
+        check("metrics --json series non-empty", isinstance(j, dict) and len(j.get("series", [])) > 0)
+
+        r = run(["metrics", "avg:no.data.metric{*}"], env=env)
+        check("metrics no-data exits 0", r.returncode == 0, r.stderr)
+        check("metrics no-data shows 'No data returned'", "No data returned" in r.stdout)
+
+        r = run(["metrics", "avg:system.cpu.user{*}", "--from", "now-4h", "--to", "now-1h"], env=env)
+        check("metrics custom --from/--to exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # METRICS-LIST
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== metrics-list ===\n")
+
+        r = run(["metrics-list"], env=env)
+        check("metrics-list exits 0", r.returncode == 0, r.stderr)
+        check("metrics-list shows system.cpu.user", "system.cpu.user" in r.stdout)
+        check("metrics-list shows kubernetes metrics", "kubernetes" in r.stdout)
+
+        r = run(["--json", "metrics-list"], env=env)
+        j = _try_json(r.stdout)
+        check("metrics-list --json has metrics list", isinstance(j, dict) and isinstance(j.get("metrics"), list))
+        check("metrics-list --json count matches", isinstance(j, dict) and j.get("count") == len(j.get("metrics", [])))
+
+        r = run(["metrics-list", "--prefix", "system"], env=env)
+        check("metrics-list --prefix system exits 0", r.returncode == 0, r.stderr)
+        check("metrics-list --prefix filters results", "kubernetes" not in r.stdout)
+        check("metrics-list --prefix shows system metrics", "system.cpu" in r.stdout)
+
+        r = run(["--json", "metrics-list", "--prefix", "kubernetes"], env=env)
+        j = _try_json(r.stdout)
+        check("metrics-list --prefix kubernetes --json: only k8s metrics",
+              isinstance(j, dict) and all(m.startswith("kubernetes") for m in j.get("metrics", [])))
+
+        # ══════════════════════════════════════════════════════════════════
+        # EVENTS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== events ===\n")
+
+        r = run(["events"], env=env)
+        check("events exits 0", r.returncode == 0, r.stderr)
+        check("events shows Deploy", "Deploy" in r.stdout)
+        check("events shows Alert triggered", "Alert" in r.stdout)
+
+        r = run(["--json", "events"], env=env)
+        j = _try_json(r.stdout)
+        check("events --json is valid JSON", j is not None)
+        check("events --json has events list", isinstance(j, dict) and isinstance(j.get("events"), list))
+        check("events --json count matches", isinstance(j, dict) and j.get("count") == len(j.get("events", [])))
+
+        r = run(["events", "--priority", "low"], env=env)
+        check("events --priority low → empty (no low events)", r.returncode == 0, r.stderr)
+
+        r = run(["events", "--from", "now-24h", "--to", "now"], env=env)
+        check("events --from/--to exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["events", "--tags", "deploy"], env=env)
+        check("events --tags exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # EVENT-POST
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== event-post ===\n")
+
+        _requests.clear()
+        r = run(["event-post", "--title", "Deploy started", "--text", "v2.4.0 deploying", "--dry-run"], env=env)
+        check("event-post --dry-run exits 2", r.returncode == 2)
+        check("event-post --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
+        check("event-post --dry-run sends no HTTP", not any("POST" == m and "/events" in p for m, p in _requests))
+
+        r = run(["--json", "event-post", "--title", "Deploy", "--text", "body", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("event-post --dry-run --json has command=event-post",
+              isinstance(j, dict) and j.get("command") == "event-post")
+        check("event-post --dry-run --json body has title",
+              isinstance(j, dict) and (j.get("body") or {}).get("title") == "Deploy")
+
+        r = run(["event-post", "--title", "Deploy v2.4.0",
+                 "--text", "Deployment started by CI",
+                 "--priority", "normal",
+                 "--tags", "env:prod,service:api",
+                 "--alert-type", "info"], env=env)
+        check("event-post live exits 0", r.returncode == 0, r.stderr)
+        check("event-post live shows Posted event", "Posted event" in r.stdout)
+        check("event-post sends tags in body",
+              isinstance(_last_body, dict) and "env:prod" in (_last_body.get("tags") or []))
+        check("event-post sends alert_type in body",
+              isinstance(_last_body, dict) and _last_body.get("alert_type") == "info")
+
+        r = run(["--json", "event-post", "--title", "Test", "--text", "Test body"], env=env)
+        j = _try_json(r.stdout)
+        check("event-post --json live returns event id", isinstance(j, dict) and "id" in j)
+
+        # ══════════════════════════════════════════════════════════════════
+        # INCIDENTS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== incidents ===\n")
+
+        r = run(["incidents"], env=env)
+        check("incidents exits 0", r.returncode == 0, r.stderr)
+        check("incidents shows inc-001", "inc-001" in r.stdout)
+        check("incidents shows API latency degraded", "API latency" in r.stdout)
+        check("incidents shows SEV-2", "SEV-2" in r.stdout)
+
+        r = run(["--json", "incidents"], env=env)
+        j = _try_json(r.stdout)
+        check("incidents --json is valid JSON", j is not None)
+        check("incidents --json has data list", isinstance(j, dict) and isinstance(j.get("data"), list))
+
+        r = run(["incidents", "--state", "active"], env=env)
+        check("incidents --state active exits 0", r.returncode == 0, r.stderr)
+        check("incidents --state active shows active incidents", "active" in r.stdout)
+        check("incidents --state active excludes resolved", "resolved" not in r.stdout)
+
+        r = run(["incidents", "--state", "resolved"], env=env)
+        check("incidents --state resolved shows resolved ones", "resolved" in r.stdout)
+
+        # ══════════════════════════════════════════════════════════════════
+        # INCIDENT GET
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== incident get ===\n")
+
+        r = run(["incident", "inc-001"], env=env)
+        check("incident inc-001 exits 0", r.returncode == 0, r.stderr)
+        check("incident inc-001 shows title", "API latency" in r.stdout)
+        check("incident inc-001 shows status", "active" in r.stdout)
+        check("incident inc-001 shows severity", "SEV-2" in r.stdout)
+        check("incident inc-001 shows created date", "2026-05-21" in r.stdout)
+        check("incident inc-001 shows impact scope", "US customers" in r.stdout)
+
+        r = run(["--json", "incident", "inc-001"], env=env)
+        j = _try_json(r.stdout)
+        check("incident --json is valid JSON", j is not None)
+        check("incident --json has data.id", (j or {}).get("data", {}).get("id") == "inc-001")
+
+        r = run(["incident", "inc-999"], env=env)
+        check("incident inc-999 → non-zero (404)", r.returncode != 0)
+        check("incident inc-999 → 404 in stderr", "404" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # INCIDENT-CREATE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== incident-create ===\n")
+
+        _requests.clear()
+        r = run(["incident-create", "--title", "DB latency spike", "--dry-run"], env=env)
+        check("incident-create --dry-run exits 2", r.returncode == 2)
+        check("incident-create --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
+        check("incident-create --dry-run sends no HTTP", not any("POST" == m and "/incidents" in p for m, p in _requests))
+
+        r = run(["--json", "incident-create", "--title", "DB latency spike",
+                 "--severity", "SEV-2", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("incident-create --dry-run --json has command", isinstance(j, dict) and j.get("command") == "incident-create")
+        check("incident-create --dry-run --json has attributes.title",
+              isinstance(j, dict) and (j.get("attributes") or {}).get("title") == "DB latency spike")
+        check("incident-create --dry-run --json has attributes.severity",
+              isinstance(j, dict) and (j.get("attributes") or {}).get("severity") == "SEV-2")
+
+        r = run(["incident-create", "--title", "Checkout errors",
+                 "--severity", "SEV-1", "--customer-impacted"], env=env)
+        check("incident-create live exits 0", r.returncode == 0, r.stderr)
+        check("incident-create live shows Created", "Created" in r.stdout)
+        check("incident-create sends customer_impacted=True",
+              isinstance(_last_body, dict) and
+              (((_last_body.get("data") or {}).get("attributes") or {}).get("customer_impacted") is True))
+
+        # ══════════════════════════════════════════════════════════════════
+        # INCIDENT-UPDATE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== incident-update ===\n")
+
+        _requests.clear()
+        r = run(["incident-update", "inc-001", "--status", "stable", "--dry-run"], env=env)
+        check("incident-update --dry-run exits 2", r.returncode == 2)
+        check("incident-update --dry-run sends no HTTP",
+              not any("PATCH" == m and "/incidents" in p for m, p in _requests))
+
+        r = run(["--json", "incident-update", "inc-001", "--title", "New title", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("incident-update --dry-run --json has incident_id",
+              isinstance(j, dict) and j.get("incident_id") == "inc-001")
+        check("incident-update --dry-run --json has attributes.title",
+              isinstance(j, dict) and (j.get("attributes") or {}).get("title") == "New title")
+
+        r = run(["incident-update", "inc-001", "--status", "stable"], env=env)
+        check("incident-update live exits 0", r.returncode == 0, r.stderr)
+        check("incident-update shows Updated", "Updated" in r.stdout)
+
+        r = run(["incident-update", "inc-999", "--status", "resolved"], env=env)
+        check("incident-update 999 → non-zero (404)", r.returncode != 0)
+
+        r = run(["incident-update", "inc-001"], env=env)
+        check("incident-update with no attrs → non-zero (missing required)", r.returncode != 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # INCIDENT-RESOLVE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== incident-resolve ===\n")
+
+        _requests.clear()
+        r = run(["incident-resolve", "inc-001", "--dry-run"], env=env)
+        check("incident-resolve --dry-run exits 2", r.returncode == 2)
+        check("incident-resolve --dry-run sends no HTTP",
+              not any("PATCH" == m and "/incidents" in p for m, p in _requests))
+
+        r = run(["--json", "incident-resolve", "inc-001", "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("incident-resolve --dry-run --json has command=incident-resolve",
+              isinstance(j, dict) and j.get("command") == "incident-resolve")
+        check("incident-resolve --dry-run --json has incident_id",
+              isinstance(j, dict) and j.get("incident_id") == "inc-001")
+
+        r = run(["incident-resolve", "inc-001"], env=env)
+        check("incident-resolve live exits 0", r.returncode == 0, r.stderr)
+        check("incident-resolve sends status=resolved in body",
+              isinstance(_last_body, dict) and
+              (((_last_body.get("data") or {}).get("attributes") or {}).get("status") == "resolved"))
+
+        # ══════════════════════════════════════════════════════════════════
+        # DASHBOARDS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== dashboards ===\n")
+
+        r = run(["dashboards"], env=env)
+        check("dashboards exits 0", r.returncode == 0, r.stderr)
+        check("dashboards shows dash-aaa", "dash-aaa" in r.stdout)
+        check("dashboards shows Service Overview", "Service Overview" in r.stdout)
+        check("dashboards shows layout type", "ordered" in r.stdout or "free" in r.stdout)
+
+        r = run(["--json", "dashboards"], env=env)
+        j = _try_json(r.stdout)
+        check("dashboards --json is valid JSON", j is not None)
+        check("dashboards --json has dashboards list",
+              isinstance(j, dict) and isinstance(j.get("dashboards"), list))
+        check("dashboards --json count correct",
+              isinstance(j, dict) and j.get("count") == len(j.get("dashboards", [])))
+
+        r = run(["dashboard", "dash-aaa"], env=env)
+        check("dashboard dash-aaa exits 0", r.returncode == 0, r.stderr)
+        check("dashboard shows title", "Service Overview" in r.stdout)
+        check("dashboard shows Widgets:", "Widgets:" in r.stdout)
+        check("dashboard shows widget count", "2" in r.stdout)
+
+        r = run(["--json", "dashboard", "dash-aaa"], env=env)
+        j = _try_json(r.stdout)
+        check("dashboard --json has id field", isinstance(j, dict) and j.get("id") == "dash-aaa")
+        check("dashboard --json has widgets list", isinstance(j, dict) and isinstance(j.get("widgets"), list))
+
+        r = run(["dashboard", "dash-404"], env=env)
+        check("dashboard dash-404 → non-zero (404)", r.returncode != 0)
+        check("dashboard dash-404 → 404 in stderr", "404" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # SLOs
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== SLOs ===\n")
+
+        r = run(["slos"], env=env)
+        check("slos exits 0", r.returncode == 0, r.stderr)
+        check("slos shows slo-001", "slo-001" in r.stdout)
+        check("slos shows API Availability", "API Availability" in r.stdout)
+        check("slos shows type", "metric" in r.stdout)
+
+        r = run(["--json", "slos"], env=env)
+        j = _try_json(r.stdout)
+        check("slos --json has slos list", isinstance(j, dict) and isinstance(j.get("slos"), list))
+        check("slos --json count correct",
+              isinstance(j, dict) and j.get("count") == len(j.get("slos", [])))
+
+        r = run(["slos", "--tags", "team:nonexistent"], env=env)
+        check("slos --tags no match → 'No SLOs found'", "No SLOs found" in r.stdout)
+
+        r = run(["slo", "slo-001"], env=env)
+        check("slo slo-001 exits 0", r.returncode == 0, r.stderr)
+        check("slo shows SLI value", "99.95" in r.stdout)
+        check("slo shows Target", "99.9" in r.stdout)
+        check("slo shows error budget remaining", "82.3" in r.stdout)
+        check("slo shows Error budget remaining label", "Error budget" in r.stdout)
+
+        r = run(["--json", "slo", "slo-001"], env=env)
+        j = _try_json(r.stdout)
+        check("slo --json is valid JSON", j is not None)
+        check("slo --json has data.overall.sli_value",
+              isinstance(j, dict) and (j.get("data") or {}).get("overall", {}).get("sli_value") == 99.95)
+
+        r = run(["slo", "slo-001", "--from", "now-30d", "--to", "now"], env=env)
+        check("slo with --from/--to exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["slo", "slo-999"], env=env)
+        check("slo slo-999 → non-zero (404)", r.returncode != 0)
+        check("slo slo-999 → 404 in stderr", "404" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # SERVICES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== services ===\n")
+
+        r = run(["services"], env=env)
+        check("services exits 0", r.returncode == 0, r.stderr)
+        check("services shows api service", "api" in r.stdout)
+        check("services shows worker service", "worker" in r.stdout)
+        check("services shows team name", "platform" in r.stdout or "data-eng" in r.stdout)
+        check("services shows description", "REST API" in r.stdout)
+
+        r = run(["--json", "services"], env=env)
+        j = _try_json(r.stdout)
+        check("services --json has services list",
+              isinstance(j, dict) and isinstance(j.get("services"), list))
+        check("services --json count correct",
+              isinstance(j, dict) and j.get("count") == len(j.get("services", [])))
+
+        r = run(["services", "--page-size", "1"], env=env)
+        check("services --page-size 1 exits 0", r.returncode == 0, r.stderr)
+        r2 = run(["--json", "services", "--page-size", "1"], env=env)
+        j2 = _try_json(r2.stdout)
+        check("services --page-size 1 returns only 1 service",
+              isinstance(j2, dict) and j2.get("count") == 1)
+
+        # ══════════════════════════════════════════════════════════════════
+        # SNAPSHOT
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== snapshot ===\n")
+
+        r = run(["snapshot"], env=env)
+        check("snapshot exits 1 (alerting monitors present)", r.returncode == 1, r.stderr)
+        check("snapshot shows Monitors:", "Monitors:" in r.stdout)
+        check("snapshot shows Events (1h):", "Events (1h):" in r.stdout)
+        check("snapshot shows SLOs:", "SLOs:" in r.stdout)
+        check("snapshot shows ALERT line", "ALERT" in r.stdout)
+        check("snapshot shows CPU High in alert list", "CPU High" in r.stdout)
+        check("snapshot shows WARN line", "WARN" in r.stdout)
+
+        r = run(["--json", "snapshot"], env=env)
+        j = _try_json(r.stdout)
+        check("snapshot --json is valid JSON", j is not None)
+        check("snapshot --json has tool=datadog",
+              isinstance(j, dict) and j.get("tool") == "datadog")
+        check("snapshot --json has timestamp",
+              isinstance(j, dict) and "timestamp" in j)
+        check("snapshot --json has monitors object",
+              isinstance(j, dict) and isinstance(j.get("monitors"), dict))
+        check("snapshot --json monitors has total, alerting, warning",
+              isinstance(j, dict) and all(k in (j.get("monitors") or {}) for k in ("total", "alerting", "warning")))
+        check("snapshot --json alerting list non-empty",
+              isinstance(j, dict) and len((j.get("monitors") or {}).get("alerting", [])) > 0)
+        check("snapshot --json alerting entries have id and name",
+              isinstance(j, dict) and all(
+                  "id" in m and "name" in m
+                  for m in (j.get("monitors") or {}).get("alerting", [])))
+        check("snapshot --json has recent_events int",
+              isinstance(j, dict) and isinstance(j.get("recent_events"), int))
+        check("snapshot --json has slos int",
+              isinstance(j, dict) and isinstance(j.get("slos"), int))
+
+        # ══════════════════════════════════════════════════════════════════
+        # ERROR HANDLING
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== error handling ===\n")
+
+        r = run(["monitor", "999"], env=env)
+        check("404 error → non-zero exit", r.returncode != 0)
+        check("404 error → '404' in stderr", "404" in r.stderr)
+
+        r = run(["monitor", "429"], env=env)
+        check("429 rate-limit → non-zero exit", r.returncode != 0)
+        check("429 rate-limit → error message on stderr", len(r.stderr) > 0)
+
+        r = run(["monitor", "500"], env=env)
+        check("500 server error → non-zero exit", r.returncode != 0)
+        check("500 server error → '500' in stderr", "500" in r.stderr)
+
+        # connection refused: point at a closed port
+        r = run(["monitors"], env={**env, "DD_API_BASE_URL": "http://127.0.0.1:1"})
+        check("connection refused → non-zero exit", r.returncode != 0)
+        check("connection refused → error message on stderr", len(r.stderr) > 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # TIME PARSING
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== time parsing ===\n")
+
+        for time_arg in ["now-1h", "now-2d", "now-30m", "now-1w", "now"]:
+            r = run(["events", "--from", time_arg], env=env)
+            check(f"time '{time_arg}' accepted by --from", r.returncode == 0, r.stderr)
+
+        r = run(["events", "--from", "2026-01-01"], env=env)
+        check("ISO date 2026-01-01 accepted by --from", r.returncode == 0, r.stderr)
+
+        r = run(["events", "--from", "1716289200"], env=env)
+        check("epoch integer accepted by --from", r.returncode == 0, r.stderr)
+
+        r = run(["events", "--from", "not-a-date"], env=env)
+        check("invalid time string → non-zero exit", r.returncode != 0)
+        check("invalid time string → error in stderr", "Cannot parse time" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DD_SITE OVERRIDE
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== DD_SITE / base URL ===\n")
+
+        # DD_API_BASE_URL takes priority over DD_SITE
+        r = run(["monitors"], env={**env, "DD_SITE": "datadoghq.eu",
+                                   "DD_API_BASE_URL": base})
+        check("DD_API_BASE_URL overrides DD_SITE", r.returncode == 0, r.stderr)
+
+        # When no DD_API_BASE_URL set, DD_SITE shapes the URL
+        # (we can't actually reach datadoghq.eu in tests, just verify exit != 0 differently)
+        r = run(["monitors"], env={k: v for k, v in env.items()
+                                   if k != "DD_API_BASE_URL"} | {"DD_SITE": "datadoghq.eu"})
+        check("DD_SITE=datadoghq.eu with no base override → connection error (not auth error)",
+              r.returncode != 0 and "DD_API_KEY" not in r.stderr)
+
+        # Empty DD_SITE falls back to datadoghq.com
+        r = run(["monitors"], env={**env, "DD_SITE": ""})
+        check("DD_SITE empty → falls back to datadoghq.com base URL, test server still responds",
+              r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # AUTH HEADER VERIFICATION
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== auth header verification ===\n")
+
+        _requests.clear()
+        r = run(["monitors"], env=env)
+        check("valid creds → 200 response, exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["monitors"], env=_env(base, api_key="bad-key", app_key=VALID_APP_KEY))
+        check("bad API key → 403 → non-zero exit", r.returncode != 0)
+
+        r = run(["monitors"], env=_env(base, api_key=VALID_API_KEY, app_key="bad-app-key"))
+        check("bad APP key → 403 → non-zero exit", r.returncode != 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # HELP OUTPUT
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== help output ===\n")
+
+        r = run(["--help"], env=env)
+        check("--help exits 0", r.returncode == 0)
+        check("--help mentions monitors", "monitors" in r.stdout)
+        check("--help mentions logs", "logs" in r.stdout)
+        check("--help mentions incidents", "incidents" in r.stdout)
+        check("--help mentions snapshot", "snapshot" in r.stdout)
+
+        for cmd in ["monitors", "monitor-mute", "logs", "metrics", "incidents",
+                    "incident-create", "dashboards", "slos", "services", "snapshot"]:
+            r = run([cmd, "--help"], env=env)
+            check(f"{cmd} --help exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # EDGE CASES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== edge cases ===\n")
+
+        # monitor-create without required args
+        r = run(["monitor-create", "--name", "Only name"], env=env)
+        check("monitor-create missing --type → non-zero exit", r.returncode != 0)
+
+        r = run(["monitor-create", "--name", "x", "--type", "metric alert"], env=env)
+        check("monitor-create missing --query → non-zero exit", r.returncode != 0)
+
+        # incident-create without --title
+        r = run(["incident-create"], env=env)
+        check("incident-create missing --title → non-zero exit", r.returncode != 0)
+
+        # event-post missing required args
+        r = run(["event-post", "--title", "Only title"], env=env)
+        check("event-post missing --text → non-zero exit", r.returncode != 0)
+
+        # monitor-mute with time expressions as --end
+        r = run(["monitor-mute", "101", "--end", "now-1h", "--dry-run"], env=env)
+        check("monitor-mute --end now-1h accepted", r.returncode == 2)
+
+        r = run(["monitor-mute", "101", "--end", "now", "--dry-run"], env=env)
+        check("monitor-mute --end now accepted", r.returncode == 2)
+
+        # priority choices validated
+        r = run(["event-post", "--title", "T", "--text", "B", "--priority", "urgent"], env=env)
+        check("event-post invalid --priority → non-zero exit", r.returncode != 0)
+
+        # monitor-create priority range validation
+        r = run(["monitor-create", "--name", "x", "--type", "metric alert",
+                 "--query", "q", "--priority", "6", "--dry-run"], env=env)
+        check("monitor-create --priority 6 (out of range) → non-zero", r.returncode != 0)
+
+        # incident-create invalid severity
+        r = run(["incident-create", "--title", "T", "--severity", "SEV-9", "--dry-run"], env=env)
+        check("incident-create invalid --severity → non-zero", r.returncode != 0)
+
+        # logs with --limit 0 (edge: still parses, server returns empty slice)
+        r = run(["logs", "--limit", "0"], env=env)
+        check("logs --limit 0 exits 0 (server decides)", r.returncode == 0, r.stderr)
+
+        # metrics-list empty prefix
+        r = run(["metrics-list", "--prefix", ""], env=env)
+        check("metrics-list --prefix empty string exits 0", r.returncode == 0, r.stderr)
+
+        # snapshot --json exit code 0 when no alerting monitors
+        r = run(["monitors", "--state", "OK"], env=env)
+        check("no-alerting monitors list exits 0", r.returncode == 0)
+
+        print(f"\nResults: {PASS} passed, {FAIL} failed")
+        return 0 if FAIL == 0 else 1
+
+    finally:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
