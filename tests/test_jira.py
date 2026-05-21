@@ -685,6 +685,10 @@ def main() -> int:
             check("issue list --limit non-integer exits 1", r.returncode == 1)
             check("issue list --limit non-integer prints error", "Error:" in r.stderr, r.stderr)
 
+            r = run(["issue", "list", "PROJ", "--limit", "-1"], env=env)
+            check("issue list --limit -1 exits 1", r.returncode == 1)
+            check("issue list --limit -1 prints error", "Error:" in r.stderr, r.stderr)
+
             # ── issue create ────────────────────────────────────────────────────
 
             print("\nissue create")
