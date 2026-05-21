@@ -1804,7 +1804,10 @@ tools:
     - discover accessible GitHub repositories
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
+    - classify changed files by review-risk tier (critical/elevated/standard)
     - audit PR review risks and generate fix-oriented engineering review replies
+    - surface the built-in review doctrine on every review
+    - gate merges on failing checks, unresolved threads, dirty merge state, and missing approval
     - approve, comment, request changes, close/reopen, edit, check out, update branches, mark ready/draft, and merge pull requests
     commands:
       whoami: Show authenticated GitHub user
@@ -1816,8 +1819,9 @@ tools:
       diff: Show PR diff
       threads: Show unresolved PR review threads
       checks: Show PR checks
-      review: Summarize a PR for review
+      review: Summarize a PR for review — state, checks, risk tier, and the review doctrine
       audit: Audit a PR for review risks and generate request-changes-ready reply text
+      doctrine: Print the PR review doctrine
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -1826,7 +1830,7 @@ tools:
       checkout: Check out a PR locally
       edit: Edit PR metadata
       update-branch: Update a PR branch from its base branch
-      merge: Merge a PR
+      merge: Merge a PR (gated on checks, threads, merge state, approval; --force to bypass)
       ready: Mark a PR ready for review
       draft: Convert a PR to draft
     examples:
