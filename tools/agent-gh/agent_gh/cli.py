@@ -1,4 +1,3 @@
-"""CLI entry point: argument parser and main dispatcher."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +7,6 @@ from typing import Any
 from .groups import audit as audit_group
 from .groups import pr as pr_group
 from .transport import GhError
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="agent-gh - GitHub work-state for agent-do")
@@ -190,7 +188,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
-
 def _build_issue_parser(sub: Any) -> None:
     from .groups import issue as issue_group
 
@@ -278,7 +275,6 @@ def _build_issue_parser(sub: Any) -> None:
     itr.add_argument("issue_ref", help="owner/repo#num")
     itr.add_argument("--json", action="store_true")
     itr.set_defaults(func=issue_group.cmd_issue_triage)
-
 
 def _build_release_parser(sub: Any) -> None:
     from .groups import release as release_group
@@ -372,7 +368,6 @@ def _build_release_parser(sub: Any) -> None:
     rnotes.add_argument("--json", action="store_true")
     rnotes.set_defaults(func=release_group.cmd_release_notes)
 
-
 def _build_api_parser(sub: Any) -> None:
     from .groups import api as api_group
 
@@ -395,11 +390,9 @@ def _build_api_parser(sub: Any) -> None:
     gql_p.add_argument("--json", action="store_true")
     gql_p.set_defaults(func=api_group.cmd_graphql)
 
-
 def _subcommand_help(parser: argparse.ArgumentParser, command: str | None) -> None:
     if not command:
         parser.print_help()
-
 
 def show_help() -> None:
     print(
@@ -449,7 +442,6 @@ Examples:
   agent-do gh audit ovachiever/agent-do#3 --reply
 """
     )
-
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
