@@ -1,0 +1,790 @@
+#!/usr/bin/env bash
+# agent-sentry - Sentry error tracking and performance monitoring
+
+set -euo pipefail
+
+show_help() {
+    cat << 'EOF'
+agent-sentry - Sentry error tracking and performance monitoring
+
+PROJECTS
+  projects / ls                 List all projects with platforms
+  project <slug>                Detailed project info
+
+ISSUES
+  issues [opts]                 List issues (default: unresolved)
+    --project <slug>            Filter by project
+    --query <query>             Sentry search query (default: is:unresolved)
+    --sort <sort>               Sort: date|freq|new|priority (default: date)
+    --limit <n>                 Max results (default: 25)
+  issue <id>                    Detailed issue info (short ID e.g. VERSOVA-CHAT-B)
+  resolve <id>                  Resolve an issue
+  unresolve <id>                Reopen a resolved issue
+  ignore <id>                   Mark an issue as ignored
+  assign <id> <email>           Assign an issue to a user by email
+
+ALERTS
+  alerts                        List alert rules across all projects
+  alert <rule_id>               Detailed alert rule info
+
+RELEASES
+  releases [--project <slug>]   List recent releases
+
+ACCOUNT
+  snapshot                      Full account state as JSON
+
+The org slug and region URL are auto-detected from the auth token
+payload. Override with SENTRY_ORG and SENTRY_REGION_URL if needed.
+
+Environment:
+  SENTRY_AUTH_TOKEN              Auth token (org or user token)
+  SENTRY_ORG                     Org slug override (auto-detected from token)
+  SENTRY_REGION_URL              Region URL override (auto-detected from token)
+
+Examples:
+  agent-sentry projects
+  agent-sentry issues --project versova-chat
+  agent-sentry issues --query "is:unresolved level:error"
+  agent-sentry issue VERSOVA-CHAT-B
+  agent-sentry resolve VERSOVA-CHAT-B
+  agent-sentry alerts
+  agent-sentry snapshot
+EOF
+}
+
+# --- Token and Auth Helpers ---
+
+sentry_token() {
+    local token="${SENTRY_AUTH_TOKEN:-}"
+    if [[ -z "$token" ]]; then
+        echo "Error: SENTRY_AUTH_TOKEN not set" >&2
+        echo "  Store it with: agent-do creds store SENTRY_AUTH_TOKEN --stdin" >&2
+        return 1
+    fi
+    printf '%s' "$token"
+}
+
+# Extract org slug and region URL from the sntrys_ token payload.
+# Token format: sntrys_<base64_payload>_<signature>
+# Payload JSON: {"iat":...,"url":"...","region_url":"...","org":"..."}
+sentry_token_payload() {
+    local token
+    token=$(sentry_token) || return 1
+    if [[ "$token" != sntrys_* ]]; then
+        return 1
+    fi
+    local payload
+    payload="${token#sntrys_}"
+    payload="${payload%%_*}"
+    # base64 decode — pad if needed
+    local padded="$payload"
+    local mod=$(( ${#padded} % 4 ))
+    if (( mod == 2 )); then padded+="=="
+    elif (( mod == 3 )); then padded+="="
+    fi
+    printf '%s' "$padded" | base64 -d 2>/dev/null
+}
+
+sentry_org() {
+    local org="${SENTRY_ORG:-}"
+    if [[ -n "$org" ]]; then
+        printf '%s' "$org"
+        return 0
+    fi
+    local payload
+    payload=$(sentry_token_payload 2>/dev/null) || true
+    if [[ -n "$payload" ]]; then
+        org=$(printf '%s' "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('org',''))" 2>/dev/null)
+    fi
+    if [[ -z "$org" ]]; then
+        echo "Error: cannot determine org slug. Set SENTRY_ORG or use an sntrys_ org token." >&2
+        return 1
+    fi
+    printf '%s' "$org"
+}
+
+sentry_base_url() {
+    local region="${SENTRY_REGION_URL:-}"
+    if [[ -n "$region" ]]; then
+        printf '%s/api/0' "$region"
+        return 0
+    fi
+    local payload
+    payload=$(sentry_token_payload 2>/dev/null) || true
+    if [[ -n "$payload" ]]; then
+        region=$(printf '%s' "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('region_url',''))" 2>/dev/null)
+    fi
+    if [[ -z "$region" ]]; then
+        region="https://sentry.io"
+    fi
+    printf '%s/api/0' "$region"
+}
+
+# --- HTTP Helpers ---
+
+sentry_get() {
+    local url="$1"
+    local token
+    token=$(sentry_token) || return 1
+    curl -sS --connect-timeout 10 --max-time 60 \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/json" \
+        "$url"
+}
+
+sentry_put() {
+    local url="$1"
+    local data="$2"
+    local token
+    token=$(sentry_token) || return 1
+    curl -sS --connect-timeout 10 --max-time 60 -X PUT \
+        -H "Authorization: Bearer ${token}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d "$data" "$url"
+}
+
+# --- Resolvers ---
+
+# Resolve a short ID (e.g. VERSOVA-CHAT-B) to a numeric issue ID.
+# If input is already numeric, return it directly.
+resolve_issue_id() {
+    local id_or_short="$1"
+    local base_url org
+
+    # Purely numeric — use directly
+    if [[ "$id_or_short" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$id_or_short"
+        return 0
+    fi
+
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/organizations/${org}/shortids/${id_or_short}/") || return 1
+
+    local numeric_id
+    numeric_id=$(printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('', end='')
+else:
+    g = d.get('group', {})
+    print(g.get('id', ''), end='')
+" 2>/dev/null)
+
+    if [[ -z "$numeric_id" ]]; then
+        echo "Error: Issue '${id_or_short}' not found" >&2
+        return 1
+    fi
+
+    printf '%s' "$numeric_id"
+}
+
+# --- Commands ---
+
+cmd_projects() {
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/organizations/${org}/projects/") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if isinstance(data, dict) and 'detail' in data:
+    print('Error:', data['detail'], file=sys.stderr)
+    sys.exit(1)
+if not data:
+    print('No projects found.')
+    sys.exit(0)
+fmt = '{:<35} {:<15} {:<10} {:<20}'
+print(fmt.format('SLUG', 'PLATFORM', 'STATUS', 'TEAM'))
+print('-' * 80)
+for p in data:
+    team = ''
+    if p.get('team'):
+        team = p['team'].get('slug', '')
+    elif p.get('teams'):
+        team = ', '.join(t.get('slug','') for t in p['teams'][:2])
+    print(fmt.format(
+        p.get('slug', '')[:35],
+        (p.get('platform') or '-')[:15],
+        p.get('status', '')[:10],
+        team[:20],
+    ))
+"
+}
+
+cmd_project() {
+    local slug="${1:?Usage: agent-sentry project <slug>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/projects/${org}/${slug}/") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+teams = [t.get('slug','') for t in d.get('teams', [])]
+print(json.dumps({
+    'slug': d.get('slug', ''),
+    'name': d.get('name', ''),
+    'platform': d.get('platform'),
+    'status': d.get('status', ''),
+    'dateCreated': d.get('dateCreated', ''),
+    'firstEvent': d.get('firstEvent'),
+    'features': d.get('features', []),
+    'teams': teams,
+    'isBookmarked': d.get('isBookmarked', False),
+    'hasAccess': d.get('hasAccess', True),
+}, indent=2))
+"
+}
+
+cmd_issues() {
+    local base_url org project="" query="is:unresolved" sort="date" limit="25"
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="$2"; shift 2 ;;
+            --query) query="$2"; shift 2 ;;
+            --sort) sort="$2"; shift 2 ;;
+            --limit) limit="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    # Prepend project filter to query string if specified
+    if [[ -n "$project" ]]; then
+        query="project:${project} ${query}"
+    fi
+
+    # URL-encode the query safely via env var (no shell interpolation in Python)
+    local encoded_query
+    encoded_query=$(SENTRY_QUERY="$query" python3 -c "
+import os, urllib.parse
+print(urllib.parse.quote(os.environ['SENTRY_QUERY']))
+") || return 1
+
+    local url="${base_url}/organizations/${org}/issues/?query=${encoded_query}&sort=${sort}&limit=${limit}"
+
+    local result
+    result=$(sentry_get "$url") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if isinstance(data, dict) and 'detail' in data:
+    print('Error:', data['detail'], file=sys.stderr)
+    sys.exit(1)
+if not data:
+    print('No issues found.')
+    sys.exit(0)
+fmt = '{:<22} {:<50} {:<6} {:<6} {:<12}'
+print(fmt.format('ID', 'TITLE', 'EVENTS', 'USERS', 'LAST SEEN'))
+print('-' * 96)
+for i in data:
+    print(fmt.format(
+        i.get('shortId', '')[:22],
+        i.get('title', '')[:50],
+        str(i.get('count', ''))[:6],
+        str(i.get('userCount', ''))[:6],
+        (i.get('lastSeen', '') or '')[:12],
+    ))
+"
+}
+
+cmd_issue() {
+    local short_id="${1:?Usage: agent-sentry issue <short_id>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local issue_id
+    issue_id=$(resolve_issue_id "$short_id") || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/organizations/${org}/issues/${issue_id}/") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+assignee = d.get('assignedTo')
+assigned = None
+if assignee:
+    assigned = assignee.get('email') or assignee.get('name') or str(assignee.get('id',''))
+print(json.dumps({
+    'id': d.get('id', ''),
+    'shortId': d.get('shortId', ''),
+    'title': d.get('title', ''),
+    'culprit': d.get('culprit', ''),
+    'level': d.get('level', ''),
+    'status': d.get('status', ''),
+    'substatus': d.get('substatus'),
+    'platform': d.get('platform', ''),
+    'project': d.get('project', {}).get('slug', ''),
+    'type': d.get('type', ''),
+    'count': d.get('count', ''),
+    'userCount': d.get('userCount', 0),
+    'firstSeen': d.get('firstSeen', ''),
+    'lastSeen': d.get('lastSeen', ''),
+    'assignedTo': assigned,
+    'isPublic': d.get('isPublic', False),
+    'hasSeen': d.get('hasSeen', False),
+    'permalink': d.get('permalink', ''),
+}, indent=2))
+"
+}
+
+cmd_resolve() {
+    local short_id="${1:?Usage: agent-sentry resolve <short_id>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local issue_id
+    issue_id=$(resolve_issue_id "$short_id") || return 1
+
+    local result
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"resolved"}') || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+print('Issue', d.get('shortId', d.get('id', '')), 'resolved.')
+"
+}
+
+cmd_unresolve() {
+    local short_id="${1:?Usage: agent-sentry unresolve <short_id>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local issue_id
+    issue_id=$(resolve_issue_id "$short_id") || return 1
+
+    local result
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"unresolved"}') || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+print('Issue', d.get('shortId', d.get('id', '')), 'reopened.')
+"
+}
+
+cmd_ignore() {
+    local short_id="${1:?Usage: agent-sentry ignore <short_id>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local issue_id
+    issue_id=$(resolve_issue_id "$short_id") || return 1
+
+    local result
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"ignored"}') || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+print('Issue', d.get('shortId', d.get('id', '')), 'ignored.')
+"
+}
+
+cmd_assign() {
+    local short_id="${1:?Usage: agent-sentry assign <short_id> <email>}"
+    local email="${2:?Usage: agent-sentry assign <short_id> <email>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local issue_id
+    issue_id=$(resolve_issue_id "$short_id") || return 1
+
+    local payload
+    payload=$(printf '{"assignedTo":"%s"}' "$email")
+
+    local result
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" "$payload") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+assignee = d.get('assignedTo')
+assigned = 'nobody'
+if assignee:
+    assigned = assignee.get('email') or assignee.get('name', '')
+print('Issue', d.get('shortId', d.get('id', '')), 'assigned to', assigned)
+"
+}
+
+cmd_alerts() {
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/organizations/${org}/combined-rules/") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if isinstance(data, dict) and 'detail' in data:
+    print('Error:', data['detail'], file=sys.stderr)
+    sys.exit(1)
+if not data:
+    print('No alert rules found.')
+    sys.exit(0)
+fmt = '{:<8} {:<35} {:<12} {:<15} {:<20}'
+print(fmt.format('ID', 'NAME', 'TYPE', 'STATUS', 'PROJECT'))
+print('-' * 90)
+for r in data:
+    rtype = r.get('type', 'unknown')
+    status = ''
+    proj = ''
+    if rtype == 'alert_rule':
+        status = r.get('status', '')
+        proj_list = r.get('projects', [])
+        proj = proj_list[0] if proj_list else ''
+    else:
+        status = r.get('status', '')
+        proj_list = r.get('projects', [])
+        proj = proj_list[0] if proj_list else ''
+    print(fmt.format(
+        str(r.get('id', ''))[:8],
+        r.get('name', '')[:35],
+        rtype[:12],
+        str(status)[:15],
+        str(proj)[:20],
+    ))
+"
+}
+
+cmd_alert() {
+    local rule_id="${1:?Usage: agent-sentry alert <rule_id>}"
+    local base_url org
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    local result
+    result=$(sentry_get "${base_url}/organizations/${org}/alert-rules/${rule_id}/") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(d, indent=2, default=str))
+"
+}
+
+cmd_releases() {
+    local base_url org project=""
+    base_url=$(sentry_base_url) || return 1
+    org=$(sentry_org) || return 1
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="$2"; shift 2 ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    local url="${base_url}/organizations/${org}/releases/?per_page=25"
+    if [[ -n "$project" ]]; then
+        url="${url}&project=${project}"
+    fi
+
+    local result
+    result=$(sentry_get "$url") || return 1
+
+    printf '%s' "$result" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if isinstance(data, dict) and 'detail' in data:
+    print('Error:', data['detail'], file=sys.stderr)
+    sys.exit(1)
+if not data:
+    print('No releases found.')
+    sys.exit(0)
+fmt = '{:<30} {:<24} {:<10} {:<10}'
+print(fmt.format('VERSION', 'DATE', 'NEW ISSUES', 'PROJECTS'))
+print('-' * 74)
+for r in data:
+    projs = ','.join(p.get('slug','') for p in r.get('projects', [])[:3])
+    print(fmt.format(
+        r.get('shortVersion', r.get('version', ''))[:30],
+        (r.get('dateCreated', '') or '')[:24],
+        str(r.get('newGroups', ''))[:10],
+        projs[:10],
+    ))
+"
+}
+
+cmd_snapshot() {
+    local token
+    token=$(sentry_token) || { echo '{"error": "SENTRY_AUTH_TOKEN not set"}'; return 1; }
+    local org
+    org=$(sentry_org 2>/dev/null) || { echo '{"error":"cannot determine org"}'; return 1; }
+    local base_url
+    base_url=$(sentry_base_url) || { echo '{"error":"cannot determine base URL"}'; return 1; }
+
+    SENTRY_AUTH_TOKEN="$token" SENTRY_SNAP_ORG="$org" SENTRY_SNAP_BASE="$base_url" python3 -c "
+import json, sys, os
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+ORG = os.environ['SENTRY_SNAP_ORG']
+TOKEN = os.environ.get('SENTRY_AUTH_TOKEN', '')
+BASE = os.environ['SENTRY_SNAP_BASE']
+
+def api_get(url):
+    req = Request(url, headers={
+        'Authorization': 'Bearer ' + TOKEN,
+        'Accept': 'application/json',
+    })
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode('utf-8', errors='replace')
+            detail = json.loads(body).get('detail', str(e))
+        except Exception:
+            detail = body or str(e)
+        return {'error': detail, 'status': e.code}
+    except Exception as e:
+        return {'error': str(e)}
+
+def fetch_paginated(url, max_pages=10):
+    all_items = []
+    pages = 0
+    while url and pages < max_pages:
+        req = Request(url, headers={
+            'Authorization': 'Bearer ' + TOKEN,
+            'Accept': 'application/json',
+        })
+        try:
+            with urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+                if isinstance(data, dict) and 'error' in data:
+                    return data
+                if isinstance(data, list):
+                    all_items.extend(data)
+                else:
+                    return data
+                link_header = resp.getheader('Link', '')
+                url = None
+                for part in link_header.split(','):
+                    if 'rel=\"next\"' in part and 'results=\"true\"' in part:
+                        # Extract URL between angle brackets
+                        if '<' in part and '>' in part:
+                            url = part.split('<')[1].split('>')[0].strip()
+                        break
+                pages += 1
+        except HTTPError as e:
+            return {'error': str(e), 'status': e.code}
+        except Exception as e:
+            return {'error': str(e)}
+    return all_items
+
+token_valid = True
+
+# --- Projects ---
+raw_projects = fetch_paginated(BASE + '/organizations/' + ORG + '/projects/')
+if isinstance(raw_projects, dict) and 'error' in raw_projects:
+    token_valid = False
+    projects = []
+    projects_by_platform = {}
+else:
+    projects = []
+    projects_by_platform = {}
+    for p in raw_projects:
+        platform = p.get('platform') or 'unknown'
+        projects_by_platform[platform] = projects_by_platform.get(platform, 0) + 1
+        teams = [t.get('slug', '') for t in p.get('teams', [])]
+        projects.append({
+            'id': p.get('id', ''),
+            'slug': p.get('slug', ''),
+            'name': p.get('name', ''),
+            'platform': platform,
+            'status': p.get('status', ''),
+            'dateCreated': p.get('dateCreated', ''),
+            'firstEvent': p.get('firstEvent'),
+            'teams': teams,
+        })
+
+# --- Unresolved Issues ---
+raw_issues = fetch_paginated(
+    BASE + '/organizations/' + ORG + '/issues/?query=is%3Aunresolved&sort=date&limit=100',
+    max_pages=3
+)
+issues = []
+issues_by_level = {}
+issues_by_project = {}
+if isinstance(raw_issues, list):
+    for i in raw_issues:
+        level = i.get('level', 'unknown')
+        issues_by_level[level] = issues_by_level.get(level, 0) + 1
+        proj = i.get('project', {}).get('slug', 'unknown')
+        issues_by_project[proj] = issues_by_project.get(proj, 0) + 1
+        issues.append({
+            'id': i.get('id', ''),
+            'shortId': i.get('shortId', ''),
+            'title': i.get('title', ''),
+            'culprit': i.get('culprit', ''),
+            'level': level,
+            'status': i.get('status', ''),
+            'count': i.get('count', ''),
+            'userCount': i.get('userCount', 0),
+            'firstSeen': i.get('firstSeen', ''),
+            'lastSeen': i.get('lastSeen', ''),
+            'project': proj,
+        })
+
+# --- Alert Rules ---
+raw_alerts = api_get(BASE + '/organizations/' + ORG + '/combined-rules/')
+alerts = []
+if isinstance(raw_alerts, list):
+    for r in raw_alerts:
+        projs = r.get('projects', [])
+        alerts.append({
+            'id': r.get('id', ''),
+            'name': r.get('name', ''),
+            'type': r.get('type', ''),
+            'status': r.get('status', ''),
+            'projects': projs,
+            'dateCreated': r.get('dateCreated', ''),
+        })
+
+# --- Releases (last 25) ---
+raw_releases = api_get(BASE + '/organizations/' + ORG + '/releases/?per_page=25')
+releases = []
+if isinstance(raw_releases, list):
+    for r in raw_releases:
+        projs = [p.get('slug', '') for p in r.get('projects', [])]
+        releases.append({
+            'version': r.get('version', ''),
+            'shortVersion': r.get('shortVersion', ''),
+            'dateCreated': r.get('dateCreated', ''),
+            'newGroups': r.get('newGroups', 0),
+            'projects': projs,
+        })
+
+# --- Assemble ---
+snapshot = {
+    'org': ORG,
+    'base_url': BASE,
+    'projects': {
+        'count': len(projects),
+        'by_platform': projects_by_platform,
+        'items': projects,
+    },
+    'issues': {
+        'unresolved_count': len(issues),
+        'by_level': issues_by_level,
+        'by_project': issues_by_project,
+        'items': issues,
+    },
+    'alerts': {
+        'count': len(alerts),
+        'items': alerts,
+    },
+    'releases': {
+        'count': len(releases),
+        'items': releases,
+    },
+    'token_valid': token_valid,
+}
+
+print(json.dumps(snapshot, indent=2))
+"
+}
+
+# --- Main ---
+
+case "${1:-help}" in
+    projects|ls|list)
+        cmd_projects
+        ;;
+    project|show)
+        shift
+        cmd_project "$@"
+        ;;
+    issues)
+        shift || true
+        cmd_issues "$@"
+        ;;
+    issue|get)
+        shift
+        cmd_issue "$@"
+        ;;
+    resolve)
+        shift
+        cmd_resolve "$@"
+        ;;
+    unresolve|reopen)
+        shift
+        cmd_unresolve "$@"
+        ;;
+    ignore)
+        shift
+        cmd_ignore "$@"
+        ;;
+    assign)
+        shift
+        cmd_assign "$@"
+        ;;
+    alerts|rules)
+        cmd_alerts
+        ;;
+    alert|rule)
+        shift
+        cmd_alert "$@"
+        ;;
+    releases)
+        shift || true
+        cmd_releases "$@"
+        ;;
+    snapshot|snap)
+        cmd_snapshot
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1" >&2
+        echo "Try: agent-sentry --help" >&2
+        exit 1
+        ;;
+esac
