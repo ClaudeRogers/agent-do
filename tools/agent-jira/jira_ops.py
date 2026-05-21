@@ -1,0 +1,1043 @@
+#!/usr/bin/env python3
+"""agent-jira backend: connection profiles, issue management, search, sprints."""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _home() -> Path:
+    return Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
+
+
+def _err(msg: str, code: int = 1) -> None:
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _print_json(payload: Any) -> None:
+    print(json.dumps(payload, indent=2, default=str))
+
+
+# ── credential storage ─────────────────────────────────────────────────────────
+
+def _creds_dir() -> Path:
+    return _home() / "jira" / ".creds"
+
+
+def _profiles_path() -> Path:
+    return _home() / "jira" / "connections.json"
+
+
+def _creds_store(profile: str, url: str, email: str, token: str) -> None:
+    d = _creds_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    payload = json.dumps({"url": url, "email": email, "token": token}).encode()
+    target = d / profile
+    fd, tmp = tempfile.mkstemp(dir=d)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, payload)
+        os.close(fd)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _creds_get(profile: str) -> dict[str, str] | None:
+    """Return {url, email, token} for a profile, checking env vars first."""
+    p = profile.upper().replace("-", "_")
+    env_url   = os.environ.get(f"JIRA_URL_{p}")
+    env_email = os.environ.get(f"JIRA_EMAIL_{p}")
+    env_token = os.environ.get(f"JIRA_API_TOKEN_{p}")
+    if env_url and env_email and env_token:
+        return {"url": env_url, "email": env_email, "token": env_token}
+    f = _creds_dir() / profile
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def _creds_delete(profile: str) -> None:
+    try:
+        (_creds_dir() / profile).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _load_profiles() -> dict[str, Any]:
+    p = _profiles_path()
+    if not p.exists():
+        return {"profiles": {}, "default": None}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"profiles": {}, "default": None}
+
+
+def _save_profiles(data: dict[str, Any]) -> None:
+    p = _profiles_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=p.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, json.dumps(data, indent=2).encode())
+        os.close(fd)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ── HTTP client ────────────────────────────────────────────────────────────────
+
+class JiraClient:
+    def __init__(self, url: str, email: str, token: str, *, server: bool = False):
+        self.base = url.rstrip("/")
+        self.email = email
+        self.token = token
+        self.server = server
+        self.api_version = "2" if server else "3"
+        raw = f"{email}:{token}".encode()
+        self._auth = "Basic " + base64.b64encode(raw).decode()
+
+    def _api(self, path: str) -> str:
+        return f"{self.base}/rest/api/{self.api_version}/{path.lstrip('/')}"
+
+    def _agile(self, path: str) -> str:
+        return f"{self.base}/rest/agile/1.0/{path.lstrip('/')}"
+
+    def request(self, method: str, url: str, *, body: Any = None) -> Any:
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {
+            "Authorization": self._auth,
+            "Accept": "application/json",
+        }
+        if data:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            body_bytes = exc.read()
+            try:
+                detail = json.loads(body_bytes)
+                messages = detail.get("errorMessages") or []
+                errors = detail.get("errors") or {}
+                msg = "; ".join(messages + [f"{k}: {v}" for k, v in errors.items()])
+                if not msg:
+                    msg = detail.get("message") or str(detail)
+            except (json.JSONDecodeError, AttributeError):
+                msg = body_bytes.decode(errors="replace")[:200]
+            _err(f"Jira API {exc.code} {exc.reason}: {msg}")
+        except urllib.error.URLError as exc:
+            _err(f"Could not connect to Jira: {exc.reason}")
+
+    def get(self, path: str, *, params: dict[str, Any] | None = None, agile: bool = False) -> Any:
+        base_url = self._agile(path) if agile else self._api(path)
+        if params:
+            base_url += "?" + urllib.parse.urlencode(
+                {k: v for k, v in params.items() if v is not None}
+            )
+        return self.request("GET", base_url)
+
+    def post(self, path: str, body: Any, *, agile: bool = False) -> Any:
+        url = self._agile(path) if agile else self._api(path)
+        return self.request("POST", url, body=body)
+
+    def put(self, path: str, body: Any, *, agile: bool = False) -> Any:
+        url = self._agile(path) if agile else self._api(path)
+        return self.request("PUT", url, body=body)
+
+    def delete(self, path: str) -> Any:
+        return self.request("DELETE", self._api(path))
+
+    def _text_body(self, text: str) -> Any:
+        """Return description/comment body in the correct format for this API version."""
+        if self.server:
+            return text
+        # Cloud uses Atlassian Document Format (ADF)
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+            ],
+        }
+
+    def _extract_text(self, body: Any) -> str:
+        """Extract plain text from ADF or plain string."""
+        if isinstance(body, str):
+            return body
+        if isinstance(body, dict):
+            content = body.get("content") or []
+            parts = []
+            for block in content:
+                for inline in (block.get("content") or []):
+                    if inline.get("type") == "text":
+                        parts.append(inline.get("text", ""))
+            return " ".join(parts)
+        return ""
+
+
+def _get_client(connection: str | None) -> JiraClient:
+    """Resolve a connection profile and return a JiraClient."""
+    data = _load_profiles()
+
+    # Env-var fallback (no profile configured)
+    env_url   = os.environ.get("JIRA_URL", "")
+    env_email = os.environ.get("JIRA_EMAIL", "")
+    env_token = os.environ.get("JIRA_API_TOKEN", "")
+
+    if connection:
+        creds = _creds_get(connection)
+        if not creds:
+            _err(f"Profile '{connection}' not found. Run: agent-do jira connections add {connection} ...")
+        meta = data["profiles"].get(connection, {})
+        return JiraClient(creds["url"], creds["email"], creds["token"],
+                          server=meta.get("server", False))
+
+    default = data.get("default")
+    if default:
+        creds = _creds_get(default)
+        if creds:
+            meta = data["profiles"].get(default, {})
+            return JiraClient(creds["url"], creds["email"], creds["token"],
+                              server=meta.get("server", False))
+
+    if env_url and env_email and env_token:
+        return JiraClient(env_url, env_email, env_token)
+
+    _err(
+        "No Jira connection configured.\n"
+        "  agent-do jira connections add <name> --url <url> --email <email> --token <token>\n"
+        "Or set JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN environment variables."
+    )
+
+
+# ── formatting helpers ─────────────────────────────────────────────────────────
+
+def _fmt_date(iso: str | None) -> str:
+    if not iso:
+        return ""
+    return iso[:10]
+
+
+def _fmt_issue(issue: dict[str, Any], client: JiraClient) -> dict[str, Any]:
+    f = issue.get("fields") or {}
+    return {
+        "key": issue.get("key"),
+        "summary": f.get("summary", ""),
+        "status": (f.get("status") or {}).get("name", ""),
+        "type": (f.get("issuetype") or {}).get("name", ""),
+        "priority": (f.get("priority") or {}).get("name", ""),
+        "assignee": (f.get("assignee") or {}).get("displayName") or (f.get("assignee") or {}).get("emailAddress", ""),
+        "reporter": (f.get("reporter") or {}).get("displayName", ""),
+        "labels": f.get("labels") or [],
+        "created": _fmt_date(f.get("created")),
+        "updated": _fmt_date(f.get("updated")),
+        "url": f"{client.base}/browse/{issue.get('key')}",
+        "description": client._extract_text(f.get("description")),
+    }
+
+
+# ── connections ────────────────────────────────────────────────────────────────
+
+def cmd_connections(argv: list[str]) -> None:
+    sub = argv[0] if argv else "list"
+    rest = argv[1:]
+
+    if sub in ("list", "ls"):
+        data = _load_profiles()
+        profiles = data.get("profiles", {})
+        default = data.get("default")
+        if not profiles:
+            print("No Jira connection profiles saved.")
+            print("  agent-do jira connections add <name> --url <url> --email <email> --token <token>")
+            return
+        for name, p in profiles.items():
+            marker = " *" if name == default else ""
+            kind = "Server" if p.get("server") else "Cloud"
+            url = p.get("url", "")
+            added = p.get("added_at", "")[:10]
+            print(f"  {name}{marker}  [{kind}]  {url}  {added}  (credentials stored securely)")
+
+    elif sub == "add":
+        name = rest[0] if rest else None
+        if not name:
+            _err("Usage: connections add <name> --url <url> --email <email> --token <token>")
+        url = email = token = ""
+        is_server = is_default = False
+        i = 1
+        while i < len(rest):
+            if rest[i] == "--url" and i + 1 < len(rest):
+                url = rest[i + 1].strip(); i += 2
+            elif rest[i] == "--email" and i + 1 < len(rest):
+                email = rest[i + 1].strip(); i += 2
+            elif rest[i] == "--token" and i + 1 < len(rest):
+                token = rest[i + 1].strip(); i += 2
+            elif rest[i] == "--server":
+                is_server = True; i += 1
+            elif rest[i] == "--default":
+                is_default = True; i += 1
+            else:
+                i += 1
+        if not url:
+            _err("--url is required")
+        if not email:
+            _err("--email is required")
+        if not token:
+            _err("--token is required")
+        if not url.startswith("http"):
+            _err(f"--url must start with http:// or https://, got: {url!r}")
+
+        data = _load_profiles()
+        data["profiles"][name] = {
+            "url": url,
+            "server": is_server,
+            "added_at": _now(),
+        }
+        if is_default or not data.get("default"):
+            data["default"] = name
+        _creds_store(name, url, email, token)
+        _save_profiles(data)
+        kind = "Server/DC" if is_server else "Cloud"
+        print(f"Saved profile '{name}' [{kind}]  {url}"
+              + (" (default)" if data["default"] == name else ""))
+
+    elif sub == "remove":
+        name = rest[0] if rest else None
+        if not name:
+            _err("Usage: connections remove <name>")
+        data = _load_profiles()
+        if name not in data["profiles"]:
+            _err(f"Profile '{name}' not found")
+        del data["profiles"][name]
+        _creds_delete(name)
+        if data.get("default") == name:
+            data["default"] = next(iter(data["profiles"]), None)
+        _save_profiles(data)
+        print(f"Removed profile '{name}'")
+
+    elif sub == "set-default":
+        name = rest[0] if rest else None
+        if not name:
+            _err("Usage: connections set-default <name>")
+        data = _load_profiles()
+        if name not in data["profiles"]:
+            _err(f"Profile '{name}' not found")
+        data["default"] = name
+        _save_profiles(data)
+        print(f"Default connection set to '{name}'")
+
+    else:
+        _err(f"Unknown connections subcommand: {sub!r}. Use: list, add, remove, set-default")
+
+
+# ── whoami ─────────────────────────────────────────────────────────────────────
+
+def cmd_whoami(argv: list[str]) -> None:
+    connection = json_mode = None
+    json_mode = False
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--connection" and i + 1 < len(argv):
+            connection = argv[i + 1]; i += 2
+        elif argv[i] == "--json":
+            json_mode = True; i += 1
+        else:
+            i += 1
+    client = _get_client(connection)
+    data = client.get("myself")
+    if json_mode:
+        _print_json(data)
+    else:
+        print(f"Account: {data.get('displayName')} <{data.get('emailAddress')}>")
+        print(f"ID:      {data.get('accountId') or data.get('name')}")
+        print(f"Jira:    {client.base}")
+
+
+# ── snapshot ───────────────────────────────────────────────────────────────────
+
+def cmd_snapshot(argv: list[str]) -> None:
+    connection = None
+    json_mode = False
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--connection" and i + 1 < len(argv):
+            connection = argv[i + 1]; i += 2
+        elif argv[i] == "--json":
+            json_mode = True; i += 1
+        else:
+            i += 1
+    client = _get_client(connection)
+    projects_data = client.get("project", params={"expand": "description"})
+    projects = []
+    for p in (projects_data or []):
+        try:
+            result = client.get("search", params={
+                "jql": f"project = {p['key']} AND statusCategory != Done",
+                "maxResults": 0,
+            })
+            open_count = result.get("total", 0)
+        except Exception:
+            open_count = -1
+        projects.append({
+            "key": p.get("key"),
+            "name": p.get("name"),
+            "type": p.get("projectTypeKey"),
+            "open_issues": open_count,
+        })
+    payload = {
+        "tool": "snapshot",
+        "timestamp": _now(),
+        "data": {"project_count": len(projects), "projects": projects},
+    }
+    if json_mode:
+        _print_json(payload)
+    else:
+        print(f"Jira: {client.base}  Projects: {len(projects)}")
+        for p in projects:
+            open_str = str(p["open_issues"]) if p["open_issues"] >= 0 else "?"
+            print(f"  {p['key']:<12} {p['name']:<40} {open_str} open")
+
+
+# ── issues ─────────────────────────────────────────────────────────────────────
+
+def cmd_issue(argv: list[str]) -> None:
+    sub = argv[0] if argv else ""
+    rest = argv[1:]
+    dispatch = {
+        "view": _issue_view,
+        "list": _issue_list,
+        "create": _issue_create,
+        "comment": _issue_comment,
+        "assign": _issue_assign,
+        "transition": _issue_transition,
+        "label": _issue_label,
+        "edit": _issue_edit,
+    }
+    fn = dispatch.get(sub)
+    if not fn:
+        _err(f"Unknown issue subcommand: {sub!r}. Use: view, list, create, comment, assign, transition, label, edit")
+    fn(rest)
+
+
+def _parse_common(argv: list[str], *, start: int = 0) -> tuple[str | None, bool, list[str]]:
+    """Parse --connection and --json flags, return (connection, json_mode, remaining)."""
+    connection = None
+    json_mode = False
+    remaining = []
+    i = start
+    while i < len(argv):
+        if argv[i] == "--connection" and i + 1 < len(argv):
+            connection = argv[i + 1]; i += 2
+        elif argv[i] == "--json":
+            json_mode = True; i += 1
+        else:
+            remaining.append(argv[i]); i += 1
+    return connection, json_mode, remaining
+
+
+def _issue_view(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue view <ISSUE-KEY> [--comments] [--json] [--connection <name>]")
+    key = argv[0]
+    show_comments = "--comments" in argv
+    connection, json_mode, _ = _parse_common(argv, start=1)
+    client = _get_client(connection)
+    expand = "renderedFields,names,changelog"
+    if show_comments:
+        expand += ",comment"
+    issue = client.get(f"issue/{key}", params={"expand": expand})
+    fmt = _fmt_issue(issue, client)
+    if show_comments:
+        comments = []
+        for c in (((issue.get("fields") or {}).get("comment") or {}).get("comments") or []):
+            comments.append({
+                "author": (c.get("author") or {}).get("displayName", ""),
+                "created": _fmt_date(c.get("created")),
+                "body": client._extract_text(c.get("body")),
+            })
+        fmt["comments"] = comments
+    if json_mode:
+        _print_json(fmt)
+    else:
+        print(f"{fmt['key']}: {fmt['summary']}")
+        print(f"  Status:   {fmt['status']}  |  Type: {fmt['type']}  |  Priority: {fmt['priority']}")
+        print(f"  Assignee: {fmt['assignee'] or '(unassigned)'}  |  Reporter: {fmt['reporter']}")
+        print(f"  Labels:   {', '.join(fmt['labels']) or '(none)'}")
+        print(f"  Created:  {fmt['created']}  |  Updated: {fmt['updated']}")
+        print(f"  URL:      {fmt['url']}")
+        if fmt.get("description"):
+            print(f"\n  {fmt['description'][:400]}")
+        if show_comments and fmt.get("comments"):
+            print(f"\n  Comments ({len(fmt['comments'])}):")
+            for c in fmt["comments"]:
+                print(f"    [{c['created']}] {c['author']}: {c['body'][:200]}")
+
+
+def _issue_list(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue list <PROJECT-KEY> [--status <name>] [--assignee <user>] [--limit N] [--json]")
+    project = argv[0]
+    status = assignee = issue_type = priority = label = None
+    limit = 50
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--status" and i + 1 < len(argv):
+            status = argv[i + 1]; i += 2
+        elif argv[i] == "--assignee" and i + 1 < len(argv):
+            assignee = argv[i + 1]; i += 2
+        elif argv[i] == "--type" and i + 1 < len(argv):
+            issue_type = argv[i + 1]; i += 2
+        elif argv[i] == "--priority" and i + 1 < len(argv):
+            priority = argv[i + 1]; i += 2
+        elif argv[i] == "--label" and i + 1 < len(argv):
+            label = argv[i + 1]; i += 2
+        elif argv[i] == "--limit" and i + 1 < len(argv):
+            limit = int(argv[i + 1]); i += 2
+        else:
+            i += 1
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    jql_parts = [f"project = {project}"]
+    if status:
+        jql_parts.append(f'status = "{status}"')
+    if assignee:
+        jql_parts.append(f'assignee = "{assignee}"')
+    if issue_type:
+        jql_parts.append(f'issuetype = "{issue_type}"')
+    if priority:
+        jql_parts.append(f'priority = "{priority}"')
+    if label:
+        jql_parts.append(f'labels = "{label}"')
+    jql_parts.append("ORDER BY updated DESC")
+    jql = " AND ".join(jql_parts[:-1]) + " " + jql_parts[-1]
+
+    result = client.get("search", params={"jql": jql, "maxResults": limit,
+                                           "fields": "summary,status,issuetype,priority,assignee,labels,created,updated"})
+    issues = [_fmt_issue(i, client) for i in (result.get("issues") or [])]
+    total = result.get("total", len(issues))
+
+    if json_mode:
+        _print_json({"tool": "issue_list", "timestamp": _now(),
+                     "data": {"project": project, "total": total, "count": len(issues), "issues": issues}})
+    else:
+        print(f"{project}  ({len(issues)} of {total})")
+        for iss in issues:
+            assignee_str = iss["assignee"] or "unassigned"
+            print(f"  {iss['key']:<12} [{iss['status']:<16}] {iss['summary'][:60]}  ({assignee_str})")
+
+
+def _issue_create(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue create <PROJECT-KEY> --summary <text> [options]")
+    project = argv[0]
+    summary = description = assignee = parent = None
+    issue_type = "Task"
+    priority = None
+    labels: list[str] = []
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--summary" and i + 1 < len(argv):
+            summary = argv[i + 1]; i += 2
+        elif argv[i] == "--description" and i + 1 < len(argv):
+            description = argv[i + 1]; i += 2
+        elif argv[i] == "--type" and i + 1 < len(argv):
+            issue_type = argv[i + 1]; i += 2
+        elif argv[i] == "--assignee" and i + 1 < len(argv):
+            assignee = argv[i + 1]; i += 2
+        elif argv[i] == "--priority" and i + 1 < len(argv):
+            priority = argv[i + 1]; i += 2
+        elif argv[i] == "--label" and i + 1 < len(argv):
+            labels.append(argv[i + 1]); i += 2
+        elif argv[i] == "--parent" and i + 1 < len(argv):
+            parent = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not summary:
+        _err("--summary is required")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    fields: dict[str, Any] = {
+        "project": {"key": project},
+        "summary": summary,
+        "issuetype": {"name": issue_type},
+    }
+    if description:
+        fields["description"] = client._text_body(description)
+    if assignee:
+        if client.server:
+            fields["assignee"] = {"name": assignee}
+        else:
+            fields["assignee"] = {"accountId": assignee}
+    if priority:
+        fields["priority"] = {"name": priority}
+    if labels:
+        fields["labels"] = labels
+    if parent:
+        fields["parent"] = {"key": parent}
+
+    body = {"fields": fields}
+
+    if dry_run:
+        print(f"[dry-run] would create {issue_type} in {project}:")
+        print(f"  Summary: {summary}")
+        if description:
+            print(f"  Description: {description[:100]}")
+        if assignee:
+            print(f"  Assignee: {assignee}")
+        if priority:
+            print(f"  Priority: {priority}")
+        if labels:
+            print(f"  Labels: {', '.join(labels)}")
+        sys.exit(2)
+
+    result = client.post("issue", body)
+    key = result.get("key", "?")
+    url = f"{client.base}/browse/{key}"
+    if json_mode:
+        _print_json({"key": key, "url": url})
+    else:
+        print(f"Created {key}: {summary}")
+        print(f"  {url}")
+
+
+def _issue_comment(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue comment <ISSUE-KEY> --body <text> [--dry-run]")
+    key = argv[0]
+    body_text = None
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--body" and i + 1 < len(argv):
+            body_text = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not body_text:
+        _err("--body is required")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    if dry_run:
+        print(f"[dry-run] would comment on {key}:")
+        print(f"  {body_text[:200]}")
+        sys.exit(2)
+
+    result = client.post(f"issue/{key}/comment", {"body": client._text_body(body_text)})
+    comment_id = result.get("id")
+    if json_mode:
+        _print_json({"key": key, "comment_id": comment_id})
+    else:
+        print(f"Comment added to {key} (id: {comment_id})")
+
+
+def _issue_assign(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue assign <ISSUE-KEY> --to <account-id-or-email>")
+    key = argv[0]
+    to = None
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--to" and i + 1 < len(argv):
+            to = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not to:
+        _err("--to is required (use 'none' to unassign)")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    if dry_run:
+        action = "unassign" if to.lower() == "none" else f"assign to {to}"
+        print(f"[dry-run] would {action} {key}")
+        sys.exit(2)
+
+    if to.lower() == "none":
+        body: dict[str, Any] = {"accountId": None} if not client.server else {"name": None}
+    elif client.server:
+        body = {"name": to}
+    else:
+        body = {"accountId": to}
+
+    client.put(f"issue/{key}/assignee", body)
+    if json_mode:
+        _print_json({"key": key, "assignee": to})
+    else:
+        print(f"Assigned {key} to {to}")
+
+
+def _issue_transition(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue transition <ISSUE-KEY> --to <status-name>")
+    key = argv[0]
+    to_status = None
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--to" and i + 1 < len(argv):
+            to_status = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not to_status:
+        _err("--to is required (run `agent-do jira transitions <key>` to see options)")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    # Look up the transition ID by name
+    t_data = client.get(f"issue/{key}/transitions")
+    transitions = t_data.get("transitions") or []
+    match = next(
+        (t for t in transitions if t.get("name", "").lower() == to_status.lower()),
+        None,
+    )
+    if not match:
+        available = [t.get("name") for t in transitions]
+        _err(f"Transition '{to_status}' not found for {key}. Available: {', '.join(available)}")
+
+    if dry_run:
+        print(f"[dry-run] would transition {key} → '{match['name']}' (id: {match['id']})")
+        sys.exit(2)
+
+    client.post(f"issue/{key}/transitions", {"transition": {"id": match["id"]}})
+    if json_mode:
+        _print_json({"key": key, "transition": match["name"]})
+    else:
+        print(f"Transitioned {key} → {match['name']}")
+
+
+def _issue_label(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue label <ISSUE-KEY> [--add <label>] [--remove <label>]")
+    key = argv[0]
+    add_labels: list[str] = []
+    remove_labels: list[str] = []
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--add" and i + 1 < len(argv):
+            add_labels.append(argv[i + 1]); i += 2
+        elif argv[i] == "--remove" and i + 1 < len(argv):
+            remove_labels.append(argv[i + 1]); i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not add_labels and not remove_labels:
+        _err("Specify at least one --add or --remove label")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    # Get current labels
+    issue = client.get(f"issue/{key}", params={"fields": "labels"})
+    current = [(l.get("value") if isinstance(l, dict) else l)
+               for l in ((issue.get("fields") or {}).get("labels") or [])]
+    updated = [l for l in current if l not in remove_labels]
+    for l in add_labels:
+        if l not in updated:
+            updated.append(l)
+
+    if dry_run:
+        print(f"[dry-run] would update labels on {key}:")
+        print(f"  Before: {', '.join(current) or '(none)'}")
+        print(f"  After:  {', '.join(updated) or '(none)'}")
+        sys.exit(2)
+
+    client.put(f"issue/{key}", {"fields": {"labels": updated}})
+    if json_mode:
+        _print_json({"key": key, "labels": updated})
+    else:
+        print(f"Labels updated on {key}: {', '.join(updated) or '(none)'}")
+
+
+def _issue_edit(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue edit <ISSUE-KEY> [--summary <text>] [--description <text>] [--priority <p>]")
+    key = argv[0]
+    summary = description = priority = None
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--summary" and i + 1 < len(argv):
+            summary = argv[i + 1]; i += 2
+        elif argv[i] == "--description" and i + 1 < len(argv):
+            description = argv[i + 1]; i += 2
+        elif argv[i] == "--priority" and i + 1 < len(argv):
+            priority = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not any([summary, description, priority]):
+        _err("Specify at least one field to edit: --summary, --description, --priority")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    fields: dict[str, Any] = {}
+    if summary:
+        fields["summary"] = summary
+    if description:
+        fields["description"] = client._text_body(description)
+    if priority:
+        fields["priority"] = {"name": priority}
+
+    if dry_run:
+        print(f"[dry-run] would edit {key}:")
+        for k, v in fields.items():
+            print(f"  {k}: {v}")
+        sys.exit(2)
+
+    client.put(f"issue/{key}", {"fields": fields})
+    if json_mode:
+        _print_json({"key": key, "updated": list(fields.keys())})
+    else:
+        print(f"Updated {key}: {', '.join(fields.keys())}")
+
+
+# ── transitions ────────────────────────────────────────────────────────────────
+
+def cmd_transitions(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: transitions <ISSUE-KEY> [--connection <name>] [--json]")
+    key = argv[0]
+    connection, json_mode, _ = _parse_common(argv, start=1)
+    client = _get_client(connection)
+    data = client.get(f"issue/{key}/transitions")
+    transitions = [{"id": t["id"], "name": t["name"],
+                    "to": (t.get("to") or {}).get("name", "")}
+                   for t in (data.get("transitions") or [])]
+    if json_mode:
+        _print_json({"key": key, "transitions": transitions})
+    else:
+        print(f"Available transitions for {key}:")
+        for t in transitions:
+            print(f"  {t['id']:>4}  {t['name']:<30}  → {t['to']}")
+
+
+# ── search ─────────────────────────────────────────────────────────────────────
+
+def cmd_search(argv: list[str]) -> None:
+    if not argv or argv[0].startswith("-"):
+        _err("Usage: search '<JQL>' [--limit N] [--fields <fields>] [--json]")
+    jql = argv[0]
+    limit = 50
+    fields = "summary,status,issuetype,priority,assignee,labels,created,updated"
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--limit" and i + 1 < len(argv):
+            limit = int(argv[i + 1]); i += 2
+        elif argv[i] == "--fields" and i + 1 < len(argv):
+            fields = argv[i + 1]; i += 2
+        else:
+            i += 1
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    result = client.get("search", params={"jql": jql, "maxResults": limit, "fields": fields})
+    issues = [_fmt_issue(iss, client) for iss in (result.get("issues") or [])]
+    total = result.get("total", len(issues))
+
+    if json_mode:
+        _print_json({"tool": "search", "timestamp": _now(),
+                     "data": {"jql": jql, "total": total, "count": len(issues), "issues": issues}})
+    else:
+        print(f"JQL: {jql}  ({len(issues)} of {total})")
+        for iss in issues:
+            print(f"  {iss['key']:<12} [{iss['status']:<16}] {iss['summary'][:60]}")
+
+
+# ── boards & sprints ───────────────────────────────────────────────────────────
+
+def cmd_board(argv: list[str]) -> None:
+    sub = argv[0] if argv else "list"
+    rest = argv[1:]
+    if sub == "list":
+        project = None
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--project" and i + 1 < len(rest):
+                project = rest[i + 1]; i += 2
+            else:
+                i += 1
+        connection, json_mode, _ = _parse_common(rest)
+        client = _get_client(connection)
+        params: dict[str, Any] = {}
+        if project:
+            params["projectKeyOrId"] = project
+        data = client.get("board", params=params, agile=True)
+        boards = data.get("values") or []
+        if json_mode:
+            _print_json({"boards": boards})
+        else:
+            for b in boards:
+                print(f"  {b.get('id'):>5}  {b.get('name'):<40}  [{b.get('type')}]")
+    else:
+        _err(f"Unknown board subcommand: {sub!r}. Use: list")
+
+
+def cmd_sprint(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: sprint <list|active|add> ...")
+    sub = argv[0]
+    rest = argv[1:]
+
+    if sub == "list":
+        if not rest or rest[0].startswith("-"):
+            _err("Usage: sprint list <BOARD-ID>")
+        board_id = rest[0]
+        state = "active"
+        i = 1
+        while i < len(rest):
+            if rest[i] == "--state" and i + 1 < len(rest):
+                state = rest[i + 1]; i += 2
+            else:
+                i += 1
+        connection, json_mode, _ = _parse_common(rest[1:])
+        client = _get_client(connection)
+        data = client.get(f"board/{board_id}/sprint", params={"state": state}, agile=True)
+        sprints = data.get("values") or []
+        if json_mode:
+            _print_json({"board_id": board_id, "sprints": sprints})
+        else:
+            for s in sprints:
+                start = _fmt_date(s.get("startDate"))
+                end = _fmt_date(s.get("endDate"))
+                print(f"  {s.get('id'):>5}  {s.get('name'):<40}  {start} → {end}  [{s.get('state')}]")
+
+    elif sub == "active":
+        if not rest or rest[0].startswith("-"):
+            _err("Usage: sprint active <BOARD-ID>")
+        board_id = rest[0]
+        connection, json_mode, _ = _parse_common(rest[1:])
+        client = _get_client(connection)
+        data = client.get(f"board/{board_id}/sprint", params={"state": "active"}, agile=True)
+        sprints = data.get("values") or []
+        if not sprints:
+            print("No active sprint found.")
+            return
+        sprint = sprints[0]
+        sprint_id = sprint.get("id")
+        issues_data = client.get(f"sprint/{sprint_id}/issue",
+                                  params={"maxResults": 100,
+                                          "fields": "summary,status,issuetype,priority,assignee"},
+                                  agile=True)
+        issues = [_fmt_issue(i, client) for i in (issues_data.get("issues") or [])]
+        if json_mode:
+            _print_json({"sprint": sprint, "issues": issues})
+        else:
+            print(f"Sprint: {sprint.get('name')}  [{sprint.get('state')}]")
+            print(f"  {_fmt_date(sprint.get('startDate'))} → {_fmt_date(sprint.get('endDate'))}")
+            print(f"  {len(issues)} issues:")
+            for iss in issues:
+                assignee_str = iss["assignee"] or "unassigned"
+                print(f"    {iss['key']:<12} [{iss['status']:<16}] {iss['summary'][:50]}  ({assignee_str})")
+
+    elif sub == "add":
+        if not rest or rest[0].startswith("-"):
+            _err("Usage: sprint add <ISSUE-KEY> --sprint <id>")
+        key = rest[0]
+        sprint_id = None
+        dry_run = False
+        i = 1
+        while i < len(rest):
+            if rest[i] == "--sprint" and i + 1 < len(rest):
+                sprint_id = rest[i + 1]; i += 2
+            elif rest[i] == "--dry-run":
+                dry_run = True; i += 1
+            else:
+                i += 1
+        if not sprint_id:
+            _err("--sprint <id> is required")
+        connection, json_mode, _ = _parse_common(rest[1:])
+        client = _get_client(connection)
+
+        if dry_run:
+            print(f"[dry-run] would add {key} to sprint {sprint_id}")
+            sys.exit(2)
+
+        client.post(f"sprint/{sprint_id}/issue", {"issues": [key]}, agile=True)
+        if json_mode:
+            _print_json({"key": key, "sprint_id": sprint_id})
+        else:
+            print(f"Added {key} to sprint {sprint_id}")
+
+    else:
+        _err(f"Unknown sprint subcommand: {sub!r}. Use: list, active, add")
+
+
+# ── dispatch ───────────────────────────────────────────────────────────────────
+
+def main(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: agent-do jira <command> [args]. Try: agent-do jira --help")
+    cmd = argv[0]
+    rest = argv[1:]
+    dispatch = {
+        "connections": cmd_connections,
+        "whoami":      cmd_whoami,
+        "snapshot":    cmd_snapshot,
+        "issue":       cmd_issue,
+        "transitions": cmd_transitions,
+        "search":      cmd_search,
+        "board":       cmd_board,
+        "sprint":      cmd_sprint,
+    }
+    fn = dispatch.get(cmd)
+    if not fn:
+        _err(f"Unknown command: {cmd!r}. Try: agent-do jira --help")
+    fn(rest)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
