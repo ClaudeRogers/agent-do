@@ -1590,7 +1590,7 @@ def main() -> int:
 
         # incidents text shows severity in brackets
         r = run(["incidents"], env=env)
-        check("incidents text has SEV-1 bracket", "[SEV-1  ]" in r.stdout or "SEV-1" in r.stdout)
+        check("incidents text has SEV-1 bracket", "[SEV-1" in r.stdout and "]" in r.stdout)
 
         # slos text shows both SLOs
         r = run(["slos"], env=env)
