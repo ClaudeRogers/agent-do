@@ -492,7 +492,11 @@ def cmd_user(argv: list[str]) -> None:
     while i < len(rest):
         if rest[i] in ("--email", "--query") and i + 1 < len(rest):
             query = rest[i + 1]; i += 2
-        elif not rest[i].startswith("-") and query is None:
+        elif rest[i] == "--connection" and i + 1 < len(rest):
+            i += 2  # skip; _parse_common handles it
+        elif rest[i].startswith("-"):
+            i += 1  # skip boolean flags (e.g. --json)
+        elif query is None:
             query = rest[i]; i += 1
         else:
             i += 1
