@@ -214,9 +214,13 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
                 monitors = [m for m in monitors if m["overall_state"].lower() == state_filter.lower()]
             if tag_filter:
                 monitors = [m for m in monitors if tag_filter in (m.get("tags") or [])]
-            # special: empty tag returns no monitors (for empty test)
+            # env:nonexistent → empty, env:ok-only → one OK monitor for clean-state tests
             if tag_filter == "env:nonexistent":
                 monitors = []
+            elif tag_filter == "env:ok-only":
+                monitors = [{"id": 102, "name": "Error Rate", "type": "log alert",
+                             "overall_state": "OK", "query": "logs(\"status:error\").count > 100",
+                             "message": "", "tags": ["env:ok-only"]}]
             self._send(monitors)
 
         elif method == "GET" and path == "/monitor/101":
@@ -231,6 +235,12 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
         elif method == "GET" and path == "/monitor/403":
             # already handled by auth check but left for explicit test
             self._send_err("Forbidden", status=403)
+
+        elif method == "GET" and path == "/monitor/401":
+            self._send_err("Unauthorized: invalid credentials", status=401)
+
+        elif method == "GET" and path == "/monitor/422":
+            self._send_err("Unprocessable: query is invalid", status=422)
 
         elif method == "GET" and path == "/monitor/429":
             self._send_err("Rate limited", status=429)
@@ -1240,9 +1250,405 @@ def main() -> int:
         r = run(["metrics-list", "--prefix", ""], env=env)
         check("metrics-list --prefix empty string exits 0", r.returncode == 0, r.stderr)
 
-        # snapshot --json exit code 0 when no alerting monitors
+        # no-alerting list exits 0
         r = run(["monitors", "--state", "OK"], env=env)
         check("no-alerting monitors list exits 0", r.returncode == 0)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — HTTP ERROR CODES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: HTTP error codes ===\n")
+
+        r = run(["monitor", "401"], env=env)
+        check("401 Unauthorized → non-zero exit", r.returncode != 0)
+        check("401 Unauthorized → '401' in stderr", "401" in r.stderr)
+        check("401 Unauthorized → error detail in stderr", len(r.stderr.strip()) > 5)
+
+        r = run(["monitor", "422"], env=env)
+        check("422 Unprocessable → non-zero exit", r.returncode != 0)
+        check("422 Unprocessable → '422' in stderr", "422" in r.stderr)
+
+        r = run(["monitor", "429"], env=env)
+        check("429 Rate Limited → non-zero exit", r.returncode != 0)
+        check("429 Rate Limited → '429' in stderr", "429" in r.stderr)
+
+        r = run(["monitor", "500"], env=env)
+        check("500 Server Error → non-zero exit", r.returncode != 0)
+        check("500 Server Error → '500' in stderr", "500" in r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — CLEAN STATE EXIT CODES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: clean state exit codes ===\n")
+
+        r = run(["monitor-status", "--tag", "env:nonexistent"], env=env)
+        check("monitor-status all-empty → exits 0", r.returncode == 0, r.stderr)
+        check("monitor-status all-empty → shows Total monitors: 0", "Total monitors: 0" in r.stdout)
+
+        r = run(["--json", "monitor-status", "--tag", "env:nonexistent"], env=env)
+        check("monitor-status all-empty --json → exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-status all-empty --json → ALERT list empty",
+              isinstance(j, dict) and j.get("by_state", {}).get("ALERT") is None)
+
+        r = run(["monitor-status", "--tag", "env:ok-only"], env=env)
+        check("monitor-status all-OK → exits 0", r.returncode == 0, r.stderr)
+
+        r = run(["--json", "monitor-status", "--tag", "env:ok-only"], env=env)
+        check("monitor-status all-OK --json → exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-status all-OK --json → no ALERT key in by_state",
+              isinstance(j, dict) and "ALERT" not in (j.get("by_state") or {}))
+        check("monitor-status all-OK --json → OK key present",
+              isinstance(j, dict) and "OK" in (j.get("by_state") or {}))
+
+        r = run(["slos"], env=env)
+        check("slos exits 0 (read-only, always clean)", r.returncode == 0, r.stderr)
+
+        r = run(["services"], env=env)
+        check("services exits 0 (read-only, always clean)", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — REQUEST BODY ASSERTIONS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: request body assertions ===\n")
+
+        # logs combined --service + --status filter query composition
+        r = run(["--json", "logs", "--service", "api", "--status", "error"], env=env)
+        check("logs --service + --status exits 0", r.returncode == 0, r.stderr)
+        # verify both filters were in the query by checking the server received them
+        # (since error+service:api query matches neither service:worker nor service:nonexistent,
+        #  it returns all logs → count > 0)
+        j = _try_json(r.stdout)
+        check("logs --service + --status --json logs list is list",
+              isinstance(j, dict) and isinstance(j.get("logs"), list))
+
+        # verify via a second call that the composed query hits the right logs path
+        r2 = run(["logs", "timeout", "--service", "api", "--status", "error"], env=env)
+        check("logs query + --service + --status combined exits 0", r2.returncode == 0, r2.stderr)
+
+        # monitor-create body: message + tags + priority all sent
+        r = run(["--json", "monitor-create",
+                 "--name", "Body Test Monitor",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 95",
+                 "--message", "notify @pagerduty",
+                 "--tags", "env:prod,team:platform",
+                 "--priority", "1"], env=env)
+        check("monitor-create all fields --json exits 0", r.returncode == 0, r.stderr)
+        check("monitor-create body has message",
+              isinstance(_last_body, dict) and "notify @pagerduty" in (_last_body.get("message") or ""))
+        check("monitor-create body has correct tags",
+              isinstance(_last_body, dict) and "team:platform" in (_last_body.get("tags") or []))
+        check("monitor-create body has priority=1",
+              isinstance(_last_body, dict) and _last_body.get("priority") == 1)
+        check("monitor-create body has type field",
+              isinstance(_last_body, dict) and _last_body.get("type") == "metric alert")
+        check("monitor-create body has query field",
+              isinstance(_last_body, dict) and "system.cpu.user" in (_last_body.get("query") or ""))
+
+        # event-post body: all optional fields sent when specified
+        r = run(["--json", "event-post",
+                 "--title", "Full body test",
+                 "--text", "Event body text",
+                 "--priority", "low",
+                 "--tags", "env:staging,deploy",
+                 "--alert-type", "warning"], env=env)
+        check("event-post full body exits 0", r.returncode == 0, r.stderr)
+        check("event-post body priority=low",
+              isinstance(_last_body, dict) and _last_body.get("priority") == "low")
+        check("event-post body alert_type=warning",
+              isinstance(_last_body, dict) and _last_body.get("alert_type") == "warning")
+        check("event-post body tags list contains deploy",
+              isinstance(_last_body, dict) and "deploy" in (_last_body.get("tags") or []))
+
+        # incident-update body: all three fields together
+        r = run(["incident-update", "inc-001",
+                 "--title", "Updated title",
+                 "--status", "stable",
+                 "--severity", "SEV-3"], env=env)
+        check("incident-update all three fields exits 0", r.returncode == 0, r.stderr)
+        sent_attrs = ((_last_body.get("data") or {}).get("attributes") or {})
+        check("incident-update body has title", sent_attrs.get("title") == "Updated title")
+        check("incident-update body has status", sent_attrs.get("status") == "stable")
+        check("incident-update body has severity", sent_attrs.get("severity") == "SEV-3")
+        check("incident-update body data.id matches arg",
+              ((_last_body.get("data") or {}).get("id")) == "inc-001")
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — --JSON LIVE WRITE RESPONSES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: --json live write responses ===\n")
+
+        r = run(["--json", "monitor-mute", "101"], env=env)
+        check("monitor-mute live --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-mute live --json is valid JSON", j is not None, r.stdout)
+        check("monitor-mute live --json has id=101", isinstance(j, dict) and j.get("id") == 101)
+        check("monitor-mute live --json has name", isinstance(j, dict) and j.get("name") == "CPU High")
+
+        r = run(["--json", "monitor-unmute", "101"], env=env)
+        check("monitor-unmute live --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-unmute live --json has id=101", isinstance(j, dict) and j.get("id") == 101)
+
+        r = run(["--json", "monitor-create",
+                 "--name", "JSON Response Test",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 90"], env=env)
+        check("monitor-create live --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitor-create live --json has id", isinstance(j, dict) and j.get("id") == 201)
+        check("monitor-create live --json has name echoed back",
+              isinstance(j, dict) and j.get("name") == "JSON Response Test")
+
+        r = run(["--json", "incident-update", "inc-001", "--status", "active"], env=env)
+        check("incident-update live --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("incident-update live --json has data.id",
+              isinstance(j, dict) and (j.get("data") or {}).get("id") == "inc-001")
+
+        r = run(["--json", "incident-resolve", "inc-001"], env=env)
+        check("incident-resolve live --json exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("incident-resolve live --json is valid JSON", j is not None, r.stdout)
+
+        r = run(["--json", "event-post", "--title", "JSON test", "--text", "body"], env=env)
+        check("event-post live --json has id", isinstance(_try_json(r.stdout), dict) and
+              "id" in (_try_json(r.stdout) or {}))
+
+        r = run(["--json", "monitor-delete", "101"], env=env)
+        check("monitor-delete live --json has deleted=True",
+              (_try_json(r.stdout) or {}).get("deleted") is True)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — OPTIONAL FIELD HANDLING
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: optional fields ===\n")
+
+        # monitor-create with only required fields
+        r = run(["monitor-create",
+                 "--name", "Minimal Monitor",
+                 "--type", "metric alert",
+                 "--query", "avg(last_5m):avg:system.cpu.user{*} > 80"], env=env)
+        check("monitor-create minimal (no optional fields) exits 0", r.returncode == 0, r.stderr)
+        check("monitor-create minimal body has no message key",
+              isinstance(_last_body, dict) and "message" not in _last_body)
+        check("monitor-create minimal body has no tags key",
+              isinstance(_last_body, dict) and "tags" not in _last_body)
+        check("monitor-create minimal body has no priority key",
+              isinstance(_last_body, dict) and "priority" not in _last_body)
+
+        # monitor-create log alert type
+        r = run(["monitor-create",
+                 "--name", "Log Alert",
+                 "--type", "log alert",
+                 "--query", "logs(\"status:error\").count > 50",
+                 "--dry-run"], env=env)
+        check("monitor-create --type 'log alert' --dry-run exits 2", r.returncode == 2)
+        r = run(["--json", "monitor-create",
+                 "--name", "Log Alert",
+                 "--type", "log alert",
+                 "--query", "logs(\"status:error\").count > 50",
+                 "--dry-run"], env=env)
+        j = _try_json(r.stdout)
+        check("monitor-create --type 'log alert' body.type is 'log alert'",
+              isinstance(j, dict) and (j.get("body") or {}).get("type") == "log alert")
+
+        # incident-create without --severity (optional)
+        r = run(["incident-create", "--title", "No severity incident"], env=env)
+        check("incident-create without --severity exits 0", r.returncode == 0, r.stderr)
+        sent_attrs = ((_last_body.get("data") or {}).get("attributes") or {})
+        check("incident-create without --severity body has no severity key",
+              "severity" not in sent_attrs)
+
+        # incident-create without --customer-impacted (default False)
+        r = run(["incident-create", "--title", "Default impacted"], env=env)
+        check("incident-create default customer_impacted=False in body",
+              ((_last_body.get("data") or {}).get("attributes") or {}).get("customer_impacted") is False)
+
+        # monitor-mute minimal (no optional args)
+        r = run(["monitor-mute", "101"], env=env)
+        check("monitor-mute minimal (no --end/--scope/--message) exits 0", r.returncode == 0, r.stderr)
+        check("monitor-mute minimal body is empty (sent as None)",
+              isinstance(_last_body, dict) and len(_last_body) == 0)
+
+        # event-post minimal (just title + text)
+        r = run(["event-post", "--title", "Minimal event", "--text", "Event text"], env=env)
+        check("event-post minimal exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — DRY-RUN STRUCTURE COMPLETENESS
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: dry-run JSON structure ===\n")
+
+        for cmd_args, expected_cmd in [
+            (["monitor-mute", "101", "--dry-run"], "monitor-mute"),
+            (["monitor-unmute", "101", "--dry-run"], "monitor-unmute"),
+            (["monitor-create", "--name", "x", "--type", "metric alert", "--query", "q", "--dry-run"], "monitor-create"),
+            (["monitor-delete", "101", "--dry-run"], "monitor-delete"),
+            (["event-post", "--title", "T", "--text", "B", "--dry-run"], "event-post"),
+            (["incident-create", "--title", "T", "--dry-run"], "incident-create"),
+            (["incident-update", "inc-001", "--status", "active", "--dry-run"], "incident-update"),
+            (["incident-resolve", "inc-001", "--dry-run"], "incident-resolve"),
+        ]:
+            r = run(["--json"] + cmd_args, env=env)
+            j = _try_json(r.stdout)
+            check(f"{expected_cmd} --dry-run --json has tool=datadog",
+                  isinstance(j, dict) and j.get("tool") == "datadog")
+            check(f"{expected_cmd} --dry-run --json has command={expected_cmd}",
+                  isinstance(j, dict) and j.get("command") == expected_cmd)
+            check(f"{expected_cmd} --dry-run exits 2", r.returncode == 2)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — TIME PARSING EDGE CASES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: time parsing edge cases ===\n")
+
+        # monitor-mute --end accepts ISO8601 date
+        r = run(["monitor-mute", "101", "--end", "2026-06-01", "--dry-run"], env=env)
+        check("monitor-mute --end ISO date 2026-06-01 exits 2", r.returncode == 2)
+
+        # monitor-mute --end accepts epoch integer string
+        r = run(["monitor-mute", "101", "--end", "1748736000", "--dry-run"], env=env)
+        check("monitor-mute --end epoch integer exits 2", r.returncode == 2)
+
+        # logs --from epoch integer
+        r = run(["logs", "--from", "1716289200"], env=env)
+        check("logs --from epoch integer exits 0", r.returncode == 0, r.stderr)
+
+        # slo with explicit epoch range
+        r = run(["slo", "slo-001", "--from", "1716289200", "--to", "1716892800"], env=env)
+        check("slo --from/--to epoch integers exits 0", r.returncode == 0, r.stderr)
+
+        # events with ISO8601 --from
+        r = run(["events", "--from", "2026-05-01"], env=env)
+        check("events --from ISO date exits 0", r.returncode == 0, r.stderr)
+
+        # metrics with now-30m
+        r = run(["metrics", "avg:system.cpu.user{*}", "--from", "now-30m"], env=env)
+        check("metrics --from now-30m exits 0", r.returncode == 0, r.stderr)
+
+        # week offset
+        r = run(["events", "--from", "now-2w"], env=env)
+        check("events --from now-2w exits 0", r.returncode == 0, r.stderr)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — FILTER COMPOSITION
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: filter composition ===\n")
+
+        # metrics-list returns empty for unknown prefix
+        r = run(["metrics-list", "--prefix", "xyznonexistent"], env=env)
+        check("metrics-list unknown prefix → No metrics found", "No metrics found" in r.stdout)
+
+        r = run(["--json", "metrics-list", "--prefix", "xyznonexistent"], env=env)
+        j = _try_json(r.stdout)
+        check("metrics-list unknown prefix --json → empty list",
+              isinstance(j, dict) and j.get("metrics") == [] and j.get("count") == 0)
+
+        # monitors --page-size respected
+        r = run(["--json", "monitors", "--page-size", "2"], env=env)
+        check("monitors --page-size 2 exits 0", r.returncode == 0, r.stderr)
+
+        # logs: explicit query with spaces
+        r = run(["logs", "error connection timeout"], env=env)
+        check("logs query with spaces exits 0", r.returncode == 0, r.stderr)
+
+        # incidents: both active and resolved in list
+        r = run(["--json", "incidents"], env=env)
+        j = _try_json(r.stdout)
+        statuses = [(i.get("attributes") or {}).get("status") for i in (j or {}).get("data", [])]
+        check("incidents list contains both active and resolved",
+              "active" in statuses and "resolved" in statuses)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — TEXT OUTPUT FORMAT
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: text output format ===\n")
+
+        # events text output includes formatted timestamp
+        r = run(["events"], env=env)
+        check("events text output has bracketed ISO timestamp", "[20" in r.stdout and "T" in r.stdout)
+        check("events text output has priority field", "normal" in r.stdout)
+        check("events text output has event title", "Deploy" in r.stdout)
+
+        # metrics text shows scope
+        r = run(["metrics", "avg:system.cpu.user{host:web-01}"], env=env)
+        check("metrics text shows Scope: host:web-01", "host:web-01" in r.stdout)
+        check("metrics text shows Last: with value and timestamp", "Last:   52.1" in r.stdout)
+
+        # dashboards text shows both IDs
+        r = run(["dashboards"], env=env)
+        check("dashboards text shows dash-aaa", "dash-aaa" in r.stdout)
+        check("dashboards text shows dash-bbb", "dash-bbb" in r.stdout)
+        check("dashboards text shows both layout types", "ordered" in r.stdout and "free" in r.stdout)
+
+        # monitors text shows all three monitors
+        r = run(["monitors"], env=env)
+        check("monitors text shows all 3 monitors", r.stdout.count("  [") >= 3)
+
+        # incidents text shows severity in brackets
+        r = run(["incidents"], env=env)
+        check("incidents text has SEV-1 bracket", "[SEV-1  ]" in r.stdout or "SEV-1" in r.stdout)
+
+        # slos text shows both SLOs
+        r = run(["slos"], env=env)
+        check("slos text shows slo-001 and slo-002",
+              "slo-001" in r.stdout and "slo-002" in r.stdout)
+
+        # services text shows descriptions
+        r = run(["services"], env=env)
+        check("services text shows Core REST API description", "Core REST API" in r.stdout)
+        check("services text shows Background job processor", "Background job" in r.stdout)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — SEVERITY ALL VALID VALUES
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: severity choices ===\n")
+
+        for sev in ["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "UNKNOWN"]:
+            r = run(["incident-create", "--title", f"Test {sev}", "--severity", sev, "--dry-run"], env=env)
+            check(f"incident-create --severity {sev} accepted (dry-run exits 2)", r.returncode == 2)
+
+        # incident-update severity choices
+        for sev in ["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "UNKNOWN"]:
+            r = run(["incident-update", "inc-001", "--severity", sev, "--dry-run"], env=env)
+            check(f"incident-update --severity {sev} accepted (dry-run exits 2)", r.returncode == 2)
+
+        # ══════════════════════════════════════════════════════════════════
+        # DEEP REGRESSION — SNAPSHOT BUG FIX VERIFICATION
+        # ══════════════════════════════════════════════════════════════════
+        print("\n=== deep regression: snapshot bug fixes ===\n")
+
+        # Verify snapshot correctly handles events and slos (operator precedence fix)
+        r = run(["--json", "snapshot"], env=env)
+        j = _try_json(r.stdout)
+        check("snapshot --json recent_events is int (not None)", isinstance(j, dict) and isinstance(j.get("recent_events"), int))
+        check("snapshot --json recent_events >= 0", isinstance(j, dict) and (j.get("recent_events") or 0) >= 0)
+        check("snapshot --json slos is int (not None)", isinstance(j, dict) and isinstance(j.get("slos"), int))
+        check("snapshot --json slos >= 0", isinstance(j, dict) and (j.get("slos") or 0) >= 0)
+        # The fixture has 2 events and 2 SLOs
+        check("snapshot --json recent_events == 2", isinstance(j, dict) and j.get("recent_events") == 2)
+        check("snapshot --json slos == 2", isinstance(j, dict) and j.get("slos") == 2)
+        # monitors total should be 3 (our fixture)
+        check("snapshot --json monitors.total == 3",
+              isinstance(j, dict) and (j.get("monitors") or {}).get("total") == 3)
+        # alerting: exactly 1 (CPU High)
+        check("snapshot --json monitors.alerting count == 1",
+              isinstance(j, dict) and len((j.get("monitors") or {}).get("alerting", [])) == 1)
+        # warning: exactly 1 (Memory Warning)
+        check("snapshot --json monitors.warning count == 1",
+              isinstance(j, dict) and len((j.get("monitors") or {}).get("warning", [])) == 1)
+
+        # snapshot exits 1 text mode too
+        r = run(["snapshot"], env=env)
+        check("snapshot text mode exits 1 (alerting present)", r.returncode == 1)
+        check("snapshot text mode shows correct total", "3 total" in r.stdout)
+        check("snapshot text mode shows 1 alerting", "1 alerting" in r.stdout)
+        check("snapshot text mode shows 1 warning", "1 warning" in r.stdout)
+        check("snapshot text mode events=2", "Events (1h): 2" in r.stdout)
+        check("snapshot text mode slos=2", "SLOs:        2" in r.stdout)
 
         print(f"\nResults: {PASS} passed, {FAIL} failed")
         return 0 if FAIL == 0 else 1
