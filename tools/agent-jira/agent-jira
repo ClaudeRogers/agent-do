@@ -30,6 +30,7 @@ ISSUES
   issue list <PROJECT-KEY>                  List issues in a project
     [--status <status>]                     Filter by status name
     [--assignee <email-or-account-id>]      Filter by assignee
+    [--mine]                                Shorthand for --assignee currentUser()
     [--type <Bug|Story|Task|...>]           Filter by issue type
     [--priority <priority>]                 Filter by priority
     [--label <label>]                       Filter by label
@@ -43,6 +44,7 @@ ISSUES
     [--priority <Highest|High|Medium|Low>]  Set priority
     [--label <label>]                       Add label (repeatable)
     [--parent <ISSUE-KEY>]                  Set parent issue/epic
+    [--sprint <id>]                         Add to sprint by ID at creation
     [--dry-run] [--json] [--connection <name>]
   issue comment <ISSUE-KEY>                 Add a comment
     --body <text>                           Comment text (required)
@@ -63,6 +65,11 @@ ISSUES
     [--priority <priority>]                 New priority
     [--dry-run] [--json] [--connection <name>]
   transitions <ISSUE-KEY>                   List available transitions for an issue
+    [--connection <name>] [--json]
+
+USERS
+  user find <query>                         Find users by name, email, or username
+    [--email <email>]                       Search by email address
     [--connection <name>] [--json]
 
 SEARCH
@@ -105,6 +112,8 @@ EXAMPLES
   agent-do jira issue assign PROJ-123 --to me@company.com
   agent-do jira search 'assignee = currentUser() AND status != Done ORDER BY priority DESC'
   agent-do jira sprint active 42 --json
+  agent-do jira user find me@company.com
+  agent-do jira issue list PROJ --mine --status "In Progress"
 EOF
 }
 
@@ -116,7 +125,7 @@ case "${1:-help}" in
     help|--help|-h)
         show_help
         ;;
-    connections|whoami|snapshot|issue|transitions|search|board|sprint)
+    connections|whoami|snapshot|user|issue|transitions|search|board|sprint)
         run_ops "$@"
         ;;
     *)

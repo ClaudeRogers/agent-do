@@ -91,6 +91,30 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
             if "statusCategory != Done" in jql:
                 count = 5 if "project = PROJ" in jql else 2
                 self._send({"total": count, "issues": [], "maxResults": 0})
+            elif "assignee = currentUser()" in jql:
+                # --mine: return one issue assigned to current user
+                self._send({
+                    "total": 1,
+                    "issues": [
+                        {
+                            "key": "PROJ-1",
+                            "fields": {
+                                "summary": "Fix login bug",
+                                "status": {"name": "In Progress"},
+                                "issuetype": {"name": "Bug"},
+                                "priority": {"name": "High"},
+                                "assignee": {"displayName": "Test User", "emailAddress": "test@example.com"},
+                                "reporter": {"displayName": "Reporter"},
+                                "labels": ["backend"],
+                                "created": "2026-01-01T00:00:00.000Z",
+                                "updated": "2026-01-15T00:00:00.000Z",
+                                "description": None,
+                            },
+                        }
+                    ],
+                })
+            elif "project = EMPTY" in jql:
+                self._send({"total": 0, "issues": [], "maxResults": 50})
             else:
                 self._send({
                     "total": 2,
@@ -128,7 +152,16 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                     ],
                 })
 
-        elif path in ("/rest/api/3/issue/PROJ-1", "/rest/api/3/issue/PROJ-1?expand=renderedFields,names,changelog", "/rest/api/3/issue/PROJ-1?expand=renderedFields,names,changelog,comment") or path.startswith("/rest/api/3/issue/PROJ-1?"):
+        elif path == "/rest/api/3/issue/PROJ-1/transitions":
+            self._send({
+                "transitions": [
+                    {"id": "11", "name": "To Do", "to": {"name": "Todo"}},
+                    {"id": "21", "name": "In Progress", "to": {"name": "In Progress"}},
+                    {"id": "31", "name": "Done", "to": {"name": "Done"}},
+                ]
+            })
+
+        elif path.startswith("/rest/api/3/issue/PROJ-1"):
             self._send({
                 "key": "PROJ-1",
                 "fields": {
@@ -162,25 +195,74 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                 },
             })
 
+        elif path.startswith("/rest/api/3/issue/PROJ-NOASSIGN"):
+            self._send({
+                "key": "PROJ-NOASSIGN",
+                "fields": {
+                    "summary": "Unassigned issue",
+                    "status": {"name": "Todo"},
+                    "issuetype": {"name": "Task"},
+                    "priority": {"name": "Low"},
+                    "assignee": None,
+                    "reporter": {"displayName": "Reporter"},
+                    "labels": [],
+                    "created": "2026-01-01T00:00:00.000Z",
+                    "updated": "2026-01-01T00:00:00.000Z",
+                    "description": None,
+                    "comment": {"comments": []},
+                },
+            })
+
+        elif path == "/rest/api/3/issue/PROJ-NOTRANS/transitions":
+            self._send({"transitions": []})
+
+        elif path.startswith("/rest/api/3/issue/PROJ-NOTRANS"):
+            self._send({"key": "PROJ-NOTRANS", "fields": {"summary": "No transitions", "status": {"name": "Todo"},
+                "issuetype": {"name": "Task"}, "priority": {"name": "Low"}, "assignee": None,
+                "reporter": {"displayName": "Reporter"}, "labels": [], "created": "2026-01-01T00:00:00.000Z",
+                "updated": "2026-01-01T00:00:00.000Z", "description": None, "comment": {"comments": []}}})
+
+        elif path.startswith("/rest/api/3/issue/PROJ-401"):
+            self._send_err("Not authenticated", status=401)
+
+        elif path.startswith("/rest/api/3/issue/PROJ-403"):
+            self._send_err("Forbidden", status=403)
+
+        elif path.startswith("/rest/api/3/issue/PROJ-500"):
+            self._send_err("Internal server error", status=500)
+
         elif path == "/rest/api/3/issue/PROJ-999":
             self._send_err("Issue does not exist or you do not have permission.", status=404)
 
-        elif path == "/rest/api/3/issue/PROJ-1/transitions":
-            self._send({
-                "transitions": [
-                    {"id": "11", "name": "To Do", "to": {"name": "Todo"}},
-                    {"id": "21", "name": "In Progress", "to": {"name": "In Progress"}},
-                    {"id": "31", "name": "Done", "to": {"name": "Done"}},
-                ]
-            })
+        elif path == "/rest/api/3/user/search":
+            query = qs.get("query", [""])[0] or qs.get("username", [""])[0]
+            if "nobody" in query:
+                self._send([])
+            else:
+                self._send([
+                    {
+                        "accountId": "acc-abc123",
+                        "displayName": "Alice Smith",
+                        "emailAddress": "alice@example.com",
+                        "name": "alice",
+                    },
+                    {
+                        "accountId": "acc-def456",
+                        "displayName": "Alice Jones",
+                        "emailAddress": "alicej@example.com",
+                        "name": "alicej",
+                    },
+                ])
 
         elif path == "/rest/agile/1.0/board":
-            self._send({
-                "values": [
-                    {"id": 42, "name": "PROJ Board", "type": "scrum"},
-                    {"id": 43, "name": "OPS Board", "type": "kanban"},
-                ]
-            })
+            project_filter = qs.get("projectKeyOrId", [""])[0]
+            boards = [
+                {"id": 42, "name": "PROJ Board", "type": "scrum"},
+                {"id": 43, "name": "OPS Board", "type": "kanban"},
+            ]
+            if project_filter == "PROJ":
+                boards = [b for b in boards if b["name"].startswith("PROJ")]
+            self._send({"values": boards})
 
         elif path.startswith("/rest/agile/1.0/board/42/sprint"):
             state = qs.get("state", ["active"])[0]
@@ -198,6 +280,10 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                 })
             else:
                 self._send({"values": []})
+
+        elif path.startswith("/rest/agile/1.0/board/99/sprint"):
+            # board with no active sprint
+            self._send({"values": []})
 
         elif path == "/rest/agile/1.0/sprint/1/issue":
             self._send({
@@ -319,6 +405,24 @@ def main() -> int:
             check("connections add: token NOT in connections.json", "tok-secret" not in meta_file.read_text())
             check("connections add: default set in metadata", meta.get("default") == "work")
 
+            print("\nconnections add: overwrite existing profile")
+            r = run(["connections", "add", "work",
+                     "--url", base_url,
+                     "--email", "updated@example.com",
+                     "--token", "tok-updated",
+                     "--default"], env=env)
+            check("connections add overwrite exits 0", r.returncode == 0, r.stderr)
+            check("connections add overwrite prints 'Updated'", "Updated" in r.stdout, r.stdout)
+            updated_creds = json.loads(creds_file.read_text())
+            check("connections add overwrite: new email stored", updated_creds.get("email") == "updated@example.com")
+            check("connections add overwrite: new token stored", updated_creds.get("token") == "tok-updated")
+            # Restore original creds for remaining tests
+            run(["connections", "add", "work",
+                 "--url", base_url,
+                 "--email", "test@example.com",
+                 "--token", "tok-secret",
+                 "--default"], env=env)
+
             print("\nconnections add second profile")
             r2 = run(["connections", "add", "personal",
                       "--url", base_url,
@@ -344,6 +448,10 @@ def main() -> int:
             meta_after = json.loads(meta_file.read_text())
             check("set-default changes metadata", meta_after.get("default") == "personal")
 
+            r = run(["connections", "set-default", "nonexistent-profile"], env=env)
+            check("set-default nonexistent exits 1", r.returncode == 1)
+            check("set-default nonexistent mentions listing", "list" in r.stderr.lower() or "connections" in r.stderr.lower(), r.stderr)
+
             # restore default to work for remaining tests
             run(["connections", "set-default", "work"], env=env)
 
@@ -365,6 +473,10 @@ def main() -> int:
             meta_after = json.loads(meta_file.read_text())
             check("connections remove: metadata updated", "dc" not in meta_after.get("profiles", {}))
 
+            r = run(["connections", "remove", "nonexistent-profile"], env=env)
+            check("connections remove nonexistent exits 1", r.returncode == 1)
+            check("connections remove nonexistent mentions listing", "list" in r.stderr.lower() or "connections" in r.stderr.lower(), r.stderr)
+
             print("\nconnections add: missing required args")
             r = run(["connections", "add", "bad", "--url", base_url, "--email", "x@x.com"], env=env)
             check("connections add missing --token exits 1", r.returncode == 1)
@@ -372,6 +484,20 @@ def main() -> int:
 
             r = run(["connections", "add", "bad2", "--email", "x@x.com", "--token", "t"], env=env)
             check("connections add missing --url exits 1", r.returncode == 1)
+
+            print("\nconnections add: profile name validation")
+            r = run(["connections", "add", "../evil",
+                     "--url", base_url, "--email", "x@x.com", "--token", "t"], env=env)
+            check("profile name with slash exits 1", r.returncode == 1)
+            check("profile name with slash prints error", "Error:" in r.stderr, r.stderr)
+
+            r = run(["connections", "add", ".hidden",
+                     "--url", base_url, "--email", "x@x.com", "--token", "t"], env=env)
+            check("profile name starting with dot exits 1", r.returncode == 1)
+
+            r = run(["connections", "add", "a" * 65,
+                     "--url", base_url, "--email", "x@x.com", "--token", "t"], env=env)
+            check("profile name >64 chars exits 1", r.returncode == 1)
 
             # ── whoami ──────────────────────────────────────────────────────────
 
@@ -415,6 +541,51 @@ def main() -> int:
             check("snapshot --json has PROJ", "PROJ" in proj_keys)
             check("snapshot --json has open_issues", all("open_issues" in p for p in projects))
 
+            # ── user find ───────────────────────────────────────────────────────
+
+            print("\nuser find")
+            _requests.clear()
+            r = run(["user", "find", "alice"], env=env)
+            check("user find exits 0", r.returncode == 0, r.stderr)
+            check("user find shows account ID", "acc-abc123" in r.stdout, r.stdout)
+            check("user find shows display name", "Alice Smith" in r.stdout, r.stdout)
+            check("user find shows email", "alice@example.com" in r.stdout, r.stdout)
+            # Cloud should use ?query= param
+            user_reqs = [path for m, path in _requests if m == "GET" and "user/search" in path]
+            check("user find Cloud uses ?query= param", any("query=" in p for p in user_reqs), str(user_reqs))
+
+            r = run(["user", "find", "--email", "alice@example.com"], env=env)
+            check("user find --email exits 0", r.returncode == 0, r.stderr)
+            check("user find --email shows results", "Alice" in r.stdout, r.stdout)
+
+            r = run(["user", "find", "nobody@example.com"], env=env)
+            check("user find no results exits 0", r.returncode == 0, r.stderr)
+            check("user find no results shows helpful message", "No users" in r.stdout or "no users" in r.stdout.lower(), r.stdout)
+
+            r = run(["user", "find", "--json", "alice"], env=env)
+            check("user find --json exits 0", r.returncode == 0, r.stderr)
+            uj = json.loads(r.stdout)
+            check("user find --json has users key", "users" in uj)
+            check("user find --json has 2 users", len(uj["users"]) == 2)
+            check("user find --json user has accountId", uj["users"][0].get("accountId") == "acc-abc123")
+
+            r = run(["user", "find"], env=env)
+            check("user find no query exits 1", r.returncode == 1)
+            check("user find no query prints error", "Error:" in r.stderr, r.stderr)
+
+            print("\nuser find: Server/DC uses ?username= param")
+            run(["connections", "add", "dc3",
+                 "--url", base_url,
+                 "--email", "admin",
+                 "--token", "pat",
+                 "--server"], env=env)
+            _requests.clear()
+            r = run(["user", "find", "alice", "--connection", "dc3"], env=env)
+            check("user find Server/DC exits 0", r.returncode == 0, r.stderr)
+            server_user_reqs = [path for m, path in _requests if m == "GET" and "user/search" in path]
+            check("user find Server/DC uses ?username= param", any("username=" in p for p in server_user_reqs), str(server_user_reqs))
+            run(["connections", "remove", "dc3"], env=env)
+
             # ── issue view ──────────────────────────────────────────────────────
 
             print("\nissue view")
@@ -440,9 +611,32 @@ def main() -> int:
             check("issue view --json status", iv.get("status") == "In Progress")
             check("issue view --json labels", "backend" in (iv.get("labels") or []))
 
+            r = run(["issue", "view", "PROJ-1", "--comments", "--json"], env=env)
+            check("issue view --comments --json exits 0", r.returncode == 0, r.stderr)
+            ivj = json.loads(r.stdout)
+            check("issue view --comments --json has comments key", "comments" in ivj)
+            check("issue view --comments --json has comment body", len(ivj.get("comments", [])) > 0)
+
+            print("\nissue view: unassigned issue")
+            r = run(["issue", "view", "PROJ-NOASSIGN"], env=env)
+            check("issue view unassigned exits 0", r.returncode == 0, r.stderr)
+            check("issue view unassigned shows (unassigned)", "unassigned" in r.stdout.lower(), r.stdout)
+
             r = run(["issue", "view", "PROJ-999"], env=env)
             check("issue view 404 exits 1", r.returncode == 1)
             check("issue view 404 prints error", "Error:" in r.stderr, r.stderr)
+
+            print("\nissue view: HTTP error messages")
+            r = run(["issue", "view", "PROJ-401"], env=env)
+            check("issue view 401 exits 1", r.returncode == 1)
+            check("issue view 401 mentions API token", "api token" in r.stderr.lower() or "token" in r.stderr.lower(), r.stderr)
+
+            r = run(["issue", "view", "PROJ-403"], env=env)
+            check("issue view 403 exits 1", r.returncode == 1)
+            check("issue view 403 mentions permission", "permission" in r.stderr.lower(), r.stderr)
+
+            r = run(["issue", "view", "PROJ-500"], env=env)
+            check("issue view 500 exits 1", r.returncode == 1)
 
             # ── issue list ──────────────────────────────────────────────────────
 
@@ -458,6 +652,38 @@ def main() -> int:
             il = json.loads(r.stdout)
             check("issue list --json has issues", len(il["data"]["issues"]) == 2)
             check("issue list --json project field", il["data"]["project"] == "PROJ")
+
+            print("\nissue list --mine")
+            _requests.clear()
+            r = run(["issue", "list", "PROJ", "--mine"], env=env)
+            check("issue list --mine exits 0", r.returncode == 0, r.stderr)
+            check("issue list --mine shows PROJ-1", "PROJ-1" in r.stdout, r.stdout)
+            # Verify the JQL sent to the server uses unquoted currentUser()
+            # The query string will be URL-encoded: currentUser() → currentUser%28%29
+            mine_reqs = [path for m, path in _requests if m == "GET" and "search" in path]
+            check("issue list --mine sends unquoted currentUser()", any("currentUser%28%29" in p or "currentUser()" in p for p in mine_reqs), str(mine_reqs))
+            # %22 is URL-encoded double-quote; verify it does NOT appear before currentUser
+            check("issue list --mine does NOT quote currentUser()", not any('%22currentUser' in p or '"currentUser()' in p for p in mine_reqs), str(mine_reqs))
+
+            print("\nissue list: all filters combined")
+            r = run(["issue", "list", "PROJ",
+                     "--status", "In Progress",
+                     "--type", "Bug",
+                     "--priority", "High",
+                     "--label", "backend",
+                     "--assignee", "test@example.com",
+                     "--limit", "25"], env=env)
+            check("issue list all filters exits 0", r.returncode == 0, r.stderr)
+
+            print("\nissue list: empty project")
+            r = run(["issue", "list", "EMPTY"], env=env)
+            check("issue list empty project exits 0", r.returncode == 0, r.stderr)
+            check("issue list empty project shows 0 results", "0" in r.stdout, r.stdout)
+
+            print("\nissue list --limit validation")
+            r = run(["issue", "list", "PROJ", "--limit", "notanumber"], env=env)
+            check("issue list --limit non-integer exits 1", r.returncode == 1)
+            check("issue list --limit non-integer prints error", "Error:" in r.stderr, r.stderr)
 
             # ── issue create ────────────────────────────────────────────────────
 
@@ -488,6 +714,32 @@ def main() -> int:
             desc = create_body2.get("fields", {}).get("description", {})
             check("issue create sends ADF description", isinstance(desc, dict) and desc.get("type") == "doc")
 
+            print("\nissue create --parent")
+            _post_bodies.clear()
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Child issue",
+                     "--parent", "PROJ-1"], env=env)
+            check("issue create --parent exits 0", r.returncode == 0, r.stderr)
+            parent_body = _post_bodies.get("/rest/api/3/issue", {})
+            parent_field = (parent_body.get("fields") or {}).get("parent", {})
+            check("issue create --parent sends parent key", parent_field.get("key") == "PROJ-1")
+
+            print("\nissue create --sprint")
+            _post_bodies.clear()
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Sprint issue",
+                     "--sprint", "42"], env=env)
+            check("issue create --sprint exits 0", r.returncode == 0, r.stderr)
+            sprint_body = _post_bodies.get("/rest/api/3/issue", {})
+            sprint_field = (sprint_body.get("fields") or {}).get("customfield_10020", {})
+            check("issue create --sprint sends customfield_10020", sprint_field.get("id") == 42)
+
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Bad sprint",
+                     "--sprint", "notanumber"], env=env)
+            check("issue create --sprint non-integer exits 1", r.returncode == 1)
+            check("issue create --sprint non-integer prints error", "Error:" in r.stderr, r.stderr)
+
             print("\nissue create --dry-run")
             _requests_before = len(_requests)
             r = run(["issue", "create", "PROJ",
@@ -496,9 +748,19 @@ def main() -> int:
             check("issue create --dry-run exits 2", r.returncode == 2)
             check("issue create --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             check("issue create --dry-run shows summary", "Dry run test" in r.stdout, r.stdout)
-            # No new POST should have been made
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
             check("issue create --dry-run makes no HTTP request", len(new_posts) == 0)
+
+            print("\nissue create --dry-run --json")
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Json dry run",
+                     "--dry-run", "--json"], env=env)
+            check("issue create --dry-run --json exits 2", r.returncode == 2)
+            drj = json.loads(r.stdout)
+            check("issue create --dry-run --json has dry_run=true", drj.get("dry_run") is True)
+            check("issue create --dry-run --json has action", drj.get("action") == "issue_create")
+            check("issue create --dry-run --json has project", drj.get("project") == "PROJ")
+            check("issue create --dry-run --json has fields", "fields" in drj)
 
             r = run(["issue", "create", "PROJ"], env=env)
             check("issue create missing --summary exits 1", r.returncode == 1)
@@ -528,6 +790,13 @@ def main() -> int:
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
             check("issue comment --dry-run makes no HTTP request", len(new_posts) == 0)
 
+            print("\nissue comment --dry-run --json")
+            r = run(["issue", "comment", "PROJ-1", "--body", "Preview", "--dry-run", "--json"], env=env)
+            check("issue comment --dry-run --json exits 2", r.returncode == 2)
+            cdj = json.loads(r.stdout)
+            check("issue comment --dry-run --json has dry_run=true", cdj.get("dry_run") is True)
+            check("issue comment --dry-run --json has action", "comment" in cdj.get("action", ""))
+
             r = run(["issue", "comment", "PROJ-1"], env=env)
             check("issue comment missing --body exits 1", r.returncode == 1)
 
@@ -553,12 +822,39 @@ def main() -> int:
             unassign_body = _put_bodies.get("/rest/api/3/issue/PROJ-1/assignee", {})
             check("issue assign --to none sends null accountId", unassign_body.get("accountId") is None)
 
+            _put_bodies.clear()
+            r = run(["issue", "assign", "PROJ-1", "--to", "NONE"], env=env)
+            check("issue assign --to NONE (uppercase) exits 0", r.returncode == 0, r.stderr)
+            unassign_body2 = _put_bodies.get("/rest/api/3/issue/PROJ-1/assignee", {})
+            check("issue assign --to NONE sends null accountId", unassign_body2.get("accountId") is None)
+
+            print("\nissue assign: Server/DC uses 'name' field")
+            run(["connections", "add", "dc4",
+                 "--url", base_url,
+                 "--email", "admin",
+                 "--token", "pat",
+                 "--server"], env=env)
+            _put_bodies.clear()
+            r = run(["issue", "assign", "PROJ-1", "--to", "jira-user", "--connection", "dc4"], env=env)
+            check("issue assign Server/DC exits 0", r.returncode == 0, r.stderr)
+            dc_assign = _put_bodies.get("/rest/api/3/issue/PROJ-1/assignee", {})
+            check("issue assign Server/DC sends 'name' not accountId", "name" in dc_assign, str(dc_assign))
+            check("issue assign Server/DC 'name' value correct", dc_assign.get("name") == "jira-user")
+            run(["connections", "remove", "dc4"], env=env)
+
             _requests_before = len(_requests)
             r = run(["issue", "assign", "PROJ-1", "--to", "x@x.com", "--dry-run"], env=env)
             check("issue assign --dry-run exits 2", r.returncode == 2)
             check("issue assign --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_puts = [m for m in _requests[_requests_before:] if m[0] == "PUT"]
             check("issue assign --dry-run makes no HTTP request", len(new_puts) == 0)
+
+            print("\nissue assign --dry-run --json")
+            r = run(["issue", "assign", "PROJ-1", "--to", "x@x.com", "--dry-run", "--json"], env=env)
+            check("issue assign --dry-run --json exits 2", r.returncode == 2)
+            adj = json.loads(r.stdout)
+            check("issue assign --dry-run --json has dry_run=true", adj.get("dry_run") is True)
+            check("issue assign --dry-run --json has assignee", "assignee" in adj or "to" in adj)
 
             r = run(["issue", "assign", "PROJ-1"], env=env)
             check("issue assign missing --to exits 1", r.returncode == 1)
@@ -580,6 +876,11 @@ def main() -> int:
             check("issue transition bad status exits 1", r.returncode == 1)
             check("issue transition bad status lists available", "To Do" in r.stderr or "Done" in r.stderr, r.stderr)
 
+            print("\nissue transition: no transitions available")
+            r = run(["issue", "transition", "PROJ-NOTRANS", "--to", "Done"], env=env)
+            check("issue transition no transitions exits 1", r.returncode == 1)
+            check("issue transition no transitions prints error", "Error:" in r.stderr or "no" in r.stderr.lower(), r.stderr)
+
             _requests_before = len(_requests)
             r = run(["issue", "transition", "PROJ-1", "--to", "Done", "--dry-run"], env=env)
             check("issue transition --dry-run exits 2", r.returncode == 2)
@@ -587,6 +888,17 @@ def main() -> int:
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"
                          and "transitions" in m[1]]
             check("issue transition --dry-run makes no transition POST", len(new_posts) == 0)
+
+            print("\nissue transition --dry-run --json")
+            r = run(["issue", "transition", "PROJ-1", "--to", "Done", "--dry-run", "--json"], env=env)
+            check("issue transition --dry-run --json exits 2", r.returncode == 2, r.stderr)
+            if r.returncode == 2 and r.stdout.strip():
+                tdj = json.loads(r.stdout)
+                check("issue transition --dry-run --json has dry_run=true", tdj.get("dry_run") is True)
+                check("issue transition --dry-run --json has transition name", "transition" in tdj or "to" in tdj)
+            else:
+                check("issue transition --dry-run --json has dry_run=true", False, r.stdout or r.stderr)
+                check("issue transition --dry-run --json has transition name", False, r.stdout or r.stderr)
 
             # ── issue label ──────────────────────────────────────────────────────
 
@@ -602,12 +914,31 @@ def main() -> int:
             check("issue label removes auth", "auth" not in updated_labels)
             check("issue label keeps backend", "backend" in updated_labels)
 
+            print("\nissue label: add existing label (no duplicate)")
+            _put_bodies.clear()
+            r = run(["issue", "label", "PROJ-1", "--add", "backend"], env=env)
+            check("issue label add existing exits 0", r.returncode == 0, r.stderr)
+            dedup_body = _put_bodies.get("/rest/api/3/issue/PROJ-1", {})
+            dedup_labels = (dedup_body.get("fields") or {}).get("labels", [])
+            check("issue label add existing: no duplicate", dedup_labels.count("backend") <= 1)
+
+            print("\nissue label: remove non-existent label (graceful)")
+            _put_bodies.clear()
+            r = run(["issue", "label", "PROJ-1", "--remove", "doesnotexist"], env=env)
+            check("issue label remove nonexistent exits 0", r.returncode == 0, r.stderr)
+
             _requests_before = len(_requests)
             r = run(["issue", "label", "PROJ-1", "--add", "x", "--dry-run"], env=env)
             check("issue label --dry-run exits 2", r.returncode == 2)
             check("issue label --dry-run shows before/after", "Before:" in r.stdout and "After:" in r.stdout, r.stdout)
             new_puts = [m for m in _requests[_requests_before:] if m[0] == "PUT"]
             check("issue label --dry-run makes no HTTP PUT", len(new_puts) == 0)
+
+            print("\nissue label --dry-run --json")
+            r = run(["issue", "label", "PROJ-1", "--add", "x", "--dry-run", "--json"], env=env)
+            check("issue label --dry-run --json exits 2", r.returncode == 2)
+            ldj = json.loads(r.stdout)
+            check("issue label --dry-run --json has dry_run=true", ldj.get("dry_run") is True)
 
             r = run(["issue", "label", "PROJ-1"], env=env)
             check("issue label no --add/--remove exits 1", r.returncode == 1)
@@ -632,6 +963,12 @@ def main() -> int:
             check("issue edit --dry-run exits 2", r.returncode == 2)
             check("issue edit --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             check("issue edit --dry-run makes no PUT", "/rest/api/3/issue/PROJ-1" not in _put_bodies)
+
+            print("\nissue edit --dry-run --json")
+            r = run(["issue", "edit", "PROJ-1", "--summary", "x", "--dry-run", "--json"], env=env)
+            check("issue edit --dry-run --json exits 2", r.returncode == 2)
+            edj = json.loads(r.stdout)
+            check("issue edit --dry-run --json has dry_run=true", edj.get("dry_run") is True)
 
             r = run(["issue", "edit", "PROJ-1"], env=env)
             check("issue edit no fields exits 1", r.returncode == 1)
@@ -659,6 +996,12 @@ def main() -> int:
             names = [t["name"] for t in tj["transitions"]]
             check("transitions --json contains Done", "Done" in names)
 
+            print("\ntransitions: no transitions available")
+            r = run(["transitions", "PROJ-NOTRANS", "--json"], env=env)
+            check("transitions no available exits 0", r.returncode == 0, r.stderr)
+            notrans_j = json.loads(r.stdout)
+            check("transitions no available --json empty list", notrans_j.get("transitions") == [])
+
             # ── search ───────────────────────────────────────────────────────────
 
             print("\nsearch")
@@ -678,6 +1021,15 @@ def main() -> int:
             r = run(["search", "project = PROJ", "--limit", "10", "--json"], env=env)
             check("search --limit exits 0", r.returncode == 0, r.stderr)
 
+            print("\nsearch: validation")
+            r = run(["search", "project = PROJ", "--limit", "badval"], env=env)
+            check("search --limit non-integer exits 1", r.returncode == 1)
+            check("search --limit non-integer prints error", "Error:" in r.stderr, r.stderr)
+
+            r = run(["search"], env=env)
+            check("search no JQL exits 1", r.returncode == 1)
+            check("search no JQL prints error", "Error:" in r.stderr, r.stderr)
+
             # ── board ────────────────────────────────────────────────────────────
 
             print("\nboard list")
@@ -691,6 +1043,12 @@ def main() -> int:
             check("board list --json exits 0", r.returncode == 0, r.stderr)
             bj = json.loads(r.stdout)
             check("board list --json has boards", len(bj.get("boards", [])) == 2)
+
+            print("\nboard list --project filter")
+            r = run(["board", "list", "--project", "PROJ"], env=env)
+            check("board list --project exits 0", r.returncode == 0, r.stderr)
+            check("board list --project shows PROJ Board", "PROJ Board" in r.stdout, r.stdout)
+            check("board list --project shows only 1 board", "OPS Board" not in r.stdout, r.stdout)
 
             # ── sprint ───────────────────────────────────────────────────────────
 
@@ -706,6 +1064,11 @@ def main() -> int:
             check("sprint list --json has sprints", len(slj.get("sprints", [])) == 1)
             check("sprint list --json board_id", slj.get("board_id") == "42")
 
+            print("\nsprint list --state closed")
+            r = run(["sprint", "list", "42", "--state", "closed"], env=env)
+            check("sprint list --state closed exits 0", r.returncode == 0, r.stderr)
+            check("sprint list --state closed shows 0 sprints", "0" in r.stdout or "No sprints" in r.stdout or r.stdout.strip() == "" or "sprints" in r.stdout.lower(), r.stdout)
+
             print("\nsprint active")
             r = run(["sprint", "active", "42"], env=env)
             check("sprint active exits 0", r.returncode == 0, r.stderr)
@@ -719,11 +1082,23 @@ def main() -> int:
             check("sprint active --json has sprint", "sprint" in saj)
             check("sprint active --json has issues", len(saj.get("issues", [])) > 0)
 
+            print("\nsprint active: no active sprint")
+            r = run(["sprint", "active", "99"], env=env)
+            check("sprint active no sprint exits 0 or 1", r.returncode in (0, 1))
+            check("sprint active no sprint shows helpful message", "no active" in r.stdout.lower() or "no active" in r.stderr.lower() or "not found" in r.stdout.lower() or "not found" in r.stderr.lower(), r.stdout + r.stderr)
+
             print("\nsprint add")
             _requests_before = len(_requests)
             r = run(["sprint", "add", "PROJ-1", "--sprint", "1"], env=env)
             check("sprint add exits 0", r.returncode == 0, r.stderr)
             check("sprint add prints confirmation", "PROJ-1" in r.stdout, r.stdout)
+
+            print("\nsprint add --json")
+            r = run(["sprint", "add", "PROJ-1", "--sprint", "1", "--json"], env=env)
+            check("sprint add --json exits 0", r.returncode == 0, r.stderr)
+            saj2 = json.loads(r.stdout)
+            check("sprint add --json has key", "key" in saj2 or "issue" in saj2)
+            check("sprint add --json has sprint_id", "sprint_id" in saj2 or "sprint" in str(saj2))
 
             _requests_before = len(_requests)
             r = run(["sprint", "add", "PROJ-2", "--sprint", "1", "--dry-run"], env=env)
@@ -731,6 +1106,12 @@ def main() -> int:
             check("sprint add --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
             check("sprint add --dry-run makes no HTTP request", len(new_posts) == 0)
+
+            print("\nsprint add --dry-run --json")
+            r = run(["sprint", "add", "PROJ-1", "--sprint", "1", "--dry-run", "--json"], env=env)
+            check("sprint add --dry-run --json exits 2", r.returncode == 2)
+            sadj = json.loads(r.stdout)
+            check("sprint add --dry-run --json has dry_run=true", sadj.get("dry_run") is True)
 
             r = run(["sprint", "add", "PROJ-1"], env=env)
             check("sprint add missing --sprint exits 1", r.returncode == 1)
@@ -747,6 +1128,17 @@ def main() -> int:
             r = run(["whoami"], env=env_no_profile)
             check("env var credentials: whoami exits 0", r.returncode == 0, r.stderr)
             check("env var credentials: resolves without profile", "Test User" in r.stdout, r.stdout)
+
+            print("\npartial env var credentials (missing token)")
+            env_partial = _make_env(tmp / "partial", port, extra={
+                "JIRA_URL": base_url,
+                "JIRA_EMAIL": "env@example.com",
+                # JIRA_API_TOKEN intentionally omitted
+            })
+            (tmp / "partial" / "home").mkdir(parents=True, exist_ok=True)
+            r = run(["whoami"], env=env_partial)
+            check("partial env creds exits 1", r.returncode == 1)
+            check("partial env creds shows helpful error", "JIRA_API_TOKEN" in r.stderr or "token" in r.stderr.lower() or "connections add" in r.stderr, r.stderr)
 
             print("\nper-profile env var credentials")
             env_per_profile = _make_env(tmp / "envprofile", port, extra={
@@ -803,6 +1195,9 @@ def main() -> int:
     check("agent-do jira --help shows CONNECTION MANAGEMENT", "CONNECTION MANAGEMENT" in r.stdout, r.stdout)
     check("agent-do jira --help shows issue commands", "issue view" in r.stdout, r.stdout)
     check("agent-do jira --help shows sprint", "sprint" in r.stdout, r.stdout)
+    check("agent-do jira --help shows user find", "user find" in r.stdout, r.stdout)
+    check("agent-do jira --help shows --mine", "--mine" in r.stdout, r.stdout)
+    check("agent-do jira --help shows --sprint", "--sprint" in r.stdout, r.stdout)
 
     print(f"\nResults: {PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
