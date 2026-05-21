@@ -51,9 +51,13 @@ def _validate_profile_name(name: str) -> None:
 
 def _parse_limit(value: str) -> int:
     try:
-        return int(value)
+        n = int(value)
     except ValueError:
         _err(f"--limit must be an integer, got: {value!r}")
+        return 0  # unreachable
+    if n < 0:
+        _err(f"--limit must be non-negative, got: {n}")
+    return n
 
 
 # ── credential storage ─────────────────────────────────────────────────────────
@@ -406,7 +410,7 @@ def cmd_connections(argv: list[str]) -> None:
 # ── whoami ─────────────────────────────────────────────────────────────────────
 
 def cmd_whoami(argv: list[str]) -> None:
-    connection = json_mode = None
+    connection = None
     json_mode = False
     i = 0
     while i < len(argv):
@@ -859,7 +863,7 @@ def _issue_transition(argv: list[str]) -> None:
         None,
     )
     if not match:
-        available = [t.get("name") for t in transitions]
+        available = [t.get("name", "") for t in transitions]
         _err(f"Transition '{to_status}' not found for {key}. Available: {', '.join(available)}")
 
     if dry_run:
