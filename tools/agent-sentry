@@ -76,13 +76,17 @@ sentry_token_payload() {
     local payload
     payload="${token#sntrys_}"
     payload="${payload%%_*}"
-    # base64 decode — pad if needed
+    # base64url decode — cross-platform via python3 (macOS base64 lacks -d;
+    # sntrys_ tokens use URL-safe base64 which requires urlsafe_b64decode)
     local padded="$payload"
     local mod=$(( ${#padded} % 4 ))
     if (( mod == 2 )); then padded+="=="
     elif (( mod == 3 )); then padded+="="
     fi
-    printf '%s' "$padded" | base64 -d 2>/dev/null
+    printf '%s' "$padded" | python3 -c "
+import sys, base64
+sys.stdout.buffer.write(base64.urlsafe_b64decode(sys.stdin.read().strip()))
+" 2>/dev/null
 }
 
 sentry_org() {
@@ -258,10 +262,18 @@ cmd_issues() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --project) project="$2"; shift 2 ;;
-            --query) query="$2"; shift 2 ;;
-            --sort) sort="$2"; shift 2 ;;
-            --limit) limit="$2"; shift 2 ;;
+            --project)
+                if [[ $# -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
+                project="$2"; shift 2 ;;
+            --query)
+                if [[ $# -lt 2 ]]; then echo "Error: --query requires a value" >&2; return 1; fi
+                query="$2"; shift 2 ;;
+            --sort)
+                if [[ $# -lt 2 ]]; then echo "Error: --sort requires a value" >&2; return 1; fi
+                sort="$2"; shift 2 ;;
+            --limit)
+                if [[ $# -lt 2 ]]; then echo "Error: --limit requires a value" >&2; return 1; fi
+                limit="$2"; shift 2 ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done
@@ -515,7 +527,9 @@ cmd_releases() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --project) project="$2"; shift 2 ;;
+            --project)
+                if [[ $# -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
+                project="$2"; shift 2 ;;
             *) echo "Unknown option: $1" >&2; return 1 ;;
         esac
     done

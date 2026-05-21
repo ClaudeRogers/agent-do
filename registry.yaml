@@ -5822,3 +5822,6 @@ tools:
         fix: agent-do creds store SENTRY_AUTH_TOKEN --stdin
         note: Requires SENTRY_AUTH_TOKEN resolved from env or secure storage
     concurrency: mixed
+    concurrency_detail:
+      read: [projects, project, issues, issue, alerts, alert, releases, snapshot]
+      mutate: [resolve, unresolve, ignore, assign]
