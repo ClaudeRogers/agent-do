@@ -381,7 +381,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
         print(f"Points: {len(points)}")
         if points:
             last = points[-1]
-            ts_iso = _epoch_to_iso(last[0] / 1000) if last[0] > 1e9 else _epoch_to_iso(last[0])
+            ts_iso = _epoch_to_iso(last[0] / 1000) if last[0] > 1e12 else _epoch_to_iso(last[0])
             print(f"Last:   {last[1]} at {ts_iso}")
     return 0
 
