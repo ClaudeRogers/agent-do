@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=pr_group.cmd_review_summary)
 
+    doctrine = sub.add_parser("doctrine", help="Print the PR review doctrine")
+    doctrine.set_defaults(func=pr_group.cmd_doctrine)
+
     audit = sub.add_parser("audit", help="Audit a PR for review risks")
     audit.add_argument("pr")
     audit.add_argument("--json", action="store_true")
@@ -120,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--match-head-commit")
     merge.add_argument("--subject")
     merge.add_argument("--body")
+    merge.add_argument("--force", action="store_true", help="Bypass merge safety gates")
     merge.add_argument("--dry-run", action="store_true")
     merge.add_argument("--json", action="store_true")
     merge.set_defaults(func=pr_group.cmd_merge)

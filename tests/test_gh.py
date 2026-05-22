@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import importlib
 import json
 import os
 import stat
@@ -24,14 +25,9 @@ def require(condition: bool, message: str) -> None:
 
 
 def load_agent_gh():
-    """Import the extensionless agent-gh tool as a module for unit tests."""
-    loader = importlib.machinery.SourceFileLoader("agent_gh", str(ROOT / "tools" / "agent-gh"))
-    spec = importlib.util.spec_from_loader("agent_gh", loader)
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so @dataclass can resolve cls.__module__.
-    sys.modules["agent_gh"] = module
-    loader.exec_module(module)
-    return module
+    """Import the agent-gh package for unit tests."""
+    sys.path.insert(0, str(ROOT / "tools" / "agent-gh"))
+    return importlib.import_module("agent_gh")
 
 
 def test_classify_risk() -> None:
@@ -65,9 +61,10 @@ def test_merge_gate() -> None:
     ref = gh.parse_pr_ref("owner/repo#1")
 
     def patch(*, detail, checks, threads):
-        gh.pr_detail = lambda r: detail
-        gh.pr_checks = lambda r: checks
-        gh.pr_threads = lambda r: threads
+        import agent_gh.groups.pr as pr_group
+        pr_group.pr_detail = lambda r: detail
+        pr_group.pr_checks = lambda r: checks
+        pr_group.pr_threads = lambda r: threads
 
     clean_detail = {"merge_state": "CLEAN", "review_decision": "APPROVED",
                     "files": [{"path": "src/app.ts"}]}

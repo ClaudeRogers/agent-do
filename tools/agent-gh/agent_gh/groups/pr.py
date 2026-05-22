@@ -43,6 +43,16 @@ PR_VIEW_FIELDS = ",".join(
     ]
 )
 
+REVIEW_DOCTRINE = """Pull Request Review Doctrine
+
+- Review the diff, not just the PR description.
+- Trace ownership and data/control flow before approving risky changes.
+- Verify tests, checks, and unresolved review threads before blessing.
+- Scale scrutiny by risk tier: critical paths need explicit evidence.
+- Prefer clear fixable findings over vague concern.
+- Do not merge as-is when gates are blocked.
+"""
+
 PR_SEARCH_FIELDS = "number,title,state,url,repository,author,isDraft,updatedAt,commentsCount,labels"
 
 def normalize_pr(item: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +192,62 @@ def pr_checks(ref: PrRef) -> list[dict[str, Any]]:
 
 def pr_diff_text(ref: PrRef) -> str:
     return run_gh(["pr", "diff", *pr_gh_args(ref)])
+
+def classify_risk(paths: list[str]) -> dict[str, Any]:
+    critical_suffixes = ("/migrations/",)
+    critical_names = ("middleware.ts", "middleware.js", "middleware.tsx", "middleware.jsx")
+    elevated_names = ("render.yaml", "render.yml", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
+    counts = {"critical": 0, "elevated": 0, "standard": 0}
+    signals: list[dict[str, str]] = []
+
+    for path in paths:
+        norm = path.replace("\\", "/")
+        name = norm.rsplit("/", 1)[-1]
+        tier = "standard"
+        if any(part in norm for part in critical_suffixes) or name in critical_names:
+            tier = "critical"
+        elif name in elevated_names:
+            tier = "elevated"
+        counts[tier] += 1
+        signals.append({"path": path, "tier": tier})
+
+    order = {"critical": 0, "elevated": 1, "standard": 2}
+    signals.sort(key=lambda item: (order[item["tier"]], item["path"]))
+    tier = "standard"
+    if counts["critical"]:
+        tier = "critical"
+    elif counts["elevated"]:
+        tier = "elevated"
+    return {"tier": tier, "counts": counts, "signals": signals}
+
+def merge_gate(ref: PrRef) -> dict[str, Any]:
+    detail = pr_detail(ref)
+    checks = pr_checks(ref)
+    threads = pr_threads(ref)
+    blocks: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+
+    failed_checks = [c for c in checks if str(c.get("bucket") or "").lower() in {"fail", "failed", "failure"}]
+    if failed_checks:
+        blocks.append({"gate": "checks", "message": "Required checks are failing", "items": failed_checks})
+
+    if threads:
+        blocks.append({"gate": "threads", "message": "Unresolved review threads exist", "count": len(threads)})
+
+    merge_state = str(detail.get("merge_state") or "").upper()
+    if merge_state and merge_state not in {"CLEAN", "UNKNOWN"}:
+        blocks.append({"gate": "mergeable", "message": "PR is not cleanly mergeable", "state": merge_state})
+
+    review_decision = str(detail.get("review_decision") or "").upper()
+    if review_decision != "APPROVED":
+        blocks.append({"gate": "approval", "message": "PR does not have approval", "state": review_decision or None})
+
+    paths = [str((f or {}).get("path") or "") for f in detail.get("files") or [] if (f or {}).get("path")]
+    risk = classify_risk(paths)
+    if risk["tier"] == "critical":
+        warnings.append({"gate": "risk", "message": "Critical-risk files changed", "risk": risk})
+
+    return {"allowed": not blocks, "blocks": blocks, "warnings": warnings}
 
 def pr_threads(ref: PrRef, *, all_threads: bool = False) -> list[dict[str, Any]]:
     if not ref.repo or not ref.number:
@@ -549,6 +615,8 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
         "pr": detail,
         "checks": {"count": len(checks), "items": checks},
         "unresolved_threads": {"count": len(threads), "items": threads},
+        "risk": classify_risk([str((f or {}).get("path") or "") for f in detail.get("files") or [] if (f or {}).get("path")]),
+        "doctrine": REVIEW_DOCTRINE,
     }
     if args.json:
         print_json(payload)
@@ -557,6 +625,12 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
         print(f"State: {detail.get('state')}  Draft: {detail.get('draft')}  Review: {detail.get('review_decision')}")
         print(f"Checks: {len(checks)}  Unresolved threads: {len(threads)}")
         print(f"Files changed: {detail.get('changed_files')}  +{detail.get('additions')} -{detail.get('deletions')}")
+        print(f"Risk: {payload['risk']['tier']}")
+        print()
+        print(REVIEW_DOCTRINE)
+
+def cmd_doctrine(args: argparse.Namespace) -> None:
+    print(REVIEW_DOCTRINE)
 
 def cmd_review_action(args: argparse.Namespace, action: str) -> None:
     ref = parse_pr_ref(args.pr)
@@ -590,6 +664,17 @@ def cmd_merge(args: argparse.Namespace) -> None:
         gh_args.extend(["--subject", args.subject])
     if args.body:
         gh_args.extend(["--body", args.body])
+    gate = merge_gate(ref)
+    if not gate["allowed"] and not getattr(args, "force", False):
+        if getattr(args, "json", False):
+            print_json(gate)
+        else:
+            print("Merge blocked by safety gates:", file=sys.stderr)
+            for block in gate["blocks"]:
+                print(f"- {block.get('gate')}: {block.get('message')}", file=sys.stderr)
+        sys.exit(2)
+    if not gate["allowed"] and getattr(args, "force", False):
+        print("bypassing merge gates due to --force", file=sys.stderr)
     if getattr(args, "dry_run", False):
         if not getattr(args, "json", False):
             print(f"[dry-run] would run: gh {' '.join(gh_args)}")
