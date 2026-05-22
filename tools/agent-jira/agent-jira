@@ -51,6 +51,10 @@ ISSUES
     --type <blocks|is blocked by|clones|is cloned by|duplicates|is duplicated by|relates to>
                                             Jira link type / direction (default: relates to)
     [--dry-run] [--json] [--connection <name>]
+  issue delete <ISSUE-KEY>                  Delete an issue
+    [--dry-run]                             Preview deletion only
+    [--confirm]                             Actually delete the issue
+    [--json] [--connection <name>]
   issue comment <ISSUE-KEY>                 Add a comment
     --body <text>                           Comment text (required)
     [--dry-run] [--json] [--connection <name>]
@@ -114,6 +118,7 @@ EXAMPLES
   agent-do jira issue view PROJ-123 --comments
   agent-do jira issue create PROJ --summary "Fix login bug" --type Bug --priority High --dry-run
   agent-do jira issue link PROJ-2 --to PROJ-1 --type blocks
+  agent-do jira issue delete PROJ-2 --dry-run
   agent-do jira issue transition PROJ-123 --to "In Progress"
   agent-do jira issue assign PROJ-123 --to me@company.com
   agent-do jira search 'assignee = currentUser() AND status != Done ORDER BY priority DESC'
