@@ -126,6 +126,12 @@ def test_parse_pr_ref_bare_number_no_git() -> None:
             raised = True
     require(raised, "expected GhError for bare number outside git repo")
 
+def test_repo_from_git_handles_oserror() -> None:
+    from unittest.mock import patch
+    from agent_gh import refs as refs_mod
+    with patch("agent_gh.refs.subprocess.run", side_effect=OSError("git missing")):
+        require(refs_mod.repo_from_git() is None, "expected None when git cannot start")
+
 def test_parse_pr_ref_invalid() -> None:
     raised = False
     try:
@@ -163,6 +169,7 @@ def main() -> int:
         test_parse_pr_ref_owner_hash,
         test_parse_pr_ref_github_url,
         test_parse_pr_ref_bare_number_no_git,
+        test_repo_from_git_handles_oserror,
         test_parse_pr_ref_invalid,
         test_parse_pr_ref_empty_outside_git,
     ]

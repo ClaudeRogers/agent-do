@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..refs import parse_repo
 from ..snapshot import envelope
+from ..snapshot import parse_github_time
 from ..transport import gh_json
 
 _SECTION_LABELS: list[tuple[str, list[str]]] = [
@@ -27,8 +29,16 @@ def _tag_date(repo_slug: str, tag: str) -> str | None:
         # lightweight tag — points directly to a commit
         commit_obj = gh_json(["api", f"/repos/{repo_slug}/git/commits/{sha}"]) or {}
         return (commit_obj.get("committer") or {}).get("date")
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).debug("failed to resolve tag date for %s@%s: %s", repo_slug, tag, exc)
         return None
+
+def _merged_after(merged_at: str | None, tag_date: str | None) -> bool:
+    merged = parse_github_time(merged_at)
+    tag = parse_github_time(tag_date)
+    if merged is None or tag is None:
+        return True
+    return merged > tag
 
 def notes_between(repo: str, since_tag: str, *, target: str | None = None) -> dict[str, Any]:
     r = parse_repo(repo)
@@ -58,7 +68,6 @@ def notes_between(repo: str, since_tag: str, *, target: str | None = None) -> di
     except Exception as exc:
         # Fall back to PR label grouping below. generate-notes can fail legitimately
         # (repo too new for a tag, auth scope, network); we intentionally continue.
-        import logging  # noqa: PLC0415
         logging.getLogger(__name__).debug("generate-notes endpoint failed, using fallback: %s", exc)
 
     # Fallback: list merged PRs since the tag and group by label
@@ -72,7 +81,7 @@ def notes_between(repo: str, since_tag: str, *, target: str | None = None) -> di
 
     tag_date = _tag_date(r.slug, since_tag)
     if tag_date:
-        prs = [pr for pr in prs if (pr.get("mergedAt") or "") > tag_date]
+        prs = [pr for pr in prs if _merged_after(pr.get("mergedAt"), tag_date)]
 
     sections: dict[str, list[str]] = {name: [] for name, _ in _SECTION_LABELS}
     uncategorized: list[str] = []

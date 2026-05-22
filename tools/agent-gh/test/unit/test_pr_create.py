@@ -95,6 +95,20 @@ def test_pr_create_dry_run_skips_gh() -> None:
     require("[dry-run] would run: gh pr create --title Preview only" in buf.getvalue(), buf.getvalue())
 
 
+def test_pr_checkout_dry_run_skips_gh() -> None:
+    with patch("agent_gh.groups.pr.run_gh") as run_mock:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli.main(["checkout", "ovachiever/agent-do#42", "--dry-run"])
+
+    require(rc == 0, f"expected exit 0, got {rc}")
+    require(run_mock.call_count == 0, f"dry-run should not call gh: {run_mock.call_args_list}")
+    require(
+        "[dry-run] would run: gh pr checkout 42 --repo ovachiever/agent-do" in buf.getvalue(),
+        buf.getvalue(),
+    )
+
+
 def test_pr_create_json_envelope() -> None:
     with patch("agent_gh.groups.pr.run_gh", return_value="https://github.com/ovachiever/agent-do/pull/100\n"):
         buf = io.StringIO()
@@ -112,6 +126,7 @@ def main() -> int:
     tests = [
         test_pr_create_dispatch_and_args,
         test_pr_create_dry_run_skips_gh,
+        test_pr_checkout_dry_run_skips_gh,
         test_pr_create_json_envelope,
     ]
     failures = []
