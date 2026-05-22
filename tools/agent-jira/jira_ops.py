@@ -182,7 +182,7 @@ class JiraClient:
         # Jira Cloud removed GET /rest/api/3/search; use the enhanced search endpoint.
         return "search" if self.server else "search/jql"
 
-    def request(self, method: str, url: str, *, body: Any = None) -> Any:
+    def request(self, method: str, url: str, *, body: Any = None, suppress_errors: bool = False) -> Any:
         data = json.dumps(body).encode() if body is not None else None
         headers = {
             "Authorization": self._auth,
@@ -212,6 +212,8 @@ class JiraClient:
                 _err(f"Jira API 403 Forbidden — your account lacks permission for this action. {msg}".rstrip(". "))
             elif exc.code == 429:
                 _err(f"Jira API 429 Too Many Requests — slow down or check rate limits. {msg}".rstrip(". "))
+            elif suppress_errors:
+                return {"_error": msg, "status": exc.code}
             else:
                 _err(f"Jira API {exc.code} {exc.reason}: {msg}")
         except urllib.error.URLError as exc:
@@ -225,9 +227,9 @@ class JiraClient:
             )
         return self.request("GET", base_url)
 
-    def post(self, path: str, body: Any, *, agile: bool = False) -> Any:
+    def post(self, path: str, body: Any, *, agile: bool = False, suppress_errors: bool = False) -> Any:
         url = self._agile(path) if agile else self._api(path)
-        return self.request("POST", url, body=body)
+        return self.request("POST", url, body=body, suppress_errors=suppress_errors)
 
     def put(self, path: str, body: Any, *, agile: bool = False) -> Any:
         url = self._agile(path) if agile else self._api(path)
@@ -306,6 +308,35 @@ def _get_client(connection: str | None) -> JiraClient:
         "  agent-do jira connections add <name> --url <url> --email <email> --token <token>\n"
         "Or set JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN environment variables."
     )
+
+
+def _resolve_assignee(client: JiraClient, assignee: str) -> str:
+    """Resolve Cloud email addresses to account IDs when possible."""
+    if client.server or "@" not in assignee:
+        return assignee
+
+    users = client.get("user/search", params={"query": assignee, "maxResults": 10})
+    if not isinstance(users, list):
+        users = []
+
+    def _email(u: dict[str, Any]) -> str:
+        return (u.get("emailAddress") or "").strip().lower()
+
+    matches = [u for u in users if isinstance(u, dict) and _email(u) == assignee.lower()]
+    if not matches and len(users) == 1 and isinstance(users[0], dict):
+        matches = [users[0]]
+
+    if not matches:
+        found = ", ".join(
+            f"{u.get('displayName') or u.get('accountId') or u.get('name') or 'unknown'} <{u.get('emailAddress') or ''}>"
+            for u in users
+            if isinstance(u, dict)
+        )
+        suffix = f" (found: {found})" if found else ""
+        _err(f"Could not resolve Jira user from email {assignee!r}{suffix}")
+
+    user = matches[0]
+    return user.get("accountId") or user.get("name") or assignee
 
 
 # ── formatting helpers ─────────────────────────────────────────────────────────
@@ -761,11 +792,13 @@ def _issue_create(argv: list[str]) -> None:
     }
     if description:
         fields["description"] = client._text_body(description)
-    if assignee:
+    resolved_assignee = _resolve_assignee(client, assignee) if assignee else None
+
+    if resolved_assignee:
         if client.server:
-            fields["assignee"] = {"name": assignee}
+            fields["assignee"] = {"name": resolved_assignee}
         else:
-            fields["assignee"] = {"accountId": assignee}
+            fields["assignee"] = {"accountId": resolved_assignee}
     if priority:
         fields["priority"] = {"name": priority}
     if labels:
@@ -789,8 +822,8 @@ def _issue_create(argv: list[str]) -> None:
             print(f"  Summary: {summary}")
             if description:
                 print(f"  Description: {description[:100]}")
-            if assignee:
-                print(f"  Assignee: {assignee}")
+            if resolved_assignee:
+                print(f"  Assignee: {resolved_assignee}")
             if priority:
                 print(f"  Priority: {priority}")
             if labels:
@@ -801,7 +834,15 @@ def _issue_create(argv: list[str]) -> None:
                 print(f"  Sprint: {sprint_id}")
         sys.exit(DRY_RUN_EXIT_CODE)
 
-    result = client.post("issue", body)
+    result = client.post("issue", body, suppress_errors=True)
+    if isinstance(result, dict) and result.get("_error"):
+        message = str(result.get("_error", "")).lower()
+        if issue_type.lower() != "task" and ("issuetype" in message or "issue type" in message):
+            fields["issuetype"] = {"name": "Task"}
+            body = {"fields": fields}
+            result = client.post("issue", body)
+        else:
+            _err(str(result["_error"]))
     key = result.get("key", "?")
     url = f"{client.base}/browse/{key}"
     if json_mode:
@@ -997,7 +1038,7 @@ def _issue_assign(argv: list[str]) -> None:
     elif client.server:
         body = {"name": to}
     else:
-        body = {"accountId": to}
+        body = {"accountId": _resolve_assignee(client, to)}
 
     client.put(f"issue/{key}/assignee", body)
     if json_mode:
