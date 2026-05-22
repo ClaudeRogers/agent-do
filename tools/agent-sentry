@@ -3,6 +3,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../lib/retry.sh"
+source "${SCRIPT_DIR}/../lib/snapshot.sh"
+
 show_help() {
     cat << 'EOF'
 agent-sentry - Sentry error tracking and performance monitoring
@@ -130,10 +134,19 @@ sentry_get() {
     local url="$1"
     local token
     token=$(sentry_token) || return 1
-    curl -sS --connect-timeout 10 --max-time 60 \
+
+    local response
+    response=$(stall_detect 70 api_request GET "$url" \
+        --connect-timeout 10 --max-time 60 \
         -H "Authorization: Bearer ${token}" \
-        -H "Accept: application/json" \
-        "$url"
+        -H "Accept: application/json") || {
+        if [[ -n "$response" ]]; then
+            printf '%s' "$response"
+            return 0
+        fi
+        return 1
+    }
+    printf '%s' "$response"
 }
 
 sentry_put() {
@@ -141,11 +154,21 @@ sentry_put() {
     local data="$2"
     local token
     token=$(sentry_token) || return 1
-    curl -sS --connect-timeout 10 --max-time 60 -X PUT \
+
+    local response
+    response=$(stall_detect 70 api_request PUT "$url" \
+        --connect-timeout 10 --max-time 60 \
         -H "Authorization: Bearer ${token}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
-        -d "$data" "$url"
+        -d "$data") || {
+        if [[ -n "$response" ]]; then
+            printf '%s' "$response"
+            return 0
+        fi
+        return 1
+    }
+    printf '%s' "$response"
 }
 
 # --- Resolvers ---
@@ -538,33 +561,27 @@ cmd_releases() {
     done
 
     local url="${base_url}/organizations/${org}/releases/?per_page=25"
-    if [[ -n "$project" ]]; then
-        # Sentry releases endpoint requires numeric project ID, not slug
-        local project_id="$project"
-        if [[ ! "$project_id" =~ ^[0-9]+$ ]]; then
-            local proj_json
-            proj_json=$(sentry_get "${base_url}/projects/${org}/${project}/") || {
-                echo "Error: cannot resolve project slug '${project}'" >&2
-                return 1
-            }
-            project_id=$(printf '%s' "$proj_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
-            if [[ -z "$project_id" ]]; then
-                echo "Error: cannot resolve project slug '${project}' to numeric ID" >&2
-                return 1
-            fi
-        fi
-        url="${url}&project=${project_id}"
-    fi
 
     local result
     result=$(sentry_get "$url") || return 1
 
-    printf '%s' "$result" | python3 -c "
-import sys, json
+    printf '%s' "$result" | SENTRY_RELEASE_PROJECT="$project" python3 -c "
+import os, sys, json
 data = json.load(sys.stdin)
 if isinstance(data, dict) and 'detail' in data:
     print('Error:', data['detail'], file=sys.stderr)
     sys.exit(1)
+project = os.environ.get('SENTRY_RELEASE_PROJECT', '')
+if project:
+    data = [
+        r for r in data
+        if any(
+            str(p.get('slug', '')) == project
+            or str(p.get('id', '')) == project
+            or str(p.get('name', '')) == project
+            for p in r.get('projects', [])
+        )
+    ]
 if not data:
     print('No releases found.')
     sys.exit(0)
@@ -584,13 +601,14 @@ for r in data:
 
 cmd_snapshot() {
     local token
-    token=$(sentry_token) || { echo '{"error": "SENTRY_AUTH_TOKEN not set"}'; return 1; }
+    token=$(sentry_token) || { snapshot_error "SENTRY_AUTH_TOKEN not set" "sentry"; return 1; }
     local org
-    org=$(sentry_org 2>/dev/null) || { echo '{"error":"cannot determine org"}'; return 1; }
+    org=$(sentry_org 2>/dev/null) || { snapshot_error "cannot determine org" "sentry"; return 1; }
     local base_url
-    base_url=$(sentry_base_url) || { echo '{"error":"cannot determine base URL"}'; return 1; }
+    base_url=$(sentry_base_url) || { snapshot_error "cannot determine base URL" "sentry"; return 1; }
 
-    SENTRY_AUTH_TOKEN="$token" SENTRY_SNAP_ORG="$org" SENTRY_SNAP_BASE="$base_url" python3 -c "
+    local snapshot_payload
+    snapshot_payload=$(SENTRY_AUTH_TOKEN="$token" SENTRY_SNAP_ORG="$org" SENTRY_SNAP_BASE="$base_url" python3 -c "
 import json, sys, os
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -758,8 +776,25 @@ snapshot = {
     'token_valid': token_valid,
 }
 
-print(json.dumps(snapshot, indent=2))
-"
+print(json.dumps(snapshot, separators=(',', ':')))
+")
+
+    local projects_json issues_json alerts_json releases_json token_valid_json
+    projects_json=$(printf '%s' "$snapshot_payload" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['projects']))")
+    issues_json=$(printf '%s' "$snapshot_payload" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['issues']))")
+    alerts_json=$(printf '%s' "$snapshot_payload" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['alerts']))")
+    releases_json=$(printf '%s' "$snapshot_payload" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['releases']))")
+    token_valid_json=$(printf '%s' "$snapshot_payload" | python3 -c "import sys,json; print('true' if json.load(sys.stdin)['token_valid'] else 'false')")
+
+    snapshot_begin "sentry"
+    snapshot_field "org" "$org"
+    snapshot_field "base_url" "$base_url"
+    snapshot_json_field "projects" "$projects_json"
+    snapshot_json_field "issues" "$issues_json"
+    snapshot_json_field "alerts" "$alerts_json"
+    snapshot_json_field "releases" "$releases_json"
+    snapshot_bool_field "token_valid" "$token_valid_json"
+    snapshot_end
 }
 
 # --- Main ---

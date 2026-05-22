@@ -58,10 +58,10 @@ check_error_output() {
     shift 2
     local output rc
     output=$("$@" 2>&1); rc=$?
-    if [[ $rc -ne 0 ]] && echo "$output" | grep -q "$pattern"; then
+    if [[ $rc -eq 1 ]] && echo "$output" | grep -q "$pattern"; then
         pass "$desc"
     else
-        fail "$desc" "expected non-zero exit and pattern '$pattern', rc=$rc, got: $(echo "$output" | head -3)"
+        fail "$desc" "expected exit 1 and pattern '$pattern', rc=$rc, got: $(echo "$output" | head -3)"
     fi
 }
 
