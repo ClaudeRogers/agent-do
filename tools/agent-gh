@@ -409,7 +409,14 @@ def summarize_checks(checks: list[Any]) -> dict[str, Any]:
 
 
 def pr_checks(ref: PrRef) -> list[dict[str, Any]]:
-    payload = gh_json(["pr", "checks", *pr_gh_args(ref), "--json", "name,state,bucket,link,description,workflow,startedAt,completedAt"])
+    # `gh pr checks` exits non-zero when a branch has zero checks — that is a
+    # normal state (no CI configured), not an error. Treat it as an empty list.
+    try:
+        payload = gh_json(["pr", "checks", *pr_gh_args(ref), "--json", "name,state,bucket,link,description,workflow,startedAt,completedAt"])
+    except GhError as exc:
+        if "no checks reported" in str(exc).lower():
+            return []
+        raise
     return payload or []
 
 
@@ -640,6 +647,141 @@ def build_awaiting(args: argparse.Namespace) -> dict[str, Any]:
     if not (args.repo or args.owner or args.author or args.query):
         scope_note = "Unscoped awaiting uses strict review requests only. Add --owner, --repo, --author, or a query for broader not-yet-reviewed PR discovery."
     return {"viewer": viewer, "count": len(details), "items": details[: args.limit], "scope_note": scope_note}
+
+
+REVIEW_DOCTRINE = """# Pull Request Review Doctrine
+
+A pull request is someone's work — a person's or an agent's — finished and handed to you. Review it the way you'd want yours reviewed: closely, fairly, all the way through. Own the whole arc — review, audit, and merge or send back. Don't hand a half-finished review to the human; they work alongside you, they don't run your steps.
+
+## Read the change, not the pitch
+
+The PR description says what the author meant to do. The diff says what they did. Read the diff. Where the two diverge, the diff wins and the description becomes a question to raise.
+
+## Verify before you bless
+
+- If CI reported, read it. If no CI ran, run the relevant tests yourself — and say exactly which ones and what happened.
+- `agent-do gh review <n>` gives you the risk tier. Critical-tier changes — auth, middleware, rate limiting, migrations, secrets, permissions — get traced, not skimmed: follow the control flow, name the failure modes, confirm the tests exercise the thing being fixed.
+- Standard-tier changes still get a real read. They just don't need the forensic pass.
+
+## Write like a colleague, not a linter
+
+The author reads every word you leave. Write so it lands as help, not as a verdict.
+
+- Cite specifics: `middleware.ts:80`, not "the middleware." A reviewer who can't point at a line didn't read the file.
+- Name what's right. Good work should hear it's good — that's information, not flattery.
+- Say the problem and the fix in the same breath. "X breaks under Y; do Z" beats "X looks wrong."
+- Plain and short. No ceremony, no restating the PR back at the author, no padding.
+- Never estimate time. "Quick fix," "this'd take a while" — cut all of it.
+- You're moving the change forward, not guarding a gate. Even a request-for-changes reads as "here's what gets this in" — not "denied."
+
+## The decision
+
+- Passes review, audit, and checks -> approve and squash-merge with a clean message. Resolve any bot threads you've genuinely addressed. Done — don't wait for permission on a routine merge.
+- Fixable problems -> request changes with the exact lines and the exact fixes. Don't merge.
+- Judgment call — changes authorization semantics, alters a migration's meaning, affects other people's running work, or the scope outgrew the stated intent -> review it, state your recommendation plainly, escalate to the human. That, and only that, goes back to them.
+
+## Merge hygiene
+
+Squash by default. Clean message describing the why. Delete the branch. The merge gate refuses on failing checks, unresolved threads, a dirty merge state, or a missing approval — don't fight it, fix the cause. `--force` exists for genuine emergencies and announces itself loudly when used.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Risk classification — maps changed paths to review-scrutiny tiers.
+# critical: security / authorization / data-integrity surface
+# elevated: build / deploy / dependency surface
+# standard: everything else
+# ---------------------------------------------------------------------------
+
+RISK_RULES: list[tuple[str, str, str]] = [
+    ("critical", r"middleware\.", "auth perimeter"),
+    ("critical", r"(^|/)auth($|[./_-])", "authentication"),
+    ("critical", r"rate.?limit", "rate limiting"),
+    ("critical", r"(^|/)rls($|[/._-])", "row-level security"),
+    ("critical", r"migrations?/", "database migration"),
+    ("critical", r"\.sql$", "database migration"),
+    ("critical", r"secret", "secret material"),
+    ("critical", r"credential", "credential handling"),
+    ("critical", r"(^|[/._-])token($|[./_-])", "token handling"),
+    ("critical", r"session", "session handling"),
+    ("critical", r"crypto", "cryptography"),
+    ("critical", r"password", "password handling"),
+    ("critical", r"(^|/)cors", "CORS policy"),
+    ("critical", r"permission", "permission logic"),
+    ("elevated", r"\.github/workflows/", "CI workflow"),
+    ("elevated", r"(^|/)dockerfile", "container build"),
+    ("elevated", r"render\.yaml", "deploy config"),
+    ("elevated", r"vercel\.json", "deploy config"),
+    ("elevated", r"\.tf$", "infrastructure"),
+    ("elevated", r"package\.json$", "dependency manifest"),
+    ("elevated", r"-lock\.(json|yaml)$", "dependency lockfile"),
+    ("elevated", r"requirements\.txt$", "dependency manifest"),
+    ("elevated", r"Cargo\.(toml|lock)$", "dependency manifest"),
+    ("elevated", r"(^|/)\.env", "environment config"),
+    ("elevated", r"next\.config\.", "framework config"),
+]
+
+_RISK_TIER_ORDER = {"standard": 0, "elevated": 1, "critical": 2}
+
+
+def classify_risk(paths: list[str]) -> dict[str, Any]:
+    """Classify changed paths into review-scrutiny tiers. Pure function."""
+    counts = {"critical": 0, "elevated": 0, "standard": 0}
+    signals: list[dict[str, str]] = []
+    overall = "standard"
+    for path in paths:
+        path_tier = "standard"
+        path_reason = ""
+        for tier, pattern, reason in RISK_RULES:
+            if re.search(pattern, path, re.IGNORECASE):
+                if _RISK_TIER_ORDER[tier] > _RISK_TIER_ORDER[path_tier]:
+                    path_tier = tier
+                    path_reason = reason
+        counts[path_tier] += 1
+        if path_tier != "standard":
+            signals.append({"path": path, "tier": path_tier, "reason": path_reason})
+        if _RISK_TIER_ORDER[path_tier] > _RISK_TIER_ORDER[overall]:
+            overall = path_tier
+    signals.sort(key=lambda s: _RISK_TIER_ORDER[s["tier"]], reverse=True)
+    return {"tier": overall, "counts": counts, "signals": signals}
+
+
+def merge_gate(ref: PrRef) -> dict[str, Any]:
+    """Deterministic merge preconditions. Returns blocks (hard) + warnings (risk)."""
+    detail = pr_detail(ref)
+    checks = pr_checks(ref)
+    threads = pr_threads(ref)
+    blocks: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+
+    failed = [c for c in checks if str(c.get("bucket") or "").lower() in {"fail", "failed", "failure"}]
+    if failed:
+        names = ", ".join(str(c.get("name") or "unnamed") for c in failed[:5])
+        blocks.append({"gate": "checks", "reason": f"{len(failed)} check(s) failing: {names}"})
+
+    if threads:
+        blocks.append({"gate": "threads", "reason": f"{len(threads)} unresolved review thread(s)"})
+
+    merge_state = str(detail.get("merge_state") or "").upper()
+    if merge_state and merge_state not in {"CLEAN", "UNKNOWN"}:
+        blocks.append({"gate": "mergeable", "reason": f"merge state is {merge_state}, not CLEAN"})
+
+    decision = str(detail.get("review_decision") or "").upper()
+    if decision != "APPROVED":
+        blocks.append({
+            "gate": "approval",
+            "reason": f"no approving review recorded (review_decision={decision or 'none'})",
+        })
+
+    risk = classify_risk(changed_paths(detail))
+    if risk["tier"] == "critical":
+        crit = ", ".join(s["path"] for s in risk["signals"] if s["tier"] == "critical")
+        warnings.append({
+            "gate": "risk",
+            "reason": f"critical-tier paths changed ({crit}) — pass --confirm-risk after tracing the control flow",
+        })
+
+    return {"allowed": not blocks, "blocks": blocks, "warnings": warnings, "risk": risk}
 
 
 def add_finding(
@@ -970,6 +1112,7 @@ def audit_pr(ref: PrRef, *, probe_deploys: bool = False) -> dict[str, Any]:
         "checks": {"count": len(checks), "items": checks},
         "unresolved_threads": {"count": len(threads), "items": threads},
         "changed_paths": paths,
+        "risk": classify_risk(paths),
         "env_vars_in_diff": env_vars,
         "deployment_probe": deploy_probe,
         "findings": findings,
@@ -1199,10 +1342,13 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
     detail = pr_detail(ref)
     checks = pr_checks(ref)
     threads = pr_threads(ref)
+    risk = classify_risk(changed_paths(detail))
     payload = {
         "pr": detail,
         "checks": {"count": len(checks), "items": checks},
         "unresolved_threads": {"count": len(threads), "items": threads},
+        "risk": risk,
+        "doctrine": REVIEW_DOCTRINE,
     }
     if args.json:
         print_json(payload)
@@ -1211,6 +1357,20 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
         print(f"State: {detail.get('state')}  Draft: {detail.get('draft')}  Review: {detail.get('review_decision')}")
         print(f"Checks: {len(checks)}  Unresolved threads: {len(threads)}")
         print(f"Files changed: {detail.get('changed_files')}  +{detail.get('additions')} -{detail.get('deletions')}")
+        counts = risk["counts"]
+        print()
+        print(
+            f"Risk: {risk['tier']}  "
+            f"(critical={counts['critical']} elevated={counts['elevated']} standard={counts['standard']})"
+        )
+        for signal in risk["signals"]:
+            print(f"  [{signal['tier']}] {signal['path']} — {signal['reason']}")
+        print()
+        print(REVIEW_DOCTRINE)
+
+
+def cmd_doctrine(args: argparse.Namespace) -> None:
+    print(REVIEW_DOCTRINE)
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
@@ -1260,6 +1420,38 @@ def cmd_review_action(args: argparse.Namespace, action: str) -> None:
 
 def cmd_merge(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
+
+    # Merge gate: deterministic preconditions before any merge call.
+    gate = merge_gate(ref)
+    unresolved_warnings = [
+        w for w in gate["warnings"]
+        if not (w["gate"] == "risk" and getattr(args, "confirm_risk", False))
+    ]
+    blocked = bool(gate["blocks"]) or bool(unresolved_warnings)
+
+    if blocked and not args.force:
+        if getattr(args, "json", False):
+            print_json({**gate, "warnings": unresolved_warnings})
+        else:
+            print(f"Merge blocked for {ref.repo}#{ref.number}:", file=sys.stderr)
+            for block in gate["blocks"]:
+                print(f"  BLOCK  [{block['gate']}] {block['reason']}", file=sys.stderr)
+            for warning in unresolved_warnings:
+                print(f"  WARN   [{warning['gate']}] {warning['reason']}", file=sys.stderr)
+            if gate["blocks"]:
+                print(
+                    "  Fix the cause, or pass --force for a genuine emergency.",
+                    file=sys.stderr,
+                )
+        sys.exit(2)
+
+    if args.force and gate["blocks"]:
+        bypassed = ", ".join(block["gate"] for block in gate["blocks"])
+        print(
+            f"--force: bypassing merge gates [{bypassed}] for {ref.repo}#{ref.number}",
+            file=sys.stderr,
+        )
+
     strategy = "--squash"
     if args.merge:
         strategy = "--merge"
@@ -1471,7 +1663,7 @@ def build_parser() -> argparse.ArgumentParser:
         action_parser.add_argument("--body-file")
         action_parser.set_defaults(func=lambda ns, action=action: cmd_review_action(ns, action))
 
-    merge = sub.add_parser("merge", help="Merge a pull request")
+    merge = sub.add_parser("merge", help="Merge a pull request (gated)")
     merge.add_argument("pr")
     strategy = merge.add_mutually_exclusive_group()
     strategy.add_argument("--squash", action="store_true")
@@ -1482,7 +1674,16 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--match-head-commit")
     merge.add_argument("--subject")
     merge.add_argument("--body")
+    merge.add_argument("--force", action="store_true",
+                       help="Bypass merge gate blocks (emergency only; announced loudly)")
+    merge.add_argument("--confirm-risk", action="store_true", dest="confirm_risk",
+                       help="Acknowledge critical-tier risk after tracing the change")
+    merge.add_argument("--json", action="store_true",
+                       help="Emit the merge gate result as JSON when blocked")
     merge.set_defaults(func=cmd_merge)
+
+    doctrine = sub.add_parser("doctrine", help="Print the PR review doctrine")
+    doctrine.set_defaults(func=cmd_doctrine)
 
     close = sub.add_parser("close", help="Close a pull request")
     close.add_argument("pr")
@@ -1553,12 +1754,13 @@ Commands:
   diff <pr>                      Show PR diff
   threads <pr>                   Show unresolved PR review threads
   checks <pr>                    Show PR checks
-  review <pr> --summary          Summarize a PR for review
+  review <pr>                    Summarize a PR: state, checks, risk tier, doctrine
   audit <pr> [--reply]           Audit a PR and generate fix-oriented review text
+  doctrine                       Print the PR review doctrine
   approve <pr> [--body text]     Approve a PR
   request-changes <pr> --body t  Request changes on a PR
   comment <pr> [--body text]     Comment on a PR
-  merge <pr> [--squash]          Merge a PR
+  merge <pr> [--squash]          Merge a PR (gated: checks, threads, approval, risk)
   close <pr> [--delete-branch]   Close a PR
   reopen <pr>                    Reopen a PR
   checkout <pr>                  Check out a PR locally

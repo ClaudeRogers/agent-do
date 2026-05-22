@@ -120,7 +120,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # Traffic filtering (removes static, CDN, deduplicates)
 │       ├── auth.js         # Auth extraction from captured headers/cookies
 │       └── generator.js    # Skill package writer → ~/.agent-do/skills/<name>/
-├── tools/agent-*           # 89 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 94 tools (standalone scripts + directory-based tools)
 ├── registry.yaml           # Master tool catalog
 ├── test.sh                 # Test suite
 └── requirements.txt        # Python dependencies
@@ -253,6 +253,7 @@ Directory-based tools with complex backends:
 | `tools/agent-db/` | Bash + Python | Database client (PostgreSQL, MySQL, SQLite). Connection management, queries, schema inspection. |
 | `tools/agent-excel/` | Bash + Python | Excel workbook automation via openpyxl. Read/write cells, formulas, sheets, export. |
 | `tools/agent-macos/` | Bash + Python | Desktop GUI automation via macOS accessibility APIs. Click, type, UI tree inspection. Write/control actions are now gated through the shared `lib/live/` runtime substrate and require `agent-do +live(...)` or an active live lease. |
+| `tools/agent-appleevents/` | Bash + Python | Scriptable macOS app automation via AppleEvents, AppleScript, and JXA. Inspects SDEF dictionaries, compile-checks scripts without running them, and gates execution and Automation permission probes through `lib/live/`. |
 | `tools/agent-screen/` | Bash + Python | Vision-based screen perception. Multi-display capture, OCR, element detection. Mouse and keyboard actions are now gated through the shared `lib/live/` runtime substrate and require `agent-do +live(...)` or an active live lease. |
 | `tools/agent-vision/` | Bash + Python | Visual perception with YOLO object detection, OCR, face detection. |
 | `tools/agent-coord` | Python | Project-local state-and-interrupt broker. Derives stable identities from thread/tmux context, stores agent state under `.git/agent-do/coord/` when available, tracks focus/claims/needs/publishes, and computes contention/dependency/novelty interrupts instead of relying on a mailbox. |
@@ -290,7 +291,7 @@ Nudge raw commands toward agent-do alternatives:
 AGENT_DO_PATTERNS = {
     r'\bxcrun\s+simctl\b': ('ios', 'Use agent-do ios instead'),
     r'\badb\s+(shell|install)': ('android', 'Use agent-do android instead'),
-    r'\bosascript\b': ('macos', 'Use agent-do macos instead'),
+    r'\bosascript\b': ('appleevents', 'Use agent-do appleevents instead'),
     r'\bplaywright\b|\bpuppeteer\b': ('browse', 'Use agent-do browse instead'),
 }
 ```

@@ -350,8 +350,9 @@ agent-do +live(scope=desktop,ttl=15m) macos click @g5
 
 ## Tool Surface
 
-There are 91 tools in the current catalog. Use `agent-do --list` for the complete
-inventory and `agent-do <tool> --help` for command details.
+There are 93 registered tools in the current catalog. Use `agent-do --list` for
+the complete executable inventory and `agent-do <tool> --help` for command
+details.
 
 | Category | Tools | What They Do |
 |---|---|---|
@@ -361,7 +362,7 @@ inventory and `agent-do <tool> --help` for command details.
 | GitHub | `gh`, `git`, `ci` | PR triage, review, merge, local git, checks |
 | Cloud | `render`, `vercel`, `supabase`, `cloudflare`, `gcp`, `docker`, `k8s` | Service and infrastructure operations |
 | Visual | `dpt`, `screen`, `vision`, `ocr` | Screenshots, UI critique, OCR, perception |
-| Devices | `ios`, `android`, `macos`, `hardware` | Simulators, desktop automation, device control |
+| Devices | `ios`, `android`, `macos`, `appleevents`, `hardware` | Simulators, desktop and scriptable app automation, device control |
 | Data | `db`, `excel`, `sheets`, `pdf`, `pdf2md` | Databases, spreadsheets, PDF workflows |
 | Communication | `notify`, `email`, `sms`, `slack`, `meetings`, `resend` | Human notifications, inboxes, meetings, email ops |
 | Agent Support | `coord`, `harness`, `spec`, `manna`, `sessions` | Coordination, observability, specs, issue tracking |
