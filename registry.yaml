@@ -1713,6 +1713,63 @@ tools:
       required:
       - CLERK_SECRET_KEY
     concurrency: mixed
+  coderabbit:
+    description: Local AI code review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+    capabilities:
+    - review uncommitted or staged changes against a base branch
+    - replay findings from the most recent local review without an API call
+    - check auth and connectivity via doctor command
+    - support free-tier browser OAuth or API key for unlimited headless use
+    commands:
+      review: Review current uncommitted changes against the base branch
+      findings: Re-read results from the most recent local review (no API call)
+      doctor: Verify installation, authentication, git state, and service connectivity
+      snapshot: Auth status, cr version, and last doctor summary
+      auth login: Authenticate via browser (free tier, 3 reviews/hour)
+      auth org: Switch CodeRabbit organization
+    examples:
+    - intent: review my changes before opening a PR
+      command: agent-do coderabbit review
+    - intent: review changes against develop branch
+      command: agent-do coderabbit review --base develop
+    - intent: get structured JSON review output for agent processing
+      command: agent-do coderabbit review --json
+    - intent: replay last review results without an API call
+      command: agent-do coderabbit findings
+    - intent: check coderabbit auth and connectivity
+      command: agent-do coderabbit doctor
+    - intent: coderabbit status and auth summary
+      command: agent-do coderabbit snapshot --json
+    credentials:
+      optional:
+      - CODERABBIT_API_KEY
+      notes:
+      - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth — no API key needed."
+      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'."
+    routing:
+      discover_keywords:
+      - coderabbit
+      - code review
+      - local review
+      - pre-pr review
+      - cr review
+      recommended_entrypoints:
+      - agent-do coderabbit review
+      - agent-do coderabbit doctor
+      default_command: review
+      raw_cli_equivalents:
+      - pattern: \bcr\b\s+(--agent|--plain|--base|review)
+        replacement: agent-do coderabbit
+        example: agent-do coderabbit review --base develop
+        reason: agent-do coderabbit adds credential management and structured JSON output
+      project_signals:
+      - .coderabbit.yaml
+      - .coderabbit
+      readiness:
+        check: agent-do coderabbit doctor
+        fix: brew install coderabbit && agent-do coderabbit auth login
+        note: Free tier requires browser login; set CODERABBIT_API_KEY for unlimited headless use
+    concurrency: read
   ci:
     description: Control CI/CD pipelines
     capabilities:
