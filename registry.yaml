@@ -1873,6 +1873,7 @@ tools:
       - jira project
       - issue tracker
       - atlassian
+      - jql
       prompt_patterns:
       - '\bjira\b'
       - '\b(?:create|view|transition|assign|comment\s+on)\s+(?:a\s+)?(?:jira\s+)?issue\b'
@@ -1883,6 +1884,44 @@ tools:
         replacement: agent-do jira
         example: agent-do jira issue view PROJ-123
         reason: agent-do jira wraps Jira Cloud and Server/DC REST APIs with connection profiles, dry-run, and JSON output
+      project_signals:
+      - jira
+      - jira issue
+      - jira ticket
+      - jira sprint
+      - jira board
+      - jira project
+      - issue tracker
+      - atlassian
+      - jql
+      readiness:
+        check: agent-do jira whoami --json
+        fix: agent-do jira connections add work --url https://company.atlassian.net --email me@company.com --token <token> --default
+        note: Requires Jira credentials via env vars or a saved connection profile
+      command_concurrency:
+        connections list: read
+        connections add: write
+        connections remove: write
+        connections set-default: write
+        snapshot: read
+        whoami: read
+        issue view: read
+        issue list: read
+        issue create: write
+        issue link: write
+        issue delete: write
+        issue comment: write
+        issue assign: write
+        issue transition: write
+        issue label: write
+        issue edit: write
+        transitions: read
+        user find: read
+        search: read
+        board list: read
+        sprint list: read
+        sprint active: read
+        sprint add: write
     credentials:
       required:
       - JIRA_URL
