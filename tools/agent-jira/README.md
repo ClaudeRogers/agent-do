@@ -96,6 +96,15 @@ agent-do jira issue create PROJ \
   --json
 ```
 
+### Link
+```bash
+# Create a linked work item relationship
+agent-do jira issue link PROJ-2 --to PROJ-1 --type blocks
+agent-do jira issue link PROJ-2 --to PROJ-1 --type "is blocked by"
+agent-do jira issue link PROJ-2 --to PROJ-1 --type clones
+agent-do jira issue link PROJ-2 --to PROJ-1 --type relates to
+```
+
 ### Comment
 ```bash
 agent-do jira issue comment PROJ-123 --body "Confirmed on staging." [--dry-run] [--json]

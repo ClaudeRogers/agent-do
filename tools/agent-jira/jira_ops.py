@@ -168,6 +168,10 @@ class JiraClient:
     def _agile(self, path: str) -> str:
         return f"{self.base}/rest/agile/1.0/{path.lstrip('/')}"
 
+    def _search(self) -> str:
+        # Jira Cloud removed GET /rest/api/3/search; use the enhanced search endpoint.
+        return "search" if self.server else "search/jql"
+
     def request(self, method: str, url: str, *, body: Any = None) -> Any:
         data = json.dumps(body).encode() if body is not None else None
         headers = {
@@ -309,6 +313,32 @@ def _fmt_issue(issue: dict[str, Any], client: JiraClient) -> dict[str, Any]:
         "url": f"{client.base}/browse/{issue.get('key')}",
         "description": client._extract_text(f.get("description")),
     }
+
+
+def _normalize_issue_link_type(raw: str) -> tuple[str, str]:
+    """Return (canonical_link_type, relation_label) for common Jira link phrases."""
+    value = " ".join(raw.strip().lower().replace("_", " ").replace("-", " ").split())
+    mapping = {
+        "blocks": ("Blocks", "blocks"),
+        "block": ("Blocks", "blocks"),
+        "is blocked by": ("Blocks", "is blocked by"),
+        "blocked by": ("Blocks", "is blocked by"),
+        "clones": ("Cloners", "clones"),
+        "clone": ("Cloners", "clones"),
+        "is cloned by": ("Cloners", "is cloned by"),
+        "cloned by": ("Cloners", "is cloned by"),
+        "duplicates": ("Duplicates", "duplicates"),
+        "duplicate": ("Duplicates", "duplicates"),
+        "is duplicated by": ("Duplicates", "is duplicated by"),
+        "duplicated by": ("Duplicates", "is duplicated by"),
+        "relates to": ("Relates", "relates to"),
+        "relates": ("Relates", "relates to"),
+    }
+    if value not in mapping:
+        _err(
+            f"Unknown issue link type: {raw!r}. Use one of: blocks, is blocked by, clones, is cloned by, duplicates, is duplicated by, relates to"
+        )
+    return mapping[value]
 
 
 # ── connections ────────────────────────────────────────────────────────────────
@@ -541,6 +571,7 @@ def cmd_issue(argv: list[str]) -> None:
         "view": _issue_view,
         "list": _issue_list,
         "create": _issue_create,
+        "link": _issue_link,
         "comment": _issue_comment,
         "assign": _issue_assign,
         "transition": _issue_transition,
@@ -549,7 +580,7 @@ def cmd_issue(argv: list[str]) -> None:
     }
     fn = dispatch.get(sub)
     if not fn:
-        _err(f"Unknown issue subcommand: {sub!r}. Use: view, list, create, comment, assign, transition, label, edit")
+        _err(f"Unknown issue subcommand: {sub!r}. Use: view, list, create, link, comment, assign, transition, label, edit")
     fn(rest)
 
 
@@ -652,8 +683,8 @@ def _issue_list(argv: list[str]) -> None:
     jql_parts.append("ORDER BY updated DESC")
     jql = " AND ".join(jql_parts[:-1]) + " " + jql_parts[-1]
 
-    result = client.get("search", params={"jql": jql, "maxResults": limit,
-                                           "fields": "summary,status,issuetype,priority,assignee,labels,created,updated"})
+    result = client.get(client._search(), params={"jql": jql, "maxResults": limit,
+                                                  "fields": "summary,status,issuetype,priority,assignee,labels,created,updated"})
     issues = [_fmt_issue(i, client) for i in (result.get("issues") or [])]
     total = result.get("total", len(issues))
 
@@ -758,6 +789,88 @@ def _issue_create(argv: list[str]) -> None:
     else:
         print(f"Created {key}: {summary}")
         print(f"  {url}")
+
+
+def _issue_link(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue link <ISSUE-KEY> --to <ISSUE-KEY> --type <blocks|is blocked by|clones|is cloned by|duplicates|is duplicated by|relates to>")
+    key = argv[0]
+    target = None
+    link_type = "relates to"
+    dry_run = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--to" and i + 1 < len(argv):
+            target = argv[i + 1]; i += 2
+        elif argv[i] == "--type" and i + 1 < len(argv):
+            link_type = argv[i + 1]; i += 2
+        elif argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        else:
+            i += 1
+    if not target:
+        _err("--to is required")
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    canonical_type, relation = _normalize_issue_link_type(link_type)
+    relation_value = relation
+    subject_outward = relation_value in ("blocks", "clones", "duplicates", "relates to")
+    if relation_value == "is blocked by":
+        subject_outward = False
+    elif relation_value == "blocks":
+        subject_outward = True
+    elif relation_value == "is cloned by":
+        subject_outward = False
+    elif relation_value == "clones":
+        subject_outward = True
+    elif relation_value == "is duplicated by":
+        subject_outward = False
+    elif relation_value == "duplicates":
+        subject_outward = True
+
+    if subject_outward:
+        outward_key, inward_key = key, target
+    else:
+        outward_key, inward_key = target, key
+
+    body = {
+        "type": {"name": canonical_type},
+        "outwardIssue": {"key": outward_key},
+        "inwardIssue": {"key": inward_key},
+    }
+
+    if dry_run:
+        if json_mode:
+            _print_json({
+                "dry_run": True,
+                "action": "issue_link",
+                "from": key,
+                "to": target,
+                "link_type": relation_value,
+                "jira_type": canonical_type,
+                "outward_issue": outward_key,
+                "inward_issue": inward_key,
+            })
+        else:
+            print(f"[dry-run] would link {key} {relation_value} {target}")
+            print(f"  Jira type: {canonical_type}")
+            print(f"  Outward issue: {outward_key}")
+            print(f"  Inward issue:  {inward_key}")
+        sys.exit(2)
+
+    client.post("issueLink", body)
+    if json_mode:
+        _print_json({
+            "from": key,
+            "to": target,
+            "link_type": relation_value,
+            "jira_type": canonical_type,
+            "outward_issue": outward_key,
+            "inward_issue": inward_key,
+        })
+    else:
+        print(f"Linked {key} {relation_value} {target}")
 
 
 def _issue_comment(argv: list[str]) -> None:
@@ -1015,7 +1128,7 @@ def cmd_search(argv: list[str]) -> None:
     connection, json_mode, _ = _parse_common(argv[1:])
     client = _get_client(connection)
 
-    result = client.get("search", params={"jql": jql, "maxResults": limit, "fields": fields})
+    result = client.get(client._search(), params={"jql": jql, "maxResults": limit, "fields": fields})
     issues = [_fmt_issue(iss, client) for iss in (result.get("issues") or [])]
     total = result.get("total", len(issues))
 
