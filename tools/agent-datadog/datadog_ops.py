@@ -26,17 +26,18 @@ def _parse_time(value: str) -> int:
     v = value.strip().lower()
     if v == "now":
         return _now_epoch()
-    if v.startswith("now-"):
+    if v.startswith("now-") or v.startswith("now+"):
+        sign = -1 if v[3] == "-" else 1
         tail = v[4:]
         try:
             if tail.endswith("h"):
-                return _now_epoch() - int(tail[:-1]) * 3600
+                return _now_epoch() + sign * int(tail[:-1]) * 3600
             if tail.endswith("d"):
-                return _now_epoch() - int(tail[:-1]) * 86400
+                return _now_epoch() + sign * int(tail[:-1]) * 86400
             if tail.endswith("m"):
-                return _now_epoch() - int(tail[:-1]) * 60
+                return _now_epoch() + sign * int(tail[:-1]) * 60
             if tail.endswith("w"):
-                return _now_epoch() - int(tail[:-1]) * 604800
+                return _now_epoch() + sign * int(tail[:-1]) * 604800
         except ValueError:
             pass
     for fmt in ("%Y-%m-%dt%H:%M:%Sz", "%Y-%m-%dt%H:%M:%S", "%Y-%m-%d"):
@@ -47,7 +48,7 @@ def _parse_time(value: str) -> int:
     try:
         return int(v)
     except ValueError:
-        _err(f"Cannot parse time: {value!r}. Use 'now', 'now-1h', 'now-2d', ISO8601, or epoch integer.")
+        _err(f"Cannot parse time: {value!r}. Use 'now', 'now+1h', 'now-1h', ISO8601, or epoch integer.")
     return _now_epoch()  # unreachable — _err exits
 
 
@@ -802,7 +803,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # monitor-mute
     p = _sub("monitor-mute", help="Mute a monitor")
     p.add_argument("id", type=int)
-    p.add_argument("--end", help="Mute until (now-1h, ISO8601, or epoch integer)")
+    p.add_argument("--end", help="Mute until (now+1h, ISO8601, or epoch integer)")
     p.add_argument("--scope", help="Scope to mute (e.g. host:web-01)")
     p.add_argument("--message", help="Mute reason")
     p.add_argument("--dry-run", action="store_true")
