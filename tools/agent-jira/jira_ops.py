@@ -206,14 +206,14 @@ class JiraClient:
                     msg = detail.get("message") or str(detail)
             except (json.JSONDecodeError, AttributeError):
                 msg = body_bytes.decode(errors="replace")[:200]
+            if suppress_errors:
+                return {"_error": msg, "status": exc.code}
             if exc.code == 401:
                 _err(f"Jira API 401 Unauthorized — check your API token and email. {msg}".rstrip(". "))
             elif exc.code == 403:
                 _err(f"Jira API 403 Forbidden — your account lacks permission for this action. {msg}".rstrip(". "))
             elif exc.code == 429:
                 _err(f"Jira API 429 Too Many Requests — slow down or check rate limits. {msg}".rstrip(". "))
-            elif suppress_errors:
-                return {"_error": msg, "status": exc.code}
             else:
                 _err(f"Jira API {exc.code} {exc.reason}: {msg}")
         except urllib.error.URLError as exc:
@@ -423,15 +423,20 @@ def cmd_connections(argv: list[str]) -> None:
         i = 1
         while i < len(rest):
             if rest[i] == "--url" and i + 1 < len(rest):
-                url = rest[i + 1].strip(); i += 2
+                url = rest[i + 1].strip()
+                i += 2
             elif rest[i] == "--email" and i + 1 < len(rest):
-                email = rest[i + 1].strip(); i += 2
+                email = rest[i + 1].strip()
+                i += 2
             elif rest[i] == "--token" and i + 1 < len(rest):
-                token = rest[i + 1].strip(); i += 2
+                token = rest[i + 1].strip()
+                i += 2
             elif rest[i] == "--server":
-                is_server = True; i += 1
+                is_server = True
+                i += 1
             elif rest[i] == "--default":
-                is_default = True; i += 1
+                is_default = True
+                i += 1
             else:
                 i += 1
         if not url:
@@ -440,8 +445,6 @@ def cmd_connections(argv: list[str]) -> None:
             _err("--email is required")
         if not token:
             _err("--token is required")
-        if not url.startswith("http"):
-            _err(f"--url must start with http:// or https://, got: {url!r}")
         url = _validate_base_url(url)
 
         data = _load_profiles()
@@ -497,9 +500,11 @@ def cmd_whoami(argv: list[str]) -> None:
     i = 0
     while i < len(argv):
         if argv[i] == "--connection" and i + 1 < len(argv):
-            connection = argv[i + 1]; i += 2
+            connection = argv[i + 1]
+            i += 2
         elif argv[i] == "--json":
-            json_mode = True; i += 1
+            json_mode = True
+            i += 1
         else:
             i += 1
     client = _get_client(connection)
@@ -520,9 +525,11 @@ def cmd_snapshot(argv: list[str]) -> None:
     i = 0
     while i < len(argv):
         if argv[i] == "--connection" and i + 1 < len(argv):
-            connection = argv[i + 1]; i += 2
+            connection = argv[i + 1]
+            i += 2
         elif argv[i] == "--json":
-            json_mode = True; i += 1
+            json_mode = True
+            i += 1
         else:
             i += 1
     client = _get_client(connection)
@@ -577,13 +584,15 @@ def cmd_user(argv: list[str]) -> None:
     i = 0
     while i < len(rest):
         if rest[i] in ("--email", "--query") and i + 1 < len(rest):
-            query = rest[i + 1]; i += 2
+            query = rest[i + 1]
+            i += 2
         elif rest[i] == "--connection" and i + 1 < len(rest):
             i += 2  # skip; _parse_common handles it
         elif rest[i].startswith("-"):
             i += 1  # skip boolean flags (e.g. --json)
         elif query is None:
-            query = rest[i]; i += 1
+            query = rest[i]
+            i += 1
         else:
             i += 1
 
@@ -645,11 +654,14 @@ def _parse_common(argv: list[str], *, start: int = 0) -> tuple[str | None, bool,
     i = start
     while i < len(argv):
         if argv[i] == "--connection" and i + 1 < len(argv):
-            connection = argv[i + 1]; i += 2
+            connection = argv[i + 1]
+            i += 2
         elif argv[i] == "--json":
-            json_mode = True; i += 1
+            json_mode = True
+            i += 1
         else:
-            remaining.append(argv[i]); i += 1
+            remaining.append(argv[i])
+            i += 1
     return connection, json_mode, remaining
 
 
@@ -700,19 +712,26 @@ def _issue_list(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--status" and i + 1 < len(argv):
-            status = argv[i + 1]; i += 2
+            status = argv[i + 1]
+            i += 2
         elif argv[i] == "--assignee" and i + 1 < len(argv):
-            assignee = argv[i + 1]; i += 2
+            assignee = argv[i + 1]
+            i += 2
         elif argv[i] == "--mine":
-            assignee = "currentUser()"; i += 1
+            assignee = "currentUser()"
+            i += 1
         elif argv[i] == "--type" and i + 1 < len(argv):
-            issue_type = argv[i + 1]; i += 2
+            issue_type = argv[i + 1]
+            i += 2
         elif argv[i] == "--priority" and i + 1 < len(argv):
-            priority = argv[i + 1]; i += 2
+            priority = argv[i + 1]
+            i += 2
         elif argv[i] == "--label" and i + 1 < len(argv):
-            label = argv[i + 1]; i += 2
+            label = argv[i + 1]
+            i += 2
         elif argv[i] == "--limit" and i + 1 < len(argv):
-            limit = _parse_limit(argv[i + 1]); i += 2
+            limit = _parse_limit(argv[i + 1])
+            i += 2
         else:
             i += 1
     connection, json_mode, _ = _parse_common(argv[1:])
@@ -763,23 +782,32 @@ def _issue_create(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--summary" and i + 1 < len(argv):
-            summary = argv[i + 1]; i += 2
+            summary = argv[i + 1]
+            i += 2
         elif argv[i] == "--description" and i + 1 < len(argv):
-            description = argv[i + 1]; i += 2
+            description = argv[i + 1]
+            i += 2
         elif argv[i] == "--type" and i + 1 < len(argv):
-            issue_type = argv[i + 1]; i += 2
+            issue_type = argv[i + 1]
+            i += 2
         elif argv[i] == "--assignee" and i + 1 < len(argv):
-            assignee = argv[i + 1]; i += 2
+            assignee = argv[i + 1]
+            i += 2
         elif argv[i] == "--priority" and i + 1 < len(argv):
-            priority = argv[i + 1]; i += 2
+            priority = argv[i + 1]
+            i += 2
         elif argv[i] == "--label" and i + 1 < len(argv):
-            labels.append(argv[i + 1]); i += 2
+            labels.append(argv[i + 1])
+            i += 2
         elif argv[i] == "--parent" and i + 1 < len(argv):
-            parent = argv[i + 1]; i += 2
+            parent = argv[i + 1]
+            i += 2
         elif argv[i] == "--sprint" and i + 1 < len(argv):
-            sprint_id = argv[i + 1]; i += 2
+            sprint_id = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not summary:
@@ -984,9 +1012,11 @@ def _issue_comment(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--body" and i + 1 < len(argv):
-            body_text = argv[i + 1]; i += 2
+            body_text = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not body_text:
@@ -1019,9 +1049,11 @@ def _issue_assign(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--to" and i + 1 < len(argv):
-            to = argv[i + 1]; i += 2
+            to = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not to:
@@ -1060,9 +1092,11 @@ def _issue_transition(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--to" and i + 1 < len(argv):
-            to_status = argv[i + 1]; i += 2
+            to_status = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not to_status:
@@ -1106,11 +1140,14 @@ def _issue_label(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--add" and i + 1 < len(argv):
-            add_labels.append(argv[i + 1]); i += 2
+            add_labels.append(argv[i + 1])
+            i += 2
         elif argv[i] == "--remove" and i + 1 < len(argv):
-            remove_labels.append(argv[i + 1]); i += 2
+            remove_labels.append(argv[i + 1])
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not add_labels and not remove_labels:
@@ -1153,13 +1190,17 @@ def _issue_edit(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--summary" and i + 1 < len(argv):
-            summary = argv[i + 1]; i += 2
+            summary = argv[i + 1]
+            i += 2
         elif argv[i] == "--description" and i + 1 < len(argv):
-            description = argv[i + 1]; i += 2
+            description = argv[i + 1]
+            i += 2
         elif argv[i] == "--priority" and i + 1 < len(argv):
-            priority = argv[i + 1]; i += 2
+            priority = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not any([summary, description, priority]):
@@ -1222,9 +1263,11 @@ def cmd_search(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--limit" and i + 1 < len(argv):
-            limit = _parse_limit(argv[i + 1]); i += 2
+            limit = _parse_limit(argv[i + 1])
+            i += 2
         elif argv[i] == "--fields" and i + 1 < len(argv):
-            fields = argv[i + 1]; i += 2
+            fields = argv[i + 1]
+            i += 2
         else:
             i += 1
     connection, json_mode, _ = _parse_common(argv[1:])
@@ -1253,7 +1296,8 @@ def cmd_board(argv: list[str]) -> None:
         i = 0
         while i < len(rest):
             if rest[i] == "--project" and i + 1 < len(rest):
-                project = rest[i + 1]; i += 2
+                project = rest[i + 1]
+                i += 2
             else:
                 i += 1
         connection, json_mode, _ = _parse_common(rest)
@@ -1286,7 +1330,8 @@ def cmd_sprint(argv: list[str]) -> None:
         i = 1
         while i < len(rest):
             if rest[i] == "--state" and i + 1 < len(rest):
-                state = rest[i + 1]; i += 2
+                state = rest[i + 1]
+                i += 2
             else:
                 i += 1
         connection, json_mode, _ = _parse_common(rest[1:])
@@ -1338,9 +1383,11 @@ def cmd_sprint(argv: list[str]) -> None:
         i = 1
         while i < len(rest):
             if rest[i] == "--sprint" and i + 1 < len(rest):
-                sprint_id = rest[i + 1]; i += 2
+                sprint_id = rest[i + 1]
+                i += 2
             elif rest[i] == "--dry-run":
-                dry_run = True; i += 1
+                dry_run = True
+                i += 1
             else:
                 i += 1
         if not sprint_id:
