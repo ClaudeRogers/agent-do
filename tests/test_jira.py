@@ -9,6 +9,7 @@ import os
 import socketserver
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -17,6 +18,8 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parents[1]
 JIRA_PY = ROOT / "tools" / "agent-jira" / "jira_ops.py"
 AGENT_DO = ROOT / "agent-do"
+sys.path.insert(0, str(ROOT / "lib"))
+import registry  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -42,7 +45,7 @@ def check(desc: str, condition: bool, detail: str = "") -> None:
 
 def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(JIRA_PY), *argv],
+        [sys.executable, str(JIRA_PY), *argv],
         text=True,
         capture_output=True,
         env=env,
@@ -551,6 +554,11 @@ def main() -> int:
                      "--url", "ftp://example.com", "--email", "x@x.com", "--token", "t"], env=env)
             check("connections add unsupported scheme exits 1", r.returncode == 1)
             check("connections add unsupported scheme prints error", "http:// or https://" in r.stderr, r.stderr)
+
+            r = run(["connections", "add", "bad-empty-host",
+                     "--url", "https://", "--email", "x@x.com", "--token", "t"], env=env)
+            check("connections add empty-host url exits 1", r.returncode == 1)
+            check("connections add empty-host url prints error", "http:// or https://" in r.stderr, r.stderr)
 
             r = run(["connections", "add", ".hidden",
                      "--url", base_url, "--email", "x@x.com", "--token", "t"], env=env)
@@ -1582,6 +1590,19 @@ def main() -> int:
     check("agent-do jira --help shows user find", "user find" in r.stdout, r.stdout)
     check("agent-do jira --help shows --mine", "--mine" in r.stdout, r.stdout)
     check("agent-do jira --help shows --sprint", "--sprint" in r.stdout, r.stdout)
+
+    print("\nregistry metadata")
+    reg = registry.load_registry()
+    jira_info = reg["tools"]["jira"]
+    jira_commands = jira_info["commands"]
+    check("registry documents issue link", "issue link" in jira_commands)
+    check("registry documents issue delete", "issue delete" in jira_commands)
+    check("registry documents user find", "user find" in jira_commands)
+    command_concurrency = registry.get_tool_command_concurrency(jira_info)
+    check("registry concurrency has issue link", command_concurrency.get("issue link") == "write")
+    check("registry concurrency has user find", command_concurrency.get("user find") == "read")
+    check("malformed command_concurrency is ignored",
+          registry.get_tool_command_concurrency({"routing": {"command_concurrency": ["bad"]}}) == {})
 
     print(f"\nResults: {PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1
