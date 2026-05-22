@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+DRY_RUN_EXIT_CODE = 3
+
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -58,6 +60,14 @@ def _parse_limit(value: str) -> int:
     if n < 0:
         _err(f"--limit must be non-negative, got: {n}")
     return n
+
+
+def _validate_base_url(url: str) -> str:
+    """Return a normalized Jira base URL or fail fast on unsafe schemes."""
+    parsed = urllib.parse.urlparse(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        _err(f"Jira base URL must start with http:// or https://, got: {url!r}")
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
 # ── credential storage ─────────────────────────────────────────────────────────
@@ -154,7 +164,7 @@ def _save_profiles(data: dict[str, Any]) -> None:
 
 class JiraClient:
     def __init__(self, url: str, email: str, token: str, *, server: bool = False):
-        self.base = url.rstrip("/")
+        self.base = _validate_base_url(url)
         self.email = email
         self.token = token
         self.server = server
@@ -268,19 +278,28 @@ def _get_client(connection: str | None) -> JiraClient:
         if not creds:
             _err(f"Profile '{connection}' not found. Run: agent-do jira connections add {connection} ...")
         meta = data["profiles"].get(connection, {})
-        return JiraClient(creds["url"], creds["email"], creds["token"],
-                          server=meta.get("server", False))
+        try:
+            return JiraClient(creds["url"], creds["email"], creds["token"],
+                              server=meta.get("server", False))
+        except ValueError as exc:
+            _err(str(exc))
 
     default = data.get("default")
     if default:
         creds = _creds_get(default)
         if creds:
             meta = data["profiles"].get(default, {})
-            return JiraClient(creds["url"], creds["email"], creds["token"],
-                              server=meta.get("server", False))
+            try:
+                return JiraClient(creds["url"], creds["email"], creds["token"],
+                                  server=meta.get("server", False))
+            except ValueError as exc:
+                _err(str(exc))
 
     if env_url and env_email and env_token:
-        return JiraClient(env_url, env_email, env_token)
+        try:
+            return JiraClient(env_url, env_email, env_token)
+        except ValueError as exc:
+            _err(str(exc))
 
     _err(
         "No Jira connection configured.\n"
@@ -780,7 +799,7 @@ def _issue_create(argv: list[str]) -> None:
                 print(f"  Parent: {parent}")
             if sprint_id:
                 print(f"  Sprint: {sprint_id}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     result = client.post("issue", body)
     key = result.get("key", "?")
@@ -861,7 +880,7 @@ def _issue_link(argv: list[str]) -> None:
             print(f"  Jira type: {canonical_type}")
             print(f"  Outward issue: {outward_key}")
             print(f"  Inward issue:  {inward_key}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     client.post("issueLink", body)
     if json_mode:
@@ -899,7 +918,7 @@ def _issue_delete(argv: list[str]) -> None:
             _print_json({"dry_run": True, "action": "issue_delete", "key": key})
         else:
             print(f"[dry-run] would delete {key}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     if not confirm:
         _err("Delete requires --confirm (or use --dry-run to preview)")
@@ -936,7 +955,7 @@ def _issue_comment(argv: list[str]) -> None:
         else:
             print(f"[dry-run] would comment on {key}:")
             print(f"  {body_text[:200]}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     result = client.post(f"issue/{key}/comment", {"body": client._text_body(body_text)})
     comment_id = result.get("id")
@@ -971,7 +990,7 @@ def _issue_assign(argv: list[str]) -> None:
             _print_json({"dry_run": True, "action": "issue_assign", "key": key, "to": to})
         else:
             print(f"[dry-run] would {action} {key}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     if to.lower() == "none":
         body: dict[str, Any] = {"accountId": None} if not client.server else {"name": None}
@@ -1023,7 +1042,7 @@ def _issue_transition(argv: list[str]) -> None:
                          "transition": match["name"], "id": match["id"]})
         else:
             print(f"[dry-run] would transition {key} → '{match['name']}' (id: {match['id']})")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     client.post(f"issue/{key}/transitions", {"transition": {"id": match["id"]}})
     if json_mode:
@@ -1071,7 +1090,7 @@ def _issue_label(argv: list[str]) -> None:
             print(f"[dry-run] would update labels on {key}:")
             print(f"  Before: {', '.join(current) or '(none)'}")
             print(f"  After:  {', '.join(updated) or '(none)'}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     client.put(f"issue/{key}", {"fields": {"labels": updated}})
     if json_mode:
@@ -1118,7 +1137,7 @@ def _issue_edit(argv: list[str]) -> None:
             print(f"[dry-run] would edit {key}:")
             for k, v in fields.items():
                 print(f"  {k}: {v}")
-        sys.exit(2)
+        sys.exit(DRY_RUN_EXIT_CODE)
 
     client.put(f"issue/{key}", {"fields": fields})
     if json_mode:
@@ -1290,7 +1309,7 @@ def cmd_sprint(argv: list[str]) -> None:
                              "key": key, "sprint_id": sprint_id})
             else:
                 print(f"[dry-run] would add {key} to sprint {sprint_id}")
-            sys.exit(2)
+            sys.exit(DRY_RUN_EXIT_CODE)
 
         client.post(f"sprint/{sprint_id}/issue", {"issues": [key]}, agile=True)
         if json_mode:

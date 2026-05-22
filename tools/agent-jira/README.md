@@ -76,7 +76,7 @@ agent-do jira issue list PROJ --limit 20 --json
 
 ### Create
 ```bash
-# Preview first (exit code 2 = dry-run, no changes made)
+# Preview first (exit code 3 = dry-run, no changes made)
 agent-do jira issue create PROJ \
   --summary "Fix login bug" \
   --type Bug \
@@ -183,7 +183,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 |------|-------------|
 | `--connection <name>` | Use a specific connection profile |
 | `--json` | Structured JSON output |
-| `--dry-run` | Preview write operations without making changes (exits 2) |
+| `--dry-run` | Preview write operations without making changes (exits 3) |
 
 ## Exit Codes
 
@@ -191,7 +191,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 |------|---------|
 | 0 | Success |
 | 1 | Error |
-| 2 | Dry-run preview (no changes made) |
+| 3 | Dry-run preview (no changes made) |
 
 ## Environment
 
@@ -207,7 +207,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 
 ## Regression Test Coverage
 
-`tests/test_jira.py` — 368 assertions, fake HTTP server, zero external dependencies.
+`tests/test_jira.py` — 376 assertions, fake HTTP server, zero external dependencies.
 
 | Area | Assertions |
 |------|-----------|
@@ -217,6 +217,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 | connections add --server flag | 3 |
 | connections remove | 3 |
 | connections error cases (missing flags) | 3 |
+| connections add validation (profile names + URLs) | 7 |
 | whoami (text + JSON + bad connection) | 10 |
 | snapshot (text + JSON structure) | 10 |
 | issue view (text, --comments, JSON, 404) | 18 |
@@ -236,7 +237,9 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 | sprint active (text + JSON) | 7 |
 | sprint add (dry-run, missing flag) | 6 |
 | env var credentials (global + per-profile) | 3 |
+| env var credentials (bad URL) | 2 |
 | no credentials error | 2 |
 | Server/DC mode (plain-text description) | 2 |
+| agent-do wrapper unknown command (plain + json) | 4 |
 | agent-do dispatch (--help) | 8 |
-| **Total** | **368** |
+| **Total** | **376** |
