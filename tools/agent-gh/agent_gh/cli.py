@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any
 
 from .groups import audit as audit_group
@@ -403,6 +404,25 @@ def _subcommand_help(parser: argparse.ArgumentParser, command: str | None) -> No
     if not command:
         parser.print_help()
 
+def _build_pr_create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent-gh pr create", description="Create a pull request")
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--body")
+    parser.add_argument("--body-file")
+    parser.add_argument("--base")
+    parser.add_argument("--head")
+    parser.add_argument("--draft", action="store_true")
+    parser.add_argument("--web", action="store_true")
+    parser.add_argument("--fill", action="store_true")
+    parser.add_argument("--label", action="append", dest="labels")
+    parser.add_argument("--assignee", action="append", dest="assignees")
+    parser.add_argument("--reviewer", action="append", dest="reviewers")
+    parser.add_argument("--project", action="append", dest="projects")
+    parser.add_argument("--milestone")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser
+
 def show_help() -> None:
     print(
         """agent-gh - GitHub work-state for agent-do
@@ -419,6 +439,7 @@ PR commands (existing):
   checks <pr>                    Show PR checks
   review <pr>                    Summarize a PR for review
   audit <pr> [--reply]           Audit a PR and generate fix-oriented review text
+  pr create                      Create a pull request
   approve / request-changes / comment / merge / ready / draft
 
 Issue commands (new):
@@ -457,6 +478,15 @@ def main(argv: list[str] | None = None) -> int:
     if len(argv) == 1 and argv[0] in {"help", "--help", "-h"}:
         show_help()
         return 0
+    if len(argv) >= 2 and argv[0] == "pr" and argv[1] == "create":
+        parser = _build_pr_create_parser()
+        args = parser.parse_args(argv[2:])
+        try:
+            pr_group.cmd_create(args)
+            return 0
+        except GhError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.func is None:

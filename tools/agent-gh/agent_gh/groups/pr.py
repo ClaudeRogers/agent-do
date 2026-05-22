@@ -667,6 +667,43 @@ def append_repeated_flag(gh_args: list[str], flag: str, values: list[str] | None
     for value in values or []:
         gh_args.extend([flag, value])
 
+def cmd_create(args: argparse.Namespace) -> None:
+    gh_args = ["pr", "create"]
+    if args.title:
+        gh_args.extend(["--title", args.title])
+    if args.body:
+        gh_args.extend(["--body", args.body])
+    elif args.body_file:
+        body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text()
+        gh_args.extend(["--body", body])
+    if args.base:
+        gh_args.extend(["--base", args.base])
+    if args.head:
+        gh_args.extend(["--head", args.head])
+    if args.draft:
+        gh_args.append("--draft")
+    if args.web:
+        gh_args.append("--web")
+    if args.fill:
+        gh_args.append("--fill")
+    append_repeated_flag(gh_args, "--label", args.labels)
+    append_repeated_flag(gh_args, "--assignee", args.assignees)
+    append_repeated_flag(gh_args, "--reviewer", args.reviewers)
+    append_repeated_flag(gh_args, "--project", args.projects)
+    if args.milestone:
+        gh_args.extend(["--milestone", args.milestone])
+    if args.dry_run:
+        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
+        return
+    out = run_gh(gh_args).strip()
+    url = out.splitlines()[-1] if out else None
+    if args.json:
+        from ..snapshot import envelope
+
+        print_json(envelope("pr create", data={"url": url}))
+    else:
+        print(f"Created PR: {url}")
+
 def cmd_edit(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
     gh_args = ["pr", "edit", *pr_gh_args(ref)]
