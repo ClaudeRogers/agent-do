@@ -508,13 +508,11 @@ tools:
       discover_keywords:
       - macos automation
       - desktop automation
-      - osascript
       - accessibility
       - native app ui
       prompt_patterns:
       - \b(macos|mac\s*os)\s+(automation|app)\b
       - \bdesktop automation\b
-      - \bosascript\b
       - \bui element\b
       - \bmenu item\b
       recommended_entrypoints:
@@ -523,10 +521,6 @@ tools:
       - agent-do macos find Finder Save
       default_command: tree
       raw_cli_equivalents:
-      - pattern: \bosascript\b
-        replacement: agent-do macos
-        example: agent-do macos tree Finder
-        reason: agent-do exposes structured desktop snapshots instead of opaque AppleScript output
       - pattern: \bautomator\b
         replacement: agent-do macos
         example: agent-do macos tree Finder
@@ -539,6 +533,83 @@ tools:
         check: agent-do macos permissions
         fix: agent-do macos permissions
         note: Accessibility permission is required for desktop automation
+    concurrency: mixed
+  appleevents:
+    description: Control scriptable macOS apps through AppleEvents, AppleScript, and JXA
+    capabilities:
+    - inspect app scripting dictionaries
+    - compile AppleScript and JXA safely before running
+    - run live-gated AppleEvent scripts
+    - diagnose macOS Automation permission state with explicit live probes
+    commands:
+      apps: List scriptability hints from installed app bundle metadata
+      probe: Resolve an app and inspect static scriptability and dictionary metadata
+      dictionary: Show an app scripting dictionary as JSON, Markdown, or raw SDEF XML
+      terms: Search commands, classes, and properties from an app dictionary
+      compile: Compile-check AppleScript or JXA without running it
+      permissions: Live-gated Automation permission probe by sending a benign event
+      run: Live-gated AppleScript or JXA execution
+      tell: Terse target-app sugar over the shared run path
+      cache: Inspect or clear cached scripting dictionaries
+    examples:
+    - intent: inspect Finder scripting support
+      command: agent-appleevents probe Finder
+    - intent: show Xcode's scripting dictionary
+      command: agent-appleevents dictionary Xcode --format markdown
+    - intent: compile-check AppleScript from stdin
+      command: agent-appleevents compile --language applescript --stdin
+    - intent: test Automation permission for Finder
+      command: agent-do +live(scope=desktop,ttl=5m) appleevents permissions Finder
+    routing:
+      discover_keywords:
+      - appleevents
+      - apple events
+      - applescript
+      - javascript for automation
+      - jxa
+      - osa
+      - osascript
+      - osacompile
+      - sdef
+      - scripting dictionary
+      - xcode automation
+      prompt_patterns:
+      - \bapple\s*events?\b
+      - \bappleevents\b
+      - \bapplescript\b
+      - \bjxa\b
+      - \bjavascript for automation\b
+      - \bosascript\b
+      - \bosacompile\b
+      - \bsdef\b
+      - \bscripting dictionary\b
+      recommended_entrypoints:
+      - agent-do appleevents probe Finder
+      - agent-do appleevents dictionary Finder --format json
+      - agent-do appleevents compile --language applescript --stdin
+      default_command: probe
+      raw_cli_equivalents:
+      - pattern: \bosascript\b
+        replacement: agent-do appleevents run
+        example: agent-do +live(scope=desktop,ttl=5m) appleevents run --language applescript --stdin
+        reason: agent-do compiles scripts first, gates live AppleEvents explicitly, and reports structured Automation failures
+      - pattern: \bosacompile\b
+        replacement: agent-do appleevents compile
+        example: agent-do appleevents compile --language applescript --stdin
+        reason: agent-do returns structured compile diagnostics and hashes script source without logging it
+      - pattern: \bsdef\b
+        replacement: agent-do appleevents dictionary
+        example: agent-do appleevents dictionary Finder --format json
+        reason: agent-do parses SDEF dictionaries into agent-readable commands, classes, and properties
+      project_signals:
+      - macos
+      - desktop
+      - automation
+      - native
+      - xcode
+      readiness:
+        check: agent-do +live(scope=desktop,ttl=5m) appleevents permissions <app>
+        note: macOS Automation permission is target-app specific and can only be confirmed by a live AppleEvent probe
     concurrency: mixed
   repl:
     description: Control interactive REPLs (Python, Node, psql, etc.)
@@ -1733,7 +1804,10 @@ tools:
     - discover accessible GitHub repositories
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
+    - classify changed files by review-risk tier (critical/elevated/standard)
     - audit PR review risks and generate fix-oriented engineering review replies
+    - surface the built-in review doctrine on every review
+    - gate merges on failing checks, unresolved threads, dirty merge state, and missing approval
     - approve, comment, request changes, close/reopen, edit, check out, update branches, mark ready/draft, and merge pull requests
     commands:
       whoami: Show authenticated GitHub user
@@ -1745,8 +1819,9 @@ tools:
       diff: Show PR diff
       threads: Show unresolved PR review threads
       checks: Show PR checks
-      review: Summarize a PR for review
+      review: Summarize a PR for review — state, checks, risk tier, and the review doctrine
       audit: Audit a PR for review risks and generate request-changes-ready reply text
+      doctrine: Print the PR review doctrine
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -1755,7 +1830,7 @@ tools:
       checkout: Check out a PR locally
       edit: Edit PR metadata
       update-branch: Update a PR branch from its base branch
-      merge: Merge a PR
+      merge: Merge a PR (gated on checks, threads, merge state, approval; --force to bypass)
       ready: Mark a PR ready for review
       draft: Convert a PR to draft
     examples:

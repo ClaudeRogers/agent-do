@@ -127,7 +127,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # filterEntries: removes static assets, CDN, deduplicates
 │       ├── auth.js         # extractAuth: identifies auth patterns in captured traffic
 │       └── generator.js    # generateSkill: writes skill package to ~/.agent-do/skills/
-├── tools/agent-*           # 91 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 94 tools (standalone scripts + directory-based tools)
 └── registry.yaml           # Master tool catalog: tool descriptions, commands, examples
 ```
 
@@ -155,6 +155,7 @@ Registries merge in reverse priority order (higher-priority wins):
 | `agent-db/` | Bash + Python | Database client (PostgreSQL, MySQL, SQLite). Connection management, queries, schema inspection. |
 | `agent-excel/` | Bash + Python | Excel workbook automation via openpyxl. Read/write cells, formulas, sheets, export. |
 | `agent-macos/` | Bash + Python | Desktop GUI automation via macOS accessibility APIs. Click, type, UI tree inspection. |
+| `agent-appleevents/` | Bash + Python | Scriptable macOS app automation via AppleEvents, AppleScript, and JXA. Dictionary inspection, compile checks, and live-gated execution. |
 | `agent-screen/` | Bash + Python | Vision-based screen perception. Multi-display capture, OCR, element detection, mouse/keyboard control. |
 | `agent-vision/` | Bash + Python | Visual perception with YOLO object detection, OCR, face detection, motion detection. |
 | `agent-render` | Bash + curl | Render.com service management via REST API. Requires `RENDER_API_KEY`. |

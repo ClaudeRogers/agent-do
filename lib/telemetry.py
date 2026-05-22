@@ -314,21 +314,40 @@ def clear_nudges() -> None:
         item.unlink()
 
 
+def redact_tool_args(tool: str, args: list[str]) -> list[str]:
+    """Redact tool-specific sensitive argument payloads before telemetry."""
+    if tool != "appleevents":
+        return list(args)
+
+    redacted: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        redacted.append(arg)
+        if arg == "--script" and i + 1 < len(args):
+            redacted.append(f"<script:{stable_hash(args[i + 1])}>")
+            i += 2
+            continue
+        i += 1
+    return redacted
+
+
 def command_preview(tool: str, args: list[str]) -> str:
-    parts = ["agent-do", tool, *args]
+    parts = ["agent-do", tool, *redact_tool_args(tool, args)]
     return redact_text(" ".join(parts), 320)
 
 
-def args_shape(args: list[str]) -> list[str]:
+def args_shape(args: list[str], *, tool: str | None = None) -> list[str]:
+    safe_args = redact_tool_args(tool, args) if tool else args
     shape = []
-    for arg in args[:12]:
+    for arg in safe_args[:12]:
         if arg.startswith("-"):
             shape.append(arg)
         elif "/" in arg or len(arg) > 32:
             shape.append("<arg>")
         else:
             shape.append(redact_text(arg, 48))
-    if len(args) > 12:
+    if len(safe_args) > 12:
         shape.append("...")
     return shape
 
@@ -445,7 +464,7 @@ def record_tool_call(tool: str, args: list[str], *, cwd: str | None = None) -> s
         "agent-do",
         invocation_id=invocation_id,
         tool=tool,
-        args_shape=args_shape(args),
+        args_shape=args_shape(args, tool=tool),
         command_preview=command_preview(tool, args),
         cwd=cwd or os.getcwd(),
     )

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -18,6 +21,93 @@ AGENT_DO = ROOT / "agent-do"
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def load_agent_gh():
+    """Import the extensionless agent-gh tool as a module for unit tests."""
+    loader = importlib.machinery.SourceFileLoader("agent_gh", str(ROOT / "tools" / "agent-gh"))
+    spec = importlib.util.spec_from_loader("agent_gh", loader)
+    module = importlib.util.module_from_spec(spec)
+    # Register before exec so @dataclass can resolve cls.__module__.
+    sys.modules["agent_gh"] = module
+    loader.exec_module(module)
+    return module
+
+
+def test_classify_risk() -> None:
+    gh = load_agent_gh()
+
+    crit = gh.classify_risk(["apps/web/middleware.ts"])
+    require(crit["tier"] == "critical", f"middleware should be critical: {crit}")
+
+    sql = gh.classify_risk(["packages/database/migrations/0001_init.sql"])
+    require(sql["tier"] == "critical", f"migration should be critical: {sql}")
+
+    elevated = gh.classify_risk(["render.yaml"])
+    require(elevated["tier"] == "elevated", f"render.yaml should be elevated: {elevated}")
+
+    lockfile = gh.classify_risk(["apps/web/package-lock.json"])
+    require(lockfile["tier"] == "elevated", f"lockfile should be elevated: {lockfile}")
+
+    standard = gh.classify_risk(["README.md", "apps/web/components/Button.tsx"])
+    require(standard["tier"] == "standard", f"docs/components should be standard: {standard}")
+
+    mixed = gh.classify_risk(["apps/web/middleware.ts", "render.yaml", "README.md"])
+    require(mixed["tier"] == "critical", f"mixed set tier should be highest: {mixed}")
+    require(mixed["counts"] == {"critical": 1, "elevated": 1, "standard": 1},
+            f"mixed counts wrong: {mixed}")
+    require([s["path"] for s in mixed["signals"]][0] == "apps/web/middleware.ts",
+            f"signals should be critical-first: {mixed}")
+
+
+def test_merge_gate() -> None:
+    gh = load_agent_gh()
+    ref = gh.parse_pr_ref("owner/repo#1")
+
+    def patch(*, detail, checks, threads):
+        gh.pr_detail = lambda r: detail
+        gh.pr_checks = lambda r: checks
+        gh.pr_threads = lambda r: threads
+
+    clean_detail = {"merge_state": "CLEAN", "review_decision": "APPROVED",
+                    "files": [{"path": "src/app.ts"}]}
+
+    # Clean PR — allowed.
+    patch(detail=clean_detail, checks=[], threads=[])
+    gate = gh.merge_gate(ref)
+    require(gate["allowed"], f"clean PR should be allowed: {gate}")
+
+    # Failing check — blocked.
+    patch(detail=clean_detail, checks=[{"name": "build", "bucket": "fail"}], threads=[])
+    gate = gh.merge_gate(ref)
+    require(not gate["allowed"] and any(b["gate"] == "checks" for b in gate["blocks"]),
+            f"failing check should block: {gate}")
+
+    # Unresolved thread — blocked.
+    patch(detail=clean_detail, checks=[], threads=[{"id": "t1"}])
+    gate = gh.merge_gate(ref)
+    require(any(b["gate"] == "threads" for b in gate["blocks"]),
+            f"unresolved thread should block: {gate}")
+
+    # Dirty merge state — blocked.
+    patch(detail={**clean_detail, "merge_state": "DIRTY"}, checks=[], threads=[])
+    gate = gh.merge_gate(ref)
+    require(any(b["gate"] == "mergeable" for b in gate["blocks"]),
+            f"dirty merge state should block: {gate}")
+
+    # No approval — blocked.
+    patch(detail={**clean_detail, "review_decision": "CHANGES_REQUESTED"}, checks=[], threads=[])
+    gate = gh.merge_gate(ref)
+    require(any(b["gate"] == "approval" for b in gate["blocks"]),
+            f"missing approval should block: {gate}")
+
+    # Critical-risk paths — warning, not block.
+    patch(detail={**clean_detail, "files": [{"path": "apps/web/middleware.ts"}]},
+          checks=[], threads=[])
+    gate = gh.merge_gate(ref)
+    require(gate["allowed"], f"critical risk alone should not block: {gate}")
+    require(any(w["gate"] == "risk" for w in gate["warnings"]),
+            f"critical risk should warn: {gate}")
 
 
 def make_exec(path: Path, contents: str) -> None:
@@ -292,8 +382,10 @@ else:
         approve = run([str(AGENT_DO), "gh", "approve", "ovachiever/agent-do#3", "--body", "LGTM"], cwd=ROOT, env=env)
         require(approve.returncode == 0, f"approve failed: {approve.stderr}")
 
-        merge = run([str(AGENT_DO), "gh", "merge", "ovachiever/agent-do#3", "--squash", "--match-head-commit", "b352"], cwd=ROOT, env=env)
-        require(merge.returncode == 0, f"merge failed: {merge.stderr}")
+        # PR 3 in the mock is DIRTY + CHANGES_REQUESTED with an unresolved
+        # thread — the merge gate must block it. --force reaches the merge call.
+        merge = run([str(AGENT_DO), "gh", "merge", "ovachiever/agent-do#3", "--squash", "--match-head-commit", "b352", "--force"], cwd=ROOT, env=env)
+        require(merge.returncode == 0, f"forced merge failed: {merge.stderr}")
 
         close = run(
             [
@@ -399,6 +491,38 @@ else:
             ["pr", "update-branch", "3", "--repo", "ovachiever/agent-do", "--rebase"] in calls,
             f"missing update-branch call: {calls}",
         )
+
+        # ── Review doctrine + merge gate (subprocess) ──────────────────
+
+        doctrine = run([str(AGENT_DO), "gh", "doctrine"], cwd=ROOT, env=env)
+        require(doctrine.returncode == 0, f"doctrine failed: {doctrine.stderr}")
+        require("Pull Request Review Doctrine" in doctrine.stdout,
+                f"doctrine missing header: {doctrine.stdout[:200]}")
+
+        review = run([str(AGENT_DO), "gh", "review", "9", "--json"], cwd=ROOT, env=env)
+        require(review.returncode == 0, f"review failed: {review.stderr}")
+        review_payload = json.loads(review.stdout)
+        require("risk" in review_payload and "doctrine" in review_payload,
+                f"review --json missing risk/doctrine keys: {list(review_payload)}")
+        require(review_payload["risk"]["tier"] == "critical",
+                f"PR 9 touches a .sql migration — risk should be critical: {review_payload['risk']}")
+
+        # PR 9 has reviewDecision="" — merge must block on the approval gate.
+        merge_blocked = run([str(AGENT_DO), "gh", "merge", "9", "--json"], cwd=ROOT, env=env)
+        require(merge_blocked.returncode == 2,
+                f"merge of unapproved PR should exit 2: rc={merge_blocked.returncode}")
+        gate_payload = json.loads(merge_blocked.stdout)
+        require(any(b["gate"] == "approval" for b in gate_payload["blocks"]),
+                f"merge gate should block on approval: {gate_payload}")
+
+        # --force bypasses the block and reaches the gh merge call.
+        merge_forced = run([str(AGENT_DO), "gh", "merge", "9", "--force"], cwd=ROOT, env=env)
+        require(merge_forced.returncode == 0, f"forced merge failed: {merge_forced.stderr}")
+        require("bypassing merge gates" in merge_forced.stderr,
+                f"--force should announce the bypass: {merge_forced.stderr}")
+
+    test_classify_risk()
+    test_merge_gate()
 
     print("gh tests passed")
     return 0
