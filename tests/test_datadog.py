@@ -37,7 +37,7 @@ def check(desc: str, condition: bool, detail: str = "") -> None:
 
 def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(DD_OPS), *argv],
+        [sys.executable, str(DD_OPS), *argv],
         text=True, capture_output=True, env=env, check=False,
     )
 
@@ -588,7 +588,7 @@ def main() -> int:
         check("monitor-mute 101 shows muted", "Muted" in r.stdout)
         check("monitor-mute 101 shows monitor name", "CPU High" in r.stdout)
 
-        r = run(["monitor-mute", "101", "--end", "now-1h",
+        r = run(["monitor-mute", "101", "--end", "now+1h",
                  "--scope", "host:web-01", "--message", "Deploying"], env=env)
         check("monitor-mute with --end --scope --message exits 0", r.returncode == 0, r.stderr)
         check("mute body included scope in last request",
@@ -1226,6 +1226,9 @@ def main() -> int:
         r = run(["monitor-mute", "101", "--end", "now-1h", "--dry-run"], env=env)
         check("monitor-mute --end now-1h accepted", r.returncode == 2)
 
+        r = run(["monitor-mute", "101", "--end", "now+1h", "--dry-run"], env=env)
+        check("monitor-mute --end now+1h accepted", r.returncode == 2)
+
         r = run(["monitor-mute", "101", "--end", "now", "--dry-run"], env=env)
         check("monitor-mute --end now accepted", r.returncode == 2)
 
@@ -1590,7 +1593,7 @@ def main() -> int:
 
         # incidents text shows severity in brackets
         r = run(["incidents"], env=env)
-        check("incidents text has SEV-1 bracket", "[SEV-1" in r.stdout and "]" in r.stdout)
+        check("incidents text has SEV-1 bracket", "[SEV-1  ]" in r.stdout)
 
         # slos text shows both SLOs
         r = run(["slos"], env=env)
@@ -1697,6 +1700,7 @@ def main() -> int:
 
     finally:
         server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":
