@@ -86,7 +86,7 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                 {"key": "OPS", "name": "Ops Project", "projectTypeKey": "business"},
             ])
 
-        elif path == "/rest/api/3/search":
+        elif path in ("/rest/api/3/search", "/rest/api/3/search/jql"):
             jql = qs.get("jql", [""])[0]
             if "statusCategory != Done" in jql:
                 count = 5 if "project = PROJ" in jql else 2
@@ -160,6 +160,9 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                     {"id": "31", "name": "Done", "to": {"name": "Done"}},
                 ]
             })
+
+        elif path == "/rest/api/3/issueLink":
+            self._send({}, status=201)
 
         elif path.startswith("/rest/api/3/issue/PROJ-1"):
             self._send({
@@ -325,6 +328,8 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/rest/api/3/issue":
             self._send({"key": "PROJ-3", "id": "10003"}, status=201)
+        elif path == "/rest/api/3/issueLink":
+            self._send({}, status=201)
         elif path == "/rest/api/3/issue/PROJ-1/comment":
             self._send({"id": "cmt-1"})
         elif path == "/rest/api/3/issue/PROJ-1/transitions":
@@ -1258,6 +1263,31 @@ def main() -> int:
             dup_labels = (dup_body.get("fields") or {}).get("labels", [])
             # The code sends what was passed; Jira deduplicates server-side, but test what we send
             check("issue create duplicate labels sends labels list", len(dup_labels) >= 2, str(dup_labels))
+
+            # ── issue link ───────────────────────────────────────────────────────
+
+            print("\nissue link")
+            _requests.clear()
+            _post_bodies.clear()
+            r = run(["issue", "link", "PROJ-3", "--to", "PROJ-1", "--type", "blocks", "--json"], env=env)
+            check("issue link exits 0", r.returncode == 0, r.stderr)
+            link_payload = json.loads(r.stdout)
+            check("issue link json from field", link_payload["from"] == "PROJ-3", r.stdout)
+            check("issue link json to field", link_payload["to"] == "PROJ-1", r.stdout)
+            check("issue link json type field", link_payload["link_type"] == "blocks", r.stdout)
+            link_body = _post_bodies.get("/rest/api/3/issueLink", {})
+            check("issue link sends canonical Jira type", (link_body.get("type") or {}).get("name") == "Blocks", str(link_body))
+            check("issue link sends outward issue", (link_body.get("outwardIssue") or {}).get("key") == "PROJ-3", str(link_body))
+            check("issue link sends inward issue", (link_body.get("inwardIssue") or {}).get("key") == "PROJ-1", str(link_body))
+
+            _requests.clear()
+            r = run(["issue", "link", "PROJ-3", "--to", "PROJ-1", "--type", "is blocked by", "--dry-run", "--json"], env=env)
+            check("issue link dry-run exits 2", r.returncode == 2, r.stderr)
+            dry_link = json.loads(r.stdout)
+            check("issue link dry-run reports relation", dry_link["link_type"] == "is blocked by", r.stdout)
+            check("issue link dry-run reverses outward issue", dry_link["outward_issue"] == "PROJ-1", r.stdout)
+            check("issue link dry-run reverses inward issue", dry_link["inward_issue"] == "PROJ-3", r.stdout)
+            check("issue link dry-run makes no HTTP request", not any(path == "/rest/api/3/issueLink" for _, path in _requests), str(_requests))
 
             # ── issue edit: all three fields ─────────────────────────────────────
 
