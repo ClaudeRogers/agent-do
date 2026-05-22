@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../../lib/json-output.sh" 2>/dev/null || true
 
 show_help() {
     cat << 'EOF'
@@ -107,7 +108,7 @@ ENVIRONMENT
 EXIT CODES
   0  Success
   1  Error
-  2  Dry-run preview (no changes made)
+  3  Dry-run preview (no changes made)
 
 EXAMPLES
   agent-do jira connections add work \
@@ -140,8 +141,13 @@ case "${1:-help}" in
         run_ops "$@"
         ;;
     *)
-        echo "Unknown command: ${1:-}" >&2
-        echo "Try: agent-do jira --help" >&2
+        if [[ " $* " == *" --json "* ]]; then
+            OUTPUT_FORMAT=json
+            json_error "Unknown command: ${1:-}" 1
+        else
+            echo "Unknown command: ${1:-}" >&2
+            echo "Try: agent-do jira --help" >&2
+        fi
         exit 1
         ;;
 esac
