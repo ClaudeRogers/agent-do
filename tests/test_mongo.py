@@ -65,7 +65,19 @@ FIXTURE_INDEXES = [
 
 class _Cursor(list):
     def sort(self, key_or_list, *args, **kwargs):
-        return self
+        keys = key_or_list if isinstance(key_or_list, list) else [(key_or_list, args[0] if args else 1)]
+        items = list(self)
+        for key, direction in reversed(keys):
+            def sort_value(doc):
+                if key in doc:
+                    return doc.get(key)
+                external_id = doc.get("externalId")
+                for original in FIXTURE_DOCS:
+                    if original.get("externalId") == external_id:
+                        return original.get(key)
+                return None
+            items.sort(key=sort_value, reverse=int(direction) < 0)
+        return _Cursor(items)
 
     def skip(self, n):
         return _Cursor(self[n:])
@@ -94,7 +106,21 @@ class _Collection:
         return 42
 
     def find(self, filt=None, projection=None):
-        return _Cursor(list(FIXTURE_DOCS))
+        docs = list(FIXTURE_DOCS)
+        if projection:
+            include_keys = {k for k, v in projection.items() if v and k != "_id"}
+            exclude_keys = {k for k, v in projection.items() if not v}
+            projected = []
+            for doc in docs:
+                if include_keys:
+                    next_doc = {k: doc[k] for k in include_keys if k in doc}
+                    if projection.get("_id", 1) and "_id" in doc:
+                        next_doc["_id"] = doc["_id"]
+                else:
+                    next_doc = {k: v for k, v in doc.items() if k not in exclude_keys}
+                projected.append(next_doc)
+            docs = projected
+        return _Cursor(docs)
 
     def aggregate(self, pipeline):
         return iter(list(FIXTURE_DOCS))
@@ -737,6 +763,13 @@ def main() -> int:
                  "--projection", '{"_id":0,"externalId":1}',
                  "--sort", '{"createdAt":-1}', "--json"], env=base_env)
         check("valid projection+sort exits 0", r.returncode == 0, r.stderr)
+        if r.returncode == 0:
+            out = json.loads(r.stdout)
+            docs = out["data"]["documents"]
+            check("valid projection forwarded to find",
+                  docs and set(docs[0].keys()) == {"externalId"}, str(docs[:1]))
+            check("valid sort forwarded to cursor",
+                  [doc["externalId"] for doc in docs] == ["x002", "x001"], str(docs))
 
         # ── aggregate edge cases ───────────────────────────────────────────────
         print("\n--- aggregate edge cases ---")
