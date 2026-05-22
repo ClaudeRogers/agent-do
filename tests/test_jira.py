@@ -49,6 +49,17 @@ def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[
     )
 
 
+def run_wrapper(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(AGENT_DO), *argv],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
 class JiraHandler(http.server.BaseHTTPRequestHandler):
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
@@ -334,6 +345,8 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
             self._send({"id": "cmt-1"})
         elif path == "/rest/api/3/issue/PROJ-1/transitions":
             self._send(None, status=204)
+        elif path == "/rest/api/3/issue/PROJ-3":
+            self._send(None, status=204)
         elif path == "/rest/agile/1.0/sprint/1/issue":
             self._send(None, status=204)
         else:
@@ -348,6 +361,16 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
         _put_bodies[path] = body
 
         if path in ("/rest/api/3/issue/PROJ-1/assignee", "/rest/api/3/issue/PROJ-1"):
+            self._send(None, status=204)
+        else:
+            self._send_err(f"Not found: {path}", status=404)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        _requests.append(("DELETE", self.path))
+        path = urlparse(self.path).path
+        path = path.replace("/rest/api/2/", "/rest/api/3/")
+
+        if path == "/rest/api/3/issue/PROJ-3":
             self._send(None, status=204)
         else:
             self._send_err(f"Not found: {path}", status=404)
@@ -1289,6 +1312,25 @@ def main() -> int:
             check("issue link dry-run reverses inward issue", dry_link["inward_issue"] == "PROJ-3", r.stdout)
             check("issue link dry-run makes no HTTP request", not any(path == "/rest/api/3/issueLink" for _, path in _requests), str(_requests))
 
+            # ── issue delete ────────────────────────────────────────────────────
+
+            print("\nissue delete")
+            _requests.clear()
+            r = run(["issue", "delete", "PROJ-3", "--dry-run", "--json"], env=env)
+            check("issue delete dry-run exits 2", r.returncode == 2, r.stderr)
+            delete_preview = json.loads(r.stdout)
+            check("issue delete dry-run action", delete_preview["action"] == "issue_delete", r.stdout)
+            check("issue delete dry-run key", delete_preview["key"] == "PROJ-3", r.stdout)
+            check("issue delete dry-run makes no HTTP request", not any(path.endswith("/PROJ-3") for _, path in _requests), str(_requests))
+
+            _requests.clear()
+            r = run(["issue", "delete", "PROJ-3", "--confirm", "--json"], env=env)
+            check("issue delete exits 0", r.returncode == 0, r.stderr)
+            delete_payload = json.loads(r.stdout)
+            check("issue delete json key", delete_payload["key"] == "PROJ-3", r.stdout)
+            check("issue delete json deleted", delete_payload["deleted"] is True, r.stdout)
+            check("issue delete sent DELETE", any(m == "DELETE" and path == "/rest/api/3/issue/PROJ-3" for m, path in _requests), str(_requests))
+
             # ── issue edit: all three fields ─────────────────────────────────────
 
             print("\nissue edit: all three fields simultaneously")
@@ -1338,7 +1380,7 @@ def main() -> int:
             check("connections bogus subcommand exits 1", r.returncode == 1)
             check("connections bogus subcommand lists valid subcommands", "add" in r.stderr or "list" in r.stderr, r.stderr)
 
-            r = run(["completely-unknown-cmd"], env=env)
+            r = run_wrapper(["jira", "completely-unknown-cmd"], env=env)
             check("top-level unknown command exits 1", r.returncode == 1)
             check("top-level unknown command mentions --help", "help" in r.stderr.lower(), r.stderr)
 
@@ -1423,9 +1465,9 @@ def main() -> int:
             # ── whoami: no args to top-level dispatch ────────────────────────────
 
             print("\ntop-level dispatch: no args")
-            r = run([], env=env)
-            check("no args exits 1", r.returncode == 1)
-            check("no args shows usage", "agent-do jira" in r.stderr or "Usage" in r.stderr, r.stderr)
+            r = run_wrapper(["jira"], env=env)
+            check("no args exits 0", r.returncode == 0)
+            check("no args shows usage", "agent-do jira" in r.stdout or "Usage" in r.stdout, r.stdout)
 
         finally:
             server.shutdown()
@@ -1443,6 +1485,7 @@ def main() -> int:
     check("agent-do jira --help exits 0", r.returncode == 0, r.stderr)
     check("agent-do jira --help shows CONNECTION MANAGEMENT", "CONNECTION MANAGEMENT" in r.stdout, r.stdout)
     check("agent-do jira --help shows issue commands", "issue view" in r.stdout, r.stdout)
+    check("agent-do jira --help shows delete", "issue delete" in r.stdout, r.stdout)
     check("agent-do jira --help shows sprint", "sprint" in r.stdout, r.stdout)
     check("agent-do jira --help shows user find", "user find" in r.stdout, r.stdout)
     check("agent-do jira --help shows --mine", "--mine" in r.stdout, r.stdout)

@@ -105,6 +105,13 @@ agent-do jira issue link PROJ-2 --to PROJ-1 --type clones
 agent-do jira issue link PROJ-2 --to PROJ-1 --type relates to
 ```
 
+### Delete
+```bash
+# Preview first, then confirm when you're ready
+agent-do jira issue delete PROJ-2 --dry-run
+agent-do jira issue delete PROJ-2 --confirm
+```
+
 ### Comment
 ```bash
 agent-do jira issue comment PROJ-123 --body "Confirmed on staging." [--dry-run] [--json]
@@ -200,7 +207,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 
 ## Regression Test Coverage
 
-`tests/test_jira.py` — 190 assertions, fake HTTP server, zero external dependencies.
+`tests/test_jira.py` — 368 assertions, fake HTTP server, zero external dependencies.
 
 | Area | Assertions |
 |------|-----------|
@@ -215,6 +222,8 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 | issue view (text, --comments, JSON, 404) | 18 |
 | issue list (text + JSON) | 7 |
 | issue create (fields, ADF, dry-run, --json) | 14 |
+| issue link (payload, blocks / is blocked by, dry-run) | 12 |
+| issue delete (dry-run, confirm, DELETE path) | 8 |
 | issue comment (ADF body, dry-run, --json) | 9 |
 | issue assign (accountId, unassign null, dry-run) | 9 |
 | issue transition (by name, case-insensitive, bad name, dry-run) | 9 |
@@ -229,5 +238,5 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 | env var credentials (global + per-profile) | 3 |
 | no credentials error | 2 |
 | Server/DC mode (plain-text description) | 2 |
-| agent-do dispatch (--help) | 4 |
-| **Total** | **190** |
+| agent-do dispatch (--help) | 8 |
+| **Total** | **368** |

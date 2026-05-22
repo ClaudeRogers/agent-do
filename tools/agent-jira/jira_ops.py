@@ -478,7 +478,7 @@ def cmd_snapshot(argv: list[str]) -> None:
     projects = []
     for p in (projects_data or []):
         try:
-            result = client.get("search", params={
+            result = client.get(client._search(), params={
                 "jql": f"project = {p['key']} AND statusCategory != Done",
                 "maxResults": 0,
             })
@@ -572,6 +572,7 @@ def cmd_issue(argv: list[str]) -> None:
         "list": _issue_list,
         "create": _issue_create,
         "link": _issue_link,
+        "delete": _issue_delete,
         "comment": _issue_comment,
         "assign": _issue_assign,
         "transition": _issue_transition,
@@ -580,7 +581,7 @@ def cmd_issue(argv: list[str]) -> None:
     }
     fn = dispatch.get(sub)
     if not fn:
-        _err(f"Unknown issue subcommand: {sub!r}. Use: view, list, create, link, comment, assign, transition, label, edit")
+        _err(f"Unknown issue subcommand: {sub!r}. Use: view, list, create, link, delete, comment, assign, transition, label, edit")
     fn(rest)
 
 
@@ -801,11 +802,14 @@ def _issue_link(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--to" and i + 1 < len(argv):
-            target = argv[i + 1]; i += 2
+            target = argv[i + 1]
+            i += 2
         elif argv[i] == "--type" and i + 1 < len(argv):
-            link_type = argv[i + 1]; i += 2
+            link_type = argv[i + 1]
+            i += 2
         elif argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         else:
             i += 1
     if not target:
@@ -871,6 +875,40 @@ def _issue_link(argv: list[str]) -> None:
         })
     else:
         print(f"Linked {key} {relation_value} {target}")
+
+
+def _issue_delete(argv: list[str]) -> None:
+    if not argv:
+        _err("Usage: issue delete <ISSUE-KEY> [--dry-run] [--confirm]")
+    key = argv[0]
+    dry_run = False
+    confirm = False
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--dry-run":
+            dry_run = True; i += 1
+        elif argv[i] == "--confirm":
+            confirm = True; i += 1
+        else:
+            i += 1
+    connection, json_mode, _ = _parse_common(argv[1:])
+    client = _get_client(connection)
+
+    if dry_run:
+        if json_mode:
+            _print_json({"dry_run": True, "action": "issue_delete", "key": key})
+        else:
+            print(f"[dry-run] would delete {key}")
+        sys.exit(2)
+
+    if not confirm:
+        _err("Delete requires --confirm (or use --dry-run to preview)")
+
+    client.delete(f"issue/{key}")
+    if json_mode:
+        _print_json({"key": key, "deleted": True})
+    else:
+        print(f"Deleted {key}")
 
 
 def _issue_comment(argv: list[str]) -> None:
