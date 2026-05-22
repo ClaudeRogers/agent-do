@@ -219,13 +219,14 @@ class JiraClient:
         except urllib.error.URLError as exc:
             _err(f"Could not connect to Jira: {exc.reason}")
 
-    def get(self, path: str, *, params: dict[str, Any] | None = None, agile: bool = False) -> Any:
+    def get(self, path: str, *, params: dict[str, Any] | None = None, agile: bool = False,
+            suppress_errors: bool = False) -> Any:
         base_url = self._agile(path) if agile else self._api(path)
         if params:
             base_url += "?" + urllib.parse.urlencode(
                 {k: v for k, v in params.items() if v is not None}
             )
-        return self.request("GET", base_url)
+        return self.request("GET", base_url, suppress_errors=suppress_errors)
 
     def post(self, path: str, body: Any, *, agile: bool = False, suppress_errors: bool = False) -> Any:
         url = self._agile(path) if agile else self._api(path)
@@ -441,6 +442,7 @@ def cmd_connections(argv: list[str]) -> None:
             _err("--token is required")
         if not url.startswith("http"):
             _err(f"--url must start with http:// or https://, got: {url!r}")
+        url = _validate_base_url(url)
 
         data = _load_profiles()
         overwriting = name in data["profiles"]
@@ -531,8 +533,8 @@ def cmd_snapshot(argv: list[str]) -> None:
             result = client.get(client._search(), params={
                 "jql": f"project = {p['key']} AND statusCategory != Done",
                 "maxResults": 0,
-            })
-            open_count = result.get("total", 0)
+            }, suppress_errors=True)
+            open_count = -1 if isinstance(result, dict) and result.get("_error") else result.get("total", 0)
         except Exception:
             open_count = -1
         projects.append({
@@ -946,9 +948,11 @@ def _issue_delete(argv: list[str]) -> None:
     i = 1
     while i < len(argv):
         if argv[i] == "--dry-run":
-            dry_run = True; i += 1
+            dry_run = True
+            i += 1
         elif argv[i] == "--confirm":
-            confirm = True; i += 1
+            confirm = True
+            i += 1
         else:
             i += 1
     connection, json_mode, _ = _parse_common(argv[1:])

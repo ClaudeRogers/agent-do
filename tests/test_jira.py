@@ -25,6 +25,7 @@ FAIL = 0
 _requests: list[tuple[str, str]] = []
 _post_bodies: dict[str, dict] = {}
 _put_bodies: dict[str, dict] = {}
+FAIL_SNAPSHOT_FOR_OPS = False
 
 
 def check(desc: str, condition: bool, detail: str = "") -> None:
@@ -100,6 +101,9 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
         elif path in ("/rest/api/3/search", "/rest/api/3/search/jql"):
             jql = qs.get("jql", [""])[0]
             if "statusCategory != Done" in jql:
+                if FAIL_SNAPSHOT_FOR_OPS and "project = OPS" in jql:
+                    self._send_err("OPS search failed", status=500)
+                    return
                 count = 5 if "project = PROJ" in jql else 2
                 self._send({"total": count, "issues": [], "maxResults": 0})
             elif "assignee = currentUser()" in jql:
@@ -430,11 +434,23 @@ def main() -> int:
                 stat.S_IMODE(creds_file.stat().st_mode) == 0o600,
                 oct(stat.S_IMODE(creds_file.stat().st_mode)),
             )
+            meta_file = home / "jira" / "connections.json"
             creds = json.loads(creds_file.read_text())
             check("connections add: url stored in creds", creds.get("url") == base_url, str(creds))
             check("connections add: token stored in creds", creds.get("token") == "tok-secret", str(creds))
 
-            meta_file = home / "jira" / "connections.json"
+            print("\nconnections add: URL normalization")
+            r = run(["connections", "add", "normalized",
+                     "--url", base_url + "/",
+                     "--email", "norm@example.com",
+                     "--token", "tok-normal"], env=env)
+            check("connections add normalized exits 0", r.returncode == 0, r.stderr)
+            normalized_creds = json.loads((home / "jira" / ".creds" / "normalized").read_text())
+            check("connections add normalized stores trimmed url", normalized_creds.get("url") == base_url, str(normalized_creds))
+            normalized_meta = json.loads(meta_file.read_text())
+            check("connections add normalized stores trimmed url in metadata",
+                  normalized_meta["profiles"]["normalized"].get("url") == base_url, str(normalized_meta["profiles"]["normalized"]))
+
             check("connections add: connections.json created", meta_file.exists())
             meta = json.loads(meta_file.read_text())
             check("connections add: token NOT in connections.json", "tok-secret" not in meta_file.read_text())
@@ -585,6 +601,19 @@ def main() -> int:
             proj_keys = [p["key"] for p in projects]
             check("snapshot --json has PROJ", "PROJ" in proj_keys)
             check("snapshot --json has open_issues", all("open_issues" in p for p in projects))
+
+            print("\nsnapshot: tolerate a project search failure")
+            global FAIL_SNAPSHOT_FOR_OPS
+            FAIL_SNAPSHOT_FOR_OPS = True
+            try:
+                r = run(["snapshot", "--json"], env=env)
+            finally:
+                FAIL_SNAPSHOT_FOR_OPS = False
+            check("snapshot failure case exits 0", r.returncode == 0, r.stderr)
+            snap_fail = json.loads(r.stdout)
+            fail_projects = {p["key"]: p["open_issues"] for p in snap_fail["data"]["projects"]}
+            check("snapshot failure case keeps project list", set(fail_projects) == {"PROJ", "OPS"}, str(fail_projects))
+            check("snapshot failure case marks broken project unknown", fail_projects["OPS"] == -1, str(fail_projects))
 
             # ── user find ───────────────────────────────────────────────────────
 
