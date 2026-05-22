@@ -338,7 +338,14 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
         _post_bodies[path] = body
 
         if path == "/rest/api/3/issue":
-            self._send({"key": "PROJ-3", "id": "10003"}, status=201)
+            project = ((body.get("fields") or {}).get("project") or {}).get("key")
+            issue_type = ((body.get("fields") or {}).get("issuetype") or {}).get("name")
+            if project == "KAN" and issue_type == "Bug":
+                self._send_err("Project KAN does not accept issue type Bug", status=400)
+            elif project == "KAN":
+                self._send({"key": "KAN-8", "id": "10008"}, status=201)
+            else:
+                self._send({"key": "PROJ-3", "id": "10003"}, status=201)
         elif path == "/rest/api/3/issueLink":
             self._send({}, status=201)
         elif path == "/rest/api/3/issue/PROJ-1/comment":
@@ -756,6 +763,30 @@ def main() -> int:
             desc = create_body2.get("fields", {}).get("description", {})
             check("issue create sends ADF description", isinstance(desc, dict) and desc.get("type") == "doc")
 
+            print("\nissue create: KAN issue type fallback")
+            _requests.clear()
+            _post_bodies.clear()
+            r = run(["issue", "create", "KAN",
+                     "--summary", "Green Lantern alter ego is Hal Jordan instead of Kyle Rayner",
+                     "--type", "Bug"], env=env)
+            check("issue create KAN bug exits 0", r.returncode == 0, r.stderr)
+            check("issue create KAN bug prints key", "KAN-8" in r.stdout, r.stdout)
+            kan_posts = [path for m, path in _requests if m == "POST" and path == "/rest/api/3/issue"]
+            check("issue create KAN bug retries after issue type error", len(kan_posts) >= 2, str(_requests))
+            kan_body = _post_bodies.get("/rest/api/3/issue", {})
+            kan_type = (kan_body.get("fields") or {}).get("issuetype") or {}
+            check("issue create KAN bug ultimately uses Task", kan_type.get("name") == "Task", str(kan_body))
+
+            print("\nissue create: assignee email resolves to accountId")
+            _post_bodies.clear()
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Email-assigned issue",
+                     "--assignee", "alice@example.com"], env=env)
+            check("issue create assignee email exits 0", r.returncode == 0, r.stderr)
+            email_body = _post_bodies.get("/rest/api/3/issue", {})
+            email_assignee = (email_body.get("fields") or {}).get("assignee") or {}
+            check("issue create assignee email sends accountId", email_assignee.get("accountId") == "acc-abc123", str(email_body))
+
             print("\nissue create --parent")
             _post_bodies.clear()
             r = run(["issue", "create", "PROJ",
@@ -857,6 +888,12 @@ def main() -> int:
 
             assign_body = _put_bodies.get("/rest/api/3/issue/PROJ-1/assignee", {})
             check("issue assign sends accountId", assign_body.get("accountId") == "user-account-id-123")
+
+            _put_bodies.clear()
+            r = run(["issue", "assign", "PROJ-1", "--to", "alice@example.com"], env=env)
+            check("issue assign email exits 0", r.returncode == 0, r.stderr)
+            email_assign_body = _put_bodies.get("/rest/api/3/issue/PROJ-1/assignee", {})
+            check("issue assign email sends accountId", email_assign_body.get("accountId") == "acc-abc123", str(email_assign_body))
 
             _put_bodies.clear()
             r = run(["issue", "assign", "PROJ-1", "--to", "none"], env=env)
