@@ -339,7 +339,7 @@ for item in items:
 
 cmd_on_call() {
     local result
-    result=$(bs_get "${BETTERSTACK_API_V2}/on-call-calendars") || return 1
+    result=$(bs_get "${BETTERSTACK_API_V2}/on-calls") || return 1
 
     echo "$result" | python3 -c "
 import sys, json
@@ -350,11 +350,17 @@ if not items:
     sys.exit(0)
 for item in items:
     a = item.get('attributes', {})
+    on_call_users = item.get('relationships', {}).get('on_call_users', {}).get('data', [])
+    emails = []
+    for user in on_call_users:
+        meta = user.get('meta', {})
+        emails.append(meta.get('email') or user.get('id', ''))
     print(json.dumps({
         'id': item.get('id', ''),
         'name': a.get('name', ''),
-        'on_call_users': a.get('on_call_users', []),
-        'default_calendar_id': a.get('default_calendar_id'),
+        'default_calendar': a.get('default_calendar', False),
+        'team_name': a.get('team_name'),
+        'on_call_users': emails,
     }, indent=2))
 "
 }
@@ -547,15 +553,22 @@ if isinstance(raw_pages, list):
         })
 
 # On-call schedules
-raw_oncall = fetch_all(API_V2 + '/on-call-calendars')
+raw_oncall = fetch_all(API_V2 + '/on-calls')
 on_call = []
 if isinstance(raw_oncall, list):
     for item in raw_oncall:
         a = item.get('attributes', {})
+        on_call_users = item.get('relationships', {}).get('on_call_users', {}).get('data', [])
+        emails = []
+        for user in on_call_users:
+            meta = user.get('meta', {})
+            emails.append(meta.get('email') or user.get('id', ''))
         on_call.append({
             'id': item.get('id', ''),
             'name': a.get('name', ''),
-            'on_call_users': a.get('on_call_users', []),
+            'default_calendar': a.get('default_calendar', False),
+            'team_name': a.get('team_name'),
+            'on_call_users': emails,
         })
 
 snapshot = {
