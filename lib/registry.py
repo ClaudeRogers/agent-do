@@ -132,6 +132,8 @@ def get_tool_readiness(info: dict) -> dict:
 def get_tool_command_concurrency(info: dict) -> dict:
     """Return per-command concurrency classifications for a tool."""
     concurrency = get_tool_routing(info).get('command_concurrency') or {}
+    if not isinstance(concurrency, dict):
+        return {}
     return {str(command): str(mode) for command, mode in concurrency.items() if command and mode}
 
 
