@@ -17,7 +17,7 @@ show_help() {
 agent-coderabbit - Local AI code review via CodeRabbit CLI
 
 REVIEW
-  review [--base BRANCH] [--json]   Review uncommitted changes (default: vs main/master)
+  review [--base BRANCH] [--json]   Review staged and uncommitted changes (default: vs main/master)
   findings [--json]                 Re-read results from most recent local review (no API call)
 
 DIAGNOSTICS
@@ -124,6 +124,13 @@ cmd_findings() {
 
     _build_cr_args
     local -a cr_args=("${_CR_BASE_ARGS[@]+"${_CR_BASE_ARGS[@]}"}")
+
+    if $json_mode; then
+        cr_args+=(--agent)
+    else
+        cr_args+=(--plain)
+    fi
+
     cr_args+=(review findings)
 
     exec "$cr_bin" "${cr_args[@]}"

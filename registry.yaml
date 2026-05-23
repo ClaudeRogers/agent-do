@@ -1721,7 +1721,7 @@ tools:
     - check auth and connectivity via doctor command
     - support free-tier browser OAuth or API key for unlimited headless use
     commands:
-      review: Review current uncommitted changes against the base branch
+      review: Review staged and uncommitted changes against the base branch
       findings: Re-read results from the most recent local review (no API call)
       doctor: Verify installation, authentication, git state, and service connectivity
       snapshot: Auth status, cr version, and last doctor summary
@@ -1767,7 +1767,7 @@ tools:
       - .coderabbit
       readiness:
         check: agent-do coderabbit doctor
-        fix: brew install coderabbit && agent-do coderabbit auth login
+        fix: brew install --cask coderabbit && agent-do coderabbit auth login
         note: Free tier requires browser login; set CODERABBIT_API_KEY for unlimited headless use
     concurrency: read
   ci:

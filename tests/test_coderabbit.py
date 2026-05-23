@@ -218,12 +218,18 @@ sys.exit(1)
         # ------------------------------------------------------------------
         # 9. Missing cr binary → exits 1 with install hint
         # ------------------------------------------------------------------
-        no_cr_env = {**base_env, "PATH": os.environ.get("PATH", "").replace(str(fake_bin), "")}
-        # Build a PATH that has no cr
+        # Build a PATH that has neither the fake bin nor any real cr/coderabbit binary
+        import shutil as _shutil
+        real_cr_dirs = set()
+        for _name in ("cr", "coderabbit"):
+            _p = _shutil.which(_name)
+            if _p:
+                real_cr_dirs.add(str(Path(_p).parent))
         safe_path = ":".join(
-            p for p in os.environ.get("PATH", "").split(":") if p and p != str(fake_bin)
+            p for p in os.environ.get("PATH", "").split(":")
+            if p and p != str(fake_bin) and p not in real_cr_dirs
         )
-        no_cr_env["PATH"] = safe_path
+        no_cr_env = {**base_env, "PATH": safe_path}
         r = run([str(AGENT_DO), "coderabbit", "doctor"], env=no_cr_env)
         check("missing cr binary exits 1", r.returncode == 1, f"rc={r.returncode}")
         check("missing cr binary prints install hint", "brew" in r.stderr.lower() or "install" in r.stderr.lower(), r.stderr[:200])
