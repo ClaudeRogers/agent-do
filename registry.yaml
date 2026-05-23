@@ -1769,7 +1769,7 @@ tools:
         check: agent-do coderabbit doctor
         fix: brew install --cask coderabbit && agent-do coderabbit auth login
         note: Free tier requires browser login; set CODERABBIT_API_KEY for unlimited headless use
-    concurrency: read
+    concurrency: mixed
   ci:
     description: Control CI/CD pipelines
     capabilities:
