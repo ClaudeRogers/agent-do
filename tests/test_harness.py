@@ -77,6 +77,7 @@ def main() -> int:
         "tool:vector",
         "tool:obsidian",
         "tool:transcribe",
+        "tool:appleevents",
     ]:
         require(component_id in components, f"missing harness component {component_id}")
 

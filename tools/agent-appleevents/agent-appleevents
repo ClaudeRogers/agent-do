@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# agent-appleevents - Scriptable macOS application automation via AppleEvents
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+show_help() {
+    cat << 'EOF'
+agent-appleevents - AppleEvents, AppleScript, and JXA automation for scriptable macOS apps
+
+READ-ONLY
+  apps                                  List scriptability hints from installed app bundles
+  probe <app-or-bundle-id>              Resolve app, inspect static scriptability, and load dictionary metadata
+  dictionary <app> [--format fmt]       Show scripting dictionary: json, markdown, raw
+  terms <app> [query]                   Search commands, classes, and properties from the dictionary
+  compile --language <lang> <source>    Compile-check AppleScript or JXA without running it
+  cache status                          Show cached dictionary state
+  cache clear [app]                     Clear cached dictionaries
+
+LIVE-GATED
+  permissions <app> [--launch|--no-launch]
+                                        Send benign "get name" event and classify Automation state
+  run --language <lang> <source> [--target <app>] [--launch|--no-launch]
+                                        Compile then run an AppleEvent script
+  tell <app> --script <script> [--language <lang>] [--launch|--no-launch]
+                                        Sugar over the shared run path for one target app
+
+SOURCE OPTIONS
+  --file <path>                         Read script source from file
+  --stdin                               Read script source from stdin
+  --script <inline>                     Read script source from one argument
+
+LANGUAGES
+  applescript                           AppleScript (default)
+  javascript, jxa                       JavaScript for Automation
+
+OPTIONS
+  --json                                Emit JSON (default for structured commands)
+  --format json|markdown|raw            Dictionary output format
+  --timeout <seconds>                   Command timeout
+  --refresh                             Refresh cached dictionary
+  --launch                              Permit AppleEvents to launch the target app
+  --no-launch                           Default; report a non-running target instead of launching it
+
+EXAMPLES
+  agent-do appleevents probe Finder
+  agent-do appleevents dictionary Finder --format markdown
+  agent-do appleevents compile --language applescript --stdin
+  agent-do +live(scope=desktop,ttl=5m) appleevents permissions Finder
+  agent-do +live(scope=desktop,ttl=5m) appleevents tell Finder --script 'get name'
+
+NOTES
+  This tool is for scriptable app APIs. Use agent-do macos for visible UI control.
+  macOS Automation permission cannot be reliably read without sending an AppleEvent.
+EOF
+}
+
+case "${1:-help}" in
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        python3 "$SCRIPT_DIR/appleevents_ops.py" "$@"
+        ;;
+esac

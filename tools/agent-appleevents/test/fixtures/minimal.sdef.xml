@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dictionary>
+  <suite name="Standard Suite" code="CoRe" description="Common terms">
+    <command name="open" code="aevtodoc" description="Open documents">
+      <direct-parameter type="specifier" description="Objects to open"/>
+      <parameter name="using" code="usin" type="specifier" optional="yes" description="Application to use"/>
+    </command>
+    <class name="document" code="docu" description="A document">
+      <property name="name" code="pnam" type="text" access="r" description="Document name"/>
+      <property name="modified" code="imod" type="boolean" access="r" description="Modification state"/>
+    </class>
+  </suite>
+  <suite name="Xcode Suite" code="Xcod" description="Xcode terms">
+    <command name="build" code="Xcodbuid" description="Build a project"/>
+    <class name="workspace" code="work" description="A workspace">
+      <property name="active scheme" code="acts" type="text" access="rw"/>
+    </class>
+  </suite>
+</dictionary>
