@@ -262,10 +262,12 @@ main() {
         result="$(check_tool "$name" 2>/dev/null || true)"
         [[ -n "$result" ]] || result="  ✗  MISS  $name"
         echo "$result"
-        case "$result" in
-            *"OK"*) ok=$((ok + 1)) ;;
-            *"WARN"*) warn=$((warn + 1)) ;;
-            *"CONF"*) conf=$((conf + 1)) ;;
+        status="$(awk '{print $2}' <<<"$result")"
+        case "$status" in
+            OK) ok=$((ok + 1)) ;;
+            WARN) warn=$((warn + 1)) ;;
+            CONF) conf=$((conf + 1)) ;;
+            MISS|ERR) miss=$((miss + 1)) ;;
             *) miss=$((miss + 1)) ;;
         esac
     done

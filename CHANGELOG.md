@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `agent-do notion` has been rebuilt from a stub into a contract-real Notion team operating layer. It now uses Notion API `2025-09-03`, resolves credentials through `agent-do creds`, supports `doctor`, `snapshot`, workspace/users/search/read/blocks/data-source commands, verified saves for team notes/tasks/decisions/handoffs/comments, local SQLite/FTS cache sync, schema adoption via `bootstrap-team`, webhook ingestion, and optional semantic cache commands.
+- The Notion registry entry now documents the required `NOTION_TOKEN`, optional semantic keys, routing keywords, recommended entrypoints, and the team-workspace setup model. `tests/test_notion.py` covers the Notion contract with mocked API responses and is included in `./test.sh`.
 - `agent-do obsidian` is now release-ready for local vault usage: `doctor --json` reports local-index mode, note/chunk/embedding counts, feature readiness, and credential readiness without exposing secret values. `agent-do --health obsidian` now treats a readable vault path as ready even when the Obsidian CLI is not installed.
 - `agent-do creds required <tool>` now supports feature-level credential presentation from `registry.yaml`, so tools can explain which API keys are required, optional, or only needed for specific capabilities. The Obsidian registry entry now documents no-key vault operations plus `VOYAGE_API_KEY`, `OPENAI_API_KEY`, and `COHERE_API_KEY` setup.
 - The README now documents Obsidian local-index setup, semantic vault search setup, vault chat setup, and the public credential-discovery contract through `agent-do creds required <tool>`.

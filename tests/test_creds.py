@@ -153,6 +153,14 @@ def main() -> int:
         f"obsidian credentials should describe recommended Voyage semantic setup: {obsidian_creds}",
     )
 
+    notion_info = get_tool_info(registry, "notion")
+    notion_creds = get_tool_credentials(notion_info or {})
+    require(notion_creds["required"] == ["NOTION_TOKEN"], f"unexpected notion credentials: {notion_creds}")
+    require(
+        notion_creds.get("features", {}).get("NOTION_TOKEN", {}).get("recommended") is True,
+        f"notion credentials should describe required token setup: {notion_creds}",
+    )
+
     required = run("./agent-do", "creds", "required", "render", "--json")
     require(required.returncode == 0, f"render required failed: {required.stderr}")
     required_payload = json.loads(required.stdout)
@@ -164,6 +172,13 @@ def main() -> int:
             f"obsidian required output should explain Voyage use: {obsidian_required.stdout}")
     require("read, save, keyword search" in obsidian_required.stdout,
             f"obsidian required output should explain no-key baseline: {obsidian_required.stdout}")
+
+    notion_required = run("./agent-do", "creds", "required", "notion")
+    require(notion_required.returncode == 0, f"notion required failed: {notion_required.stderr}")
+    require("NOTION_TOKEN: Notion workspace read/write" in notion_required.stdout,
+            f"notion required output should explain token use: {notion_required.stdout}")
+    require("pages/data sources shared with that integration" in notion_required.stdout,
+            f"notion required output should explain sharing requirement: {notion_required.stdout}")
 
     env = os.environ.copy()
     env["RENDER_API_KEY"] = "render-test-token"

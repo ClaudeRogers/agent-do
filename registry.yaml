@@ -1248,21 +1248,119 @@ tools:
       command: agent-calendar create 'Meeting' --time 15:00
     concurrency: mixed
   notion:
-    description: Control Notion
+    description: Notion team operating layer for pages, data sources, tasks, decisions, handoffs, comments, cache, and webhooks
     capabilities:
-    - create pages
-    - update content
-    - query databases
+    - use Notion API version 2025-09-03 and the databases/data-sources model
+    - resolve page/database/data-source URLs, IDs, and human names with clarification on ambiguity
+    - read workspace users, search results, pages, recursive blocks, data sources, schemas, and query results
+    - save team notes, linked groups, tasks, decisions, handoffs, and comments with read-back verification
+    - maintain a local SQLite/FTS cache of pages, blocks, users, comments, data sources, and relations
+    - inspect/adopt existing team workspace structure into a schema mapping file before creating anything
+    - ingest webhook payloads into a local event store; polling sync remains the baseline freshness path
+    - optionally build semantic cache embeddings over Notion cache content
     commands:
-      create: Create page
-      update: Update page
-      query: Query database
+      doctor: 'Credential, API, cache, and capability readiness: doctor [--json]'
+      snapshot: 'Workspace/cache state as JSON: snapshot [--json]'
+      auth: 'Token identity: auth status [--json]'
+      workspace: 'Workspace summary: workspace [--json]'
+      users: 'List users: users [--json]'
+      search: 'Search pages/data sources: search <query> [--json]'
+      read: 'Read a page recursively: read <page-or-url> [--json]'
+      blocks: 'Read recursive block tree: blocks <page-or-url> [--json]'
+      data-sources: 'Data sources: data-sources list|schema|query'
+      save: 'Create team page/row: save --title T --content T [--data-source ID|--parent-page ID]'
+      save-group: 'Create linked hub + children: save-group --title T --child name:body'
+      task: 'Tasks: task add --title T [--owner ID] [--due YYYY-MM-DD]'
+      decision: 'Decisions: decision record --title T --content T'
+      handoff: 'Agent handoffs: handoff create --title T --content T'
+      comment: 'Comments: comment add <page> --text T [--mention-user ID]'
+      verify: 'Read back write target: verify <page-or-url> [--json]'
+      sync: 'Poll and refresh local cache: sync [--limit N] [--json]'
+      cache: 'Cache search/status: cache search <query> | cache status'
+      bootstrap-team: 'Inspect/adopt team data sources into schema mapping'
+      schema: 'Show schema mapping: schema show [--json]'
+      webhooks: 'Webhook store: webhooks doctor|ingest'
+      embed: 'Semantic cache: embed status|refresh'
     examples:
-    - intent: create a new page
-      command: agent-notion create 'New Page'
+    - intent: check notion setup
+      command: agent-do notion doctor --json
+    - intent: search team notion
+      command: agent-do notion search "agent-do release" --json
+    - intent: read this notion page
+      command: agent-do notion read https://www.notion.so/example/Page-0123456789abcdef0123456789abcdef --json
+    - intent: list team data sources
+      command: agent-do notion data-sources list --json
+    - intent: save this as a team decision
+      command: agent-do notion decision record --title "Use Notion for team execution" --content "Decision text" --json
+    - intent: create a task for Chris
+      command: agent-do notion task add --title "Review release checklist" --owner "<notion-user-id>" --due 2026-05-22 --json
+    - intent: build the local Notion cache
+      command: agent-do notion sync --limit 100 --json
+    - intent: find cached team handoffs
+      command: agent-do notion cache search "handoff" --json
+    - intent: adopt existing team workspace structure
+      command: agent-do notion bootstrap-team --json
     credentials:
       required:
       - NOTION_TOKEN
+      optional:
+      - VOYAGE_API_KEY
+      - OPENAI_API_KEY
+      features:
+        NOTION_TOKEN:
+          unlocks: Notion workspace read/write, comments, data sources, cache sync, schema bootstrap, and verified team saves
+          required_for:
+          - doctor
+          - snapshot
+          - read
+          - search
+          - save
+          - sync
+          - bootstrap-team
+          recommended: true
+          setup: agent-do creds store NOTION_TOKEN --stdin
+        VOYAGE_API_KEY:
+          unlocks: optional semantic cache embeddings for Notion pages and blocks
+          required_for:
+          - embed refresh
+          - cache search --mode semantic
+          recommended: false
+          setup: agent-do creds store VOYAGE_API_KEY --stdin
+        OPENAI_API_KEY:
+          unlocks: optional semantic cache fallback embeddings
+          required_for:
+          - embed refresh fallback
+          recommended: false
+          setup: agent-do creds store OPENAI_API_KEY --stdin
+      notes:
+      - Notion requires an internal integration token and pages/data sources shared with that integration.
+      - Polling sync is the baseline freshness path. Webhooks require a public HTTPS receiver and Notion-side subscription setup.
+    routing:
+      discover_keywords:
+      - notion
+      - notion page
+      - notion database
+      - notion data source
+      - team wiki
+      - team task
+      - shared decision
+      - handoff
+      - workspace schema
+      prompt_patterns:
+      - \bnotion\b
+      - \bteam (task|decision|handoff|wiki|workspace)\b
+      - \bshared (task|decision|handoff|workspace)\b
+      - \bassign .*chris\b
+      - \bwhat changed since\b
+      recommended_entrypoints:
+      - agent-do notion doctor --json
+      - agent-do notion bootstrap-team --json
+      - agent-do notion sync --limit 100 --json
+      - agent-do notion decision record --title "..." --content "..." --json
+      raw_cli_equivalents:
+      - pattern: Notion-Version
+        replacement: agent-do notion
+        reason: use the contract-real Notion wrapper so API versioning, credentials, retries, and cache stay consistent
     concurrency: mixed
   linear:
     description: Control Linear

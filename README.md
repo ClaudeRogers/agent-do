@@ -195,6 +195,40 @@ No API key is needed for read, save, keyword search, tasks, graph, audit,
 templates, or local indexing. The Obsidian CLI is only needed for named live
 vault fallback and `+live` app/plugin/dev commands.
 
+### Notion Team Workspaces
+
+`agent-do notion` is the team-facing operating layer. Use it when the output
+belongs in a shared workspace: tasks, decisions, handoffs, project status,
+comments, and structured data sources.
+
+```bash
+agent-do creds required notion
+agent-do creds store NOTION_TOKEN --stdin
+
+agent-do notion doctor --json
+agent-do notion bootstrap-team --json
+agent-do notion sync --limit 100 --json
+```
+
+Notion requires an internal integration token and the target pages or data
+sources must be shared with that integration. The tool uses Notion API version
+`2025-09-03`, so it models databases and data sources separately.
+
+Common team calls:
+
+```bash
+agent-do notion search "release checklist" --json
+agent-do notion decision record --title "Use Notion for team execution" \
+  --content "Decision text" --json
+agent-do notion task add --title "Review release notes" \
+  --owner "<notion-user-id>" --due 2026-05-22 --json
+agent-do notion cache search "handoff" --json
+```
+
+Polling sync is the baseline freshness path. Webhooks are available as an
+incremental upgrade, but they still require a public HTTPS receiver and
+Notion-side subscription setup.
+
 ### External Docs And Project Memory
 
 Use `context` for external reference material. `retrieve` is the agent-facing
