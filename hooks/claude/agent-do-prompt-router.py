@@ -136,6 +136,13 @@ DEFAULT_HOOK_AI_CONFIDENCE = 0.86
 
 CONTEXT_RETRIEVE_QUERY_MAX_CHARS = 280
 
+KNOWN_DOC_SOURCE_COMMANDS = [
+    (
+        re.compile(r"\b(anthropic|claude|opus|sonnet|haiku)\b", re.IGNORECASE),
+        "agent-do context fetch-llms docs.claude.com --trust official --tags ai,llm,claude --register-source --source-name anthropic-docs",
+    ),
+]
+
 
 def build_ai_catalog(registry: dict) -> list[dict]:
     """Return the full agent-do catalog in a compact form suitable for hook routing."""
@@ -296,7 +303,15 @@ def build_context_retrieve_command(query: str) -> str:
         return ""
     if len(query) > CONTEXT_RETRIEVE_QUERY_MAX_CHARS:
         query = query[:CONTEXT_RETRIEVE_QUERY_MAX_CHARS].rstrip() + "..."
-    return f"agent-do context retrieve {shlex.quote(query)} --fresh --prefer-latest --max-tokens 8000"
+    return f"agent-do context retrieve {shlex.quote(query)} --require-fresh --require-official --prefer-latest --max-tokens 8000"
+
+
+def known_doc_source_commands(query: str) -> list[str]:
+    commands = []
+    for pattern, command in KNOWN_DOC_SOURCE_COMMANDS:
+        if pattern.search(query):
+            commands.append(command)
+    return commands
 
 
 def ai_context_retrieval_context(decision: dict | None) -> tuple[str, list[str], list[str]]:
@@ -313,13 +328,23 @@ def ai_context_retrieval_context(decision: dict | None) -> tuple[str, list[str],
     if not command:
         return "", [], []
 
+    source_commands = known_doc_source_commands(query)
+    fallback = ""
+    if source_commands:
+        fallback = (
+            "\nIf retrieval reports no fresh official result, fetch the known official source and retry:\n"
+            + "\n".join(f"- `{source_command}`" for source_command in source_commands)
+            + "\n"
+        )
+
     return (
         "## agent-do Context Retrieval\n\n"
-        "This prompt asks for external docs/API/library behavior. Before answering or implementing, run:\n"
+        "This prompt asks for current external docs/API/library behavior. Before answering or implementing, run:\n"
         f"- `{command}`\n\n"
-        "Use the returned provenance and freshness metadata. If retrieval fails, say what remains stale instead of guessing.\n",
+        "Use the returned provenance and freshness metadata. If retrieval fails, say what remains stale instead of guessing.\n"
+        f"{fallback}",
         ["context"],
-        [command],
+        [command, *source_commands],
     )
 
 

@@ -69,6 +69,7 @@ check_cmd "v1.1 routing foundation tests" python3 "$SCRIPT_DIR/tests/test_v11_ro
 check_cmd "transcribe tests" python3 "$SCRIPT_DIR/tests/test_transcribe.py"
 check_cmd "suggest AI routing tests" python3 "$SCRIPT_DIR/tests/test_suggest_ai.py"
 check_cmd "prompt hook AI routing tests" python3 "$SCRIPT_DIR/tests/test_prompt_hook_ai.py"
+check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "credential tests" python3 "$SCRIPT_DIR/tests/test_creds.py"
 check_cmd "notion tests" python3 "$SCRIPT_DIR/tests/test_notion.py"
 check_cmd "dispatch tests" python3 "$SCRIPT_DIR/tests/test_dispatch.py"

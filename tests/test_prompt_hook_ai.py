@@ -99,6 +99,17 @@ class _Messages:
                 "tool_suggestions": []
             })
 
+        if "use Opus 4.8 as an in-app API" in prompt:
+            return _Response({
+                "prompt_kind": "work_starting",
+                "starts_work": True,
+                "coord": {"block": False, "reason": "", "focus_command": ""},
+                "needs_docs_retrieval": True,
+                "docs_query": "Anthropic API Opus 4.8 model docs",
+                "emit_tools": False,
+                "tool_suggestions": []
+            })
+
         return _Response({
             "prompt_kind": "other",
             "starts_work": False,
@@ -171,6 +182,13 @@ class Anthropic:
         discussion = run_hook("wait what was pr 6?", cwd=project, env=current_env)
         require(discussion.returncode == 0, f"discussion hook failed: {discussion.stderr}")
         require(discussion.stdout.strip() == "", f"expected discussion prompt to pass silently: {discussion.stdout}")
+
+        docs = run_hook("use Opus 4.8 as an in-app API in this project", cwd=project, env=current_env)
+        require(docs.returncode == 0, f"docs hook failed: {docs.stderr}")
+        docs_payload = json.loads(docs.stdout)
+        docs_context = docs_payload["hookSpecificOutput"]["additionalContext"]
+        require("agent-do context retrieve 'Anthropic API Opus 4.8 model docs' --require-fresh --require-official --prefer-latest --max-tokens 8000" in docs_context, f"expected strict context retrieve command: {docs_context}")
+        require("agent-do context fetch-llms docs.claude.com --trust official" in docs_context, f"expected Anthropic source fallback: {docs_context}")
 
     print("prompt hook AI tests passed")
     return 0
