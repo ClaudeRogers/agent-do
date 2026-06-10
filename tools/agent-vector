@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VECTOR_REPO="${VECTOR_REPO:-/Users/erik/Documents/AI/Custom_Coding/versova-vector}"
+VECTOR_REPO="${VECTOR_REPO:-$HOME/versova-vector}"
 VECTOR_ENV_FILE="${VECTOR_ENV_FILE:-$HOME/.config/vector/sync.env}"
 
 if [[ -f "$VECTOR_ENV_FILE" ]]; then
