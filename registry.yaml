@@ -851,6 +851,72 @@ tools:
         fix: agent-do db connect <profile>
         note: Database commands may require a configured profile or connection
     concurrency: mixed
+  psql:
+    description: PostgreSQL CLI wrapper for AI agents over the native psql binary
+    capabilities:
+    - connect via connection string or saved profile (Render, Supabase, any Postgres)
+    - explore schema (tables, views, columns, constraints, indexes, FKs, extensions, sizes)
+    - run SQL queries returning JSON, sample tables, count rows, execute SQL files
+    - inspect administration state (connections, locks, table stats, index usage, version)
+    - back up and restore with pg_dump and pg_restore wrappers
+    commands:
+      connect: Connect via connection string or saved profile
+      disconnect: End session
+      status: Show connection status
+      profiles: List saved connection profiles
+      profile: Add or remove a connection profile (password in keychain)
+      snapshot: Full schema overview (tables, views, sizes, extensions)
+      tables: List tables (optional LIKE pattern)
+      views: List views
+      describe: Columns, types, constraints, indexes, FKs for a table
+      schemas: List schemas
+      extensions: List installed extensions
+      sizes: Table and index sizes
+      relations: FK relationship map
+      query: Execute SQL and return JSON
+      sample: Sample rows from a table
+      count: Row count for a table
+      exec: Execute a SQL file
+      connections: Active database connections
+      locks: Current lock contention
+      stats: Table statistics (seq/idx scans, live/dead tuples)
+      indexes: Index details and usage stats
+      version: PostgreSQL server version
+      dump: pg_dump wrapper (table, schema-only, format options)
+      restore: pg_restore wrapper (clean, schema-only options)
+    examples:
+    - intent: connect to a postgres database with a connection string
+      command: agent-psql connect "postgresql://user:pass@host:5432/db"
+    - intent: show the full schema overview
+      command: agent-psql snapshot
+    - intent: describe a postgres table
+      command: agent-psql describe users
+    - intent: run a SQL query returning JSON
+      command: agent-psql query "SELECT count(*) FROM orders"
+    - intent: dump a postgres database
+      command: agent-psql dump backup.sql --schema-only
+    routing:
+      discover_keywords:
+      - psql
+      - postgres
+      - postgresql
+      - pg_dump
+      - pg_restore
+      - connection string
+      - database schema
+      raw_cli_equivalents:
+      - pattern: \bpsql\s+
+        replacement: agent-psql
+        example: agent-psql query "SELECT 1"
+        reason: agent-psql returns structured JSON and manages connection profiles for agents
+      - pattern: \bpg_dump\b
+        replacement: agent-psql dump
+        example: agent-psql dump backup.sql
+        reason: agent-psql wraps pg_dump with agent-friendly defaults
+      readiness:
+        check: agent-psql status
+        note: Requires the native psql binary and an active connection or saved profile
+    concurrency: mixed
   k8s:
     description: Control Kubernetes clusters
     capabilities:

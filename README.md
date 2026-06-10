@@ -384,7 +384,7 @@ agent-do +live(scope=desktop,ttl=15m) macos click @g5
 
 ## Tool Surface
 
-There are 93 registered tools in the current catalog. Use `agent-do --list` for
+There are 94 registered tools in the current catalog. Use `agent-do --list` for
 the complete executable inventory and `agent-do <tool> --help` for command
 details.
 

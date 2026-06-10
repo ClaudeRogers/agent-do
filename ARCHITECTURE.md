@@ -9,7 +9,7 @@ agent-do is a universal automation layer that works with any AI coding agent. It
 3. **Natural Language Mode**: LLM-routed for human users
 4. **Discovery + nudge layer**: task suggestions, project-scoped tool ranking, and hook nudges
 5. **Bootstrap + health flow**: explicit setup path for stateful tools and dependency checks
-6. **89 specialized tools**: browser, iOS, database, spreadsheet, messaging, infrastructure, memory, harness observability, and more
+6. **94 specialized tools**: browser, iOS, database, spreadsheet, messaging, infrastructure, memory, harness observability, and more
 
 ## Routing Flow
 
@@ -231,9 +231,9 @@ result=$(api_request GET "$url" -H "Authorization: Bearer $TOKEN")
 ### Tool Concurrency Classification
 
 Every tool in `registry.yaml` declares `concurrency: read|write|mixed`:
-- **read** (22 tools): safe to run in parallel (context, ocr, vision, metrics, dpt, etc.)
-- **write** (16 tools): must run serially (render, vercel, namecheap, manna, docker, etc.)
-- **mixed** (44 tools): per-command (browse snapshot is read, browse click is write)
+- **read** (23 tools): safe to run in parallel (context, ocr, vision, metrics, dpt, etc.)
+- **write** (17 tools): must run serially (render, vercel, namecheap, manna, docker, etc.)
+- **mixed** (54 tools): per-command (browse snapshot is read, browse click is write)
 
 Orchestrators use this to batch parallel tool calls safely: read-only tools run concurrently, write tools run serially, mixed tools require per-command inspection.
 

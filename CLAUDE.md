@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-agent-do is a universal automation CLI for AI agents with 91 specialized tools. Two modes:
+agent-do is a universal automation CLI for AI agents with 94 specialized tools. Two modes:
 - **Structured API** (AI/scripts): `agent-do <tool> <command> [args...]` (instant, no LLM)
 - **Natural Language** (humans): `agent-do -n "what you want"` (LLM-routed via Claude)
 
@@ -203,7 +203,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-22 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 16 write tools (render, vercel, namecheap, manna, etc.) must run serially. 44 mixed tools require per-command classification. When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution.
+23 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 54 mixed tools require per-command classification. When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution.
 
 ### Universal Tool Pattern
 
