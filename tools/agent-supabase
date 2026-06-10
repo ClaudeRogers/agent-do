@@ -12,8 +12,13 @@ agent-supabase - Supabase project and database management
 PROJECT MANAGEMENT
   projects / ls                List all projects
   show <ref>                   Project details
+  create <name> --org <slug>   Create a project (billable; needs --yes)
+  update <ref> --name <new>    Rename a project
+  delete <ref> --yes           Delete a project (irreversible)
   pause <ref>                  Pause project
   restore <ref>                Restore paused project
+  restore-versions <ref>       List available restore points
+  restore-cancel <ref>         Cancel an in-progress restore
   health <ref>                 Service health status
   api-keys <ref>               List API keys (anon, service_role)
   secrets <ref>                List secrets (env vars)
@@ -21,12 +26,55 @@ PROJECT MANAGEMENT
   secret-del <ref> <name>      Delete secret
   functions <ref>              List edge functions
   function-show <ref> <slug>   Edge function details
+  function-deploy <ref> <slug> --file <path>   Deploy/create an edge function
+  function-update <ref> <slug> [--file <path>] Update an edge function
+  function-delete <ref> <slug> --yes           Delete an edge function
   domains <ref>                Custom hostname info
   types <ref>                  Generate TypeScript types
   orgs                         List organizations
   regions                      List available regions
   postgrest <ref>              PostgREST config
   snapshot                     Full account state as JSON
+
+BRANCHES (preview environments)
+  branches <ref>               List database branches
+  branch-create <ref> <name>   Create a branch [--region --size --git-branch --persistent]
+  branch-show <branch_id>      Branch config
+  branch-update <branch_id>    Update branch [--name --git-branch --persistent]
+  branch-delete <branch_id> --yes              Delete a branch
+  branch-merge <branch_id>     Merge branch into production
+  branch-push <branch_id>      Push branch migrations/functions
+  branch-reset <branch_id>     Reset branch to production
+  branch-diff <branch_id>      Diff branch vs production
+  branching-disable <ref> --yes                Disable preview branching
+
+COMPUTE & SCALING
+  addons <ref>                 List billing addons
+  addon-apply <ref> --type <t> --variant <v> --yes   Apply an addon (billable)
+  addon-remove <ref> <variant> --yes           Remove an addon
+  compute-scale <ref> --size <sz> --yes        Scale compute instance (billable)
+  upgrade <ref> --version <v> --yes            Upgrade Postgres (downtime)
+  upgrade-eligibility <ref>    Check upgrade eligibility
+  upgrade-status <ref>         Get upgrade status
+  replica-setup <ref> --region <r> --yes       Set up a read replica (billable)
+  replica-remove <ref> --id <id> --yes         Remove a read replica
+
+NETWORKING & DOMAINS
+  network-restrictions <ref>   Show DB network restrictions (allowed CIDRs)
+  network-restrict <ref> --cidr <a/32>         Apply network restrictions
+  network-bans <ref>           List banned IPs
+  network-unban <ref> --ip <ipv4>              Remove network bans
+  domain-init <ref> <hostname> Initialize a custom hostname
+  domain-reverify <ref>        Re-verify custom hostname DNS
+  domain-activate <ref>        Activate a custom hostname
+  domain-delete <ref> --yes    Delete custom hostname config
+  vanity <ref>                 Show vanity subdomain config
+  vanity-check <ref> <sub>     Check vanity subdomain availability
+  vanity-activate <ref> <sub>  Activate a vanity subdomain
+  vanity-delete <ref> --yes    Delete vanity subdomain
+
+  NOTE: create, delete, upgrade, scaling, replica, and addon operations are
+  billable and/or destructive — they require an explicit --yes flag.
 
 DATA ACCESS — REST API (no DB password needed)
   rest <ref> <table>                   Query table (GET)
@@ -172,6 +220,57 @@ supabase_request() {
 
 json_escape() {
     python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"
+}
+
+# Guard for destructive or billable operations. Agent-safe: never blocks on
+# interactive stdin — the caller must pass --yes (confirmed=1) to proceed.
+require_yes() {
+    local action="$1"
+    local confirmed="$2"
+    if [[ "$confirmed" != "1" ]]; then
+        echo "Refusing to $action without confirmation." >&2
+        echo "Re-run with --yes to proceed." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Pretty-print a Supabase API JSON response. Surfaces {message}/{error} as a
+# stderr error with non-zero exit; otherwise prints indented JSON.
+print_json() {
+    python3 -c "
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw or raw == '{}':
+    print('(empty response)'); sys.exit(0)
+try:
+    d = json.loads(raw)
+except Exception:
+    print(raw); sys.exit(0)
+if isinstance(d, dict) and (d.get('message') or d.get('error')):
+    sys.stderr.write('Error: ' + str(d.get('message') or d.get('error')) + '\n'); sys.exit(1)
+print(json.dumps(d, indent=2))
+"
+}
+
+# Print an acknowledgement for write ops. Surfaces API errors; otherwise prints
+# the success message (argv-passed, injection-safe).
+print_ack() {
+    local success_msg="$1"
+    python3 -c "
+import sys, json
+success_msg = sys.argv[1]
+raw = sys.stdin.read().strip()
+if not raw or raw == '{}':
+    print(success_msg); sys.exit(0)
+try:
+    d = json.loads(raw)
+except Exception:
+    print(success_msg); sys.exit(0)
+if isinstance(d, dict) and (d.get('message') or d.get('error')):
+    sys.stderr.write('Error: ' + str(d.get('message') or d.get('error')) + '\n'); sys.exit(1)
+print(success_msg)
+" "$success_msg"
 }
 
 # --- Commands ---
@@ -1129,6 +1228,582 @@ cmd_sample() {
     run_agent_db sample "$table" "$n"
 }
 
+# ============================================================================
+# Project lifecycle (create / update / delete) — Management API write surface
+# ============================================================================
+
+cmd_create() {
+    local name="" org="" region="" db_pass="" plan="" size="" template="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --org|--organization|--organization-slug) org="$2"; shift 2 ;;
+            --region) region="$2"; shift 2 ;;
+            --db-pass|--password) db_pass="$2"; shift 2 ;;
+            --plan) plan="$2"; shift 2 ;;
+            --size|--instance-size) size="$2"; shift 2 ;;
+            --template|--template-url) template="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            -*) echo "Unknown flag: $1" >&2; return 1 ;;
+            *) if [[ -z "$name" ]]; then name="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$name" || -z "$org" ]]; then
+        echo "Usage: agent-supabase create <name> --org <organization_slug> [--region <r>] [--db-pass <p>] [--plan free|pro] [--size <sz>] [--template <url>] --yes" >&2
+        echo "  Get the organization slug from: agent-supabase orgs" >&2
+        return 1
+    fi
+    require_yes "create project '$name' in org '$org' (provisions a billable project)" "$yes" || return 1
+    if [[ -z "$db_pass" ]]; then
+        db_pass=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        echo "Generated database password: $db_pass" >&2
+        echo "Store it now — it is not recoverable from the API." >&2
+    fi
+    local body
+    body=$(python3 -c "
+import json, sys
+name, org, region, db_pass, plan, size, template = sys.argv[1:8]
+b = {'name': name, 'organization_slug': org, 'db_pass': db_pass}
+if region: b['region'] = region
+if plan: b['plan'] = plan
+if size: b['desired_instance_size'] = size
+if template: b['template_url'] = template
+print(json.dumps(b))
+" "$name" "$org" "$region" "$db_pass" "$plan" "$size" "$template")
+    supabase_request POST "/projects" "$body" | print_json
+}
+
+cmd_update() {
+    local ref="" name=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            -*) echo "Unknown flag: $1" >&2; return 1 ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$name" ]]; then
+        echo "Usage: agent-supabase update <ref> --name <new-name>" >&2
+        return 1
+    fi
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'name': sys.argv[1]}))" "$name")
+    supabase_request PATCH "/projects/$ref" "$body" | print_json
+}
+
+cmd_delete() {
+    local ref="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" ]]; then
+        echo "Usage: agent-supabase delete <ref> --yes" >&2
+        return 1
+    fi
+    require_yes "delete project '$ref' (irreversible — destroys the database)" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref" | print_ack "Deleted project $ref"
+}
+
+# ============================================================================
+# Database branches
+# ============================================================================
+
+cmd_branches() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase branches <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/branches" | print_json
+}
+
+cmd_branch_create() {
+    local ref="" name="" region="" size="" git_branch="" persistent=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --region) region="$2"; shift 2 ;;
+            --size) size="$2"; shift 2 ;;
+            --git-branch) git_branch="$2"; shift 2 ;;
+            --persistent) persistent=1; shift ;;
+            -*) echo "Unknown flag: $1" >&2; return 1 ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; elif [[ -z "$name" ]]; then name="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$name" ]]; then
+        echo "Usage: agent-supabase branch-create <ref> <branch_name> [--region <r>] [--size <sz>] [--git-branch <b>] [--persistent]" >&2
+        return 1
+    fi
+    local body
+    body=$(python3 -c "
+import json, sys
+name, region, size, git_branch, persistent = sys.argv[1:6]
+b = {'branch_name': name}
+if region: b['region'] = region
+if size: b['desired_instance_size'] = size
+if git_branch: b['git_branch'] = git_branch
+if persistent == '1': b['persistent'] = True
+print(json.dumps(b))
+" "$name" "$region" "$size" "$git_branch" "$persistent")
+    supabase_request POST "/projects/$ref/branches" "$body" | print_json
+}
+
+cmd_branch_show() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && { echo "Usage: agent-supabase branch-show <branch_id>" >&2; return 1; }
+    supabase_request GET "/branches/$id" | print_json
+}
+
+cmd_branch_update() {
+    local id="" name="" git_branch="" persistent=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --git-branch) git_branch="$2"; shift 2 ;;
+            --persistent) persistent="true"; shift ;;
+            --no-persistent) persistent="false"; shift ;;
+            *) if [[ -z "$id" ]]; then id="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    [[ -z "$id" ]] && { echo "Usage: agent-supabase branch-update <branch_id> [--name <n>] [--git-branch <b>] [--persistent|--no-persistent]" >&2; return 1; }
+    local body
+    body=$(python3 -c "
+import json, sys
+name, git_branch, persistent = sys.argv[1:4]
+b = {}
+if name: b['branch_name'] = name
+if git_branch: b['git_branch'] = git_branch
+if persistent: b['persistent'] = (persistent == 'true')
+print(json.dumps(b))
+" "$name" "$git_branch" "$persistent")
+    supabase_request PATCH "/branches/$id" "$body" | print_json
+}
+
+cmd_branch_delete() {
+    local id="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$id" ]]; then id="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    [[ -z "$id" ]] && { echo "Usage: agent-supabase branch-delete <branch_id> --yes" >&2; return 1; }
+    require_yes "delete branch '$id'" "$yes" || return 1
+    supabase_request DELETE "/branches/$id" | print_ack "Deleted branch $id"
+}
+
+cmd_branch_action() {
+    # generic POST /branches/{id}/{action} for merge|push|reset
+    local action="$1"; local id="${2:-}"
+    [[ -z "$id" ]] && { echo "Usage: agent-supabase branch-$action <branch_id>" >&2; return 1; }
+    supabase_request POST "/branches/$id/$action" | print_json
+}
+
+cmd_branch_diff() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && { echo "Usage: agent-supabase branch-diff <branch_id>" >&2; return 1; }
+    supabase_request GET "/branches/$id/diff"
+}
+
+cmd_branching_disable() {
+    local ref="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase branching-disable <ref> --yes" >&2; return 1; }
+    require_yes "disable preview branching on '$ref' (removes all branches)" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref/branches" | print_ack "Disabled branching on $ref"
+}
+
+# ============================================================================
+# Network restrictions and bans
+# ============================================================================
+
+cmd_network_restrictions() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase network-restrictions <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/network-restrictions" | print_json
+}
+
+cmd_network_restrict() {
+    local ref="" cidrs=() cidrs6=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cidr) cidrs+=("$2"); shift 2 ;;
+            --cidr6) cidrs6+=("$2"); shift 2 ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || ( ${#cidrs[@]} -eq 0 && ${#cidrs6[@]} -eq 0 ) ]]; then
+        echo "Usage: agent-supabase network-restrict <ref> --cidr <a.b.c.d/32> [--cidr ...] [--cidr6 <::/0>]" >&2
+        return 1
+    fi
+    local body
+    body=$(CIDRS="${cidrs[*]:-}" CIDRS6="${cidrs6[*]:-}" python3 -c "
+import json, os
+v4 = os.environ.get('CIDRS','').split()
+v6 = os.environ.get('CIDRS6','').split()
+b = {}
+if v4: b['dbAllowedCidrs'] = v4
+if v6: b['dbAllowedCidrsV6'] = v6
+print(json.dumps(b))
+")
+    supabase_request POST "/projects/$ref/network-restrictions/apply" "$body" | print_json
+}
+
+cmd_network_bans() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase network-bans <ref>" >&2; return 1; }
+    supabase_request POST "/projects/$ref/network-bans/retrieve" | print_json
+}
+
+cmd_network_unban() {
+    local ref="" ips=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ip) ips+=("$2"); shift 2 ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || ${#ips[@]} -eq 0 ]]; then
+        echo "Usage: agent-supabase network-unban <ref> --ip <ipv4> [--ip ...]" >&2
+        return 1
+    fi
+    local body
+    body=$(IPS="${ips[*]}" python3 -c "
+import json, os
+print(json.dumps({'ipv4_addresses': os.environ['IPS'].split()}))
+")
+    supabase_request DELETE "/projects/$ref/network-bans" "$body" | print_ack "Removed network bans on $ref"
+}
+
+# ============================================================================
+# Read replicas
+# ============================================================================
+
+cmd_replica_setup() {
+    local ref="" region="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --region) region="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$region" ]]; then
+        echo "Usage: agent-supabase replica-setup <ref> --region <region> --yes" >&2
+        return 1
+    fi
+    require_yes "set up a read replica for '$ref' in '$region' (billable)" "$yes" || return 1
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'read_replica_region': sys.argv[1]}))" "$region")
+    supabase_request POST "/projects/$ref/read-replicas/setup" "$body" | print_ack "Read replica setup requested for $ref in $region"
+}
+
+cmd_replica_remove() {
+    local ref="" identifier="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --id|--identifier) identifier="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$identifier" ]]; then
+        echo "Usage: agent-supabase replica-remove <ref> --id <database_identifier> --yes" >&2
+        return 1
+    fi
+    require_yes "remove read replica '$identifier' from '$ref'" "$yes" || return 1
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'database_identifier': sys.argv[1]}))" "$identifier")
+    supabase_request POST "/projects/$ref/read-replicas/remove" "$body" | print_ack "Read replica removal requested for $identifier"
+}
+
+# ============================================================================
+# Custom domain write lifecycle
+# ============================================================================
+
+cmd_domain_init() {
+    local ref="${1:-}"; local hostname="${2:-}"
+    [[ -z "$ref" || -z "$hostname" ]] && { echo "Usage: agent-supabase domain-init <ref> <hostname>" >&2; return 1; }
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'custom_hostname': sys.argv[1]}))" "$hostname")
+    supabase_request POST "/projects/$ref/custom-hostname/initialize" "$body" | print_json
+}
+
+cmd_domain_reverify() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase domain-reverify <ref>" >&2; return 1; }
+    supabase_request POST "/projects/$ref/custom-hostname/reverify" | print_json
+}
+
+cmd_domain_activate() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase domain-activate <ref>" >&2; return 1; }
+    supabase_request POST "/projects/$ref/custom-hostname/activate" | print_json
+}
+
+cmd_domain_delete() {
+    local ref="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase domain-delete <ref> --yes" >&2; return 1; }
+    require_yes "delete custom hostname config on '$ref'" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref/custom-hostname" | print_ack "Deleted custom hostname config on $ref"
+}
+
+# ============================================================================
+# Vanity subdomains
+# ============================================================================
+
+cmd_vanity() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase vanity <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/vanity-subdomain" | print_json
+}
+
+cmd_vanity_check() {
+    local ref="${1:-}"; local sub="${2:-}"
+    [[ -z "$ref" || -z "$sub" ]] && { echo "Usage: agent-supabase vanity-check <ref> <subdomain>" >&2; return 1; }
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'vanity_subdomain': sys.argv[1]}))" "$sub")
+    supabase_request POST "/projects/$ref/vanity-subdomain/check-availability" "$body" | print_json
+}
+
+cmd_vanity_activate() {
+    local ref="${1:-}"; local sub="${2:-}"
+    [[ -z "$ref" || -z "$sub" ]] && { echo "Usage: agent-supabase vanity-activate <ref> <subdomain>" >&2; return 1; }
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'vanity_subdomain': sys.argv[1]}))" "$sub")
+    supabase_request POST "/projects/$ref/vanity-subdomain/activate" "$body" | print_json
+}
+
+cmd_vanity_delete() {
+    local ref="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase vanity-delete <ref> --yes" >&2; return 1; }
+    require_yes "delete vanity subdomain on '$ref'" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref/vanity-subdomain" | print_ack "Deleted vanity subdomain on $ref"
+}
+
+# ============================================================================
+# Postgres upgrade
+# ============================================================================
+
+cmd_upgrade() {
+    local ref="" version="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version|--target-version) version="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$version" ]]; then
+        echo "Usage: agent-supabase upgrade <ref> --version <target_version> --yes" >&2
+        echo "  Check eligibility first: agent-supabase upgrade-eligibility <ref>" >&2
+        return 1
+    fi
+    require_yes "upgrade Postgres on '$ref' to '$version' (causes downtime)" "$yes" || return 1
+    local body
+    body=$(python3 -c "import json,sys; print(json.dumps({'target_version': sys.argv[1]}))" "$version")
+    supabase_request POST "/projects/$ref/upgrade" "$body" | print_json
+}
+
+cmd_upgrade_eligibility() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase upgrade-eligibility <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/upgrade/eligibility" | print_json
+}
+
+cmd_upgrade_status() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase upgrade-status <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/upgrade/status" | print_json
+}
+
+# ============================================================================
+# Restore versions
+# ============================================================================
+
+cmd_restore_versions() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase restore-versions <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/restore" | print_json
+}
+
+cmd_restore_cancel() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase restore-cancel <ref>" >&2; return 1; }
+    supabase_request POST "/projects/$ref/restore/cancel" | print_ack "Cancelled restore on $ref"
+}
+
+# ============================================================================
+# Compute scaling / billing addons
+# ============================================================================
+
+cmd_addons() {
+    local ref="${1:-}"
+    [[ -z "$ref" ]] && { echo "Usage: agent-supabase addons <ref>" >&2; return 1; }
+    supabase_request GET "/projects/$ref/billing/addons" | print_json
+}
+
+cmd_addon_apply() {
+    local ref="" type="" variant="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type) type="$2"; shift 2 ;;
+            --variant) variant="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$type" || -z "$variant" ]]; then
+        echo "Usage: agent-supabase addon-apply <ref> --type <custom_domain|compute_instance|pitr|ipv4|...> --variant <variant> --yes" >&2
+        return 1
+    fi
+    require_yes "apply addon '$type/$variant' to '$ref' (billable)" "$yes" || return 1
+    local body
+    body=$(python3 -c "
+import json, sys
+print(json.dumps({'addon_type': sys.argv[1], 'addon_variant': sys.argv[2]}))
+" "$type" "$variant")
+    supabase_request PATCH "/projects/$ref/billing/addons" "$body" | print_ack "Applied addon $type/$variant to $ref"
+}
+
+cmd_addon_remove() {
+    local ref="" variant="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; elif [[ -z "$variant" ]]; then variant="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$variant" ]]; then
+        echo "Usage: agent-supabase addon-remove <ref> <addon_variant> --yes" >&2
+        return 1
+    fi
+    require_yes "remove addon '$variant' from '$ref'" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref/billing/addons/$variant" | print_ack "Removed addon $variant from $ref"
+}
+
+cmd_compute_scale() {
+    # convenience wrapper over addon-apply for compute_instance
+    local ref="" size="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --size) size="$2"; shift 2 ;;
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$size" ]]; then
+        echo "Usage: agent-supabase compute-scale <ref> --size <nano|micro|small|medium|large|xlarge|...> --yes" >&2
+        return 1
+    fi
+    require_yes "scale compute on '$ref' to '$size' (billable)" "$yes" || return 1
+    local body
+    body=$(python3 -c "
+import json, sys
+print(json.dumps({'addon_type': 'compute_instance', 'addon_variant': 'ci_' + sys.argv[1]}))
+" "$size")
+    supabase_request PATCH "/projects/$ref/billing/addons" "$body" | print_ack "Scaled compute on $ref to $size"
+}
+
+# ============================================================================
+# Edge function deploy
+# ============================================================================
+
+cmd_function_deploy() {
+    local ref="" slug="" name="" file="" verify_jwt="true"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --file) file="$2"; shift 2 ;;
+            --no-verify-jwt) verify_jwt="false"; shift ;;
+            -*) echo "Unknown flag: $1" >&2; return 1 ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; elif [[ -z "$slug" ]]; then slug="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$slug" || -z "$file" ]]; then
+        echo "Usage: agent-supabase function-deploy <ref> <slug> --file <path> [--name <n>] [--no-verify-jwt]" >&2
+        return 1
+    fi
+    if [[ ! -f "$file" ]]; then
+        echo "Error: file not found: $file" >&2
+        return 1
+    fi
+    [[ -z "$name" ]] && name="$slug"
+    local body
+    body=$(python3 -c "
+import json, sys
+slug, name, path, verify = sys.argv[1:5]
+with open(path) as f:
+    src = f.read()
+print(json.dumps({'slug': slug, 'name': name, 'body': src, 'verify_jwt': verify == 'true'}))
+" "$slug" "$name" "$file" "$verify_jwt")
+    supabase_request POST "/projects/$ref/functions" "$body" | print_json
+}
+
+cmd_function_update() {
+    local ref="" slug="" name="" file="" verify_jwt=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="$2"; shift 2 ;;
+            --file) file="$2"; shift 2 ;;
+            --verify-jwt) verify_jwt="true"; shift ;;
+            --no-verify-jwt) verify_jwt="false"; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; elif [[ -z "$slug" ]]; then slug="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$slug" ]]; then
+        echo "Usage: agent-supabase function-update <ref> <slug> [--name <n>] [--file <path>] [--verify-jwt|--no-verify-jwt]" >&2
+        return 1
+    fi
+    local src=""
+    if [[ -n "$file" ]]; then
+        [[ ! -f "$file" ]] && { echo "Error: file not found: $file" >&2; return 1; }
+        src=$(cat "$file")
+    fi
+    local body
+    body=$(SRC="$src" python3 -c "
+import json, os, sys
+name, has_file, verify = sys.argv[1:4]
+b = {}
+if name: b['name'] = name
+if has_file == '1': b['body'] = os.environ['SRC']
+if verify: b['verify_jwt'] = (verify == 'true')
+print(json.dumps(b))
+" "$name" "$([[ -n "$file" ]] && echo 1 || echo 0)" "$verify_jwt")
+    supabase_request PATCH "/projects/$ref/functions/$slug" "$body" | print_json
+}
+
+cmd_function_delete() {
+    local ref="" slug="" yes=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) yes=1; shift ;;
+            *) if [[ -z "$ref" ]]; then ref="$1"; elif [[ -z "$slug" ]]; then slug="$1"; else echo "Unexpected argument: $1" >&2; return 1; fi; shift ;;
+        esac
+    done
+    if [[ -z "$ref" || -z "$slug" ]]; then
+        echo "Usage: agent-supabase function-delete <ref> <slug> --yes" >&2
+        return 1
+    fi
+    require_yes "delete edge function '$slug' on '$ref'" "$yes" || return 1
+    supabase_request DELETE "/projects/$ref/functions/$slug" | print_ack "Deleted function $slug on $ref"
+}
+
 # --- Main ---
 
 case "${1:-help}" in
@@ -1196,6 +1871,94 @@ case "${1:-help}" in
     snapshot|snap)
         cmd_snapshot
         ;;
+    # --- Project lifecycle (write) ---
+    create|new)
+        shift; cmd_create "$@" ;;
+    update|edit)
+        shift; cmd_update "$@" ;;
+    delete|destroy|rm)
+        shift; cmd_delete "$@" ;;
+    # --- Branches ---
+    branches)
+        shift; cmd_branches "$@" ;;
+    branch-create)
+        shift; cmd_branch_create "$@" ;;
+    branch-show)
+        shift; cmd_branch_show "$@" ;;
+    branch-update)
+        shift; cmd_branch_update "$@" ;;
+    branch-delete)
+        shift; cmd_branch_delete "$@" ;;
+    branch-merge)
+        shift; cmd_branch_action merge "$@" ;;
+    branch-push)
+        shift; cmd_branch_action push "$@" ;;
+    branch-reset)
+        shift; cmd_branch_action reset "$@" ;;
+    branch-diff)
+        shift; cmd_branch_diff "$@" ;;
+    branching-disable)
+        shift; cmd_branching_disable "$@" ;;
+    # --- Network ---
+    network-restrictions)
+        shift; cmd_network_restrictions "$@" ;;
+    network-restrict)
+        shift; cmd_network_restrict "$@" ;;
+    network-bans)
+        shift; cmd_network_bans "$@" ;;
+    network-unban)
+        shift; cmd_network_unban "$@" ;;
+    # --- Read replicas ---
+    replica-setup)
+        shift; cmd_replica_setup "$@" ;;
+    replica-remove)
+        shift; cmd_replica_remove "$@" ;;
+    # --- Custom domain (write) ---
+    domain-init)
+        shift; cmd_domain_init "$@" ;;
+    domain-reverify)
+        shift; cmd_domain_reverify "$@" ;;
+    domain-activate)
+        shift; cmd_domain_activate "$@" ;;
+    domain-delete)
+        shift; cmd_domain_delete "$@" ;;
+    # --- Vanity subdomain ---
+    vanity)
+        shift; cmd_vanity "$@" ;;
+    vanity-check)
+        shift; cmd_vanity_check "$@" ;;
+    vanity-activate)
+        shift; cmd_vanity_activate "$@" ;;
+    vanity-delete)
+        shift; cmd_vanity_delete "$@" ;;
+    # --- Postgres upgrade ---
+    upgrade)
+        shift; cmd_upgrade "$@" ;;
+    upgrade-eligibility)
+        shift; cmd_upgrade_eligibility "$@" ;;
+    upgrade-status)
+        shift; cmd_upgrade_status "$@" ;;
+    # --- Restore versions ---
+    restore-versions)
+        shift; cmd_restore_versions "$@" ;;
+    restore-cancel)
+        shift; cmd_restore_cancel "$@" ;;
+    # --- Compute / addons ---
+    addons)
+        shift; cmd_addons "$@" ;;
+    addon-apply)
+        shift; cmd_addon_apply "$@" ;;
+    addon-remove)
+        shift; cmd_addon_remove "$@" ;;
+    compute-scale)
+        shift; cmd_compute_scale "$@" ;;
+    # --- Edge function deploy ---
+    function-deploy|fn-deploy)
+        shift; cmd_function_deploy "$@" ;;
+    function-update|fn-update)
+        shift; cmd_function_update "$@" ;;
+    function-delete|fn-delete)
+        shift; cmd_function_delete "$@" ;;
     # --- SQL via Management API ---
     sql|run-sql|migrate)
         shift

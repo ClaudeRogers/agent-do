@@ -3513,14 +3513,17 @@ tools:
       command: agent-tail stop
     concurrency: read
   supabase:
-    description: Supabase project management + data access (REST API, SQL via Management API, and SQL via agent-db)
+    description: Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
     capabilities:
-    - list and manage projects
-    - pause and restore projects
+    - create, update, delete, pause, and restore projects
     - view service health
     - manage API keys and secrets
-    - list and inspect edge functions
-    - view custom domains
+    - create, list, merge, push, reset, and delete database branches (preview environments)
+    - scale compute, apply/remove billing addons, set up and remove read replicas
+    - upgrade Postgres versions and check eligibility
+    - manage network restrictions (allowed CIDRs) and network bans
+    - configure custom hostnames and vanity subdomains
+    - deploy, update, and delete edge functions
     - generate TypeScript types
     - list organizations and regions
     - query, update, insert, upsert, delete via PostgREST REST API (no DB password needed)
@@ -3531,8 +3534,13 @@ tools:
     commands:
       projects: List all projects
       show: Project details
+      create: Create a project (billable; requires --yes)
+      update: Rename a project
+      delete: Delete a project (irreversible; requires --yes)
       pause: Pause project
       restore: Restore paused project
+      restore-versions: List available restore points
+      restore-cancel: Cancel an in-progress restore
       health: Service health status
       api-keys: List API keys
       secrets: List secrets (env vars)
@@ -3540,7 +3548,41 @@ tools:
       secret-del: Delete secret
       functions: List edge functions
       function-show: Edge function details
+      function-deploy: Deploy/create an edge function from a source file
+      function-update: Update an edge function
+      function-delete: Delete an edge function (requires --yes)
+      branches: List database branches
+      branch-create: Create a database branch
+      branch-show: Branch config
+      branch-update: Update branch config
+      branch-delete: Delete a branch (requires --yes)
+      branch-merge: Merge branch into production
+      branch-push: Push branch migrations/functions
+      branch-reset: Reset branch to production
+      branch-diff: Diff branch vs production
+      branching-disable: Disable preview branching (requires --yes)
+      addons: List billing addons
+      addon-apply: Apply a billing addon (billable; requires --yes)
+      addon-remove: Remove a billing addon (requires --yes)
+      compute-scale: Scale the compute instance (billable; requires --yes)
+      upgrade: Upgrade Postgres version (downtime; requires --yes)
+      upgrade-eligibility: Check Postgres upgrade eligibility
+      upgrade-status: Get Postgres upgrade status
+      replica-setup: Set up a read replica (billable; requires --yes)
+      replica-remove: Remove a read replica (requires --yes)
+      network-restrictions: Show DB network restrictions
+      network-restrict: Apply DB network restrictions (allowed CIDRs)
+      network-bans: List banned IPs
+      network-unban: Remove network bans
       domains: Custom hostname info
+      domain-init: Initialize a custom hostname
+      domain-reverify: Re-verify custom hostname DNS
+      domain-activate: Activate a custom hostname
+      domain-delete: Delete custom hostname config (requires --yes)
+      vanity: Show vanity subdomain config
+      vanity-check: Check vanity subdomain availability
+      vanity-activate: Activate a vanity subdomain
+      vanity-delete: Delete vanity subdomain (requires --yes)
       types: Generate TypeScript types
       orgs: List organizations
       regions: List available regions
@@ -3557,6 +3599,18 @@ tools:
     examples:
     - intent: list my supabase projects
       command: agent-supabase projects
+    - intent: create a new supabase project
+      command: agent-supabase create my-app --org my-org-slug --region us-east-1 --yes
+    - intent: delete a supabase project
+      command: agent-supabase delete abcdefghijklmnopqrst --yes
+    - intent: create a supabase preview branch
+      command: agent-supabase branch-create abcdefghijklmnopqrst feature-x --persistent
+    - intent: scale supabase compute
+      command: agent-supabase compute-scale abcdefghijklmnopqrst --size large --yes
+    - intent: deploy a supabase edge function
+      command: agent-supabase function-deploy abcdefghijklmnopqrst hello --file ./hello.ts
+    - intent: restrict supabase database network access
+      command: agent-supabase network-restrict abcdefghijklmnopqrst --cidr 1.2.3.4/32
     - intent: show supabase project details
       command: agent-supabase show abcdefghijklmnopqrst
     - intent: check supabase project health
