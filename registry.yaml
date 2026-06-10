@@ -970,24 +970,112 @@ tools:
       command: agent-jupyter kernel restart
     concurrency: mixed
   api:
-    description: API testing and interaction
+    description: API testing plus canonical API integration templates for agents
     capabilities:
     - make HTTP requests
-    - test endpoints
-    - mock responses
-    - manage collections
+    - inspect API state
+    - list canonical API templates
+    - show canonical API template source
+    - scaffold project API clients from templates
+    - save project integrations as canonical templates
     commands:
+      list: List canonical API templates
+      show: Show template metadata and source
+      scaffold: Write a project integration from a template
+      save: Save a project integration as canonical
       get: HTTP GET request
       post: HTTP POST request
       put: HTTP PUT request
+      patch: HTTP PATCH request
       delete: HTTP DELETE request
-      test: Run API test
+      head: HTTP HEAD request
+      snapshot: Show API environments and request history
+      history: Show recent request history
+      env: Set or show base URL environments
     examples:
+    - intent: build a canonical Anthropic client
+      command: agent-do api scaffold anthropic --target ./lib/llm.py
+    - intent: save this Anthropic client as the standard
+      command: agent-do api save anthropic --from ./lib/llm.py
     - intent: GET /api/users
-      command: agent-api get /api/users
+      command: agent-do api get /api/users
     - intent: POST to /api/login
-      command: agent-api post /api/login
-    concurrency: read
+      command: agent-do api post /api/login
+    routing:
+      discover_keywords:
+      - api integration
+      - API client
+      - SDK client
+      - canonical template
+      - canonical API template
+      - scaffold API client
+      - save API pattern
+      - lock this in
+      - make this standard
+      - anthropic client
+      - Claude client
+      - Anthropic SDK
+      prompt_patterns:
+      - \b(api|sdk) client\b
+      - \bcanonical api template\b
+      - \bscaffold .*api\b
+      - \bbuild .*api client\b
+      - \b(anthropic|claude) client\b
+      - \bfrom anthropic import\b
+      - \bAnthropic SDK\b
+      - \b(lock|save) (this|that|the) (in|pattern|version)\b
+      - \bmake this (the )?standard\b
+      - \bthis is how I want it from now on\b
+      intents:
+      - label: scaffold_api_template
+        examples:
+        - build me a Claude client
+        - add an Anthropic API client
+        - scaffold a canonical API integration
+        recommended_entrypoint: agent-do api scaffold anthropic --target ./lib/llm.py
+      - label: save_api_template
+        examples:
+        - lock this in
+        - make this the standard
+        - this is how I want it from now on
+        recommended_entrypoint: agent-do api save anthropic --from ./lib/llm.py
+      recommended_entrypoints:
+      - agent-do api scaffold anthropic --target ./lib/llm.py
+      - agent-do api save anthropic --from ./lib/llm.py
+      - agent-do api list
+      - agent-do api show anthropic
+      - agent-do api snapshot
+      default_command: scaffold
+      raw_cli_equivalents:
+      - pattern: \bfrom\s+anthropic\s+import\s+Anthropic\b
+        replacement: agent-do api scaffold anthropic
+        example: agent-do api scaffold anthropic --target ./lib/llm.py
+        reason: agent-do api provides the canonical Anthropic client template instead of re-deriving SDK usage from memory
+      - pattern: \bcurl\s+[-A-Za-z0-9_ .:=/'\"{}?&%]+\b
+        replacement: agent-do api
+        example: agent-do api get https://api.example.com/health
+        reason: agent-do api records API request history and supports structured request options
+      readiness:
+        check: agent-do api list --json
+        note: Seeds the Anthropic Python template in AGENT_DO_HOME when first listed
+    contracts:
+      snapshot:
+      - list
+      - show
+      - snapshot
+      - history
+      - env
+      interact:
+      - scaffold
+      - get
+      - post
+      - put
+      - patch
+      - delete
+      - head
+      save:
+      - save
+    concurrency: mixed
   clipboard:
     description: Cross-app clipboard management
     capabilities:

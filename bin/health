@@ -131,6 +131,20 @@ check_tool() {
                     status="WARN"; note="run: cd tools/agent-$name && npm install"
                 fi
                 ;;
+            api)
+                if "$tool_path" list --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+templates = payload.get("templates") or []
+assert any(item.get("name") == "anthropic" for item in templates)
+' 2>/dev/null; then
+                    status="OK"; note="anthropic template ready"
+                else
+                    status="WARN"; note="canonical templates not ready"
+                fi
+                ;;
             manna)
                 local manna_bin="$TOOLS_DIR/agent-manna/target/release/manna-core"
                 if [[ -x "$manna_bin" ]]; then

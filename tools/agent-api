@@ -1,39 +1,412 @@
 #!/usr/bin/env bash
-# agent-api - HTTP API testing tool
+# agent-api - HTTP API testing plus canonical API integration templates
 
 set -euo pipefail
 
+AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"
+API_HOME="$AGENT_DO_HOME/api"
+TEMPLATE_HOME="$API_HOME/templates"
+HISTORY_FILE="$API_HOME/history.json"
+ENVS_FILE="$API_HOME/envs.json"
+LEGACY_HISTORY_FILE="$AGENT_DO_HOME/api-history.json"
+LEGACY_ENVS_FILE="$AGENT_DO_HOME/api-envs.json"
+
 show_help() {
     cat << 'EOF'
-agent-api - HTTP API testing
+agent-api - API testing and canonical integration templates
 
-Commands:
-  get <url>                    GET request
-  post <url> [data]            POST request
-  put <url> [data]             PUT request
-  delete <url>                 DELETE request
-  head <url>                   HEAD request
-  snapshot                     API state: environment, base URL, recent history
-  history                      Show last 20 requests with status codes
-  env [name] [url]             Set/show base URL environment (stored in ~/.agent-do/api-envs.json)
+Template commands:
+  list [--json]                         List canonical API templates
+  show <name> [--json]                  Show template metadata and source
+  scaffold <name> --target <path>       Write a project integration from a template
+      [--lang python] [--json]
+  save <name> --from <path>             Save a project integration as canonical
+      [--lang python] [--json]
 
-Options:
-  -H, --header "Key: Value"    Add header
-  -d, --data '{"key":"val"}'   Request body (JSON)
-  -f, --file <path>            Read body from file
-  -o, --output <path>          Save response to file
-  -v, --verbose                Show headers
-  -q, --quiet                  Only output response body
-  --json                       Set Content-Type: application/json
+HTTP request commands:
+  get <url>                             GET request
+  post <url> [data]                     POST request
+  put <url> [data]                      PUT request
+  patch <url> [data]                    PATCH request
+  delete <url>                          DELETE request
+  head <url>                            HEAD request
+  snapshot                              API state: environment, base URL, recent history
+  history                               Show last 20 requests with status codes
+  env [name] [url]                      Set/show base URL environment
+
+HTTP options:
+  -H, --header "Key: Value"             Add header
+  -d, --data '{"key":"val"}'            Request body (JSON)
+  -f, --file <path>                     Read body from file
+  -o, --output <path>                   Save response to file
+  -v, --verbose                         Show headers
+  -q, --quiet                           Only output response body
+  --json                                Set Content-Type: application/json
 
 Examples:
+  agent-api list
+  agent-api scaffold anthropic --target ./lib/llm.py
+  agent-api save anthropic --from ./lib/llm.py
   agent-api get https://api.github.com/users/octocat
   agent-api post http://localhost:3000/api/users -d '{"name":"test"}'
-  agent-api get /api/users --header "Authorization: Bearer TOKEN"
 EOF
 }
 
-# Default base URL (can be set via AGENT_API_BASE)
+ensure_api_dirs() {
+    mkdir -p "$API_HOME" "$TEMPLATE_HOME"
+}
+
+write_anthropic_seed() {
+    local dir="$TEMPLATE_HOME/anthropic"
+    local template="$dir/template.py"
+    local manifest="$dir/manifest.yaml"
+
+    mkdir -p "$dir"
+    if [[ ! -f "$template" ]]; then
+        cat > "$template" << 'EOF'
+"""Canonical Anthropic Messages API client for {{PROJECT_NAME}}.
+
+Generated from `agent-do api scaffold anthropic`.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from anthropic import Anthropic
+
+
+DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+DEFAULT_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "64000"))
+
+_client: Anthropic | None = None
+
+
+def get_client() -> Anthropic:
+    """Return the Anthropic client, failing loudly if credentials are missing."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is required to call the Anthropic API")
+
+    global _client
+    if _client is None:
+        _client = Anthropic(api_key=api_key)
+    return _client
+
+
+def _system_with_prompt_cache(system: str | Sequence[Mapping[str, Any]] | None) -> Any:
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    return system
+
+
+def chat(
+    prompt: str,
+    *,
+    system: str | Sequence[Mapping[str, Any]] | None = None,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    temperature: float | None = None,
+    **kwargs: Any,
+) -> str:
+    """Send one user message and return concatenated text blocks."""
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    cached_system = _system_with_prompt_cache(system)
+    if cached_system is not None:
+        params["system"] = cached_system
+    if temperature is not None:
+        params["temperature"] = temperature
+    params.update(kwargs)
+
+    message = get_client().messages.create(**params)
+    return "".join(
+        block.text
+        for block in message.content
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    )
+EOF
+    fi
+
+    if [[ ! -f "$manifest" ]]; then
+        python3 - "$manifest" << 'PYTHON'
+import json
+import sys
+from datetime import datetime, timezone
+
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+manifest = {
+    "name": "anthropic",
+    "description": "Canonical Python client for the Anthropic Messages API",
+    "language": "python",
+    "template_file": "template.py",
+    "default_model": "claude-opus-4-8",
+    "default_max_tokens": 64000,
+    "features": [
+        "Anthropic Python SDK",
+        "single chat() entry point",
+        "prompt caching on system text",
+        "fail-loud ANTHROPIC_API_KEY check",
+    ],
+    "source": "https://docs.claude.com/llms-full.txt",
+    "context_source_id": "docs-claude-com-llms",
+    "context_query": "Anthropic API Opus 4.8 model docs",
+    "revision": 1,
+    "created_at": now,
+    "updated_at": now,
+    "saved_from": "",
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=2)
+    handle.write("\n")
+PYTHON
+    fi
+}
+
+ensure_seed_templates() {
+    ensure_api_dirs
+    write_anthropic_seed
+}
+
+template_dir() {
+    local name="$1"
+    echo "$TEMPLATE_HOME/$name"
+}
+
+template_manifest() {
+    local name="$1"
+    echo "$(template_dir "$name")/manifest.yaml"
+}
+
+template_file() {
+    local name="$1" lang="${2:-python}"
+    case "$lang" in
+        python) echo "$(template_dir "$name")/template.py" ;;
+        *) echo "Error: unsupported language: $lang" >&2; return 1 ;;
+    esac
+}
+
+parse_template_flags() {
+    JSON_OUTPUT=false
+    LANG="python"
+    TARGET=""
+    FROM_PATH=""
+    POSITIONAL=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            --lang)
+                LANG="${2:-}"
+                shift 2
+                ;;
+            --target)
+                TARGET="${2:-}"
+                shift 2
+                ;;
+            --from)
+                FROM_PATH="${2:-}"
+                shift 2
+                ;;
+            *)
+                POSITIONAL+=("$1")
+                shift
+                ;;
+        esac
+    done
+}
+
+cmd_list() {
+    ensure_seed_templates
+    parse_template_flags "$@"
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        python3 - "$TEMPLATE_HOME" << 'PYTHON'
+import json
+import os
+import sys
+
+root = sys.argv[1]
+items = []
+for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
+    manifest_path = os.path.join(root, name, "manifest.yaml")
+    if not os.path.isfile(manifest_path):
+        continue
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    items.append({
+        "name": manifest.get("name", name),
+        "language": manifest.get("language", ""),
+        "default_model": manifest.get("default_model", ""),
+        "description": manifest.get("description", ""),
+        "revision": manifest.get("revision", 0),
+        "updated_at": manifest.get("updated_at", ""),
+    })
+print(json.dumps({"success": True, "templates": items}, indent=2))
+PYTHON
+        return
+    fi
+
+    local found=false
+    for dir in "$TEMPLATE_HOME"/*; do
+        [[ -d "$dir" && -f "$dir/manifest.yaml" ]] || continue
+        found=true
+        python3 - "$dir/manifest.yaml" << 'PYTHON'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+print(f"{manifest.get('name')} ({manifest.get('language')}) - {manifest.get('description')}")
+print(f"  model: {manifest.get('default_model')}  revision: {manifest.get('revision')}")
+PYTHON
+    done
+    [[ "$found" == "true" ]] || echo "No API templates configured"
+}
+
+cmd_show() {
+    ensure_seed_templates
+    parse_template_flags "$@"
+    local name="${POSITIONAL[0]:-}"
+    [[ -n "$name" ]] || { echo "Usage: agent-api show <name> [--json]" >&2; return 1; }
+
+    local manifest template
+    manifest="$(template_manifest "$name")"
+    template="$(template_file "$name" "$LANG")"
+    [[ -f "$manifest" && -f "$template" ]] || { echo "Error: template not found: $name" >&2; return 1; }
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        python3 - "$manifest" "$template" << 'PYTHON'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    source = handle.read()
+print(json.dumps({"success": True, "manifest": manifest, "template": source}, indent=2))
+PYTHON
+        return
+    fi
+
+    python3 - "$manifest" << 'PYTHON'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+print(f"{manifest.get('name')} - {manifest.get('description')}")
+print(f"language: {manifest.get('language')}")
+print(f"default_model: {manifest.get('default_model')}")
+print(f"default_max_tokens: {manifest.get('default_max_tokens')}")
+print(f"context_source_id: {manifest.get('context_source_id')}")
+print(f"source: {manifest.get('source')}")
+print(f"revision: {manifest.get('revision')}")
+print(f"updated_at: {manifest.get('updated_at')}")
+PYTHON
+    echo
+    sed -n '1,220p' "$template"
+}
+
+cmd_scaffold() {
+    ensure_seed_templates
+    parse_template_flags "$@"
+    local name="${POSITIONAL[0]:-}"
+    [[ -n "$name" && -n "$TARGET" ]] || { echo "Usage: agent-api scaffold <name> --target <path> [--lang python]" >&2; return 1; }
+
+    local template
+    template="$(template_file "$name" "$LANG")"
+    [[ -f "$template" ]] || { echo "Error: template not found: $name" >&2; return 1; }
+    [[ ! -e "$TARGET" ]] || { echo "Error: target already exists: $TARGET" >&2; return 1; }
+
+    python3 - "$template" "$TARGET" << 'PYTHON'
+import json
+import os
+import sys
+
+template_path, target_path = sys.argv[1:3]
+project_name = os.path.basename(os.path.dirname(os.path.abspath(target_path))) or "project"
+with open(template_path, encoding="utf-8") as handle:
+    content = handle.read().replace("{{PROJECT_NAME}}", project_name)
+
+target_dir = os.path.dirname(target_path)
+if target_dir:
+    os.makedirs(target_dir, exist_ok=True)
+with open(target_path, "w", encoding="utf-8") as handle:
+    handle.write(content)
+
+print(json.dumps({
+    "success": True,
+    "target": target_path,
+    "project_name": project_name,
+}))
+PYTHON
+}
+
+cmd_save() {
+    ensure_seed_templates
+    parse_template_flags "$@"
+    local name="${POSITIONAL[0]:-}"
+    [[ -n "$name" && -n "$FROM_PATH" ]] || { echo "Usage: agent-api save <name> --from <path> [--lang python]" >&2; return 1; }
+    [[ -f "$FROM_PATH" ]] || { echo "Error: source file not found: $FROM_PATH" >&2; return 1; }
+
+    local dir manifest template
+    dir="$(template_dir "$name")"
+    manifest="$(template_manifest "$name")"
+    template="$(template_file "$name" "$LANG")"
+    mkdir -p "$dir"
+    cp "$FROM_PATH" "$template"
+
+    python3 - "$manifest" "$name" "$LANG" "$FROM_PATH" << 'PYTHON'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+manifest_path, name, language, from_path = sys.argv[1:5]
+if os.path.exists(manifest_path):
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+else:
+    manifest = {
+        "name": name,
+        "description": f"Canonical {language} integration template",
+        "language": language,
+        "template_file": "template.py" if language == "python" else f"template.{language}",
+        "revision": 0,
+        "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+
+manifest["name"] = name
+manifest["language"] = language
+manifest["template_file"] = "template.py" if language == "python" else manifest.get("template_file", "")
+manifest["revision"] = int(manifest.get("revision") or 0) + 1
+manifest["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+manifest["saved_from"] = os.path.abspath(from_path)
+
+with open(manifest_path, "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=2)
+    handle.write("\n")
+
+print(json.dumps({"success": True, "name": name, "revision": manifest["revision"], "saved_from": manifest["saved_from"]}, indent=2))
+PYTHON
+}
+
+# Default base URL for HTTP calls (can be set via AGENT_API_BASE)
 BASE_URL="${AGENT_API_BASE:-}"
 
 build_url() {
@@ -91,14 +464,13 @@ do_request() {
                 shift
                 ;;
             -*)
-                echo "Unknown option: $1"
+                echo "Unknown option: $1" >&2
                 return 1
                 ;;
             *)
                 if [[ -z "$url" ]]; then
                     url="$1"
                 else
-                    # Treat as data if no -d specified
                     [[ -z "$data" ]] && data="$1"
                 fi
                 shift
@@ -107,163 +479,161 @@ do_request() {
     done
 
     if [[ -z "$url" ]]; then
-        echo "Error: URL required"
+        echo "Error: URL required" >&2
         return 1
     fi
 
     url=$(build_url "$url")
 
     local curl_args=(-X "$method")
-
-    # Add JSON content type if specified or if data looks like JSON
     if [[ -n "$json_content" ]] || [[ "$data" =~ ^\{ ]]; then
         curl_args+=(-H "Content-Type: application/json")
     fi
-
-    # Add custom headers
     curl_args+=("${headers[@]}")
-
-    # Add data
     if [[ -n "$data" ]]; then
         curl_args+=(-d "$data")
     elif [[ -n "$data_file" ]]; then
         curl_args+=(-d "@$data_file")
     fi
-
-    # Verbose/quiet
     [[ -n "$verbose" ]] && curl_args+=(-v)
     [[ -n "$quiet" ]] && curl_args+=(-s)
     [[ -z "$verbose" && -z "$quiet" ]] && curl_args+=(-s -S)
-
-    # Output file
-    if [[ -n "$output" ]]; then
-        curl_args+=(-o "$output")
-    fi
-
-    # Show response with status code
+    [[ -n "$output" ]] && curl_args+=(-o "$output")
     if [[ -z "$quiet" && -z "$output" ]]; then
         curl_args+=(-w '\n\n[Status: %{http_code}, Time: %{time_total}s, Size: %{size_download} bytes]\n')
     fi
 
     curl "${curl_args[@]}" "$url"
 
-    # Log to history
-    python3 -c "
-import json, os, time
-history_file = os.path.expanduser('~/.agent-do/api-history.json')
+    python3 - "$method" "$url" "$HISTORY_FILE" "$LEGACY_HISTORY_FILE" << 'PYTHON' 2>/dev/null &
+import json
+import os
+import sys
+import time
+
+method, url, history_file, legacy_history_file = sys.argv[1:5]
 os.makedirs(os.path.dirname(history_file), exist_ok=True)
 history = []
-if os.path.exists(history_file):
+load_path = history_file if os.path.exists(history_file) else legacy_history_file
+if os.path.exists(load_path):
     try:
-        with open(history_file) as f:
-            history = json.load(f)
-    except: pass
-history.append({'method': '$method', 'url': '$url', 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')})
-# Keep last 100
+        with open(load_path, encoding="utf-8") as handle:
+            history = json.load(handle)
+    except Exception:
+        history = []
+history.append({"method": method, "url": url, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")})
 history = history[-100:]
-with open(history_file, 'w') as f:
-    json.dump(history, f)
-" 2>/dev/null &
+with open(history_file, "w", encoding="utf-8") as handle:
+    json.dump(history, handle)
+PYTHON
 }
 
 cmd_snapshot() {
-    python3 -c "
-import json, os
+    ensure_api_dirs
+    python3 - "$ENVS_FILE" "$HISTORY_FILE" "$LEGACY_ENVS_FILE" "$LEGACY_HISTORY_FILE" << 'PYTHON'
+import json
+import os
+import sys
 
-env_file = os.path.expanduser('~/.agent-do/api-envs.json')
-history_file = os.path.expanduser('~/.agent-do/api-history.json')
-
-# Load envs
+env_file, history_file, legacy_env_file, legacy_history_file = sys.argv[1:5]
 envs = {}
-if os.path.exists(env_file):
-    with open(env_file) as f:
-        envs = json.load(f)
-
-# Load history
+env_load_path = env_file if os.path.exists(env_file) else legacy_env_file
+if os.path.exists(env_load_path):
+    with open(env_load_path, encoding="utf-8") as handle:
+        envs = json.load(handle)
 history = []
-if os.path.exists(history_file):
-    with open(history_file) as f:
-        history = json.load(f)
-
-base_url = os.environ.get('AGENT_API_BASE', '')
-
+history_load_path = history_file if os.path.exists(history_file) else legacy_history_file
+if os.path.exists(history_load_path):
+    with open(history_load_path, encoding="utf-8") as handle:
+        history = json.load(handle)
 snapshot = {
-    'base_url': base_url or '(not set)',
-    'environments': envs,
-    'recent_requests': history[-10:],
-    'total_requests': len(history),
+    "base_url": os.environ.get("AGENT_API_BASE", "") or "(not set)",
+    "environments": envs,
+    "recent_requests": history[-10:],
+    "total_requests": len(history),
 }
 print(json.dumps(snapshot, indent=2))
-"
+PYTHON
 }
 
 cmd_history() {
-    python3 -c "
-import json, os
+    ensure_api_dirs
+    python3 - "$HISTORY_FILE" "$LEGACY_HISTORY_FILE" << 'PYTHON'
+import json
+import os
+import sys
 
-history_file = os.path.expanduser('~/.agent-do/api-history.json')
+history_file, legacy_history_file = sys.argv[1:3]
 history = []
-if os.path.exists(history_file):
-    with open(history_file) as f:
-        history = json.load(f)
-
+load_path = history_file if os.path.exists(history_file) else legacy_history_file
+if os.path.exists(load_path):
+    with open(load_path, encoding="utf-8") as handle:
+        history = json.load(handle)
 if not history:
-    print('No request history')
+    print("No request history")
 else:
-    for h in history[-20:]:
-        status = h.get('status', '?')
-        method = h.get('method', '?')
-        url = h.get('url', '?')
-        time_str = h.get('time', '?')
-        print(f'  {status}  {method:6s}  {url}  ({time_str}s)')
-"
+    for item in history[-20:]:
+        print(f"  {item.get('method', '?'):6s}  {item.get('url', '?')}  {item.get('timestamp', '')}")
+PYTHON
 }
 
 cmd_env() {
+    ensure_api_dirs
     local name="${1:-}"
     local url="${2:-}"
 
-    python3 -c "
-import json, os, sys
+    python3 - "$ENVS_FILE" "$LEGACY_ENVS_FILE" "$name" "$url" << 'PYTHON'
+import json
+import os
+import sys
 
-env_file = os.path.expanduser('~/.agent-do/api-envs.json')
+env_file, legacy_env_file, name, url = sys.argv[1:5]
 os.makedirs(os.path.dirname(env_file), exist_ok=True)
-
 envs = {}
-if os.path.exists(env_file):
-    with open(env_file) as f:
-        envs = json.load(f)
-
-name = '$name'
-url = '$url'
+load_path = env_file if os.path.exists(env_file) else legacy_env_file
+if os.path.exists(load_path):
+    with open(load_path, encoding="utf-8") as handle:
+        envs = json.load(handle)
 
 if not name:
-    # Show all envs
     if not envs:
-        print('No environments configured')
-        print('Usage: agent-api env <name> <base_url>')
+        print("No environments configured")
+        print("Usage: agent-api env <name> <base_url>")
     else:
-        for n, u in envs.items():
-            print(f'  {n}: {u}')
+        for key, value in envs.items():
+            print(f"  {key}: {value}")
 elif url:
-    # Set env
     envs[name] = url
-    with open(env_file, 'w') as f:
-        json.dump(envs, f, indent=2)
-    print(f'Set {name} = {url}')
-    print(f'Use: AGENT_API_BASE=\"{url}\" agent-api get /endpoint')
+    with open(env_file, "w", encoding="utf-8") as handle:
+        json.dump(envs, handle, indent=2)
+    print(f"Set {name} = {url}")
+    print(f'Use: AGENT_API_BASE="{url}" agent-api get /endpoint')
 else:
-    # Show specific env
     if name in envs:
         print(envs[name])
     else:
-        print(f'Environment \"{name}\" not found')
-        sys.exit(1)
-"
+        print(f'Environment "{name}" not found')
+        raise SystemExit(1)
+PYTHON
 }
 
-# Main
 case "${1:-help}" in
+    list)
+        shift
+        cmd_list "$@"
+        ;;
+    show)
+        shift
+        cmd_show "$@"
+        ;;
+    scaffold)
+        shift
+        cmd_scaffold "$@"
+        ;;
+    save)
+        shift
+        cmd_save "$@"
+        ;;
     get|GET)
         shift
         do_request GET "$@"
@@ -302,12 +672,11 @@ case "${1:-help}" in
         show_help
         ;;
     *)
-        # If it looks like a URL, default to GET
         if [[ "$1" =~ ^https?:// ]] || [[ "$1" =~ ^/ ]]; then
             do_request GET "$@"
         else
-            echo "Unknown command: $1"
-            echo "Try: agent-api help"
+            echo "Unknown command: $1" >&2
+            echo "Try: agent-api help" >&2
             exit 1
         fi
         ;;
