@@ -171,12 +171,13 @@ def emit_context(nudge: str) -> None:
 #      now ran the raw equivalent, log a gap event. Over time these gaps are
 #      the to-do list for what `agent-do <tool>` should add.
 #
-# State lives at ~/.agent-do/nudges/session-<sid>.json, keyed off the
+# State lives at $AGENT_DO_HOME/nudges/session-<sid>.json, keyed off the
 # session_id from hook input. Old session files are TTL-cleaned best-effort.
 
 import time
 
-NUDGE_STATE_DIR = Path.home() / ".agent-do" / "nudges"
+AGENT_DO_HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
+NUDGE_STATE_DIR = AGENT_DO_HOME / "nudges"
 NUDGE_STATE_TTL_DAYS = 7
 NUDGE_FRIENDLY_AFTER = 1   # after N hard nudges for a tool, degrade to friendly
 NUDGE_SILENT_AFTER = 3     # after N total nudges for a tool, suppress entirely
