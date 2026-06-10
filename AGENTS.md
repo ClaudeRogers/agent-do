@@ -38,7 +38,8 @@ Applies to `agent-do/`.
 - `LICENSE`: MIT license
 - `README.md`: public-facing documentation
 - `SECURITY.md`: vulnerability reporting policy
-- `docs/internal/`: development planning documents (PLAN, IMPROVEMENTS, TOOL_AUDIT, SPEC_TOOL, AUTH_TOOL)
+- `docs/TOOLS.md`: tool catalog reference
+- `docs/internal/`: current internal design reference (COORD_TOOL)
 
 ## Working Rules
 
