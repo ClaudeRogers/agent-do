@@ -94,7 +94,10 @@ def main() -> int:
     require("tools/agent-harness" in harness_tool["files"], f"missing harness tool file: {harness_tool}")
     for command in ["inspect", "nudges", "evidence", "manifest"]:
         require(command in harness_tool["commands"], f"missing {command} command: {harness_tool}")
-    require(harness_tool["concurrency"] == "read", f"harness should be read-only: {harness_tool}")
+    require(
+        harness_tool["concurrency"] == "mixed",
+        f"harness is mixed: evidence/manifest write files, inspect/nudges read: {harness_tool}",
+    )
 
     transcribe_tool = components["tool:transcribe"]
     require(transcribe_tool["contract_validation"]["declared"] is True,

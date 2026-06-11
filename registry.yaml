@@ -1203,7 +1203,7 @@ tools:
       command: agent-screen click --text 'OK'
     - intent: type text
       command: agent-screen type 'hello world'
-    concurrency: read
+    concurrency: mixed
   vision:
     description: AI-first visual perception with object detection, OCR, and face detection
     capabilities:
@@ -1771,6 +1771,11 @@ tools:
       save:
       - save
       - save-group
+      attributes:
+        doctor: [composite]
+        delete: [destructive]
+        chat: [long_running]
+        embed refresh: [long_running]
     concurrency: mixed
   figma:
     description: Control Figma
@@ -2341,6 +2346,10 @@ tools:
       - cost
       save:
       - transcribe
+      attributes:
+        doctor: [composite]
+        cost: [composite]
+        transcribe: [composite, long_running]
     concurrency: mixed
   hardware:
     description: Unified hardware device control across serial, bluetooth, USB, printers, and MIDI
@@ -2400,6 +2409,7 @@ tools:
       nudges: Summarize hook outcome telemetry and nudge effectiveness
       evidence: Build local drill-down evidence bundles
       manifest: Create and verify harness change manifests
+      contracts: 'Contracts gate and lexicon tooling: contracts validate|propose'
     examples:
     - intent: inspect the agent-do harness
       command: agent-harness inspect
@@ -2436,7 +2446,7 @@ tools:
       - agent-do harness evidence build <session-or-run>
       - agent-do harness manifest new <change-id>
       default_command: inspect
-    concurrency: read
+    concurrency: mixed
   serial:
     description: Serial port communication
     capabilities:
@@ -3206,7 +3216,7 @@ tools:
         check: agent-do resend domains
         fix: agent-do creds store RESEND_API_KEY --stdin
         note: Requires a Resend API key; agent-do will resolve it from env or secure storage
-    concurrency: read
+    concurrency: mixed
   okta:
     description: Okta tenant management — applications (OIDC/SAML), SSO configuration, users, groups, authorization servers,
       system logs
