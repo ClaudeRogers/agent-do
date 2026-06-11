@@ -216,14 +216,14 @@ All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 1. Create executable at `tools/agent-<name>` (must support `--help` flag)
 2. Add entry to `registry.yaml` with `description`, `capabilities`, `commands`, `examples`
    - add `routing` metadata for discovery keywords, raw CLI equivalents, readiness hints, and project signals when the tool should participate in `suggest`, UserPromptSubmit AI catalog routing, or PreToolUse hard nudges
-3. **Declare `contracts:` — mandatory for new tools.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool that is neither declared nor grandfathered in `lib/contracts-baseline.yaml` — and the baseline only shrinks, never grows.
+3. **Declare `contracts:` — mandatory.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool without a contracts block. All 94 tools declare contracts (full coverage reached 2026-06-11); contract warnings must stay at zero.
 4. `--list` auto-discovers tools via filesystem scan of `tools/agent-*`
 
 ### Contracts layer
 
 - The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable: tools declare `contracts:` blocks in `registry.yaml`; verbs that resist a single beat carry `attributes:` instead of inventing new beats.
 - `lib/contracts-lexicon.yaml` is the canonical verb→beat/attribute mapping (with per-tool `overrides:`); `agent-do harness contracts propose` regenerates draft declarations from it — the inventory is a build product, never hand-edited.
-- `agent-do harness contracts validate [--strict]` is the gate: registry shape errors + the grandfather-baseline ratchet. `--strict` requires full coverage (flip it on when the baseline empties).
+- `agent-do harness contracts validate` is the gate: registry shape errors + full-coverage enforcement (the grandfather baseline emptied 2026-06-11 and was deleted; every tool declares).
 - Multi-word contract verbs ("embed status") match commands by first token (`lib/registry.py:_contract_command_exists`).
 
 ## Dependencies

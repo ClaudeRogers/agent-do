@@ -97,6 +97,57 @@ tools:
         check: agent-do context status
         fix: agent-do context init
         note: Global context storage may need initialization
+    contracts:
+      connect:
+      - init
+      snapshot:
+      - search
+      - retrieve
+      - get
+      - list
+      - sources
+      - cache list
+      - cache stats
+      - budget
+      - inject
+      - status
+      - stale
+      - versions
+      interact:
+      - retrieve
+      - fetch
+      - crawl
+      - fetch-llms
+      - fetch-repo
+      - refresh
+      - scan-local
+      - scan-skills
+      - add-source
+      - remove-source
+      - cache clear
+      - cache pin
+      - build
+      - maintain
+      verify:
+      - validate
+      save:
+      - crawl
+      - annotate
+      - feedback
+      attributes:
+        retrieve:
+        - polymorphic
+        crawl:
+        - composite
+        remove-source:
+        - destructive
+        cache clear:
+        - destructive
+        serve:
+        - long_running
+        maintain:
+        - composite
+        - destructive
     concurrency: mixed
   creds:
     description: Secure credential storage and resolution for agent-do tools
@@ -150,6 +201,25 @@ tools:
         replacement: agent-do creds
         example: agent-do creds store RENDER_API_KEY --stdin
         reason: agent-do creds keeps secrets out of shell history and centralizes resolution
+    contracts:
+      snapshot:
+      - get
+      - list
+      - required
+      - platform
+      interact:
+      - delete
+      verify:
+      - check
+      save:
+      - store
+      - export
+      attributes:
+        store:
+        - sensitive
+        delete:
+        - destructive
+        - sensitive
     concurrency: read
   auth:
     description: Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials
@@ -258,6 +328,40 @@ tools:
       - sso
       - oauth
       - identity
+    contracts:
+      connect:
+      - init
+      - ensure
+      - load
+      - import-browser
+      snapshot:
+      - list
+      - show
+      - status
+      - probe
+      - instructions
+      interact:
+      - advance
+      - clear
+      verify:
+      - import-browser
+      - validate
+      save:
+      - save
+      - import-browser
+      attributes:
+        probe:
+        - composite
+        advance:
+        - composite
+        ensure:
+        - composite
+        - long_running
+        import-browser:
+        - composite
+        - sensitive
+        clear:
+        - destructive
     concurrency: mixed
   spec:
     description: Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness
@@ -308,6 +412,15 @@ tools:
       - spec
       - planning
       - docs
+    contracts:
+      connect:
+      - init
+      snapshot:
+      - list
+      - show
+      - status
+      interact:
+      - new
     concurrency: mixed
   zpc:
     description: Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge
@@ -385,6 +498,33 @@ tools:
         check: agent-do zpc status
         fix: agent-do zpc init
         note: ZPC is project-local and may need initialization in this repo
+    contracts:
+      connect:
+      - init
+      snapshot:
+      - harvest
+      - query
+      - patterns
+      - review
+      - inject
+      - status
+      - profile
+      interact:
+      - harvest
+      - review
+      - promote
+      - checkpoint
+      save:
+      - learn
+      - decide
+      - decide-batch
+      attributes:
+        harvest:
+        - polymorphic
+        review:
+        - polymorphic
+        checkpoint:
+        - composite
     concurrency: mixed
   tui:
     description: Control any terminal/TUI application via tmux
@@ -408,6 +548,23 @@ tools:
       command: agent-tui snapshot 1
     - intent: send q to htop
       command: agent-tui send 1 q
+    contracts:
+      connect:
+      - spawn
+      snapshot:
+      - snapshot
+      - list
+      interact:
+      - send
+      - type
+      - kill
+      verify:
+      - wait
+      attributes:
+        spawn:
+        - long_running
+        kill:
+        - destructive
     concurrency: mixed
   ios:
     description: Control iOS Simulator
@@ -482,6 +639,20 @@ tools:
         check: agent-do ios status
         fix: agent-do ios status
         note: Requires Xcode Simulator tooling and a booted simulator for some commands
+    contracts:
+      connect:
+      - boot
+      snapshot:
+      - screenshot
+      - tree
+      - list
+      - status
+      interact:
+      - tap
+      - launch
+      - swipe
+      - type
+      - shutdown
     concurrency: mixed
   macos:
     description: Control native macOS desktop applications via accessibility APIs
@@ -533,6 +704,15 @@ tools:
         check: agent-do macos permissions
         fix: agent-do macos permissions
         note: Accessibility permission is required for desktop automation
+    contracts:
+      snapshot:
+      - tree
+      - find
+      interact:
+      - click
+      - type
+      - focus
+      - menu
     concurrency: mixed
   appleevents:
     description: Control scriptable macOS apps through AppleEvents, AppleScript, and JXA
@@ -610,6 +790,28 @@ tools:
       readiness:
         check: agent-do +live(scope=desktop,ttl=5m) appleevents permissions <app>
         note: macOS Automation permission is target-app specific and can only be confirmed by a live AppleEvent probe
+    contracts:
+      snapshot:
+      - apps
+      - probe
+      - dictionary
+      - terms
+      - cache
+      interact:
+      - cache
+      verify:
+      - compile
+      - permissions
+      attributes:
+        permissions:
+        - composite
+        run:
+        - passthrough
+        tell:
+        - passthrough
+        cache:
+        - polymorphic
+        - destructive
     concurrency: mixed
   repl:
     description: Control interactive REPLs (Python, Node, psql, etc.)
@@ -631,6 +833,18 @@ tools:
       command: agent-repl send 1 'x = 42'
     - intent: read output from python
       command: agent-repl read 1
+    contracts:
+      connect:
+      - spawn
+      snapshot:
+      - read
+      - list
+      interact:
+      - send
+      - kill
+      attributes:
+        kill:
+        - destructive
     concurrency: mixed
   docker:
     description: Control Docker containers
@@ -695,6 +909,22 @@ tools:
         check: agent-do docker ps
         fix: agent-do docker ps
         note: Docker Desktop or the Docker daemon must be running
+    contracts:
+      snapshot:
+      - ps
+      - logs
+      - compose
+      interact:
+      - start
+      - stop
+      - compose
+      attributes:
+        exec:
+        - passthrough
+        shell:
+        - passthrough
+        compose:
+        - polymorphic
     concurrency: write
   ide:
     description: Control VS Code/Cursor editor
@@ -716,6 +946,18 @@ tools:
       command: agent-ide goto 42
     - intent: search for TODO
       command: agent-ide search TODO
+    contracts:
+      connect:
+      - open
+      snapshot:
+      - search
+      interact:
+      - goto
+      attributes:
+        run:
+        - passthrough
+        terminal:
+        - passthrough
     concurrency: read
   ssh:
     description: Control remote server sessions
@@ -735,6 +977,17 @@ tools:
       command: agent-ssh connect prod
     - intent: run df -h on server1
       command: agent-ssh exec server1 'df -h'
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - list
+      interact:
+      - upload
+      - download
+      attributes:
+        exec:
+        - passthrough
     concurrency: write
   android:
     description: Control Android Emulator
@@ -796,6 +1049,16 @@ tools:
         check: agent-do android screenshot
         fix: agent-do android screenshot
         note: Requires Android SDK emulator tooling and a running device for most commands
+    contracts:
+      snapshot:
+      - screenshot
+      interact:
+      - tap
+      - launch
+      - install
+      attributes:
+        shell:
+        - passthrough
     concurrency: mixed
   db:
     description: Control database clients
@@ -850,6 +1113,20 @@ tools:
         check: agent-do db --help
         fix: agent-do db connect <profile>
         note: Database commands may require a configured profile or connection
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - query
+      - tables
+      - describe
+      interact:
+      - query
+      save:
+      - export
+      attributes:
+        query:
+        - polymorphic
     concurrency: mixed
   psql:
     description: PostgreSQL CLI wrapper for AI agents over the native psql binary
@@ -916,6 +1193,43 @@ tools:
       readiness:
         check: agent-psql status
         note: Requires the native psql binary and an active connection or saved profile
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - status
+      - profiles
+      - profile
+      - snapshot
+      - tables
+      - views
+      - describe
+      - schemas
+      - extensions
+      - sizes
+      - relations
+      - query
+      - sample
+      - count
+      - connections
+      - locks
+      - stats
+      - indexes
+      - version
+      interact:
+      - disconnect
+      - query
+      - exec
+      - restore
+      save:
+      - dump
+      attributes:
+        query:
+        - polymorphic
+        exec:
+        - polymorphic
+        restore:
+        - destructive
     concurrency: mixed
   k8s:
     description: Control Kubernetes clusters
@@ -978,6 +1292,19 @@ tools:
         check: agent-do k8s pods
         fix: agent-do k8s pods
         note: Requires kubectl access and a configured current context
+    contracts:
+      connect:
+      - port-forward
+      snapshot:
+      - pods
+      - logs
+      interact:
+      - apply
+      attributes:
+        exec:
+        - passthrough
+        port-forward:
+        - long_running
     concurrency: write
   git:
     description: Enhanced git operations
@@ -997,6 +1324,18 @@ tools:
       command: agent-git commit
     - intent: show recent commits
       command: agent-git log
+    contracts:
+      snapshot:
+      - branch
+      - diff
+      - log
+      interact:
+      - commit
+      - branch
+      - stash
+      attributes:
+        branch:
+        - polymorphic
     concurrency: mixed
   debug:
     description: Control debuggers
@@ -1016,6 +1355,14 @@ tools:
       command: agent-debug break 42
     - intent: print the value of x
       command: agent-debug print x
+    contracts:
+      snapshot:
+      - print
+      - backtrace
+      interact:
+      - break
+      - continue
+      - step
     concurrency: read
   jupyter:
     description: Control Jupyter notebooks
@@ -1034,6 +1381,16 @@ tools:
       command: agent-jupyter run --all
     - intent: restart kernel
       command: agent-jupyter kernel restart
+    contracts:
+      interact:
+      - run
+      - create
+      - kernel
+      save:
+      - export
+      attributes:
+        kernel:
+        - destructive
     concurrency: mixed
   api:
     description: API testing plus canonical API integration templates for agents
@@ -1158,6 +1515,16 @@ tools:
       command: agent-clipboard copy 'hello'
     - intent: show clipboard history
       command: agent-clipboard history
+    contracts:
+      snapshot:
+      - paste
+      - history
+      interact:
+      - copy
+      - clear
+      attributes:
+        clear:
+        - destructive
     concurrency: read
   ocr:
     description: Screen text extraction
@@ -1175,6 +1542,12 @@ tools:
       command: agent-ocr screen
     - intent: find where 'Submit' button is
       command: agent-ocr find 'Submit'
+    contracts:
+      snapshot:
+      - screen
+      - region
+      - file
+      - find
     concurrency: read
   screen:
     description: Vision-based screen perception and control (macOS)
@@ -1203,6 +1576,18 @@ tools:
       command: agent-screen click --text 'OK'
     - intent: type text
       command: agent-screen type 'hello world'
+    contracts:
+      snapshot:
+      - snapshot
+      - displays
+      - elements
+      - find
+      - cursor
+      interact:
+      - click
+      - type
+      - press
+      - scroll
     concurrency: mixed
   vision:
     description: AI-first visual perception with object detection, OCR, and face detection
@@ -1230,6 +1615,27 @@ tools:
       command: agent-vision source webcam && agent-vision count person
     - intent: detect faces
       command: agent-vision snapshot --faces
+    contracts:
+      connect:
+      - source webcam
+      - source screen
+      - source window
+      - source file
+      - source image
+      - source ios
+      - source rtsp
+      snapshot:
+      - snapshot
+      - detect
+      - count
+      - ocr
+      - faces
+      - status
+      interact:
+      - detect
+      attributes:
+        detect:
+        - polymorphic
     concurrency: read
   slack:
     description: Control Slack
@@ -1237,14 +1643,12 @@ tools:
     - send messages
     - send direct messages as a user token
     - read channels
-    - manage reactions
     - upload files
     commands:
       send: Send message to channel or conversation
       dm: Send direct message to a person, email, user ID, or DM ID
       resolve-user: Resolve Slack user by name, email, or user ID
       read: Read channel
-      react: Add reaction
       upload: Upload file
     examples:
     - intent: 'post ''deploy complete'' to #engineering'
@@ -1261,6 +1665,17 @@ tools:
         - SLACK_WEBHOOK_URL
       optional:
       - SLACK_WEBHOOK_URL
+    contracts:
+      snapshot:
+      - resolve-user
+      - read
+      interact:
+      - send
+      - dm
+      - upload
+      attributes:
+        dm:
+        - composite
     concurrency: mixed
   meetings:
     description: Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams
@@ -1312,6 +1727,34 @@ tools:
       - agent-do meetings join <meeting-url>
       - agent-do meetings mute
       default_command: snapshot
+    contracts:
+      connect:
+      - join
+      snapshot:
+      - snapshot
+      - providers
+      - active
+      - zoom
+      interact:
+      - new
+      - schedule
+      - mute
+      - video
+      - share
+      - chat
+      - end
+      - zoom
+      - meet
+      - teams
+      attributes:
+        chat:
+        - long_running
+        zoom:
+        - polymorphic
+        meet:
+        - polymorphic
+        teams:
+        - polymorphic
     concurrency: mixed
   discord:
     description: Control Discord
@@ -1331,6 +1774,13 @@ tools:
       - DISCORD_TOKEN
       optional:
       - DISCORD_WEBHOOK_URL
+    contracts:
+      connect:
+      - join
+      snapshot:
+      - read
+      interact:
+      - send
     concurrency: mixed
   email:
     description: Control email
@@ -1384,6 +1834,32 @@ tools:
       - AGENT_EMAIL_IMAP_PASS
       - AGENT_EMAIL_IMAP_MAILBOX
       - AGENT_EMAIL_IMAP_MAILBOXES
+    contracts:
+      snapshot:
+      - read
+      - search
+      - snapshot
+      - latest
+      - get
+      - code
+      - link
+      - mailboxes
+      - status
+      interact:
+      - send
+      verify:
+      - wait
+      - code
+      - link
+      save:
+      - export
+      attributes:
+        code:
+        - composite
+        - sensitive
+        link:
+        - composite
+        - sensitive
     concurrency: mixed
   calendar:
     description: Control calendar
@@ -1400,6 +1876,15 @@ tools:
       command: agent-calendar list --today
     - intent: create meeting at 3pm
       command: agent-calendar create 'Meeting' --time 15:00
+    contracts:
+      snapshot:
+      - list
+      interact:
+      - create
+      - delete
+      attributes:
+        delete:
+        - destructive
     concurrency: mixed
   notion:
     description: Notion team operating layer for pages, data sources, tasks, decisions, handoffs, comments, cache, and webhooks
@@ -1515,6 +2000,51 @@ tools:
       - pattern: Notion-Version
         replacement: agent-do notion
         reason: use the contract-real Notion wrapper so API versioning, credentials, retries, and cache stay consistent
+    contracts:
+      connect:
+      - doctor
+      - webhooks doctor
+      snapshot:
+      - snapshot
+      - auth
+      - workspace
+      - users
+      - search
+      - read
+      - blocks
+      - data-sources list
+      - data-sources schema
+      - data-sources query
+      - cache
+      - bootstrap-team
+      - schema
+      - embed status
+      interact:
+      - save-group
+      - task
+      - decision
+      - handoff
+      - comment
+      - sync
+      - embed refresh
+      verify:
+      - doctor
+      - verify
+      - webhooks doctor
+      - webhooks ingest
+      save:
+      - save
+      - bootstrap-team
+      - webhooks ingest
+      attributes:
+        doctor:
+        - composite
+        bootstrap-team:
+        - composite
+        webhooks doctor:
+        - composite
+        webhooks ingest:
+        - composite
     concurrency: mixed
   linear:
     description: Control Linear
@@ -1534,6 +2064,12 @@ tools:
     credentials:
       required:
       - LINEAR_API_KEY
+    contracts:
+      snapshot:
+      - list
+      interact:
+      - create
+      - update
     concurrency: mixed
   obsidian:
     description: Obsidian vault integration with a local SQLite vault index plus official Obsidian CLI fallback
@@ -1793,6 +2329,12 @@ tools:
     credentials:
       required:
       - FIGMA_TOKEN
+    contracts:
+      snapshot:
+      - inspect
+      - list
+      save:
+      - export
     concurrency: read
   sheets:
     description: Control Google Sheets
@@ -1807,6 +2349,12 @@ tools:
     examples:
     - intent: read A1:B10 from my sheet
       command: agent-sheets read A1:B10
+    contracts:
+      snapshot:
+      - read
+      interact:
+      - write
+      - create
     concurrency: mixed
   excel:
     description: AI-first Excel CLI for workbook automation
@@ -1840,6 +2388,28 @@ tools:
       command: agent-excel export csv output.csv
     - intent: get sheet overview
       command: agent-excel snapshot --headers
+    contracts:
+      connect:
+      - open
+      snapshot:
+      - snapshot
+      - get
+      - sheets
+      interact:
+      - new
+      - set
+      - fill
+      - formula
+      - sheet name
+      - sheet new
+      - sheet rename
+      - sheet delete
+      save:
+      - save
+      - export
+      attributes:
+        sheet delete:
+        - destructive
     concurrency: mixed
   pdf:
     description: Control PDF operations
@@ -1855,6 +2425,13 @@ tools:
     examples:
     - intent: extract text from document.pdf
       command: agent-pdf extract document.pdf
+    contracts:
+      snapshot:
+      - read
+      - extract
+      interact:
+      - merge
+      - split
     concurrency: mixed
   pdf2md:
     description: Convert PDF files to Markdown
@@ -1874,6 +2451,12 @@ tools:
       command: agent-pdf2md batch .
     - intent: convert spreadsheet PDF preserving table layout
       command: agent-pdf2md convert data.pdf --mode table
+    contracts:
+      snapshot:
+      - snapshot
+      interact:
+      - convert
+      - batch
     concurrency: read
   cloud:
     description: Control cloud providers (AWS, GCP, Azure)
@@ -1888,6 +2471,12 @@ tools:
     examples:
     - intent: list EC2 instances
       command: agent-cloud list ec2
+    contracts:
+      snapshot:
+      - list
+      - logs
+      interact:
+      - deploy
     concurrency: mixed
   gcp:
     description: Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation
@@ -1943,6 +2532,42 @@ tools:
       command: agent-gcp oauth-setup my-project --name "My App" --redirect "http://localhost:3333/api/auth/callback/google"
     - intent: get GCP account snapshot
       command: agent-gcp snapshot
+    contracts:
+      snapshot:
+      - auth status
+      - auth token
+      - projects
+      - project show
+      - apis
+      - service-accounts
+      - sa-key-list
+      - secrets
+      - secret-get
+      - oauth-list
+      - snapshot
+      interact:
+      - api-enable
+      - api-disable
+      - sa-create
+      - sa-key-create
+      - secret-set
+      - secret-del
+      - oauth-setup
+      - oauth-create
+      attributes:
+        auth token:
+        - sensitive
+        sa-key-create:
+        - sensitive
+        secrets:
+        - sensitive
+        secret-get:
+        - sensitive
+        secret-del:
+        - destructive
+        oauth-setup:
+        - composite
+        - long_running
     concurrency: mixed
   cloudflare:
     description: Cloudflare account management — zones, analytics (GraphQL), DNS, Workers, Pages, R2, security events
@@ -1996,6 +2621,31 @@ tools:
       - - CLOUDFLARE_API_TOKEN
       - - CLOUDFLARE_EMAIL
         - CLOUDFLARE_API_KEY
+    contracts:
+      snapshot:
+      - zones
+      - zone
+      - visitors 24h
+      - visitors 7d
+      - top-pages
+      - top-countries
+      - requests
+      - bandwidth
+      - threats
+      - analytics
+      - dns
+      - workers
+      - pages
+      - r2-buckets
+      - firewall-events
+      - snapshot
+      interact:
+      - dns-add
+      - dns-del
+      - dns-update
+      attributes:
+        dns-del:
+        - destructive
     concurrency: mixed
   clerk:
     description: Clerk authentication platform — users, organizations, sessions, OAuth apps, enterprise SSO, JWT templates,
@@ -2040,6 +2690,23 @@ tools:
     credentials:
       required:
       - CLERK_SECRET_KEY
+    contracts:
+      snapshot:
+      - users
+      - user
+      - orgs
+      - org
+      - org-members
+      - roles
+      - sessions
+      - oauth-apps
+      - enterprise-connections
+      - jwt-templates
+      - snapshot
+      interact:
+      - user-create
+      - org-add-member
+      - oauth-app-create
     concurrency: mixed
   ci:
     description: Control CI/CD pipelines
@@ -2054,6 +2721,12 @@ tools:
     examples:
     - intent: trigger deploy pipeline
       command: agent-ci trigger deploy
+    contracts:
+      snapshot:
+      - status
+      - logs
+      interact:
+      - trigger
     concurrency: write
   gh:
     description: GitHub repository, pull request, review, and merge work-state across accessible repos
@@ -2144,6 +2817,33 @@ tools:
         replacement: agent-do gh
         example: agent-do gh inbox
         reason: agent-do gh keeps GitHub PR/review work-state in one structured surface
+    contracts:
+      snapshot:
+      - whoami
+      - repos
+      - inbox
+      - awaiting
+      - prs
+      - pr
+      - diff
+      - threads
+      - checks
+      - review
+      - doctrine
+      interact:
+      - approve
+      - request-changes
+      - comment
+      - close
+      - reopen
+      - checkout
+      - edit
+      - update-branch
+      - merge
+      - ready
+      - draft
+      verify:
+      - audit
     concurrency: mixed
   logs:
     description: Control log aggregation
@@ -2158,20 +2858,44 @@ tools:
     examples:
     - intent: search logs for errors
       command: agent-logs search 'error'
+    contracts:
+      snapshot:
+      - search
+      - filter
+      attributes:
+        tail:
+        - long_running
     concurrency: read
   metrics:
-    description: Control metrics/monitoring
+    description: System metrics and monitoring (CPU, memory, disk, network, processes)
     capabilities:
-    - view dashboards
-    - query metrics
-    - set alerts
+    - read CPU, memory, disk, and network usage
+    - list top processes
+    - report load average and uptime
     commands:
-      query: Query metrics
-      dashboard: View dashboard
-      alert: Manage alerts
+      cpu: CPU usage
+      memory: Memory usage
+      disk: Disk usage
+      network: Network stats
+      processes: 'Top processes: processes [n]'
+      load: System load average
+      uptime: System uptime
+      all: Summary of all metrics
     examples:
     - intent: show CPU usage
-      command: agent-metrics query cpu_usage
+      command: agent-metrics cpu
+    - intent: top processes
+      command: agent-metrics processes 10
+    contracts:
+      snapshot:
+      - cpu
+      - memory
+      - disk
+      - network
+      - processes
+      - load
+      - uptime
+      - all
     concurrency: read
   vm:
     description: Control virtual machines
@@ -2187,6 +2911,13 @@ tools:
     examples:
     - intent: start dev VM
       command: agent-vm start dev
+    contracts:
+      snapshot:
+      - snapshot
+      - list
+      interact:
+      - start
+      - stop
     concurrency: write
   network:
     description: Network diagnostics
@@ -2204,6 +2935,12 @@ tools:
       command: agent-network scan --port 3000
     - intent: ping google.com
       command: agent-network ping google.com
+    contracts:
+      snapshot:
+      - ping
+      - trace
+      - scan
+      - whois
     concurrency: read
   dns:
     description: DNS management
@@ -2218,6 +2955,12 @@ tools:
     examples:
     - intent: lookup DNS for example.com
       command: agent-dns lookup example.com
+    contracts:
+      snapshot:
+      - lookup
+      - list
+      interact:
+      - update
     concurrency: read
   image:
     description: Image processing
@@ -2232,6 +2975,11 @@ tools:
     examples:
     - intent: resize image to 800x600
       command: agent-image resize input.png --size 800x600
+    contracts:
+      interact:
+      - resize
+      - crop
+      - convert
     concurrency: mixed
   video:
     description: Video processing
@@ -2246,6 +2994,11 @@ tools:
     examples:
     - intent: extract frames from video
       command: agent-video extract video.mp4
+    contracts:
+      interact:
+      - trim
+      - merge
+      - extract
     concurrency: mixed
   audio:
     description: Audio processing
@@ -2260,6 +3013,17 @@ tools:
     examples:
     - intent: transcribe recording.mp3
       command: agent-audio transcribe recording.mp3
+    contracts:
+      interact:
+      - convert
+      - trim
+      - transcribe
+      save:
+      - transcribe
+      attributes:
+        transcribe:
+        - composite
+        - long_running
     concurrency: mixed
   transcribe:
     description: Source-to-transcript ingestion pipeline (YouTube URLs, authenticated downloads, Whisper API + local Whisper + caption fallbacks, batch, cost preflight, structured JSON)
@@ -2395,6 +3159,45 @@ tools:
       - agent-do hardware serial list
       - agent-do hardware usb list
       default_command: snapshot
+    contracts:
+      connect:
+      - bluetooth connect
+      snapshot:
+      - snapshot
+      - serial list
+      - serial config
+      - bluetooth status
+      - bluetooth devices
+      - bluetooth scan
+      - usb list
+      - usb tree
+      - usb info
+      - usb disks
+      - printer list
+      - printer default
+      - printer status
+      - printer jobs
+      - printer queue
+      - midi snapshot
+      - midi list
+      interact:
+      - serial send
+      - bluetooth disconnect
+      - usb eject
+      - usb mount
+      - usb unmount
+      - printer default
+      - printer print
+      - printer cancel
+      - midi send
+      - midi play
+      attributes:
+        serial monitor:
+        - long_running
+        printer default:
+        - polymorphic
+        midi monitor:
+        - long_running
     concurrency: mixed
   harness:
     description: Observable agent-do harness inventory, evidence, and change-manifest front door
@@ -2446,6 +3249,25 @@ tools:
       - agent-do harness evidence build <session-or-run>
       - agent-do harness manifest new <change-id>
       default_command: inspect
+    contracts:
+      snapshot:
+      - inspect
+      - nudges
+      - contracts propose
+      verify:
+      - manifest
+      - contracts validate
+      save:
+      - evidence
+      - manifest
+      - contracts propose
+      attributes:
+        evidence:
+        - composite
+        manifest:
+        - polymorphic
+        contracts propose:
+        - polymorphic
     concurrency: mixed
   serial:
     description: Serial port communication
@@ -2460,6 +3282,14 @@ tools:
     examples:
     - intent: list serial ports
       command: agent-serial list
+    contracts:
+      snapshot:
+      - list
+      interact:
+      - send
+      attributes:
+        monitor:
+        - long_running
     concurrency: mixed
   midi:
     description: MIDI control
@@ -2474,6 +3304,12 @@ tools:
     examples:
     - intent: list MIDI devices
       command: agent-midi list
+    contracts:
+      snapshot:
+      - list
+      interact:
+      - send
+      - play
     concurrency: mixed
   homekit:
     description: HomeKit/smart home control
@@ -2488,6 +3324,12 @@ tools:
     examples:
     - intent: turn on living room lights
       command: agent-homekit set 'Living Room' on
+    contracts:
+      snapshot:
+      - list
+      interact:
+      - set
+      - scene
     concurrency: mixed
   bluetooth:
     description: Bluetooth control
@@ -2502,6 +3344,13 @@ tools:
     examples:
     - intent: scan for bluetooth devices
       command: agent-bluetooth scan
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - scan
+      interact:
+      - disconnect
     concurrency: mixed
   usb:
     description: USB device management
@@ -2516,6 +3365,13 @@ tools:
     examples:
     - intent: list USB devices
       command: agent-usb list
+    contracts:
+      connect:
+      - mount
+      snapshot:
+      - list
+      interact:
+      - eject
     concurrency: read
   printer:
     description: Printer control
@@ -2530,6 +3386,12 @@ tools:
     examples:
     - intent: print document.pdf
       command: agent-printer print document.pdf
+    contracts:
+      snapshot:
+      - list
+      - status
+      interact:
+      - print
     concurrency: write
   agent:
     description: Control AI coding agent sessions (Claude, OpenCode, Droid, Amp)
@@ -2561,6 +3423,23 @@ tools:
       command: agent-agent accept
     - intent: list running agents
       command: agent-agent list
+    contracts:
+      connect:
+      - spawn
+      - attach
+      snapshot:
+      - list
+      - snapshot
+      - status
+      interact:
+      - send
+      - accept
+      - reject
+      - cancel
+      - kill
+      attributes:
+        kill:
+        - destructive
     concurrency: mixed
   coord:
     description: Project-local agent state and interrupt broker
@@ -2622,6 +3501,37 @@ tools:
       - agent-do coord interrupts
       - agent-do coord focus set "<goal>" --path <path>
       default_command: status
+    contracts:
+      snapshot:
+      - whoami
+      - aliases
+      - peers
+      - status
+      - interrupts
+      - claims
+      - need list
+      - publishes
+      interact:
+      - touch
+      - alias
+      - interrupts
+      - focus
+      - claim soft
+      - claim strong
+      - release
+      - need add
+      - need clear
+      - publish add
+      - publish clear
+      attributes:
+        touch:
+        - composite
+        interrupts:
+        - polymorphic
+        need clear:
+        - destructive
+        publish clear:
+        - destructive
     concurrency: mixed
   3d:
     description: 3D modeling and rendering control
@@ -2640,6 +3550,13 @@ tools:
       command: agent-3d view model.obj
     - intent: convert model.stl to obj
       command: agent-3d convert model.stl model.obj
+    contracts:
+      snapshot:
+      - info
+      interact:
+      - view
+      - convert
+      - render
     concurrency: mixed
   cad:
     description: CAD file operations
@@ -2657,6 +3574,13 @@ tools:
       command: agent-cad view drawing.dxf
     - intent: convert part.step to stl
       command: agent-cad convert part.step part.stl
+    contracts:
+      snapshot:
+      - measure
+      - info
+      interact:
+      - view
+      - convert
     concurrency: mixed
   browse:
     description: AI-first headless browser automation with @ref element selection, SSO/MFA login handoff, persistent sessions
@@ -2762,6 +3686,65 @@ tools:
         check: agent-do browse status
         fix: agent-do browse install
         note: Playwright browser binaries may need installation before first use
+    contracts:
+      connect:
+      - open
+      - login
+      - session load
+      - auth login
+      snapshot:
+      - snapshot
+      - get
+      - clipboard read
+      - session list
+      - api list
+      - api show
+      - auth check-creds
+      - auth get-creds
+      - tab list
+      - screenshot
+      - vision describe
+      - vision find
+      - vision analyze
+      - vision explain
+      - vision compare
+      interact:
+      - click
+      - fill
+      - type
+      - press
+      - clipboard copy
+      - clipboard paste
+      - session delete
+      - session import
+      - capture
+      - api delete
+      - tab new
+      - tab close
+      - viewport
+      - vision click
+      - agent
+      verify:
+      - wait
+      - api test
+      save:
+      - session save
+      - session export
+      - auth store-creds
+      attributes:
+        session delete:
+        - destructive
+        capture:
+        - long_running
+        api delete:
+        - destructive
+        auth store-creds:
+        - sensitive
+        auth get-creds:
+        - sensitive
+        agent:
+        - composite
+        - long_running
     concurrency: mixed
   burp:
     description: Burp Suite automation
@@ -2779,6 +3762,13 @@ tools:
       command: agent-burp proxy on
     - intent: scan example.com
       command: agent-burp scan https://example.com
+    contracts:
+      snapshot:
+      - issues
+      interact:
+      - launch
+      - proxy
+      - scan
     concurrency: mixed
   wireshark:
     description: Network packet capture and analysis
@@ -2796,6 +3786,16 @@ tools:
       command: agent-wireshark capture en0
     - intent: read capture.pcap
       command: agent-wireshark read capture.pcap
+    contracts:
+      snapshot:
+      - read
+      - stats
+      interact:
+      - capture
+      - filter
+      attributes:
+        capture:
+        - long_running
     concurrency: read
   ghidra:
     description: Ghidra reverse engineering automation
@@ -2813,6 +3813,13 @@ tools:
       command: agent-ghidra decompile myapp main
     - intent: list functions in binary
       command: agent-ghidra functions program.exe
+    contracts:
+      snapshot:
+      - functions
+      - strings
+      interact:
+      - analyze
+      - decompile
     concurrency: read
   latex:
     description: LaTeX document compilation
@@ -2830,6 +3837,15 @@ tools:
       command: agent-latex compile paper.tex
     - intent: create article template
       command: agent-latex template article
+    contracts:
+      snapshot:
+      - template
+      interact:
+      - compile
+      - preview
+      attributes:
+        watch:
+        - long_running
     concurrency: write
   colab:
     description: Google Colab notebook management
@@ -2847,6 +3863,13 @@ tools:
       command: agent-colab open analysis.ipynb
     - intent: convert script.py to notebook
       command: agent-colab convert script.py
+    contracts:
+      connect:
+      - open
+      interact:
+      - convert
+      - run
+      - new
     concurrency: mixed
   lab:
     description: JupyterLab management
@@ -2864,6 +3887,17 @@ tools:
       command: agent-lab start
     - intent: open notebook in jupyterlab
       command: agent-lab open analysis.ipynb
+    contracts:
+      connect:
+      - start
+      - open
+      snapshot:
+      - extensions
+      interact:
+      - stop
+      attributes:
+        start:
+        - long_running
     concurrency: mixed
   zoom:
     description: Zoom meeting control
@@ -2882,6 +3916,14 @@ tools:
       command: agent-zoom join 123-456-789
     - intent: start a zoom meeting
       command: agent-zoom start
+    contracts:
+      connect:
+      - join
+      interact:
+      - start
+      - mute
+      - video
+      - share
     concurrency: mixed
   meet:
     description: Google Meet control
@@ -2899,6 +3941,13 @@ tools:
       command: agent-meet new
     - intent: join meet abc-defg-hij
       command: agent-meet join abc-defg-hij
+    contracts:
+      connect:
+      - join
+      interact:
+      - new
+      - mute
+      - video
     concurrency: mixed
   teams:
     description: Microsoft Teams control
@@ -2916,6 +3965,16 @@ tools:
       command: agent-teams new
     - intent: chat with john in teams
       command: agent-teams chat john
+    contracts:
+      connect:
+      - join
+      interact:
+      - new
+      - chat
+      - mute
+      attributes:
+        chat:
+        - long_running
     concurrency: mixed
   voice:
     description: Voice synthesis and recognition
@@ -2933,6 +3992,21 @@ tools:
       command: agent-voice speak 'Hello, world'
     - intent: transcribe recording.wav
       command: agent-voice transcribe recording.wav
+    contracts:
+      snapshot:
+      - listen
+      interact:
+      - speak
+      - record
+      - transcribe
+      save:
+      - transcribe
+      attributes:
+        record:
+        - long_running
+        transcribe:
+        - composite
+        - long_running
     concurrency: write
   sms:
     description: SMS messaging
@@ -2959,6 +4033,27 @@ tools:
       command: agent-sms list
     - intent: wait for a verification code text
       command: agent-sms code --from WidgetHub --contains verification
+    contracts:
+      snapshot:
+      - list
+      - search
+      - snapshot
+      - latest
+      - code
+      - link
+      interact:
+      - send
+      verify:
+      - wait
+      - code
+      - link
+      attributes:
+        code:
+        - composite
+        - sensitive
+        link:
+        - composite
+        - sensitive
     concurrency: write
   prompt:
     description: Prompt management and templating
@@ -2976,6 +4071,13 @@ tools:
       command: agent-prompt save explain
     - intent: run explain prompt with topic=AI
       command: agent-prompt run explain topic=AI
+    contracts:
+      snapshot:
+      - load
+      - run
+      - list
+      save:
+      - save
     concurrency: read
   eval:
     description: LLM output evaluation and testing
@@ -2993,6 +4095,20 @@ tools:
       command: agent-eval run math-test
     - intent: show evaluation results
       command: agent-eval results
+    contracts:
+      snapshot:
+      - results
+      - compare
+      interact:
+      - run
+      - create
+      verify:
+      - run
+      save:
+      - run
+      attributes:
+        run:
+        - composite
     concurrency: read
   memory:
     description: Persistent memory and context
@@ -3010,6 +4126,13 @@ tools:
       command: agent-memory store project 'Uses React'
     - intent: what do I know about the project
       command: agent-memory recall project
+    contracts:
+      snapshot:
+      - recall
+      - search
+      - list
+      save:
+      - store
     concurrency: mixed
   manna:
     description: Git-backed issue tracking and context management for AI agents
@@ -3035,6 +4158,20 @@ tools:
       command: agent-manna list
     - intent: show issue details
       command: agent-manna show 1
+    contracts:
+      connect:
+      - init
+      snapshot:
+      - list
+      - show
+      - context
+      interact:
+      - create
+      - update
+      - delete
+      attributes:
+        delete:
+        - destructive
     concurrency: write
   learn:
     description: Learning and pattern improvement
@@ -3052,6 +4189,13 @@ tools:
       command: agent-learn correct 'screenshot ios' --should 'agent-ios screenshot'
     - intent: that was a great response
       command: agent-learn feedback 5
+    contracts:
+      snapshot:
+      - patterns
+      - stats
+      save:
+      - correct
+      - feedback
     concurrency: write
   swarm:
     description: Multi-agent orchestration
@@ -3069,6 +4213,20 @@ tools:
       command: agent-swarm spawn 3 'search for best practices'
     - intent: run tests and linting in parallel
       command: agent-swarm parallel 'test' 'lint'
+    contracts:
+      snapshot:
+      - status
+      interact:
+      - spawn
+      - parallel
+      - pipeline
+      attributes:
+        spawn:
+        - composite
+        parallel:
+        - composite
+        pipeline:
+        - composite
     concurrency: write
   unbrowse:
     description: Standalone API traffic capture → reusable curl-based skills. For SSO/MFA → headless handoff, use browse login
@@ -3107,6 +4265,27 @@ tools:
       command: agent-unbrowse test myservice
     - intent: remove a captured skill
       command: agent-unbrowse delete myservice
+    contracts:
+      snapshot:
+      - status
+      - list
+      - show
+      - replay
+      interact:
+      - capture
+      - stop
+      - close
+      - replay
+      - delete
+      verify:
+      - test
+      attributes:
+        capture:
+        - long_running
+        replay:
+        - polymorphic
+        delete:
+        - destructive
     concurrency: mixed
   namecheap:
     description: Namecheap domain and DNS management — domains, DNS records (safe upsert with exact verification), nameservers,
@@ -3153,6 +4332,26 @@ tools:
       required:
       - NAMECHEAP_API_USER
       - NAMECHEAP_API_KEY
+    contracts:
+      snapshot:
+      - domains
+      - domain
+      - dns
+      - nameservers
+      - ssl-list
+      - snapshot
+      interact:
+      - domain-renew
+      - dns-add
+      - dns-update
+      - dns-del
+      - nameservers-set
+      verify:
+      - domain-check
+      - dns-verify
+      attributes:
+        dns-del:
+        - destructive
     concurrency: write
   resend:
     description: Resend domain management and DNS verification — exact records, verification state, and public DNS checks
@@ -3216,6 +4415,17 @@ tools:
         check: agent-do resend domains
         fix: agent-do creds store RESEND_API_KEY --stdin
         note: Requires a Resend API key; agent-do will resolve it from env or secure storage
+    contracts:
+      snapshot:
+      - domains
+      - domain
+      - records
+      - status
+      interact:
+      - add
+      - verify
+      verify:
+      - dns-check
     concurrency: mixed
   okta:
     description: Okta tenant management — applications (OIDC/SAML), SSO configuration, users, groups, authorization servers,
@@ -3261,6 +4471,35 @@ tools:
     credentials:
       required:
       - OKTA_API_TOKEN
+    contracts:
+      snapshot:
+      - apps
+      - app
+      - app-creds
+      - users
+      - groups
+      - auth-servers
+      - logs
+      - trusted-origins
+      - snapshot
+      interact:
+      - app-create-oidc web
+      - app-create-oidc spa
+      - app-create-oidc native
+      - app-create-oidc service
+      - app-create-saml
+      - app-update
+      - app-creds-rotate
+      - app-assign-group
+      attributes:
+        app-create-oidc web:
+        - sensitive
+        app-create-oidc service:
+        - sensitive
+        app-creds:
+        - sensitive
+        app-creds-rotate:
+        - sensitive
     concurrency: mixed
   render:
     description: Full-surface Render.com control — services (create/update/delete/lifecycle), deploys (trigger/show/cancel/rollback), one-off jobs, cron runs, env vars + secret files, env groups, postgres lifecycle + creds + recovery, key value, blueprints, custom domains + headers + routes, persistent disks + snapshots, dedicated IPs, registry credentials, projects + environments, webhooks, notifications, maintenance, audit logs, owners, observability (logs + metrics)
@@ -3403,6 +4642,159 @@ tools:
         check: agent-do render services
         fix: agent-do creds store RENDER_API_KEY --stdin
         note: Requires a Render API key; agent-do will resolve it from env or secure storage
+    contracts:
+      snapshot:
+      - owners
+      - whoami
+      - services
+      - show
+      - events
+      - instances
+      - autoscaling show
+      - deploys
+      - jobs
+      - job show
+      - env
+      - secret list
+      - secret get
+      - env-group list
+      - env-group show
+      - env-group get
+      - env-group secret
+      - db
+      - kv list
+      - kv show
+      - kv connect-info
+      - domains
+      - domain
+      - header list
+      - route list
+      - blueprint list
+      - blueprint show
+      - blueprint syncs
+      - disk list
+      - disk show
+      - disk snapshots
+      - dedicated-ip list
+      - dedicated-ip show
+      - registry list
+      - registry show
+      - projects
+      - project
+      - environment list
+      - environment show
+      - webhook list
+      - webhook show
+      - webhook events
+      - notify show
+      - notify overrides
+      - notify override
+      - maintenance list
+      - maintenance show
+      - metrics
+      - logs
+      - snapshot
+      interact:
+      - create
+      - update
+      - delete
+      - cache-purge
+      - restart
+      - suspend
+      - resume
+      - scale
+      - autoscaling enable
+      - autoscaling disable
+      - deploy
+      - rollback
+      - job run
+      - job cancel
+      - cron run
+      - cron cancel
+      - env-set
+      - env-del
+      - secret set
+      - secret del
+      - env-group create
+      - env-group delete
+      - env-group rename
+      - env-group link
+      - env-group unlink
+      - env-group set
+      - env-group del-var
+      - db
+      - kv create
+      - kv update
+      - kv delete
+      - kv suspend
+      - kv resume
+      - header add
+      - header del
+      - route add
+      - route del
+      - blueprint update
+      - blueprint delete
+      - disk create
+      - disk update
+      - disk delete
+      - disk restore
+      - dedicated-ip create
+      - dedicated-ip delete
+      - registry add
+      - registry delete
+      - environment create
+      - environment delete
+      - environment link
+      - environment unlink
+      - webhook create
+      - webhook update
+      - webhook delete
+      - notify update
+      - maintenance reschedule
+      - maintenance trigger
+      verify:
+      - audit
+      - blueprint validate
+      attributes:
+        delete:
+        - destructive
+        cache-purge:
+        - destructive
+        env-del:
+        - destructive
+        secret get:
+        - sensitive
+        secret del:
+        - destructive
+        env-group delete:
+        - destructive
+        env-group del-var:
+        - destructive
+        env-group secret:
+        - sensitive
+        db:
+        - polymorphic
+        - sensitive
+        kv delete:
+        - destructive
+        kv connect-info:
+        - sensitive
+        header del:
+        - destructive
+        route del:
+        - destructive
+        blueprint delete:
+        - destructive
+        disk delete:
+        - destructive
+        dedicated-ip delete:
+        - destructive
+        registry delete:
+        - destructive
+        environment delete:
+        - destructive
+        webhook delete:
+        - destructive
     concurrency: write
   vector:
     description: Operate Versova Vector portfolio command center
@@ -3476,6 +4868,37 @@ tools:
         check: agent-do vector ls
         fix: agent-do creds store VECTOR_SUPABASE_SERVICE_KEY --stdin
         note: Requires Vector Supabase URL and service role key
+    contracts:
+      connect:
+      - open
+      snapshot:
+      - today
+      - inbox
+      - ls
+      - show
+      - snapshot
+      - members
+      - feed
+      - intake
+      interact:
+      - work
+      - support
+      - ask
+      - link
+      - sync
+      - bind
+      - members
+      - intake
+      save:
+      - decide
+      attributes:
+        link:
+        - destructive
+        members:
+        - polymorphic
+        intake:
+        - polymorphic
+        - composite
     concurrency: write
   vercel:
     description: Control Vercel projects, deployments, domains, and env vars
@@ -3556,6 +4979,26 @@ tools:
         check: agent-do vercel projects
         fix: agent-do creds store VERCEL_ACCESS_TOKEN --stdin
         note: Requires a Vercel access token; agent-do will resolve it from env or secure storage
+    contracts:
+      snapshot:
+      - projects
+      - show
+      - deployments
+      - inspect
+      - logs
+      - env
+      - domains
+      - teams
+      - snapshot
+      interact:
+      - deploy
+      - cancel
+      - promote
+      - env-set
+      - env-del
+      attributes:
+        env-del:
+        - destructive
     concurrency: write
   tail:
     description: Wrap dev commands, capture output to log files for AI agents
@@ -3587,6 +5030,28 @@ tools:
       command: agent-tail grep 'TypeError' api
     - intent: stop all dev services
       command: agent-tail stop
+    contracts:
+      snapshot:
+      - read
+      - grep
+      - errors
+      - list
+      - sessions
+      - snapshot
+      interact:
+      - stop
+      - prune
+      attributes:
+        run:
+        - passthrough
+        - long_running
+        start:
+        - passthrough
+        - long_running
+        follow:
+        - long_running
+        prune:
+        - destructive
     concurrency: read
   supabase:
     description: Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
@@ -3765,6 +5230,112 @@ tools:
         check: agent-do supabase projects
         fix: agent-do creds store SUPABASE_ACCESS_TOKEN --stdin
         note: Requires a Supabase access token; agent-do will resolve it from env or secure storage
+    contracts:
+      connect:
+      - db-connect
+      snapshot:
+      - projects
+      - show
+      - restore-versions
+      - health
+      - api-keys
+      - secrets
+      - functions
+      - function-show
+      - branches
+      - branch-show
+      - branch-diff
+      - addons
+      - upgrade-eligibility
+      - upgrade-status
+      - network-restrictions
+      - network-bans
+      - domains
+      - vanity
+      - types
+      - orgs
+      - regions
+      - postgrest
+      - snapshot
+      - rest
+      - sql
+      - db-status
+      - query
+      - tables
+      - describe
+      - sample
+      interact:
+      - create
+      - update
+      - delete
+      - pause
+      - restore
+      - restore-cancel
+      - secret-set
+      - secret-del
+      - function-deploy
+      - function-update
+      - function-delete
+      - branch-create
+      - branch-update
+      - branch-delete
+      - branch-merge
+      - branch-push
+      - branch-reset
+      - branching-disable
+      - addon-apply
+      - addon-remove
+      - compute-scale
+      - upgrade
+      - replica-setup
+      - replica-remove
+      - network-restrict
+      - network-unban
+      - domain-init
+      - domain-activate
+      - domain-delete
+      - vanity-activate
+      - vanity-delete
+      - rest
+      - sql
+      - query
+      verify:
+      - domain-reverify
+      - vanity-check
+      save:
+      - db-connect
+      attributes:
+        delete:
+        - destructive
+        api-keys:
+        - sensitive
+        secrets:
+        - sensitive
+        secret-del:
+        - destructive
+        function-delete:
+        - destructive
+        branch-delete:
+        - destructive
+        branch-reset:
+        - destructive
+        addon-remove:
+        - destructive
+        replica-remove:
+        - destructive
+        domain-delete:
+        - destructive
+        vanity-delete:
+        - destructive
+        rest:
+        - polymorphic
+        sql:
+        - polymorphic
+        db-connect:
+        - composite
+        - sensitive
+        query:
+        - polymorphic
     concurrency: write
   sessions:
     description: Search and retrieve AI coding session history
@@ -3804,6 +5375,17 @@ tools:
       command: agent-sessions projects
     - intent: session database stats
       command: agent-sessions stats
+    contracts:
+      snapshot:
+      - search
+      - list
+      - show
+      - context
+      - projects
+      - stats
+      - snapshot
+      - grep
+      - turns
     concurrency: read
   dpt:
     description: Design Perception Tensor - automated design quality scoring
@@ -3858,4 +5440,19 @@ tools:
         check: agent-do dpt score
         fix: agent-do dpt build
         note: DPT depends on the browse screenshot workflow and a built scoring engine
+    contracts:
+      snapshot:
+      - scan
+      - score
+      - report
+      - violations
+      - baseline
+      - diff
+      interact:
+      - build
+      save:
+      - baseline
+      attributes:
+        baseline:
+        - composite
     concurrency: read
