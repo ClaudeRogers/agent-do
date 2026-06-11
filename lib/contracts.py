@@ -174,6 +174,25 @@ def render_markdown(payload: dict, generated_at: str = "") -> str:
     import yaml
 
     stats = payload["stats"]
+    by_attr: dict[str, list[str]] = {}
+    read_only_verbs = 0
+    write_verbs = 0
+    for name, item in sorted(payload["proposals"].items()):
+        contracts = item["contracts"]
+        attrs = contracts.get("attributes") or {}
+        for verb, verb_attrs in sorted(attrs.items()):
+            for attr in verb_attrs:
+                by_attr.setdefault(attr, []).append(f"`{name} {verb}`")
+        membership: dict[str, set] = {}
+        for beat in ("connect", "snapshot", "interact", "verify", "save"):
+            for verb in contracts.get(beat) or []:
+                membership.setdefault(verb, set()).add(beat)
+        for verb, beats in membership.items():
+            if beats <= {"snapshot", "verify"}:
+                read_only_verbs += 1
+            else:
+                write_verbs += 1
+
     lines = [
         "# agent-do Contracts Inventory (v2)",
         "",
@@ -187,7 +206,32 @@ def render_markdown(payload: dict, generated_at: str = "") -> str:
         f"- Tools: {stats['tools']} ({stats['declared']} declared, {stats['proposed']} proposed)",
         f"- Classified verbs: {stats['classified_verbs']}",
         f"- Unclassified verbs: {stats['unclassified_verbs']} across {stats['tools_with_exceptions']} tools",
+        f"- Read surface (snapshot/verify only — safe to parallelize): {read_only_verbs} verbs",
+        f"- Write surface (connect/interact/save): {write_verbs} verbs",
         "",
+        "## Safety surface",
+        "",
+        "The classifications that change agent behavior: what destroys data,",
+        "what emits or persists secrets, what runs opaque payloads, and what",
+        "never returns. Review these first — a missing entry here is the",
+        "dangerous kind of error.",
+        "",
+    ]
+    attr_blurbs = {
+        "destructive": "irreversible data loss; confirm before auto-running",
+        "sensitive": "emits or persists secret material; guard output",
+        "passthrough": "arbitrary-payload escape hatch; beat decided by the argument",
+        "long_running": "daemon/stream/session; may never return",
+        "polymorphic": "beat decided by payload or flag at call time",
+        "composite": "one call performs several beats internally",
+    }
+    for attr in ("destructive", "sensitive", "passthrough", "long_running", "polymorphic", "composite"):
+        verbs = by_attr.get(attr) or []
+        lines.append(f"### {attr} ({len(verbs)}) — {attr_blurbs[attr]}")
+        lines.append("")
+        lines.append(", ".join(verbs) if verbs else "none")
+        lines.append("")
+    lines += [
         "## Exceptions for review",
         "",
         "Verbs the lexicon could not classify. THIS SECTION IS THE REVIEW",

@@ -356,6 +356,7 @@ overrides:
     check: {beats: [interact]}          # checks a checkbox, not a condition
     open: {beats: [connect]}
     agent: {beats: [interact], attributes: [composite, long_running]}  # autonomous goal loop
+    auth get-creds: {beats: [snapshot], attributes: [sensitive]}       # prints stored credentials
   creds:
     check: {beats: [verify]}
     store: {beats: [save], attributes: [sensitive]}
@@ -370,7 +371,9 @@ overrides:
     sa-key-create: {beats: [interact], attributes: [sensitive]}
     oauth-setup: {beats: [interact], attributes: [composite, long_running]}
   render:
-    db: {beats: [snapshot, interact], attributes: [polymorphic]}  # db recover: read or destroy by flag
+    db: {beats: [snapshot, interact], attributes: [polymorphic, sensitive]}  # db recover destroys by flag; db connect-info reveals DSN
+    secret get: {beats: [snapshot], attributes: [sensitive]}        # reveals secret value; "* get" pattern outran "* secret"
+    kv connect-info: {beats: [snapshot], attributes: [sensitive]}   # returns DSN with credentials
   android:
     logcat: {attributes: [long_running]}
   ios:
@@ -398,6 +401,7 @@ overrides:
   zpc:
     checkpoint: {beats: [interact], attributes: [composite]}
     review: {beats: [snapshot, interact], attributes: [polymorphic]}
+    query: {beats: [snapshot]}      # free-text/tag memory search; blind query→polymorphic rule wrong here
   coord:
     touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
     interrupts: {beats: [snapshot, interact], attributes: [polymorphic]}  # --mark-seen writes cursor
@@ -415,3 +419,22 @@ overrides:
   tui:
     spawn: {beats: [connect], attributes: [long_running]}   # not idempotent; new session per call
     attach: {beats: [snapshot]}                              # prints a tmux handoff string
+  # ── 2026-06-11 review pass (false-safe hunt over the full inventory) ──
+  metrics:
+    cpu: {beats: [snapshot]}        # registry entry was fiction (query/alert/dashboard);
+    memory: {beats: [snapshot]}     # rewritten to the tool's real read-only surface
+    disk: {beats: [snapshot]}
+    network: {beats: [snapshot]}
+    processes: {beats: [snapshot]}
+    load: {beats: [snapshot]}
+    uptime: {beats: [snapshot]}
+    all: {beats: [snapshot]}
+  notion:
+    data-sources query: {beats: [snapshot]}  # Notion query API is read-only filter/sort
+  hardware:
+    bluetooth scan: {beats: [snapshot]}      # delegates to bluetooth tool; bounded inquiry read
+  sms:
+    code: {beats: [snapshot, verify], attributes: [composite, sensitive]}  # emits OTP codes; matches email's shape
+    link: {beats: [snapshot, verify], attributes: [composite, sensitive]}  # emits magic links
+  jupyter:
+    kernel: {beats: [interact], attributes: [destructive]}  # kernel restart discards in-memory session state

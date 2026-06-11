@@ -141,8 +141,6 @@ def check_registry_gate() -> None:
     require(report["errors"] == 0, f"contract shape errors in registry.yaml: {report['errors']}")
     require(report["ok"], "registry contract validation must pass")
 
-    baseline_doc = yaml.safe_load((ROOT / "lib" / "contracts-baseline.yaml").read_text(encoding="utf-8"))
-    baseline = set(baseline_doc["grandfathered"])
     tools = registry["tools"]
     undeclared = {
         name
@@ -150,18 +148,30 @@ def check_registry_gate() -> None:
         if isinstance(info, dict) and not isinstance(info.get("contracts"), dict)
     }
 
-    new_without_contracts = sorted(undeclared - baseline)
-    require(
-        not new_without_contracts,
-        "tools without contracts that are not grandfathered "
-        f"(new tools MUST declare contracts): {new_without_contracts}",
-    )
-    stale_baseline = sorted(baseline - undeclared)
-    require(
-        not stale_baseline,
-        "baseline entries that now declare contracts or no longer exist "
-        f"(remove them — the ratchet only tightens): {stale_baseline}",
-    )
+    baseline_path = ROOT / "lib" / "contracts-baseline.yaml"
+    if baseline_path.exists():
+        baseline_doc = yaml.safe_load(baseline_path.read_text(encoding="utf-8"))
+        baseline = set(baseline_doc["grandfathered"])
+        new_without_contracts = sorted(undeclared - baseline)
+        require(
+            not new_without_contracts,
+            "tools without contracts that are not grandfathered "
+            f"(new tools MUST declare contracts): {new_without_contracts}",
+        )
+        stale_baseline = sorted(baseline - undeclared)
+        require(
+            not stale_baseline,
+            "baseline entries that now declare contracts or no longer exist "
+            f"(remove them — the ratchet only tightens): {stale_baseline}",
+        )
+    else:
+        # Strict era: the baseline emptied on 2026-06-11 and was deleted.
+        # Every registry tool declares contracts; there is no grandfather list.
+        require(
+            not undeclared,
+            f"every registry tool must declare contracts: {sorted(undeclared)}",
+        )
+        require(report["warnings"] == 0, f"contract warnings must stay zero: {report['warnings']}")
 
 
 def check_cli_gate() -> None:
@@ -201,6 +211,37 @@ def check_cli_propose() -> None:
         api["contracts"].get("save") == ["save"],
         f"api existing contracts must survive propose untouched: {api}",
     )
+
+
+class _DupKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _no_dup_construct(loader: yaml.SafeLoader, node: yaml.MappingNode) -> dict:
+    mapping: dict = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node)
+        if key in mapping:
+            raise AssertionError(
+                f"duplicate YAML key {key!r} at line {key_node.start_mark.line + 1} "
+                "— PyYAML silently keeps only the last, losing data"
+            )
+        mapping[key] = loader.construct_object(value_node)
+    return mapping
+
+
+_DupKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup_construct
+)
+
+
+def check_no_duplicate_keys() -> None:
+    """Lexicon files must not contain duplicate mapping keys."""
+    for name in ("contracts-lexicon.yaml", "contracts-lexicon-learned.yaml"):
+        path = ROOT / "lib" / name
+        if path.exists():
+            # _DupKeyLoader extends SafeLoader: safe_load semantics + dup detection.
+            yaml.load(path.read_text(encoding="utf-8"), Loader=_DupKeyLoader)
 
 
 def check_lexicon_merge(tmp_dir: Path) -> None:
@@ -248,6 +289,7 @@ def check_lexicon_merge(tmp_dir: Path) -> None:
 def main() -> int:
     import tempfile
 
+    check_no_duplicate_keys()
     check_attribute_schema()
     check_registry_gate()
     check_cli_gate()
