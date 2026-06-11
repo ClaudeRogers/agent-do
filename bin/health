@@ -10,6 +10,26 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOLS_DIR="$ROOT_DIR/tools"
 CREDS_TOOL="$TOOLS_DIR/agent-creds"
 
+probe() {
+    # probe <seconds> <cmd...> — bounded liveness check. External daemons
+    # (docker, kubectl) can block forever on a dead socket; macOS ships no
+    # timeout(1), so bound the probe via python3. Exit 124 on timeout.
+    local secs="$1"
+    shift
+    python3 - "$secs" "$@" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(sys.argv[2:], capture_output=True, timeout=float(sys.argv[1]))
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+PY
+}
+
 resolve_tool_path() {
     local name="$1"
 
@@ -162,10 +182,10 @@ assert any(item.get("name") == "anthropic" for item in templates)
                 ;;
             docker)
                 if command -v docker &>/dev/null; then
-                    if docker info &>/dev/null; then
+                    if probe 10 docker info; then
                         status="OK"; note="Docker running"
                     else
-                        status="WARN"; note="Docker installed but not running"
+                        status="WARN"; note="Docker installed but not responding"
                     fi
                 else
                     status="WARN"; note="docker not found"
@@ -173,7 +193,7 @@ assert any(item.get("name") == "anthropic" for item in templates)
                 ;;
             k8s)
                 if command -v kubectl &>/dev/null; then
-                    if kubectl cluster-info &>/dev/null 2>&1; then
+                    if probe 10 kubectl cluster-info; then
                         status="OK"; note="cluster reachable"
                     else
                         status="WARN"; note="kubectl found but no cluster"
