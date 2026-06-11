@@ -37,6 +37,8 @@ agent-do is a universal automation CLI for AI agents with 94 specialized tools. 
 ./agent-do spec init                   # Initialize repo-local spec storage
 ./agent-do spec status --change id     # Check one change package
 ./agent-do harness inspect --json      # Inspect tools/hooks/docs/tests/state as one harness
+./agent-do harness contracts validate  # Contracts gate: shape errors + grandfather-baseline ratchet
+./agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md  # Regenerate lexicon-driven contracts draft
 ./agent-do harness nudges effectiveness --since 7d  # Review hook follow/ignore/expire telemetry
 ./agent-do harness evidence build <session-or-run>  # Build drill-down evidence bundle
 ./agent-do harness manifest new <change-id>         # Start falsifiable harness change manifest
@@ -203,7 +205,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-23 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 54 mixed tools require per-command classification. When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution.
+20 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 57 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes.
 
 ### Universal Tool Pattern
 
@@ -214,7 +216,15 @@ All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 1. Create executable at `tools/agent-<name>` (must support `--help` flag)
 2. Add entry to `registry.yaml` with `description`, `capabilities`, `commands`, `examples`
    - add `routing` metadata for discovery keywords, raw CLI equivalents, readiness hints, and project signals when the tool should participate in `suggest`, UserPromptSubmit AI catalog routing, or PreToolUse hard nudges
-3. `--list` auto-discovers tools via filesystem scan of `tools/agent-*`
+3. **Declare `contracts:` — mandatory for new tools.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool that is neither declared nor grandfathered in `lib/contracts-baseline.yaml` — and the baseline only shrinks, never grows.
+4. `--list` auto-discovers tools via filesystem scan of `tools/agent-*`
+
+### Contracts layer
+
+- The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable: tools declare `contracts:` blocks in `registry.yaml`; verbs that resist a single beat carry `attributes:` instead of inventing new beats.
+- `lib/contracts-lexicon.yaml` is the canonical verb→beat/attribute mapping (with per-tool `overrides:`); `agent-do harness contracts propose` regenerates draft declarations from it — the inventory is a build product, never hand-edited.
+- `agent-do harness contracts validate [--strict]` is the gate: registry shape errors + the grandfather-baseline ratchet. `--strict` requires full coverage (flip it on when the baseline empties).
+- Multi-word contract verbs ("embed status") match commands by first token (`lib/registry.py:_contract_command_exists`).
 
 ## Dependencies
 

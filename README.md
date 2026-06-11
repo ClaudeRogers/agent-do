@@ -74,7 +74,11 @@ agent-do db disconnect
 ```
 
 Some tools are deep systems. Some are thin adapters. All of them aim at the same
-outer contract.
+outer contract — and the rhythm is machine-readable: tools declare `contracts:`
+blocks in `registry.yaml` mapping each verb to its beats, with `attributes:`
+flags (destructive, long_running, polymorphic, composite, sensitive,
+passthrough) for the shapes a single beat cannot express. New tools cannot
+merge without one (`agent-do harness contracts validate`).
 
 ## Install
 
