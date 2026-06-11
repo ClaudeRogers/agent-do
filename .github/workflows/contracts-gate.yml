@@ -1,0 +1,24 @@
+name: contracts-gate
+
+# The contracts gate: registry shape validation, verb-attribute vocabulary,
+# and the grandfather-baseline ratchet. New tools cannot merge without a
+# contracts: block in registry.yaml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml
+      - name: Contracts gate
+        run: python3 tests/test_contracts_gate.py
+      - name: Harness inventory
+        run: python3 tests/test_harness.py

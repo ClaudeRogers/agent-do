@@ -136,6 +136,78 @@ def load_registry() -> dict[str, Any]:
     return load_agent_registry().get("tools") or {}
 
 
+def load_bundled_registry() -> dict[str, Any]:
+    """Repo-truth registry only — the contracts gate must not see user overrides."""
+    import yaml  # noqa: WPS433
+
+    with open(REPO_ROOT / "registry.yaml") as f:
+        return yaml.safe_load(f) or {}
+
+
+def contracts_validate(strict: bool) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import validate_gate  # noqa: WPS433
+
+    payload = validate_gate(load_bundled_registry(), strict=strict)
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def contracts_propose(tool: str | None = None) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import propose_contracts  # noqa: WPS433
+
+    payload = propose_contracts(load_bundled_registry())
+    if tool:
+        if tool not in payload["proposals"]:
+            raise ValueError(f"unknown tool: {tool}")
+        payload["proposals"] = {tool: payload["proposals"][tool]}
+        payload["exceptions"] = {
+            name: verbs for name, verbs in payload["exceptions"].items() if name == tool
+        }
+    payload["tool"] = "harness"
+    payload["command"] = "contracts propose"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def render_contracts_validate(payload: dict[str, Any]) -> None:
+    print("agent-do harness contracts validate")
+    print(f"  Tools: {payload['tools']}  Declared: {payload['declared']}  Missing: {payload['missing']}")
+    print(f"  Errors: {payload['errors']}  Warnings: {payload['warnings']}")
+    gate = "PASS" if payload["ok"] else "FAIL"
+    mode = " (strict: full coverage required)" if payload.get("strict") else ""
+    print(f"  Gate: {gate}{mode}")
+    if payload["new_without_contracts"]:
+        print("  Tools missing contracts that are NOT grandfathered (new tools must declare):")
+        for name in payload["new_without_contracts"]:
+            print(f"    - {name}")
+    if payload["stale_baseline"]:
+        print("  Stale baseline entries (tool now declares contracts or was removed — delete from lib/contracts-baseline.yaml):")
+        for name in payload["stale_baseline"]:
+            print(f"    - {name}")
+    for item in payload.get("results") or []:
+        for error in item["errors"]:
+            print(f"  ERROR {item['tool']}: {error['message']}")
+        for warning in item["warnings"]:
+            if warning["code"] != "missing_contracts":
+                print(f"  WARN  {item['tool']}: {warning['message']}")
+
+
+def render_contracts_propose(payload: dict[str, Any]) -> None:
+    stats = payload["stats"]
+    print("agent-do harness contracts propose")
+    print(f"  Tools: {stats['tools']}  Declared: {stats['declared']}  Proposed: {stats['proposed']}")
+    print(f"  Classified verbs: {stats['classified_verbs']}  Unclassified: {stats['unclassified_verbs']}")
+    print(f"  Tools with exceptions: {stats['tools_with_exceptions']}")
+    if payload["exceptions"]:
+        print("  Exceptions (need lexicon rules or overrides):")
+        for name, verbs in sorted(payload["exceptions"].items(), key=lambda kv: -len(kv[1])):
+            print(f"    {name}: {', '.join(verbs)}")
+    print()
+    print("Use --json for full proposals or --out FILE for the markdown inventory.")
+
+
 def git_value(args: list[str], cwd: Path) -> str | None:
     result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
     if result.returncode != 0:
@@ -825,6 +897,8 @@ Commands:
   evidence build <session-or-run> [--out DIR]       Build a local drill-down evidence bundle
   manifest new <change-id> [opts]                   Create a harness change manifest
   manifest verify <change-id> --before A --after B  Compare eval case flips against manifest predictions
+  contracts validate [--strict] [--json]            Contracts gate: shape errors + grandfather-baseline ratchet
+  contracts propose [--tool X] [--out FILE] [--json]  Lexicon-driven contracts draft + exceptions report
 
 Examples:
   agent-do harness inspect
@@ -832,6 +906,8 @@ Examples:
   agent-do harness nudges effectiveness --since 7d
   agent-do harness evidence build 2017ab8f
   agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
+  agent-do harness contracts validate --json
+  agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md
 """
     )
 
@@ -878,6 +954,13 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_verify_parser.add_argument("--before", required=True)
     manifest_verify_parser.add_argument("--after", required=True)
     manifest_verify_parser.add_argument("--json", action="store_true")
+
+    contracts = sub.add_parser("contracts", add_help=False)
+    contracts.add_argument("contracts_command", choices=["validate", "propose"])
+    contracts.add_argument("--strict", action="store_true")
+    contracts.add_argument("--tool")
+    contracts.add_argument("--out")
+    contracts.add_argument("--json", action="store_true")
     return parser
 
 
@@ -924,6 +1007,32 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(payload, indent=2))
             else:
                 render_manifest_result(payload)
+            return 0
+        if args.command == "contracts" and args.contracts_command == "validate":
+            payload = contracts_validate(strict=args.strict)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_validate(payload)
+            return 0 if payload["ok"] else 1
+        if args.command == "contracts" and args.contracts_command == "propose":
+            payload = contracts_propose(tool=args.tool)
+            if args.out:
+                sys.path.insert(0, str(REPO_ROOT / "lib"))
+                from contracts import render_markdown  # noqa: WPS433
+
+                out_path = Path(args.out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    render_markdown(payload, payload["generated_at"]), encoding="utf-8"
+                )
+                payload["out"] = str(out_path)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_propose(payload)
+                if args.out:
+                    print(f"Inventory written to {payload['out']}")
             return 0
     except Exception as exc:
         if "--json" in argv:

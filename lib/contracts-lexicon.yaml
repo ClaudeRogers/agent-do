@@ -1,0 +1,417 @@
+# Contracts lexicon — the canonical verb → beat/attribute mapping.
+#
+# This file is the SOURCE OF TRUTH for proposing contracts blocks across the
+# registry. `agent-do harness contracts propose` applies it mechanically;
+# the generated inventory is a build product, never hand-edited. To change a
+# classification, change this file (or `overrides:`) and regenerate.
+#
+# ── Principles ────────────────────────────────────────────────────────────
+# 1. VERIFY IS PURPOSIVE, NOT CONTEXTUAL. A verb is verify only if its output
+#    is pass/fail or it blocks until a condition holds (wait, validate,
+#    dns-check, doctor). Reads that an agent may *use* to verify (status,
+#    logs) remain snapshot — otherwise every read dual-lists and the beat
+#    loses meaning.
+# 2. SAVE IS PERSISTENCE OF A RESULT. save/store/export/learn-shaped verbs.
+#    For commit-backed tools (manna, notify history) Interact subsumes Save;
+#    no separate save verbs are invented.
+# 3. TRANSFORMS ARE INTERACT. convert/resize/compress/merge/split derive a
+#    new artifact; they declare interact, and the audit relaxes atomicity
+#    for them rather than the registry inventing a sixth beat.
+# 4. ASYNC TRIGGERS ARE INTERACT. deploy/restore return a handle while the
+#    change lands later; declared interact, paired verify is audit guidance.
+# 5. DESTRUCTIVE IS AN ATTRIBUTE, NOT A BEAT. Teardown that loses data
+#    (delete/erase/reset/clear/kill) is interact + destructive. Graceful
+#    release (stop/close/disconnect/logout) is plain interact.
+# 6. ESCAPE HATCHES ARE PASSTHROUGH. shell/eval/tell run opaque payloads;
+#    they carry the passthrough attribute and belong to no beat.
+# 7. THE BEAT OF A POLYMORPHIC VERB IS DECIDED AT CALL TIME. query/sql/rest
+#    dual-list snapshot+interact and carry polymorphic.
+# 8. CONSISTENCY BEATS PURISM. Where shipped blocks (api, obsidian,
+#    transcribe) embody a convention — doctor as connect+verify+composite,
+#    first-token matching for namespaced verbs — the lexicon follows them.
+#
+# Rule resolution order per verb: overrides[tool][verb] → exact[verb] →
+# first matching pattern. Anything unresolved lands in the exceptions
+# report for human review. Patterns use a single leading or trailing `*`.
+
+version: 1
+
+exact:
+  # ── snapshot: structured reads ──
+  snapshot: {beats: [snapshot]}
+  list: {beats: [snapshot]}
+  show: {beats: [snapshot]}
+  status: {beats: [snapshot]}
+  read: {beats: [snapshot]}
+  get: {beats: [snapshot]}
+  search: {beats: [snapshot]}
+  find: {beats: [snapshot]}
+  info: {beats: [snapshot]}
+  describe: {beats: [snapshot]}
+  inspect: {beats: [snapshot]}
+  stats: {beats: [snapshot]}
+  history: {beats: [snapshot]}
+  logs: {beats: [snapshot]}
+  diff: {beats: [snapshot]}
+  peers: {beats: [snapshot]}
+  whoami: {beats: [snapshot]}
+  domains: {beats: [snapshot]}
+  domain: {beats: [snapshot]}
+  projects: {beats: [snapshot]}
+  project: {beats: [snapshot]}
+  users: {beats: [snapshot]}
+  user: {beats: [snapshot]}
+  orgs: {beats: [snapshot]}
+  org: {beats: [snapshot]}
+  tables: {beats: [snapshot]}
+  views: {beats: [snapshot]}
+  schemas: {beats: [snapshot]}
+  schema: {beats: [snapshot]}
+  records: {beats: [snapshot]}
+  sources: {beats: [snapshot]}
+  sessions: {beats: [snapshot]}
+  templates: {beats: [snapshot]}
+  screenshot: {beats: [snapshot]}
+  elements: {beats: [snapshot]}
+  displays: {beats: [snapshot]}
+  devices: {beats: [snapshot]}
+  version: {beats: [snapshot]}
+  versions: {beats: [snapshot]}
+  count: {beats: [snapshot]}
+  sizes: {beats: [snapshot]}
+  env: {beats: [snapshot]}
+  context: {beats: [snapshot]}
+  inject: {beats: [snapshot]}
+  budget: {beats: [snapshot]}
+  cost: {beats: [snapshot]}
+  tree: {beats: [snapshot]}
+  url: {beats: [snapshot]}
+  title: {beats: [snapshot]}
+  pages: {beats: [snapshot]}
+  # Plural resource nouns: bare noun = list it (REST-wrapper convention).
+  services: {beats: [snapshot]}
+  deploys: {beats: [snapshot]}
+  deployments: {beats: [snapshot]}
+  jobs: {beats: [snapshot]}
+  events: {beats: [snapshot]}
+  instances: {beats: [snapshot]}
+  metrics: {beats: [snapshot]}
+  branches: {beats: [snapshot]}
+  zones: {beats: [snapshot]}
+  zone: {beats: [snapshot]}
+  workers: {beats: [snapshot]}
+  apps: {beats: [snapshot]}
+  app: {beats: [snapshot]}
+  groups: {beats: [snapshot]}
+  pods: {beats: [snapshot]}
+  regions: {beats: [snapshot]}
+  functions: {beats: [snapshot]}
+  extensions: {beats: [snapshot]}
+  indexes: {beats: [snapshot]}
+  locks: {beats: [snapshot]}
+  connections: {beats: [snapshot]}
+  relations: {beats: [snapshot]}
+  profiles: {beats: [snapshot]}
+  profile: {beats: [snapshot]}
+  owners: {beats: [snapshot]}
+  repos: {beats: [snapshot]}
+  prs: {beats: [snapshot]}
+  pr: {beats: [snapshot]}
+  inbox: {beats: [snapshot]}
+  awaiting: {beats: [snapshot]}
+  threads: {beats: [snapshot]}
+  checks: {beats: [snapshot]}
+  claims: {beats: [snapshot]}
+  publishes: {beats: [snapshot]}
+  aliases: {beats: [snapshot]}
+  mailboxes: {beats: [snapshot]}
+  secrets: {beats: [snapshot], attributes: [sensitive]}
+  ps: {beats: [snapshot]}
+  log: {beats: [snapshot]}
+  ls: {beats: [snapshot]}
+
+  # ── connect: establish a usable session/attachment ──
+  connect: {beats: [connect]}
+  open: {beats: [connect]}
+  login: {beats: [connect]}
+  attach: {beats: [connect]}
+  boot: {beats: [connect]}
+  init: {beats: [connect]}
+  join: {beats: [connect]}
+  doctor: {beats: [connect, verify], attributes: [composite]}
+
+  # ── verify: pass/fail or block-until ──
+  wait: {beats: [verify]}
+  validate: {beats: [verify]}
+  test: {beats: [verify]}
+  verify: {beats: [verify]}
+  audit: {beats: [verify]}
+
+  # ── interact: mutate state ──
+  create: {beats: [interact]}
+  new: {beats: [interact]}
+  add: {beats: [interact]}
+  set: {beats: [interact]}
+  update: {beats: [interact]}
+  edit: {beats: [interact]}
+  send: {beats: [interact]}
+  write: {beats: [interact]}
+  append: {beats: [interact]}
+  insert: {beats: [interact]}
+  upload: {beats: [interact]}
+  install: {beats: [interact]}
+  uninstall: {beats: [interact], attributes: [destructive]}
+  import: {beats: [interact]}
+  apply: {beats: [interact]}
+  register: {beats: [interact]}
+  rename: {beats: [interact]}
+  move: {beats: [interact]}
+  copy: {beats: [interact]}
+  restart: {beats: [interact]}
+  launch: {beats: [interact]}
+  deploy: {beats: [interact]}
+  restore: {beats: [interact]}
+  scale: {beats: [interact]}
+  suspend: {beats: [interact]}
+  resume: {beats: [interact]}
+  cancel: {beats: [interact]}
+  promote: {beats: [interact]}
+  sync: {beats: [interact]}
+  refresh: {beats: [interact]}
+  fetch: {beats: [interact]}
+  pull: {beats: [interact]}
+  push: {beats: [interact]}
+  click: {beats: [interact]}
+  dblclick: {beats: [interact]}
+  fill: {beats: [interact]}
+  type: {beats: [interact]}
+  press: {beats: [interact]}
+  tap: {beats: [interact]}
+  swipe: {beats: [interact]}
+  scroll: {beats: [interact]}
+  hover: {beats: [interact]}
+  drag: {beats: [interact]}
+  select: {beats: [interact]}
+  focus: {beats: [interact]}
+  mute: {beats: [interact]}
+  unmute: {beats: [interact]}
+  share: {beats: [interact]}
+  reload: {beats: [interact]}
+  back: {beats: [interact]}
+  forward: {beats: [interact]}
+  viewport: {beats: [interact]}
+  convert: {beats: [interact]}
+  resize: {beats: [interact]}
+  compress: {beats: [interact]}
+  crop: {beats: [interact]}
+  rotate: {beats: [interact]}
+  flip: {beats: [interact]}
+  trim: {beats: [interact]}
+  merge: {beats: [interact]}
+  split: {beats: [interact]}
+  render: {beats: [interact]}
+  generate: {beats: [interact]}
+  scaffold: {beats: [interact]}
+  annotate: {beats: [save]}
+  feedback: {beats: [save]}
+
+  # ── teardown: graceful release (interact) vs data loss (destructive) ──
+  stop: {beats: [interact]}
+  close: {beats: [interact]}
+  disconnect: {beats: [interact]}
+  shutdown: {beats: [interact]}
+  logout: {beats: [interact]}
+  abandon: {beats: [interact]}
+  release: {beats: [interact]}
+  delete: {beats: [interact], attributes: [destructive]}
+  remove: {beats: [interact], attributes: [destructive]}
+  clear: {beats: [interact], attributes: [destructive]}
+  reset: {beats: [interact], attributes: [destructive]}
+  erase: {beats: [interact], attributes: [destructive]}
+  purge: {beats: [interact], attributes: [destructive]}
+  prune: {beats: [interact], attributes: [destructive]}
+  clean: {beats: [interact], attributes: [destructive]}
+  kill: {beats: [interact], attributes: [destructive]}
+
+  # ── save: persist a result ──
+  save: {beats: [save]}
+  store: {beats: [save]}
+  export: {beats: [save]}
+  learn: {beats: [save]}
+  decide: {beats: [save]}
+
+  # ── polymorphic: beat decided by payload/flag ──
+  query: {beats: [snapshot, interact], attributes: [polymorphic]}
+  sql: {beats: [snapshot, interact], attributes: [polymorphic]}
+  rest: {beats: [snapshot, interact], attributes: [polymorphic]}
+  retrieve: {beats: [snapshot, interact], attributes: [polymorphic]}
+  harvest: {beats: [snapshot, interact], attributes: [polymorphic]}
+
+  # ── passthrough / long-running: beat-less by design ──
+  shell: {attributes: [passthrough]}
+  eval: {attributes: [passthrough]}
+  tell: {attributes: [passthrough]}
+  repl: {attributes: [passthrough]}
+  watch: {attributes: [long_running]}
+  serve: {attributes: [long_running]}
+  monitor: {attributes: [long_running]}
+  follow: {attributes: [long_running]}
+  tail: {attributes: [long_running]}
+  record: {beats: [interact], attributes: [long_running]}
+  capture: {beats: [interact], attributes: [long_running]}
+  transcribe: {beats: [interact, save], attributes: [composite, long_running]}
+  chat: {beats: [interact], attributes: [long_running]}
+
+patterns:
+  # Ordered; first match wins. Single leading or trailing `*` only.
+  - {match: "*-list", beats: [snapshot]}
+  - {match: "*-show", beats: [snapshot]}
+  - {match: "*-get", beats: [snapshot]}
+  - {match: "*-status", beats: [snapshot]}
+  - {match: "*-info", beats: [snapshot]}
+  - {match: "*-logs", beats: [snapshot]}
+  - {match: "*-check", beats: [verify]}
+  - {match: "*-create", beats: [interact]}
+  - {match: "*-new", beats: [interact]}
+  - {match: "*-add", beats: [interact]}
+  - {match: "*-set", beats: [interact]}
+  - {match: "*-update", beats: [interact]}
+  - {match: "*-upsert", beats: [interact]}
+  - {match: "*-merge", beats: [interact]}
+  - {match: "*-rename", beats: [interact]}
+  - {match: "*-import", beats: [interact]}
+  - {match: "*-deploy", beats: [interact]}
+  - {match: "*-scale", beats: [interact]}
+  - {match: "*-restart", beats: [interact]}
+  - {match: "*-invite", beats: [interact]}
+  - {match: "*-del", beats: [interact], attributes: [destructive]}
+  - {match: "*-delete", beats: [interact], attributes: [destructive]}
+  - {match: "*-remove", beats: [interact], attributes: [destructive]}
+  - {match: "*-revoke", beats: [interact], attributes: [destructive]}
+  - {match: "*-rotate", beats: [interact], attributes: [sensitive]}
+  - {match: "*-export", beats: [save]}
+  - {match: "list-*", beats: [snapshot]}
+  - {match: "get-*", beats: [snapshot]}
+  - {match: "show-*", beats: [snapshot]}
+  - {match: "set-*", beats: [interact]}
+  - {match: "add-*", beats: [interact]}
+  - {match: "create-*", beats: [interact]}
+  - {match: "delete-*", beats: [interact], attributes: [destructive]}
+  - {match: "remove-*", beats: [interact], attributes: [destructive]}
+  - {match: "reset-*", beats: [interact], attributes: [destructive]}
+  - {match: "fetch-*", beats: [interact]}
+  - {match: "scan-*", beats: [interact]}
+  - {match: "*-enable", beats: [interact]}
+  - {match: "*-disable", beats: [interact]}
+  - {match: "*-activate", beats: [interact]}
+  - {match: "*-deactivate", beats: [interact]}
+  - {match: "*-apply", beats: [interact]}
+  - {match: "*-assign-group", beats: [interact]}
+  - {match: "*-link", beats: [interact]}
+  - {match: "*-unlink", beats: [interact]}
+  - {match: "*-push", beats: [interact]}
+  - {match: "*-trigger", beats: [interact]}
+  - {match: "*-reschedule", beats: [interact]}
+  - {match: "*-renew", beats: [interact]}
+  - {match: "*-purge", beats: [interact], attributes: [destructive]}
+  - {match: "*-reset", beats: [interact], attributes: [destructive]}
+  - {match: "*-cancel", beats: [interact]}
+  - {match: "*-diff", beats: [snapshot]}
+  - {match: "*-versions", beats: [snapshot]}
+  - {match: "*-eligibility", beats: [snapshot]}
+  - {match: "*-keys", beats: [snapshot], attributes: [sensitive]}
+  # Space-separated namespaced forms ("env-group link", "auth status").
+  - {match: "* list", beats: [snapshot]}
+  - {match: "* show", beats: [snapshot]}
+  - {match: "* status", beats: [snapshot]}
+  - {match: "* get", beats: [snapshot]}
+  - {match: "* read", beats: [snapshot]}
+  - {match: "* next", beats: [snapshot]}
+  - {match: "* events", beats: [snapshot]}
+  - {match: "* snapshots", beats: [snapshot]}
+  - {match: "* syncs", beats: [snapshot]}
+  - {match: "* token", beats: [snapshot], attributes: [sensitive]}
+  - {match: "* secret", beats: [snapshot], attributes: [sensitive]}
+  - {match: "* set", beats: [interact]}
+  - {match: "* add", beats: [interact]}
+  - {match: "* link", beats: [interact]}
+  - {match: "* unlink", beats: [interact]}
+  - {match: "* enable", beats: [interact]}
+  - {match: "* disable", beats: [interact]}
+  - {match: "* run", beats: [interact]}
+  - {match: "* trigger", beats: [interact]}
+  - {match: "* reschedule", beats: [interact]}
+  - {match: "* play", beats: [interact]}
+  - {match: "* scan", beats: [interact]}
+  - {match: "* del", beats: [interact], attributes: [destructive]}
+  - {match: "* delete", beats: [interact], attributes: [destructive]}
+  - {match: "* del-var", beats: [interact], attributes: [destructive]}
+  - {match: "* clear", beats: [interact], attributes: [destructive]}
+
+# Per-tool corrections where a verb's generic meaning is wrong for that tool.
+# These were seeded from the 2026-06-11 stress-test evidence and grow during
+# review. `skip: true` excludes a verb from proposing (manual review item).
+overrides:
+  browse:
+    check: {beats: [interact]}          # checks a checkbox, not a condition
+    open: {beats: [connect]}
+    agent: {beats: [interact], attributes: [composite, long_running]}  # autonomous goal loop
+  creds:
+    check: {beats: [verify]}
+    store: {beats: [save], attributes: [sensitive]}
+    delete: {beats: [interact], attributes: [destructive, sensitive]}
+  resend:
+    verify: {beats: [interact]}         # POSTs a verification trigger; dns-check is the real verify
+  screen:
+    snapshot: {beats: [snapshot]}       # caches elements to state file; honest enough as snapshot
+    describe: {beats: [snapshot], attributes: [long_running]}  # paid LLM vision call, non-deterministic
+  gcp:
+    secret-get: {beats: [snapshot], attributes: [sensitive]}
+    sa-key-create: {beats: [interact], attributes: [sensitive]}
+    oauth-setup: {beats: [interact], attributes: [composite, long_running]}
+  render:
+    db: {beats: [snapshot, interact], attributes: [polymorphic]}  # db recover: read or destroy by flag
+  android:
+    logcat: {attributes: [long_running]}
+  ios:
+    screenrecord: {beats: [interact], attributes: [long_running]}
+    delete: {beats: [interact], attributes: [destructive]}
+    erase: {beats: [interact], attributes: [destructive]}
+  latex:
+    preview: {beats: [interact]}        # compiles then opens GUI viewer
+    template: {beats: [snapshot]}       # emits skeleton to stdout
+    bib: {beats: [snapshot, interact], attributes: [polymorphic]}
+  appleevents:
+    run: {attributes: [passthrough]}
+    permissions: {beats: [verify], attributes: [composite]}  # probing sends a real AppleEvent
+    compile: {beats: [verify]}
+  auth:
+    ensure: {beats: [connect], attributes: [composite, long_running]}
+    advance: {beats: [interact], attributes: [composite]}
+    probe: {beats: [snapshot], attributes: [composite]}
+  context:
+    maintain: {beats: [interact], attributes: [composite, destructive]}  # refresh + prune cache
+  obsidian: {}                          # declared block preserved; overrides unused
+  notify:
+    emit: {beats: [interact], attributes: [composite]}
+    send: {beats: [interact]}
+  zpc:
+    checkpoint: {beats: [interact], attributes: [composite]}
+    review: {beats: [snapshot, interact], attributes: [polymorphic]}
+  coord:
+    touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
+    interrupts: {beats: [snapshot, interact], attributes: [polymorphic]}  # --mark-seen writes cursor
+  manna:
+    claim: {beats: [interact]}
+    done: {beats: [interact]}
+  docker:
+    exec: {attributes: [passthrough]}
+  psql:
+    exec: {beats: [interact], attributes: [polymorphic]}
+    dump: {beats: [save]}
+    restore: {beats: [interact], attributes: [destructive]}
+  db:
+    exec: {beats: [interact], attributes: [polymorphic]}
+  tui:
+    spawn: {beats: [connect], attributes: [long_running]}   # not idempotent; new session per call
+    attach: {beats: [snapshot]}                              # prints a tmux handoff string

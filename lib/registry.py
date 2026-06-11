@@ -14,6 +14,24 @@ except ModuleNotFoundError:
 
 AGENT_DO_HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
 CONTRACT_BEATS = ("connect", "snapshot", "interact", "verify", "save")
+# Orthogonal verb attributes. The beats stay five; shapes the beats cannot
+# express are declared as attributes instead of new beats:
+#   destructive  — irreversible data loss; needs confirm/backup before the audit trusts it
+#   long_running — daemon/stream/session verb; exempt from atomicity, may never return
+#   polymorphic  — beat decided by payload/flag at call time (sql, query, shell-style)
+#   composite    — one call performs several beats internally (ensure, dns-add, emit)
+#   sensitive    — emits or persists secret material; audit treats as a guarded class
+#   passthrough  — arbitrary-code escape hatch (shell/eval/run); statically unclassifiable
+CONTRACT_ATTRIBUTES = (
+    "destructive",
+    "long_running",
+    "polymorphic",
+    "composite",
+    "sensitive",
+    "passthrough",
+)
+# Attributes that legitimately stand alone, without beat membership.
+_BEATLESS_ATTRIBUTES = {"passthrough", "long_running"}
 
 
 def _load_yaml_data(path: Path) -> dict:
@@ -168,18 +186,39 @@ def get_tool_secret_envs(info: dict) -> list[str]:
 
 
 def get_tool_contracts(info: dict) -> dict:
-    """Return normalized contract declarations for a tool."""
+    """Return normalized contract beat declarations for a tool."""
     contracts = info.get("contracts") or {}
     if not isinstance(contracts, dict):
         return {}
     normalized = {}
     for beat, verbs in contracts.items():
+        if beat == "attributes":
+            continue
         if isinstance(verbs, list):
             normalized[str(beat)] = [str(verb) for verb in verbs if str(verb).strip()]
         elif verbs:
             normalized[str(beat)] = [str(verbs)]
         else:
             normalized[str(beat)] = []
+    return normalized
+
+
+def get_tool_contract_attributes(info: dict) -> dict:
+    """Return normalized verb→attribute declarations from a contracts block."""
+    contracts = info.get("contracts") or {}
+    if not isinstance(contracts, dict):
+        return {}
+    raw = contracts.get("attributes") or {}
+    if not isinstance(raw, dict):
+        return {}
+    normalized = {}
+    for verb, attrs in raw.items():
+        if isinstance(attrs, list):
+            normalized[str(verb)] = [str(attr) for attr in attrs if str(attr).strip()]
+        elif attrs:
+            normalized[str(verb)] = [str(attrs)]
+        else:
+            normalized[str(verb)] = []
     return normalized
 
 
@@ -235,13 +274,43 @@ def validate_tool_contracts(tool_name: str, info: dict) -> dict:
                     "message": f"contract verb does not match declared commands: {verb}",
                 })
 
+    attributes = get_tool_contract_attributes(info)
+    result["attributes"] = attributes
+    for verb, attrs in sorted(attributes.items()):
+        if not _contract_command_exists(verb, commands):
+            result["errors"].append({
+                "code": "unknown_command",
+                "verb": verb,
+                "message": f"attribute verb does not match declared commands: {verb}",
+            })
+        for attr in attrs:
+            if attr not in CONTRACT_ATTRIBUTES:
+                result["errors"].append({
+                    "code": "unknown_attribute",
+                    "verb": verb,
+                    "attribute": attr,
+                    "message": f"unknown contract attribute on {verb}: {attr}",
+                })
+        if verb not in seen and not (_BEATLESS_ATTRIBUTES & set(attrs)):
+            result["warnings"].append({
+                "code": "attribute_without_beat",
+                "verb": verb,
+                "message": (
+                    f"verb {verb} carries attributes but belongs to no beat; "
+                    "only passthrough/long_running verbs may stand alone"
+                ),
+            })
+
     for verb, beats in sorted(seen.items()):
-        if len(beats) > 1:
+        if len(beats) > 1 and not ({"polymorphic", "composite"} & set(attributes.get(verb, []))):
             result["warnings"].append({
                 "code": "multi_beat_verb",
                 "verb": verb,
                 "beats": beats,
-                "message": "verb is declared under multiple beats; keep only if intentionally context-dependent",
+                "message": (
+                    "verb is declared under multiple beats; mark it polymorphic "
+                    "or composite in contracts.attributes if intentional"
+                ),
             })
 
     result["ok"] = not result["errors"]

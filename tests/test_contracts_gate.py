@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Contracts gate: schema validation, verb attributes, baseline ratchet, CLI."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+
+from registry import (  # noqa: E402
+    CONTRACT_ATTRIBUTES,
+    CONTRACT_BEATS,
+    get_tool_contract_attributes,
+    get_tool_contracts,
+    validate_registry_contracts,
+    validate_tool_contracts,
+)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def run_agent_do(*args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.setdefault("AGENT_DO_HOME", str(ROOT / ".dev" / "test-home"))
+    return subprocess.run(
+        [str(ROOT / "agent-do"), *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+
+def warning_codes(result: dict) -> list[str]:
+    return [item["code"] for item in result["warnings"]]
+
+
+def error_codes(result: dict) -> list[str]:
+    return [item["code"] for item in result["errors"]]
+
+
+def check_attribute_schema() -> None:
+    """Verb attributes: vocabulary, command existence, multi-beat suppression."""
+    info = {
+        "commands": {"query": "...", "delete": "...", "shell": "...", "list": "..."},
+        "contracts": {
+            "snapshot": ["list", "query"],
+            "interact": ["query", "delete"],
+            "attributes": {
+                "query": ["polymorphic"],
+                "delete": ["destructive"],
+                "shell": ["passthrough"],
+            },
+        },
+    }
+    result = validate_tool_contracts("demo", info)
+    require(result["ok"], f"attributed contracts should validate: {result}")
+    require(
+        "multi_beat_verb" not in warning_codes(result),
+        f"polymorphic verb must not warn on multi-beat: {result['warnings']}",
+    )
+    attrs = get_tool_contract_attributes(info)
+    require(attrs["query"] == ["polymorphic"], f"attributes accessor broken: {attrs}")
+    beats = get_tool_contracts(info)
+    require("attributes" not in beats, f"attributes must not leak into beats: {beats}")
+
+    unattributed = {
+        "commands": {"query": "..."},
+        "contracts": {"snapshot": ["query"], "interact": ["query"]},
+    }
+    result = validate_tool_contracts("demo", unattributed)
+    require(
+        "multi_beat_verb" in warning_codes(result),
+        f"unattributed multi-beat verb must still warn: {result}",
+    )
+
+    bad_vocab = {
+        "commands": {"x": "..."},
+        "contracts": {"interact": ["x"], "attributes": {"x": ["explosive"]}},
+    }
+    result = validate_tool_contracts("demo", bad_vocab)
+    require("unknown_attribute" in error_codes(result), f"unknown attribute must error: {result}")
+
+    ghost_verb = {
+        "commands": {"x": "..."},
+        "contracts": {"interact": ["x"], "attributes": {"ghost": ["destructive"]}},
+    }
+    result = validate_tool_contracts("demo", ghost_verb)
+    require(
+        "unknown_command" in error_codes(result),
+        f"attribute on undeclared command must error: {result}",
+    )
+
+    beatless_passthrough = {
+        "commands": {"shell": "...", "x": "..."},
+        "contracts": {"interact": ["x"], "attributes": {"shell": ["passthrough"]}},
+    }
+    result = validate_tool_contracts("demo", beatless_passthrough)
+    require(result["ok"], f"beat-less passthrough verb is legal: {result}")
+    require(
+        "attribute_without_beat" not in warning_codes(result),
+        f"passthrough needs no beat: {result['warnings']}",
+    )
+
+    beatless_destructive = {
+        "commands": {"nuke": "...", "x": "..."},
+        "contracts": {"interact": ["x"], "attributes": {"nuke": ["destructive"]}},
+    }
+    result = validate_tool_contracts("demo", beatless_destructive)
+    require(
+        "attribute_without_beat" in warning_codes(result),
+        f"destructive without a beat should warn: {result}",
+    )
+
+    require(
+        set(CONTRACT_ATTRIBUTES)
+        == {"destructive", "long_running", "polymorphic", "composite", "sensitive", "passthrough"},
+        f"unexpected attribute vocabulary: {CONTRACT_ATTRIBUTES}",
+    )
+    require(
+        CONTRACT_BEATS == ("connect", "snapshot", "interact", "verify", "save"),
+        f"beats changed unexpectedly: {CONTRACT_BEATS}",
+    )
+
+
+def check_registry_gate() -> None:
+    """Real registry: zero shape errors; baseline ratchet holds exactly."""
+    registry = yaml.safe_load((ROOT / "registry.yaml").read_text(encoding="utf-8"))
+    report = validate_registry_contracts(registry)
+    require(report["errors"] == 0, f"contract shape errors in registry.yaml: {report['errors']}")
+    require(report["ok"], "registry contract validation must pass")
+
+    baseline_doc = yaml.safe_load((ROOT / "lib" / "contracts-baseline.yaml").read_text(encoding="utf-8"))
+    baseline = set(baseline_doc["grandfathered"])
+    tools = registry["tools"]
+    undeclared = {
+        name
+        for name, info in tools.items()
+        if isinstance(info, dict) and not isinstance(info.get("contracts"), dict)
+    }
+
+    new_without_contracts = sorted(undeclared - baseline)
+    require(
+        not new_without_contracts,
+        "tools without contracts that are not grandfathered "
+        f"(new tools MUST declare contracts): {new_without_contracts}",
+    )
+    stale_baseline = sorted(baseline - undeclared)
+    require(
+        not stale_baseline,
+        "baseline entries that now declare contracts or no longer exist "
+        f"(remove them — the ratchet only tightens): {stale_baseline}",
+    )
+
+
+def check_cli_gate() -> None:
+    """agent-do harness contracts validate honors the baseline and --strict."""
+    result = run_agent_do("harness", "contracts", "validate", "--json")
+    require(result.returncode == 0, f"contracts validate should pass: {result.stdout}{result.stderr}")
+    payload = json.loads(result.stdout)
+    require(payload["ok"] is True, f"expected ok payload: {payload}")
+    require(payload["errors"] == 0, f"expected zero errors: {payload}")
+    require("missing" in payload and "declared" in payload, f"coverage fields missing: {payload}")
+
+    strict = run_agent_do("harness", "contracts", "validate", "--strict", "--json")
+    strict_payload = json.loads(strict.stdout)
+    if payload["missing"] > 0:
+        require(
+            strict.returncode != 0 and strict_payload["ok"] is False,
+            f"--strict must fail while tools lack contracts: {strict_payload}",
+        )
+    else:
+        require(strict.returncode == 0, f"--strict should pass at full coverage: {strict_payload}")
+
+
+def check_cli_propose() -> None:
+    """agent-do harness contracts propose emits proposals + exceptions."""
+    result = run_agent_do("harness", "contracts", "propose", "--json")
+    require(result.returncode == 0, f"contracts propose failed: {result.stdout}{result.stderr}")
+    payload = json.loads(result.stdout)
+    require(payload["ok"] is True, f"expected ok payload: {payload}")
+    require("proposals" in payload and "exceptions" in payload, f"missing keys: {list(payload)}")
+    proposals = payload["proposals"]
+    require(len(proposals) >= 90, f"expected near-registry-wide proposals: {len(proposals)}")
+    declared = [p for p in proposals.values() if p["source"] == "declared"]
+    require(len(declared) >= 3, f"existing blocks must be preserved verbatim: {len(declared)}")
+    api = proposals.get("api")
+    require(api is not None and api["source"] == "declared", f"api block must be preserved: {api}")
+    require(
+        api["contracts"].get("save") == ["save"],
+        f"api existing contracts must survive propose untouched: {api}",
+    )
+
+
+def check_lexicon_merge(tmp_dir: Path) -> None:
+    """Learned classifications merge under the hand lexicon; hand overrides win."""
+    from contracts import classify_verb, load_lexicon
+
+    base = tmp_dir / "lexicon.yaml"
+    learned = tmp_dir / "learned.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "exact": {},
+                "patterns": [],
+                "overrides": {"demo": {"query": {"beats": ["snapshot"]}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    learned.write_text(
+        yaml.safe_dump(
+            {
+                "overrides": {
+                    "demo": {
+                        "query": {"beats": ["interact"], "confidence": "high"},
+                        "flush": {"beats": ["interact"], "attributes": ["destructive"]},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    lexicon = load_lexicon(base, learned)
+    hand = classify_verb("demo", "query", lexicon)
+    require(
+        hand is not None and hand["beats"] == ["snapshot"],
+        f"hand-written override must beat learned: {hand}",
+    )
+    machine = classify_verb("demo", "flush", lexicon)
+    require(
+        machine is not None and machine.get("attributes") == ["destructive"],
+        f"learned-only verb must classify: {machine}",
+    )
+
+
+def main() -> int:
+    import tempfile
+
+    check_attribute_schema()
+    check_registry_gate()
+    check_cli_gate()
+    check_cli_propose()
+    with tempfile.TemporaryDirectory() as tmp:
+        check_lexicon_merge(Path(tmp))
+    print("contracts gate tests passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
