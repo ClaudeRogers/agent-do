@@ -245,6 +245,69 @@ def check_no_duplicate_keys() -> None:
             yaml.load(path.read_text(encoding="utf-8"), Loader=_DupKeyLoader)
 
 
+def check_concurrency_alignment() -> None:
+    """Tool-level concurrency must agree with the declared write surface."""
+    read_with_write = {
+        "commands": {"list": "...", "set": "..."},
+        "concurrency": "read",
+        "contracts": {"snapshot": ["list"], "interact": ["set"]},
+    }
+    result = validate_tool_contracts("demo", read_with_write)
+    require(
+        "concurrency_mismatch" in error_codes(result),
+        f"read tool with interact verb must error: {result}",
+    )
+
+    read_with_own_state = {
+        "commands": {"list": "...", "save": "..."},
+        "concurrency": "read",
+        "contracts": {
+            "snapshot": ["list"],
+            "save": ["save"],
+            "attributes": {"save": ["own_state"]},
+        },
+    }
+    result = validate_tool_contracts("demo", read_with_own_state)
+    require(
+        result["ok"] and "concurrency_mismatch" not in error_codes(result),
+        f"own_state writes must not force mixed: {result}",
+    )
+
+    write_without_writes = {
+        "commands": {"list": "..."},
+        "concurrency": "write",
+        "contracts": {"snapshot": ["list"]},
+    }
+    result = validate_tool_contracts("demo", write_without_writes)
+    require(
+        "concurrency_overdeclared" in warning_codes(result),
+        f"write tool with zero write verbs should warn: {result}",
+    )
+
+    mixed_all_read = {
+        "commands": {"list": "..."},
+        "concurrency": "mixed",
+        "contracts": {"snapshot": ["list"]},
+    }
+    result = validate_tool_contracts("demo", mixed_all_read)
+    require(
+        "concurrency_overdeclared" in warning_codes(result),
+        f"mixed tool with all-read verbs should warn: {result}",
+    )
+
+    mixed_proper = {
+        "commands": {"list": "...", "set": "..."},
+        "concurrency": "mixed",
+        "contracts": {"snapshot": ["list"], "interact": ["set"]},
+    }
+    result = validate_tool_contracts("demo", mixed_proper)
+    require(
+        "concurrency_overdeclared" not in warning_codes(result)
+        and "concurrency_mismatch" not in error_codes(result),
+        f"honest mixed tool must pass clean: {result}",
+    )
+
+
 def check_lexicon_merge(tmp_dir: Path) -> None:
     """Learned classifications merge under the hand lexicon; hand overrides win."""
     from contracts import classify_verb, load_lexicon
@@ -292,6 +355,7 @@ def main() -> int:
 
     check_no_duplicate_keys()
     check_attribute_schema()
+    check_concurrency_alignment()
     check_registry_gate()
     check_cli_gate()
     check_cli_propose()

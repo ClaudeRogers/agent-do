@@ -316,6 +316,33 @@ def validate_tool_contracts(tool_name: str, info: dict) -> dict:
                 ),
             })
 
+    # Concurrency must agree with the declared write surface. own_state writes
+    # (a tool's own cache/state/derived output) are parallel-safe and exempt.
+    concurrency = info.get("concurrency")
+    write_verbs = sorted(
+        verb
+        for verb, beats in seen.items()
+        if ({"connect", "interact", "save"} & set(beats))
+        and "own_state" not in attributes.get(verb, [])
+    )
+    if concurrency == "read" and write_verbs:
+        result["errors"].append({
+            "code": "concurrency_mismatch",
+            "verbs": write_verbs,
+            "message": (
+                "tool is declared concurrency:read but holds world-write verbs: "
+                + ", ".join(write_verbs)
+            ),
+        })
+    elif concurrency in ("write", "mixed") and seen and not write_verbs:
+        result["warnings"].append({
+            "code": "concurrency_overdeclared",
+            "message": (
+                f"tool is declared concurrency:{concurrency} but declares no "
+                "world-write verbs; consider read"
+            ),
+        })
+
     result["ok"] = not result["errors"]
     return result
 
