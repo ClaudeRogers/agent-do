@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    name: Syntax (bash -n, py_compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Bash and Python syntax sweep
+        run: |
+          fails=0
+          for f in agent-do bin/* tools/agent-*; do
+            if [ -f "$f" ] && head -1 "$f" | grep -q bash; then
+              bash -n "$f" || { echo "BASH FAIL: $f"; fails=1; }
+            fi
+          done
+          for d in tools/agent-*/; do
+            entry="$d$(basename "$d")"
+            if [ -f "$entry" ] && head -1 "$entry" | grep -q bash; then
+              bash -n "$entry" || { echo "BASH FAIL: $entry"; fails=1; }
+            fi
+          done
+          python3 -m py_compile lib/*.py || fails=1
+          for f in bin/* tools/agent-* tools/agent-*/*; do
+            if [ -f "$f" ] && head -1 "$f" | grep -q python; then
+              python3 -m py_compile "$f" || { echo "PY FAIL: $f"; fails=1; }
+            fi
+          done
+          exit $fails
+
+  test-suite:
+    name: Full test suite (macOS)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        run: pip install pyyaml anthropic
+      - name: Run test suite
+        run: ./test.sh
