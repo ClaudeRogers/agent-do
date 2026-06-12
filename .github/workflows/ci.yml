@@ -60,5 +60,9 @@ jobs:
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
           echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
+      - name: Install tmux (agent-tui dependency; drift checks its real help)
+        run: brew list tmux >/dev/null 2>&1 || brew install tmux
+      - name: Build agent-manna (drift checks the real Rust binary's help)
+        run: cd tools/agent-manna && cargo build --release
       - name: Run test suite
         run: ./test.sh
