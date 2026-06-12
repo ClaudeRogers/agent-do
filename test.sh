@@ -103,6 +103,7 @@ check_cmd "meetings tests" python3 "$SCRIPT_DIR/tests/test_meetings.py"
 check_cmd "harness tests" python3 "$SCRIPT_DIR/tests/test_harness.py"
 check_cmd "contracts gate tests" python3 "$SCRIPT_DIR/tests/test_contracts_gate.py"
 check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drift.py"
+check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
 check_cmd "contracts drift channel empty" "$AGENT_DO" harness contracts drift
 check_cmd "health probe tests" python3 "$SCRIPT_DIR/tests/test_health_probes.py"
 check_cmd "hook outcome telemetry tests" python3 "$SCRIPT_DIR/tests/test_hook_outcome_telemetry.py"
