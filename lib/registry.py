@@ -22,6 +22,8 @@ CONTRACT_BEATS = ("connect", "snapshot", "interact", "verify", "save")
 #   composite    — one call performs several beats internally (ensure, dns-add, emit)
 #   sensitive    — emits or persists secret material; audit treats as a guarded class
 #   passthrough  — arbitrary-code escape hatch (shell/eval/run); statically unclassifiable
+#   own_state    — writes confined to the tool's own cache/state/derived output;
+#                  parallel-safe relative to other tools
 CONTRACT_ATTRIBUTES = (
     "destructive",
     "long_running",
@@ -29,6 +31,7 @@ CONTRACT_ATTRIBUTES = (
     "composite",
     "sensitive",
     "passthrough",
+    "own_state",
 )
 # Attributes that legitimately stand alone, without beat membership.
 _BEATLESS_ATTRIBUTES = {"passthrough", "long_running"}

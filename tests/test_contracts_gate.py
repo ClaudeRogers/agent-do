@@ -125,7 +125,8 @@ def check_attribute_schema() -> None:
 
     require(
         set(CONTRACT_ATTRIBUTES)
-        == {"destructive", "long_running", "polymorphic", "composite", "sensitive", "passthrough"},
+        == {"destructive", "long_running", "polymorphic", "composite",
+            "sensitive", "passthrough", "own_state"},
         f"unexpected attribute vocabulary: {CONTRACT_ATTRIBUTES}",
     )
     require(
