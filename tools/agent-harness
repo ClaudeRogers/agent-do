@@ -171,6 +171,20 @@ def contracts_propose(tool: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def contracts_surface() -> dict[str, Any]:
+    """Safety buckets over the MERGED registry — orchestrators schedule what
+    is actually installed, unlike the gate, which judges repo truth only."""
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import propose_contracts, safety_surface  # noqa: WPS433
+
+    payload = safety_surface(propose_contracts({"tools": load_registry()}))
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = "contracts surface"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
 def render_contracts_validate(payload: dict[str, Any]) -> None:
     print("agent-do harness contracts validate")
     print(f"  Tools: {payload['tools']}  Declared: {payload['declared']}  Missing: {payload['missing']}")
@@ -897,8 +911,9 @@ Commands:
   evidence build <session-or-run> [--out DIR]       Build a local drill-down evidence bundle
   manifest new <change-id> [opts]                   Create a harness change manifest
   manifest verify <change-id> --before A --after B  Compare eval case flips against manifest predictions
-  contracts validate [--strict] [--json]            Contracts gate: shape errors + grandfather-baseline ratchet
+  contracts validate [--strict] [--json]            Contracts gate: shape errors + full-coverage enforcement
   contracts propose [--tool X] [--out FILE] [--json]  Lexicon-driven contracts draft + exceptions report
+  contracts surface [--json]                        Machine-readable safety surface (merged registry) for orchestrators
 
 Examples:
   agent-do harness inspect
@@ -956,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_verify_parser.add_argument("--json", action="store_true")
 
     contracts = sub.add_parser("contracts", add_help=False)
-    contracts.add_argument("contracts_command", choices=["validate", "propose"])
+    contracts.add_argument("contracts_command", choices=["validate", "propose", "surface"])
     contracts.add_argument("--strict", action="store_true")
     contracts.add_argument("--tool")
     contracts.add_argument("--out")
@@ -1015,6 +1030,9 @@ def main(argv: list[str]) -> int:
             else:
                 render_contracts_validate(payload)
             return 0 if payload["ok"] else 1
+        if args.command == "contracts" and args.contracts_command == "surface":
+            print(json.dumps(contracts_surface(), indent=2))
+            return 0
         if args.command == "contracts" and args.contracts_command == "propose":
             payload = contracts_propose(tool=args.tool)
             if args.out:

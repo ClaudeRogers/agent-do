@@ -169,29 +169,49 @@ def propose_contracts(registry: dict, lexicon: dict | None = None) -> dict:
     }
 
 
-def render_markdown(payload: dict, generated_at: str = "") -> str:
-    """Render a propose payload as the reviewable inventory document."""
-    import yaml
+def safety_surface(payload: dict) -> dict:
+    """Aggregate a propose payload into machine-readable safety buckets.
 
-    stats = payload["stats"]
-    by_attr: dict[str, list[str]] = {}
-    read_only_verbs = 0
-    write_verbs = 0
+    Returns {tool, verb} object lists: read_only (beat-union ⊆ {snapshot,
+    verify}), write (everything else), plus one bucket per attribute.
+    Single source of truth for both `contracts surface --json` and the
+    inventory's markdown safety-surface section.
+    """
+    from registry import CONTRACT_ATTRIBUTES
+
+    surface: dict = {"read_only": [], "write": []}
+    for attr in CONTRACT_ATTRIBUTES:
+        surface[attr] = []
     for name, item in sorted(payload["proposals"].items()):
         contracts = item["contracts"]
         attrs = contracts.get("attributes") or {}
         for verb, verb_attrs in sorted(attrs.items()):
             for attr in verb_attrs:
-                by_attr.setdefault(attr, []).append(f"`{name} {verb}`")
+                if attr in CONTRACT_ATTRIBUTES:
+                    surface[attr].append({"tool": name, "verb": verb})
         membership: dict[str, set] = {}
         for beat in ("connect", "snapshot", "interact", "verify", "save"):
             for verb in contracts.get(beat) or []:
                 membership.setdefault(verb, set()).add(beat)
-        for verb, beats in membership.items():
-            if beats <= {"snapshot", "verify"}:
-                read_only_verbs += 1
-            else:
-                write_verbs += 1
+        for verb, beats in sorted(membership.items()):
+            bucket = "read_only" if beats <= {"snapshot", "verify"} else "write"
+            surface[bucket].append({"tool": name, "verb": verb})
+    return surface
+
+
+def render_markdown(payload: dict, generated_at: str = "") -> str:
+    """Render a propose payload as the reviewable inventory document."""
+    import yaml
+
+    stats = payload["stats"]
+    surface = safety_surface(payload)
+    by_attr = {
+        attr: [f"`{item['tool']} {item['verb']}`" for item in surface[attr]]
+        for attr in ("destructive", "sensitive", "passthrough",
+                     "long_running", "polymorphic", "composite", "own_state")
+    }
+    read_only_verbs = len(surface["read_only"])
+    write_verbs = len(surface["write"])
 
     lines = [
         "# agent-do Contracts Inventory (v2)",
@@ -224,8 +244,10 @@ def render_markdown(payload: dict, generated_at: str = "") -> str:
         "long_running": "daemon/stream/session; may never return",
         "polymorphic": "beat decided by payload or flag at call time",
         "composite": "one call performs several beats internally",
+        "own_state": "writes only its own cache/state; parallel-safe",
     }
-    for attr in ("destructive", "sensitive", "passthrough", "long_running", "polymorphic", "composite"):
+    for attr in ("destructive", "sensitive", "passthrough", "long_running",
+                 "polymorphic", "composite", "own_state"):
         verbs = by_attr.get(attr) or []
         lines.append(f"### {attr} ({len(verbs)}) — {attr_blurbs[attr]}")
         lines.append("")

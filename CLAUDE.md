@@ -205,7 +205,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-20 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 57 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes.
+20 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 57 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
 
 ### Universal Tool Pattern
 

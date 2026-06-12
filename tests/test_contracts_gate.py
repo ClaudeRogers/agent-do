@@ -308,6 +308,28 @@ def check_concurrency_alignment() -> None:
     )
 
 
+def check_cli_surface() -> None:
+    """harness contracts surface emits machine-readable safety buckets."""
+    result = run_agent_do("harness", "contracts", "surface", "--json")
+    require(result.returncode == 0, f"surface failed: {result.stdout}{result.stderr}")
+    payload = json.loads(result.stdout)
+    for key in (
+        "read_only", "write", "destructive", "sensitive",
+        "long_running", "passthrough", "polymorphic", "composite", "own_state",
+    ):
+        require(key in payload, f"surface missing bucket {key}: {list(payload)}")
+    require(
+        {"tool": "manna", "verb": "delete"} in payload["destructive"],
+        f"known destructive verb missing: {payload['destructive'][:5]}",
+    )
+    require(
+        {"tool": "dpt", "verb": "baseline"} in payload["own_state"],
+        f"known own_state verb missing: {payload['own_state'][:5]}",
+    )
+    require(len(payload["read_only"]) > 400, "read surface implausibly small")
+    require(len(payload["write"]) > 300, "write surface implausibly small")
+
+
 def check_lexicon_merge(tmp_dir: Path) -> None:
     """Learned classifications merge under the hand lexicon; hand overrides win."""
     from contracts import classify_verb, load_lexicon
@@ -359,6 +381,7 @@ def main() -> int:
     check_registry_gate()
     check_cli_gate()
     check_cli_propose()
+    check_cli_surface()
     with tempfile.TemporaryDirectory() as tmp:
         check_lexicon_merge(Path(tmp))
     print("contracts gate tests passed")

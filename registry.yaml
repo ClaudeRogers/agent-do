@@ -3246,7 +3246,7 @@ tools:
       nudges: Summarize hook outcome telemetry and nudge effectiveness
       evidence: Build local drill-down evidence bundles
       manifest: Create and verify harness change manifests
-      contracts: 'Contracts gate and lexicon tooling: contracts validate|propose'
+      contracts: 'Contracts gate, lexicon, and safety surface: contracts validate|propose|surface'
     examples:
     - intent: inspect the agent-do harness
       command: agent-harness inspect
@@ -3288,6 +3288,7 @@ tools:
       - inspect
       - nudges
       - contracts propose
+      - contracts surface
       verify:
       - manifest
       - contracts validate
