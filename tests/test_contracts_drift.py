@@ -103,6 +103,16 @@ def check_drift_channels() -> None:
         f"a DECLARED ls key must match the help alias: {report}",
     )
 
+    broken_env = drift_tool(
+        "demo",
+        {"list": "...", "show": "..."},
+        "Error: tmux is required for agent-tui\nInstall: brew install tmux\n",
+    )
+    require(
+        broken_env["declared_only"] == [] and broken_env.get("error"),
+        f"unparseable help is an environment error, not phantom verbs: {broken_env}",
+    )
+
 
 def check_cli() -> None:
     env = os.environ.copy()

@@ -87,6 +87,12 @@ def extract_help_verbs(help_text: str) -> dict:
 def drift_tool(tool: str, commands: dict, help_text: str) -> dict:
     """Diff one tool's registry commands map against its help output."""
     verbs = extract_help_verbs(help_text)
+    if commands and not verbs["first_tokens"]:
+        # Help produced no parseable command lines at all — a missing runtime
+        # dependency (unbuilt binary, absent tmux), not N phantom verbs. Real
+        # drift always shows a working help listing the OTHER verbs.
+        return {"tool": tool, "error": "help yielded no parseable commands",
+                "declared_only": [], "help_only": []}
     declared_only = sorted(
         key
         for key in commands
