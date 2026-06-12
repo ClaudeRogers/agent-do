@@ -330,6 +330,20 @@ def check_cli_surface() -> None:
     require(len(payload["write"]) > 300, "write surface implausibly small")
 
 
+def check_registry_context_safety() -> None:
+    """The LLM catalog carries compact per-tool safety markers, token-capped."""
+    from registry import build_registry_context, load_registry
+
+    catalog = build_registry_context(load_registry())
+    require("destructive=[" in catalog, "catalog missing destructive markers")
+    require("sensitive=[" in catalog, "catalog missing sensitive markers")
+    require("Safety: read-only" in catalog, "read-only tools should say so")
+    require(
+        len(catalog) < 40_000,
+        f"catalog grew past budget: {len(catalog)} chars (was ~29.6k pre-safety)",
+    )
+
+
 def check_lexicon_merge(tmp_dir: Path) -> None:
     """Learned classifications merge under the hand lexicon; hand overrides win."""
     from contracts import classify_verb, load_lexicon
@@ -382,6 +396,7 @@ def main() -> int:
     check_cli_gate()
     check_cli_propose()
     check_cli_surface()
+    check_registry_context_safety()
     with tempfile.TemporaryDirectory() as tmp:
         check_lexicon_merge(Path(tmp))
     print("contracts gate tests passed")

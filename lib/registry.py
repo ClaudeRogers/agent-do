@@ -114,6 +114,29 @@ def build_registry_context(registry: dict) -> str:
             cmd_list = ', '.join(commands.keys())
             lines.append(f"Commands: {cmd_list}")
 
+        # Compact safety line from contracts: writes and the flags that
+        # change agent behavior. Read verbs are the default and stay implicit.
+        contracts = get_tool_contracts(info)
+        attributes = get_tool_contract_attributes(info)
+        write_verbs = sorted({
+            verb
+            for beat in ("connect", "interact", "save")
+            for verb in contracts.get(beat, [])
+        })
+        parts = []
+        if write_verbs:
+            joined = ",".join(write_verbs)
+            parts.append(
+                f"writes=[{joined}]" if len(joined) <= 90
+                else f"writes={len(write_verbs)} verbs"
+            )
+        for attr in ("destructive", "sensitive", "passthrough"):
+            flagged = sorted(v for v, attrs in attributes.items() if attr in attrs)
+            if flagged:
+                parts.append(f"{attr}=[{','.join(flagged)}]")
+        if contracts:
+            lines.append("Safety: " + (" ".join(parts) if parts else "read-only"))
+
         examples = info.get('examples', [])
         if examples:
             lines.append("Examples:")
