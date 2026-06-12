@@ -14,6 +14,7 @@ Commands:
   open <notebook>            Open notebook in browser
   run <notebook>             Execute notebook
   convert <notebook> <fmt>   Convert notebook (html, pdf, py, md)
+  export <notebook> <fmt>    Convert notebook (alias of convert)
   create <name>              Create new notebook
   snapshot [notebook]        Jupyter state as JSON (servers, kernels, notebook cells)
 

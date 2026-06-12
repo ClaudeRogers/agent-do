@@ -12,6 +12,7 @@ Commands:
   rooms                      List rooms
   scenes                     List scenes
   run <scene>                Run a scene
+  scene <name>               Run a scene (alias of run)
   set <accessory> <state>    Set accessory state
   snapshot                   HomeKit state as JSON (accessories, rooms, scenes)
 
