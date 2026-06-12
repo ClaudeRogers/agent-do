@@ -220,7 +220,7 @@ tools:
         delete:
         - destructive
         - sensitive
-    concurrency: read
+    concurrency: mixed
   auth:
     description: Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials
     capabilities:
@@ -954,6 +954,10 @@ tools:
       interact:
       - goto
       attributes:
+        goto:
+        - own_state
+        open:
+        - own_state
         run:
         - passthrough
         terminal:
@@ -1363,6 +1367,13 @@ tools:
       - break
       - continue
       - step
+      attributes:
+        break:
+        - own_state
+        continue:
+        - own_state
+        step:
+        - own_state
     concurrency: read
   jupyter:
     description: Control Jupyter notebooks
@@ -1525,7 +1536,7 @@ tools:
       attributes:
         clear:
         - destructive
-    concurrency: read
+    concurrency: mixed
   ocr:
     description: Screen text extraction
     capabilities:
@@ -1636,6 +1647,21 @@ tools:
       attributes:
         detect:
         - polymorphic
+        - own_state
+        source file:
+        - own_state
+        source image:
+        - own_state
+        source ios:
+        - own_state
+        source rtsp:
+        - own_state
+        source screen:
+        - own_state
+        source webcam:
+        - own_state
+        source window:
+        - own_state
     concurrency: read
   slack:
     description: Control Slack
@@ -2335,6 +2361,9 @@ tools:
       - list
       save:
       - export
+      attributes:
+        export:
+        - own_state
     concurrency: read
   sheets:
     description: Control Google Sheets
@@ -2457,6 +2486,11 @@ tools:
       interact:
       - convert
       - batch
+      attributes:
+        batch:
+        - own_state
+        convert:
+        - own_state
     concurrency: read
   cloud:
     description: Control cloud providers (AWS, GCP, Azure)
@@ -2961,7 +2995,7 @@ tools:
       - list
       interact:
       - update
-    concurrency: read
+    concurrency: mixed
   image:
     description: Image processing
     capabilities:
@@ -3372,7 +3406,7 @@ tools:
       - list
       interact:
       - eject
-    concurrency: read
+    concurrency: mixed
   printer:
     description: Printer control
     capabilities:
@@ -3796,6 +3830,9 @@ tools:
       attributes:
         capture:
         - long_running
+        - own_state
+        filter:
+        - own_state
     concurrency: read
   ghidra:
     description: Ghidra reverse engineering automation
@@ -3820,6 +3857,11 @@ tools:
       interact:
       - analyze
       - decompile
+      attributes:
+        analyze:
+        - own_state
+        decompile:
+        - own_state
     concurrency: read
   latex:
     description: LaTeX document compilation
@@ -4078,6 +4120,9 @@ tools:
       - list
       save:
       - save
+      attributes:
+        save:
+        - own_state
     concurrency: read
   eval:
     description: LLM output evaluation and testing
@@ -4107,8 +4152,11 @@ tools:
       save:
       - run
       attributes:
+        create:
+        - own_state
         run:
         - composite
+        - own_state
     concurrency: read
   memory:
     description: Persistent memory and context
@@ -5042,16 +5090,19 @@ tools:
       - stop
       - prune
       attributes:
+        follow:
+        - long_running
+        prune:
+        - destructive
+        - own_state
         run:
         - passthrough
         - long_running
         start:
         - passthrough
         - long_running
-        follow:
-        - long_running
-        prune:
-        - destructive
+        stop:
+        - own_state
     concurrency: read
   supabase:
     description: Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
@@ -5455,4 +5506,7 @@ tools:
       attributes:
         baseline:
         - composite
+        - own_state
+        build:
+        - own_state
     concurrency: read
