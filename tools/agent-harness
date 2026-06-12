@@ -202,6 +202,77 @@ def contracts_drift(tool: str | None = None) -> dict[str, Any]:
     return payload
 
 
+AUDIT_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.agent-do.contracts-audit.plist"
+AUDIT_REPORT = agent_do_home() / "audit" / "contracts-audit.md"
+
+
+def contracts_audit(args: Any) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts_audit import audit_registry, render_report  # noqa: WPS433
+
+    payload = audit_registry(
+        load_bundled_registry(),
+        agent_do_cmd,
+        include_network=args.include_network,
+        only_tool=args.tool,
+        timeout=args.timeout,
+    )
+    payload["tool"] = "harness"
+    payload["command"] = "contracts audit"
+    payload["generated_at"] = now_iso()
+    if args.out:
+        out_path = Path(args.out).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_report(payload, payload["generated_at"]), encoding="utf-8")
+        payload["out"] = str(out_path)
+    if args.notify and payload["summary"]["fail"] > 0:
+        # Silent when clean — Erik only hears about tools breaking contracts.
+        agent_do_cmd(
+            "notify", "emit", "contracts_audit",
+            "--fact", f"failures={payload['summary']['fail']}",
+            "--fact", f"ok={payload['summary']['ok']}",
+            timeout=30,
+        )
+    return payload
+
+
+def contracts_audit_schedule(install: str | None, uninstall: bool) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts_audit import build_launchd_plist  # noqa: WPS433
+
+    if uninstall:
+        subprocess.run(["launchctl", "unload", str(AUDIT_PLIST)], capture_output=True, check=False)
+        existed = AUDIT_PLIST.exists()
+        AUDIT_PLIST.unlink(missing_ok=True)
+        return {"ok": True, "action": "uninstalled", "existed": existed, "plist": str(AUDIT_PLIST)}
+    plist = build_launchd_plist(str(REPO_ROOT / "agent-do"), str(AUDIT_REPORT), install or "weekly")
+    AUDIT_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    AUDIT_PLIST.write_text(plist, encoding="utf-8")
+    subprocess.run(["launchctl", "unload", str(AUDIT_PLIST)], capture_output=True, check=False)
+    result = subprocess.run(["launchctl", "load", str(AUDIT_PLIST)], capture_output=True, text=True, check=False)
+    return {
+        "ok": result.returncode == 0,
+        "action": "installed",
+        "frequency": install or "weekly",
+        "plist": str(AUDIT_PLIST),
+        "report": str(AUDIT_REPORT),
+        "launchctl": (result.stderr or "loaded").strip(),
+    }
+
+
+def render_contracts_audit(payload: dict[str, Any]) -> None:
+    summary = payload["summary"]
+    print("agent-do harness contracts audit")
+    print(f"  Probed ok: {summary['ok']}  Clean skips: {summary['clean-skip']}  "
+          f"Failures: {summary['fail']}  Policy skips: {summary['skip']}")
+    print(f"  Network probing: {'ON' if payload['include_network'] else 'off (--include-network to enable)'}")
+    for r in payload["results"]:
+        if r["outcome"] == "fail":
+            print(f"  FAIL {r['tool']} {r['verb']}: {r['reason']}")
+    if payload.get("out"):
+        print(f"  Report: {payload['out']}")
+
+
 def render_contracts_drift(payload: dict[str, Any]) -> None:
     print("agent-do harness contracts drift")
     print(f"  Declared-but-unimplemented (FAILING channel): {payload['declared_only_total']}")
@@ -944,6 +1015,10 @@ Commands:
   contracts propose [--tool X] [--out FILE] [--json]  Lexicon-driven contracts draft + exceptions report
   contracts surface [--json]                        Machine-readable safety surface (merged registry) for orchestrators
   contracts drift [--tool X] [--json]               Registry promises vs tool --help reality; fails on phantom verbs
+  contracts audit [--tool X] [--include-network] [--out FILE] [--notify] [--json]
+                                                    Bounded behavioral probe of the declared read surface (tri-state)
+  contracts audit --install-schedule [weekly|daily] Install launchd agent: audit + notify on failures
+  contracts audit --uninstall-schedule              Remove the scheduled audit
 
 Examples:
   agent-do harness inspect
@@ -1001,11 +1076,16 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_verify_parser.add_argument("--json", action="store_true")
 
     contracts = sub.add_parser("contracts", add_help=False)
-    contracts.add_argument("contracts_command", choices=["validate", "propose", "surface", "drift"])
+    contracts.add_argument("contracts_command", choices=["validate", "propose", "surface", "drift", "audit"])
     contracts.add_argument("--strict", action="store_true")
     contracts.add_argument("--tool")
     contracts.add_argument("--out")
     contracts.add_argument("--json", action="store_true")
+    contracts.add_argument("--include-network", action="store_true")
+    contracts.add_argument("--timeout", type=int, default=15)
+    contracts.add_argument("--notify", action="store_true")
+    contracts.add_argument("--install-schedule", nargs="?", const="weekly", choices=["weekly", "daily"])
+    contracts.add_argument("--uninstall-schedule", action="store_true")
     return parser
 
 
@@ -1063,6 +1143,17 @@ def main(argv: list[str]) -> int:
         if args.command == "contracts" and args.contracts_command == "surface":
             print(json.dumps(contracts_surface(), indent=2))
             return 0
+        if args.command == "contracts" and args.contracts_command == "audit":
+            if args.install_schedule or args.uninstall_schedule:
+                payload = contracts_audit_schedule(args.install_schedule, args.uninstall_schedule)
+                print(json.dumps(payload, indent=2))
+                return 0 if payload["ok"] else 1
+            payload = contracts_audit(args)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_audit(payload)
+            return 0 if payload["ok"] else 1
         if args.command == "contracts" and args.contracts_command == "drift":
             payload = contracts_drift(tool=args.tool)
             if json_mode:
