@@ -9,7 +9,9 @@ agent-figma - Figma design tool integration
 
 Commands:
   files                      List recent files
+  list                       List recent files (alias of files)
   file <key>                 Get file info
+  inspect <key>              Inspect file/elements (alias of file)
   export <key> <node-ids>    Export nodes as images
   comments <key>             List comments on file
   styles <key>               List styles in file
@@ -35,12 +37,14 @@ figma_request() {
     local endpoint="$1"
     local token="${FIGMA_TOKEN:-}"
 
+    # Always emit valid JSON: every consumer pipes this into json.load.
     if [[ -z "$token" ]]; then
-        echo "Error: FIGMA_TOKEN not set"
-        return 1
+        echo '{"error": "FIGMA_TOKEN not set"}'
+        return 0
     fi
 
-    curl -s -H "X-Figma-Token: $token" "${FIGMA_API}${endpoint}"
+    curl -s --max-time 30 -H "X-Figma-Token: $token" "${FIGMA_API}${endpoint}" \
+        || echo '{"error": "figma api request failed"}'
 }
 
 cmd_files() {
@@ -174,7 +178,7 @@ case "${1:-help}" in
     files|list)
         cmd_files
         ;;
-    file|get|info)
+    file|get|info|inspect)
         shift
         cmd_file "$@"
         ;;
