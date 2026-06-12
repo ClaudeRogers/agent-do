@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### TL;DR
+- Contracts are now load-bearing, not just declared. The registry's promises are enforced four ways: a weekly behavioral audit probes every safe read verb and pings on failures; a drift gate fails the build if the registry promises a command a tool doesn't implement; concurrency is derived from contracts (a `read` tool cannot hold world-write verbs); and natural-language routing asks before executing destructive commands unless `AGENT_DO_AUTO_DESTRUCTIVE=1`.
+- Every one of the 23 previously phantom registry commands is now real: built (`manna update/delete`, `slack read`, `discord read`, `clipboard history`, `calendar delete`, `cloud deploy/logs`, `debug backtrace`, `sheets create`, `jupyter kernel`, `dns list`, `logs filter`, `macos tree`, and more), documented where they already worked, or removed with a filed issue where the promise was infeasible (`dns update`, `discord join`).
+- New `own_state` contract attribute: tools whose only writes touch their own cache stay parallel-safe instead of being over-serialized.
+
+### Added
+- `agent-do harness contracts audit [--include-network] [--out FILE] [--notify]` — bounded behavioral probe of the declared read surface with tri-state grading (ok / clean-skip / fail); `--install-schedule [weekly|daily]` writes a launchd agent that audits automatically and notifies only on failures via `notify emit contracts_audit`. First run found 69 verbs violating their declared shape (mostly snapshot verbs ignoring `--json`) — filed for class-by-class fixes.
+- `agent-do harness contracts drift [--tool X]` — diffs registry command promises against each tool's `--help` (zero false positives across all 94 tools); the declared-but-unimplemented channel gates `./test.sh`.
+- `agent-do harness contracts surface --json` — machine-readable safety surface for orchestrators: read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists over the merged registry.
+- Routing consumes contracts: the LLM catalog carries per-tool `Safety:` lines; both routers annotate resolved routes with the verb's beats and attributes (after cache writes, so route memory never replays stale safety data); read-leaning intents resolving to write verbs log `route_intent_mismatch` telemetry.
+- `AGENT_DO_AUTO_DESTRUCTIVE=1` — natural-language routes to destructive/sensitive verbs ask first (exit 2 clarification) by default; auto mode executes with annotation and telemetry.
+- `AGENT_DO_AI_MODEL` now reaches the natural-language router (previously hardcoded).
+- Concurrency-from-contracts validator rule: `concurrency: read` with world-write verbs is a gate error; `own_state` writes are exempt.
+
+### Changed
+- `dns`, `usb`, `creds`, `clipboard` corrected `read` → `mixed` (their writes hit provider records, the OS mount table, the keychain, the clipboard); `dns` returned to `read` after its phantom `update` verb was removed.
+- `figma` emits JSON-safe errors and bounded requests; `sheets` create/write pass user input via argv instead of interpolating into python source (injection fix, plus write's double-nested values bug).
+
 ## v1.3 (2026-06-12)
 
 ### TL;DR

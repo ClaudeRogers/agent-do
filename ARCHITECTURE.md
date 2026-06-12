@@ -144,7 +144,12 @@ The README's mental model (Connect → Snapshot → Interact → Verify → Save
 - `lib/contracts-lexicon.yaml` — canonical verb→beat/attribute rules plus per-tool overrides (hand-written, always wins)
 - `lib/contracts-lexicon-learned.yaml` — agent-derived classifications with confidence and evidence (regenerable; corrections go in the hand lexicon)
 - `agent-do harness contracts propose [--tool X] [--out FILE]` — regenerate draft declarations and the safety-surface inventory
-- `agent-do harness contracts validate` — the gate: shape errors, attribute vocabulary, full coverage, zero warnings; enforced by `tests/test_contracts_gate.py` in `./test.sh` and CI
+- `agent-do harness contracts validate` — the gate: shape errors, attribute vocabulary, full coverage, zero warnings, concurrency-from-contracts (a `read` tool cannot hold world-write verbs; `own_state` writes are exempt); enforced by `tests/test_contracts_gate.py` in `./test.sh` and CI
+- `agent-do harness contracts surface --json` — machine-readable safety buckets (read_only/write/destructive/sensitive/long_running/passthrough/own_state) over the merged registry, for orchestrators scheduling parallel agents
+- `agent-do harness contracts drift [--tool X]` — registry command promises vs each tool's `--help`; the declared-but-unimplemented channel fails `./test.sh`
+- `agent-do harness contracts audit [--include-network] [--out F] [--notify]` — bounded behavioral probe of the declared read surface (lib/contracts_audit.py), tri-state outcomes; `--install-schedule` runs it weekly via launchd and notifies on failures only
+
+Routing consumes contracts: `build_registry_context` emits per-tool `Safety:` lines to the LLM router; `bin/intent-router` and `bin/pattern-matcher` annotate resolved routes with the verb's beats/attributes (after cache writes — route memory never persists safety data) and gate destructive/sensitive natural-language routes behind `AGENT_DO_AUTO_DESTRUCTIVE=1`, asking via exit 2 otherwise.
 
 No tool merges without a contracts declaration. Validation logic lives in `lib/registry.py` (`validate_tool_contracts`, `CONTRACT_BEATS`, `CONTRACT_ATTRIBUTES`); multi-word contract verbs ("embed status") match commands by first token.
 

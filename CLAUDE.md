@@ -37,8 +37,11 @@ agent-do is a universal automation CLI for AI agents with 94 specialized tools. 
 ./agent-do spec init                   # Initialize repo-local spec storage
 ./agent-do spec status --change id     # Check one change package
 ./agent-do harness inspect --json      # Inspect tools/hooks/docs/tests/state as one harness
-./agent-do harness contracts validate  # Contracts gate: shape errors + grandfather-baseline ratchet
+./agent-do harness contracts validate  # Contracts gate: shape errors + full coverage + concurrency-from-contracts
 ./agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md  # Regenerate lexicon-driven contracts draft
+./agent-do harness contracts surface --json  # Safety buckets for orchestrators (read_only/destructive/sensitive/...)
+./agent-do harness contracts drift     # Registry promises vs tool --help; fails on phantom verbs
+./agent-do harness contracts audit --out .handoff/contracts-audit.md  # Behavioral probe of the read surface (scheduled weekly via launchd)
 ./agent-do harness nudges effectiveness --since 7d  # Review hook follow/ignore/expire telemetry
 ./agent-do harness evidence build <session-or-run>  # Build drill-down evidence bundle
 ./agent-do harness manifest new <change-id>         # Start falsifiable harness change manifest
@@ -242,6 +245,7 @@ All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 - `AGENT_DO_HOOK_AI`: `auto|on|off` for AI-backed UserPromptSubmit full-catalog routing
 - `AGENT_DO_AI_MODEL`: Defaults to `claude-sonnet-4-6`
 - `AGENT_DO_AI_EFFORT`: Defaults to `max` for Sonnet 4.6 adaptive thinking
+- `AGENT_DO_AUTO_DESTRUCTIVE`: Set to `1` to let natural-language routing execute destructive/sensitive verbs without asking; default asks via exit 2 clarification
 - `AGENT_DO_AI_MAX_TOKENS`: Defaults to `64000`, the API-required output ceiling
 - `MANNA_SESSION_ID`: Override session ID for agent-manna
 - `RENDER_API_KEY`: API key for agent-render (Render.com), or store with `agent-do creds store RENDER_API_KEY --stdin`
