@@ -8,6 +8,7 @@ show_help() {
 agent-discord - Discord messaging
 
 Commands:
+  read <channel-id> [limit]    Read recent channel messages
   send <channel-id> <message>  Send message to channel
   webhook <message>            Send via webhook URL
   snapshot                   Discord state as JSON (guilds, channels)
@@ -155,6 +156,27 @@ else:
 "
 }
 
+cmd_read() {
+    local channel_id="${1:-}"
+    local limit="${2:-20}"
+    local token="${DISCORD_TOKEN:-}"
+    [[ -z "$token" ]] && { echo "Error: DISCORD_TOKEN not set"; return 1; }
+    [[ -z "$channel_id" ]] && { echo "Usage: agent-discord read <channel-id> [limit]"; return 1; }
+    curl -s --max-time 30 "https://discord.com/api/v10/channels/${channel_id}/messages?limit=${limit}" \
+        -H "Authorization: Bot $token" | \
+        python3 -c "
+import sys, json
+messages = json.load(sys.stdin)
+if isinstance(messages, list):
+    for m in reversed(messages):
+        author = m.get('author', {}).get('username', '?')
+        stamp = m.get('timestamp', '')[:16].replace('T', ' ')
+        print(f'[{stamp}] {author}: {m.get(\"content\", \"\")}')
+else:
+    print(f'Error: {messages}')
+"
+}
+
 # Main
 case "${1:-help}" in
     snapshot|snap)
@@ -166,6 +188,10 @@ case "${1:-help}" in
     channels|ch)
         shift
         cmd_channels "$@"
+        ;;
+    read)
+        shift
+        cmd_read "$@"
         ;;
     send|message)
         shift

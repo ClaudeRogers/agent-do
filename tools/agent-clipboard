@@ -10,6 +10,7 @@ agent-clipboard - Clipboard management
 Commands:
   copy <text>      Copy text to clipboard
   paste            Print clipboard contents
+  history [n]      Show last n copies made via agent-clipboard
   clear            Clear clipboard
   file <path>      Copy file contents to clipboard
   snapshot          Clipboard state as JSON (content preview, size, type)
@@ -52,7 +53,40 @@ cmd_copy() {
 
     local copy_cmd="${cmds%%:*}"
     echo -n "$text" | $copy_cmd
+    history_append "$text"
     echo "Copied to clipboard: ${text:0:50}$([ ${#text} -gt 50 ] && echo '...')"
+}
+
+HISTORY_FILE="${AGENT_DO_HOME:-$HOME/.agent-do}/clipboard-history.jsonl"
+
+history_append() {
+    # Own-state history: only captures copies made through agent-clipboard.
+    mkdir -p "$(dirname "$HISTORY_FILE")"
+    python3 - "$1" "$HISTORY_FILE" << 'PY'
+import json, sys, time
+text, path = sys.argv[1], sys.argv[2]
+with open(path, "a") as f:
+    f.write(json.dumps({"ts": int(time.time()), "text": text[:500]}) + "\n")
+lines = open(path).readlines()
+if len(lines) > 100:
+    open(path, "w").writelines(lines[-100:])
+PY
+}
+
+cmd_history() {
+    local limit="${1:-10}"
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        echo "No clipboard history yet (history records copies made via agent-clipboard)"
+        return 0
+    fi
+    tail -n "$limit" "$HISTORY_FILE" | python3 -c "
+import json, sys, time
+for line in sys.stdin:
+    e = json.loads(line)
+    stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))
+    text = e['text'][:80].replace(chr(10), ' ')
+    print(f'{stamp}  {text}')
+"
 }
 
 cmd_paste() {
@@ -168,6 +202,10 @@ case "${1:-help}" in
         ;;
     paste|get)
         cmd_paste
+        ;;
+    history)
+        shift
+        cmd_history "$@"
         ;;
     clear)
         cmd_clear

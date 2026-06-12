@@ -12,6 +12,7 @@ Commands:
   today                      Show today's events
   tomorrow                   Show tomorrow's events
   create <title>             Create event
+  delete <title>             Delete event by title (first match)
   search <query>             Search events
   snapshot [days]            Calendar state as JSON (today + upcoming events)
 
@@ -225,6 +226,46 @@ cmd_create() {
     fi
 }
 
+cmd_delete() {
+    local title=""
+    local calendar=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --calendar|-c) calendar="$2"; shift 2 ;;
+            *) title="$1"; shift ;;
+        esac
+    done
+    if [[ -z "$title" ]]; then
+        echo "Error: Event title required"
+        echo "Usage: agent-calendar delete <title> [--calendar <name>]"
+        return 1
+    fi
+    if [[ "$(uname)" != "Darwin" ]]; then
+        echo "Error: delete requires macOS Calendar.app"
+        return 1
+    fi
+    osascript - "$title" "$calendar" << 'APPLESCRIPT'
+on run argv
+    set eventTitle to item 1 of argv
+    set calName to item 2 of argv
+    tell application "Calendar"
+        set targetCals to calendars
+        if calName is not "" then set targetCals to (calendars whose name is calName)
+        repeat with cal in targetCals
+            set matches to (every event of cal whose summary is eventTitle)
+            if (count of matches) > 0 then
+                set ev to item 1 of matches
+                set evDate to start date of ev
+                delete ev
+                return "Deleted: " & eventTitle & " (" & (evDate as text) & ")"
+            end if
+        end repeat
+        return "No event found with title: " & eventTitle
+    end tell
+end run
+APPLESCRIPT
+}
+
 cmd_search() {
     local query="$*"
 
@@ -370,6 +411,10 @@ case "${1:-help}" in
     create|add|new)
         shift
         cmd_create "$@"
+        ;;
+    delete|remove)
+        shift
+        cmd_delete "$@"
         ;;
     search|find)
         shift

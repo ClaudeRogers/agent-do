@@ -14,6 +14,7 @@ Commands:
   gdb <binary>               Debug binary with gdb
 
   attach <pid>               Attach to running process
+  backtrace <pid>            Show call stack of a running process
   core <binary> <core>       Debug core dump
 
   snapshot                   Debug environment as JSON (debuggable processes, tools available)
@@ -175,6 +176,22 @@ cmd_core() {
     fi
 }
 
+cmd_backtrace() {
+    local pid="${1:-}"
+    if [[ -z "$pid" ]]; then
+        echo "Usage: agent-debug backtrace <pid>"
+        return 1
+    fi
+    if [[ "$(uname)" == "Darwin" ]] && command -v lldb >/dev/null; then
+        lldb --batch -p "$pid" -o "bt all" -o detach 2>&1 | grep -v "^(lldb)"
+    elif command -v gdb >/dev/null; then
+        gdb -p "$pid" -batch -ex "thread apply all bt" 2>/dev/null
+    else
+        echo "Error: lldb or gdb required for backtrace"
+        return 1
+    fi
+}
+
 cmd_strace() {
     local pid="${1:-}"
 
@@ -299,6 +316,10 @@ case "${1:-help}" in
     node|js)
         shift
         cmd_node "$@"
+        ;;
+    backtrace|bt)
+        shift
+        cmd_backtrace "$@"
         ;;
     lldb)
         shift

@@ -1791,7 +1791,6 @@ tools:
     commands:
       send: Send message
       read: Read channel
-      join: Join voice channel
     examples:
     - intent: 'send hello to #general'
       command: agent-discord send '#general' 'hello'
@@ -1801,8 +1800,6 @@ tools:
       optional:
       - DISCORD_WEBHOOK_URL
     contracts:
-      connect:
-      - join
       snapshot:
       - read
       interact:
@@ -2977,14 +2974,13 @@ tools:
       - whois
     concurrency: read
   dns:
-    description: DNS management
+    description: DNS lookups and resolution diagnostics (read-only; record writes live in namecheap/cloudflare)
     capabilities:
     - lookup records
-    - manage zones
-    - update entries
+    - list common record types
+    - trace resolution paths
     commands:
       lookup: DNS lookup
-      update: Update record
       list: List records
     examples:
     - intent: lookup DNS for example.com
@@ -2993,9 +2989,7 @@ tools:
       snapshot:
       - lookup
       - list
-      interact:
-      - update
-    concurrency: mixed
+    concurrency: read
   image:
     description: Image processing
     capabilities:

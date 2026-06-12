@@ -11,6 +11,7 @@ Commands:
   read <sheet-id> <range>    Read cells
   write <sheet-id> <range> <values>  Write cells
   append <sheet-id> <values> Append row
+  create <title>             Create new spreadsheet
   list <sheet-id>            List sheet names
 
 Environment:
@@ -190,6 +191,31 @@ print(f"Appended {result.get('updates', {}).get('updatedRows', 0)} row(s)")
 PYTHON
 }
 
+cmd_create() {
+    local title="${1:-}"
+    if [[ -z "$title" ]]; then
+        echo "Error: Spreadsheet title required"
+        echo "Usage: agent-sheets create <title>"
+        return 1
+    fi
+    local creds="${GOOGLE_CREDENTIALS_FILE:-}"
+    if [[ -z "$creds" ]] || [[ ! -f "$creds" ]]; then
+        echo "Error: GOOGLE_CREDENTIALS_FILE required for creating"
+        return 1
+    fi
+    python3 << PYTHON
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+creds = service_account.Credentials.from_service_account_file('$creds', scopes=SCOPES)
+service = build('sheets', 'v4', credentials=creds)
+result = service.spreadsheets().create(body={'properties': {'title': '$title'}}).execute()
+print(f"Created: {result['spreadsheetId']}")
+print(f"URL: {result.get('spreadsheetUrl', '')}")
+PYTHON
+}
+
 cmd_list() {
     local sheet_id="${1:-}"
 
@@ -229,6 +255,10 @@ case "${1:-help}" in
     append|add)
         shift
         cmd_append "$@"
+        ;;
+    create|new)
+        shift
+        cmd_create "$@"
         ;;
     list|sheets)
         shift
