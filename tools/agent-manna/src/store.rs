@@ -209,6 +209,39 @@ impl MannaStore {
         Ok(())
     }
 
+    /// Delete an issue by ID, rewriting issues.jsonl atomically.
+    pub fn delete_issue(&self, id: &str) -> Result<()> {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+
+        let issues = self.load_issues()?;
+        let remaining: Vec<Issue> = issues.into_iter().filter(|i| i.id != id).collect();
+
+        // load_issues succeeded, so a missing id means it never existed.
+        let before = self.load_issues()?.len();
+        if remaining.len() == before {
+            return Err(MannaError::IssueNotFound(id.to_string()));
+        }
+
+        let temp_path = path.with_extension("jsonl.tmp");
+        {
+            let temp_file = File::create(&temp_path)?;
+            temp_file
+                .lock_exclusive()
+                .map_err(|e| MannaError::LockFailed(e.to_string()))?;
+            let mut writer = std::io::BufWriter::new(&temp_file);
+            for issue in &remaining {
+                serde_json::to_writer(&mut writer, issue)?;
+                writeln!(writer)?;
+            }
+            writer.flush()?;
+        }
+        fs::rename(&temp_path, &path)?;
+        Ok(())
+    }
+
     /// Load all session events from sessions.jsonl.
     ///
     /// Skips malformed lines with a warning to stderr.

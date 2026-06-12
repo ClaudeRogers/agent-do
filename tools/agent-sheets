@@ -126,22 +126,20 @@ cmd_write() {
         return 1
     fi
 
-    python3 << PYTHON
-import json
+    python3 - "$creds" "$sheet_id" "$range" "$values" << 'PYTHON'
+import sys
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+creds_path, sheet_id, cell_range, raw_values = sys.argv[1:5]
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-creds = service_account.Credentials.from_service_account_file('$creds', scopes=SCOPES)
+creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
 service = build('sheets', 'v4', credentials=creds)
 
-# Parse values (comma-separated)
-values = [['$values'.split(',')]]
-
-body = {'values': values}
+body = {'values': [raw_values.split(',')]}
 result = service.spreadsheets().values().update(
-    spreadsheetId='$sheet_id',
-    range='$range',
+    spreadsheetId=sheet_id,
+    range=cell_range,
     valueInputOption='USER_ENTERED',
     body=body
 ).execute()
@@ -203,14 +201,16 @@ cmd_create() {
         echo "Error: GOOGLE_CREDENTIALS_FILE required for creating"
         return 1
     fi
-    python3 << PYTHON
+    python3 - "$title" "$creds" << 'PYTHON'
+import sys
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+title, creds_path = sys.argv[1], sys.argv[2]
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-creds = service_account.Credentials.from_service_account_file('$creds', scopes=SCOPES)
+creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
 service = build('sheets', 'v4', credentials=creds)
-result = service.spreadsheets().create(body={'properties': {'title': '$title'}}).execute()
+result = service.spreadsheets().create(body={'properties': {'title': title}}).execute()
 print(f"Created: {result['spreadsheetId']}")
 print(f"URL: {result.get('spreadsheetUrl', '')}")
 PYTHON

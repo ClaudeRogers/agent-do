@@ -95,6 +95,30 @@ enum Commands {
         id: String,
     },
 
+    /// Update an issue's title, description, or status
+    Update {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// New status (open, in_progress, blocked, done)
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Delete an issue permanently
+    Delete {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+    },
+
     /// Output context blob for AI agents
     Context {
         /// Maximum tokens for context (default 8000)
@@ -555,6 +579,72 @@ fn cmd_show(id: String) -> ! {
     output_success(IssueData { issue });
 }
 
+fn cmd_update(id: String, title: Option<String>, description: Option<String>, status: Option<String>) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    if title.is_none() && description.is_none() && status.is_none() {
+        output_error(
+            "Nothing to update: pass --title, --description, or --status",
+            EXIT_USER_ERROR,
+        );
+    }
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+    let mut issue = find_issue(&issues, &id);
+    if let Some(new_title) = title {
+        if new_title.is_empty() || new_title.len() > 500 {
+            output_error("Title must be 1-500 characters", EXIT_USER_ERROR);
+        }
+        issue.title = new_title;
+    }
+    if let Some(new_description) = description {
+        issue.description = if new_description.is_empty() { None } else { Some(new_description) };
+    }
+    if let Some(new_status) = status {
+        issue.status = match new_status.as_str() {
+            "open" => IssueStatus::Open,
+            "in_progress" => IssueStatus::InProgress,
+            "blocked" => IssueStatus::Blocked,
+            "done" => IssueStatus::Done,
+            other => output_error(
+                &format!("Invalid status '{}': use open, in_progress, blocked, or done", other),
+                EXIT_USER_ERROR,
+            ),
+        };
+    }
+    issue.updated_at = chrono::Utc::now();
+    if let Err(err) = store.update_issue(&issue) {
+        handle_manna_error(err);
+    }
+    output_success(IssueData { issue });
+}
+
+fn cmd_delete(id: String) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+    let issue = find_issue(&issues, &id);
+    if let Err(err) = store.delete_issue(&issue.id) {
+        handle_manna_error(err);
+    }
+    output_success(IssueData { issue });
+}
+
 fn cmd_context(max_tokens: usize) -> ! {
     let store = MannaStore::new(Path::new("."));
 
@@ -648,6 +738,8 @@ fn main() {
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
         Commands::List { status } => cmd_list(status),
         Commands::Show { id } => cmd_show(id),
+        Commands::Update { id, title, description, status } => cmd_update(id, title, description, status),
+        Commands::Delete { id } => cmd_delete(id),
         Commands::Context { max_tokens } => cmd_context(max_tokens),
     }
 }
