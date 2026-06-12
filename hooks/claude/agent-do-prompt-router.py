@@ -630,7 +630,8 @@ def resolve_agent_do_binary() -> str | None:
     if direct:
         return direct
 
-    repo_candidate = Path(__file__).resolve().parents[1] / "agent-do"
+    # This file lives at <repo>/hooks/claude/; the dispatcher is two levels up.
+    repo_candidate = Path(__file__).resolve().parents[2] / "agent-do"
     if repo_candidate.exists():
         return str(repo_candidate)
 

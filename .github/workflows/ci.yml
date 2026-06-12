@@ -55,17 +55,10 @@ jobs:
           echo "$HOME/.cibin" >> "$GITHUB_PATH"
           "$HOME/.cibin/bash" --version | head -1
       - name: Install Python dependencies
-        run: pip install pyyaml anthropic
+        run: pip install pyyaml anthropic pyobjc
       - name: Install PostgreSQL client (psql tests need the binary, no server)
         run: |
           brew list libpq >/dev/null 2>&1 || brew install libpq
           echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
-      - name: TEMP diagnostics — full output of runner-only failures
-        run: |
-          for t in test_v11_routing test_prompt_hook_ai test_live; do
-            echo "::group::$t"
-            python3 "tests/$t.py" || echo "DIAG: $t failed with exit $?"
-            echo "::endgroup::"
-          done
       - name: Run test suite
         run: ./test.sh

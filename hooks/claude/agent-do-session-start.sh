@@ -35,6 +35,16 @@ if [ -z "$AGENT_DO_DIR" ] && [ -f "$HOME/.agent-do/install-path" ]; then
     fi
 fi
 
+# 4. Script-relative fallback: this hook lives at <repo>/hooks/claude/, so a
+#    bare checkout (fresh contributor, CI) resolves its own dispatcher without
+#    any install artifacts.
+if [ -z "$AGENT_DO_DIR" ]; then
+    SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+    if [ -n "$SCRIPT_REPO" ] && [ -x "$SCRIPT_REPO/agent-do" ]; then
+        AGENT_DO_DIR="$SCRIPT_REPO"
+    fi
+fi
+
 # --- Add to PATH if found ---
 if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
