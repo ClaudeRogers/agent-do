@@ -30,10 +30,12 @@ fail() {
 check_cmd() {
     local desc="$1"
     shift
-    if "$@" >/dev/null 2>&1; then
+    local output
+    if output=$("$@" 2>&1); then
         pass "$desc"
     else
         fail "$desc" "command failed: $*"
+        echo "$output" | tail -15 | sed 's/^/      | /'
     fi
 }
 
