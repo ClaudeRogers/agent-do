@@ -1,7 +1,29 @@
 # Changelog
 
-## Unreleased
+## v1.3 (2026-06-12)
 
+### TL;DR
+- The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is now machine-readable and enforced. Every one of the 94 tools declares a `contracts:` block in `registry.yaml` mapping each command verb to its beats, with attribute flags for the shapes a single beat cannot express.
+- Agents and schedulers can now read per-verb truth from the registry: 890 verbs classified, 469 read-only (safe to parallelize), 51 destructive, 24 secret-emitting, 11 arbitrary-code passthroughs, 26 long-running.
+- A gate blocks any new tool from merging without contracts, enforced by `./test.sh` and GitHub Actions CI (the repo's first).
+
+### Added — contracts layer
+- `contracts:` blocks on all 94 registry tools (890/890 command verbs classified). Beats stay five; verbs that resist a single beat carry orthogonal attributes instead: `destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`. Validated against a fixed vocabulary in `lib/registry.py`; a verb declared under multiple beats must explain itself with `polymorphic` or `composite`, and only `passthrough`/`long_running` verbs may stand beat-less.
+- `lib/contracts-lexicon.yaml` — the canonical verb→beat/attribute mapping with documented principles (Verify is purposive, not contextual; transforms are interact; destruction is an attribute, not a beat) plus per-tool overrides. `lib/contracts-lexicon-learned.yaml` carries agent-derived classifications with confidence and evidence; the hand lexicon always wins on merge.
+- `agent-do harness contracts validate [--strict]` — the gate: registry shape errors plus full-coverage enforcement. `agent-do harness contracts propose [--tool X] [--out FILE]` — regenerates draft declarations and a reviewable inventory whose header aggregates the safety surface (destructive/sensitive/passthrough/long-running verbs across all tools).
+- `tests/test_contracts_gate.py` in `./test.sh`: schema validation, attribute vocabulary, full-coverage enforcement, lexicon merge precedence, and a duplicate-YAML-key guard (PyYAML silently keeps the last duplicate mapping key, which can swallow override blocks).
+- GitHub Actions CI: `contracts-gate.yml` (registry gate + harness inventory on ubuntu) and `ci.yml` (bash/python syntax sweep on ubuntu; full `./test.sh` on macOS).
+- The new-tool rule in `CLAUDE.md`/`README.md`: no tool merges without a contracts declaration.
+
+### Changed
+- Concurrency classifications corrected where per-verb review exposed lies: `screen` (drives real mouse/keyboard), `resend` (`add`/`verify` are POSTs), and `harness` (`evidence`/`manifest` write files) moved `read` → `mixed`. Distribution is now 57 mixed / 20 read / 17 write.
+- The `metrics` registry entry described a fictional tool (`query`/`alert`/`dashboard`); it now declares the real surface (`cpu`/`memory`/`disk`/`network`/`processes`/`load`/`uptime`/`all`). Phantom `slack react` (declared, never implemented) removed.
+- Sensitive-blind reads now flagged: `render secret get`, `render kv connect-info`, `render db` (DSN reveal), `browse auth get-creds`, `sms code`/`link` all carry `sensitive`.
+
+### Fixed
+- `agent-do --health` could hang forever when the Docker daemon was dead: `bin/health` now bounds external daemon probes (`docker info`, `kubectl cluster-info`) with a 10-second python-backed timeout, since macOS ships no `timeout(1)`. Regression-tested with a shimmed blocking docker (`tests/test_health_probes.py`).
+
+### Added — pre-existing unreleased work
 - `agent-do notion` has been rebuilt from a stub into a contract-real Notion team operating layer. It now uses Notion API `2025-09-03`, resolves credentials through `agent-do creds`, supports `doctor`, `snapshot`, workspace/users/search/read/blocks/data-source commands, verified saves for team notes/tasks/decisions/handoffs/comments, local SQLite/FTS cache sync, schema adoption via `bootstrap-team`, webhook ingestion, and optional semantic cache commands.
 - The Notion registry entry now documents the required `NOTION_TOKEN`, optional semantic keys, routing keywords, recommended entrypoints, and the team-workspace setup model. `tests/test_notion.py` covers the Notion contract with mocked API responses and is included in `./test.sh`.
 - `agent-do obsidian` is now release-ready for local vault usage: `doctor --json` reports local-index mode, note/chunk/embedding counts, feature readiness, and credential readiness without exposing secret values. `agent-do --health obsidian` now treats a readable vault path as ready even when the Obsidian CLI is not installed.

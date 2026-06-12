@@ -135,6 +135,18 @@ The master catalog defines all tools with:
 - `examples`: intent-to-command mappings (used by LLM router and pattern matcher)
 - `routing`: optional discovery metadata (keywords, regexes, raw CLI equivalents, readiness hints, project signals)
 - `credentials`: optional secret env vars a tool can resolve from env or secure storage
+- `contracts`: required — maps each command verb to its five-beat roles (`connect`/`snapshot`/`interact`/`verify`/`save`), with an `attributes` map flagging verbs the beats cannot express alone (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`)
+
+### Contracts Layer
+
+The README's mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 94 tools declare `contracts:`; snapshot/verify verbs are read-only, connect/interact/save verbs write, and attributes mark destruction, secret exposure, opaque passthroughs, and never-returning processes.
+
+- `lib/contracts-lexicon.yaml` — canonical verb→beat/attribute rules plus per-tool overrides (hand-written, always wins)
+- `lib/contracts-lexicon-learned.yaml` — agent-derived classifications with confidence and evidence (regenerable; corrections go in the hand lexicon)
+- `agent-do harness contracts propose [--tool X] [--out FILE]` — regenerate draft declarations and the safety-surface inventory
+- `agent-do harness contracts validate` — the gate: shape errors, attribute vocabulary, full coverage, zero warnings; enforced by `tests/test_contracts_gate.py` in `./test.sh` and CI
+
+No tool merges without a contracts declaration. Validation logic lives in `lib/registry.py` (`validate_tool_contracts`, `CONTRACT_BEATS`, `CONTRACT_ATTRIBUTES`); multi-word contract verbs ("embed status") match commands by first token.
 
 ### Registry Loading Order (lib/registry.py)
 
