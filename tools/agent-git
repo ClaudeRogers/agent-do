@@ -29,6 +29,122 @@ Examples:
 EOF
 }
 
+# --- JSON output helpers ---------------------------------------------------
+# Detect and strip a --json flag from the argument list. Sets JSON_MODE=1 when
+# present. Remaining args are stored in JSON_ARGS for the caller to use. Plain
+# text behavior is unchanged when --json is absent.
+JSON_MODE=0
+JSON_ARGS=()
+parse_json_flag() {
+    JSON_MODE=0
+    JSON_ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=1
+        else
+            JSON_ARGS+=("$arg")
+        fi
+    done
+}
+
+# Emit a structured JSON error and exit nonzero.
+json_fail() {
+    local message="$1"
+    local code="${2:-1}"
+    python3 -c "
+import json, sys
+print(json.dumps({'ok': False, 'error': sys.argv[1]}))
+" "$message"
+    exit "$code"
+}
+
+# log as JSON: structured commits.
+cmd_log_json() {
+    local count="${1:-10}"
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        json_fail "not a git repository"
+    fi
+    git log --pretty=format:'%H%x1f%h%x1f%an%x1f%aI%x1f%s' -n "$count" 2>/dev/null \
+        | python3 -c "
+import sys, json
+commits = []
+for line in sys.stdin.read().split('\n'):
+    if not line:
+        continue
+    parts = line.split('\x1f')
+    if len(parts) < 5:
+        continue
+    commits.append({
+        'hash': parts[0],
+        'short': parts[1],
+        'author': parts[2],
+        'date': parts[3],
+        'message': parts[4],
+    })
+print(json.dumps({'ok': True, 'count': len(commits), 'commits': commits}))
+"
+}
+
+# diff as JSON: per-file stat lines plus raw diff text.
+cmd_diff_json() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        json_fail "not a git repository"
+    fi
+    local scope diff_text numstat
+    if git diff --cached --quiet 2>/dev/null; then
+        scope="unstaged"
+        diff_text=$(git diff 2>/dev/null)
+        numstat=$(git diff --numstat 2>/dev/null)
+    else
+        scope="staged"
+        diff_text=$(git diff --cached 2>/dev/null)
+        numstat=$(git diff --cached --numstat 2>/dev/null)
+    fi
+    SCOPE="$scope" DIFF_TEXT="$diff_text" NUMSTAT="$numstat" python3 -c "
+import os, json
+scope = os.environ.get('SCOPE', '')
+diff_text = os.environ.get('DIFF_TEXT', '')
+numstat = os.environ.get('NUMSTAT', '')
+files = []
+for line in numstat.split('\n'):
+    if not line.strip():
+        continue
+    parts = line.split('\t')
+    if len(parts) < 3:
+        continue
+    added = None if parts[0] == '-' else int(parts[0])
+    deleted = None if parts[1] == '-' else int(parts[1])
+    files.append({'path': parts[2], 'added': added, 'deleted': deleted})
+print(json.dumps({'ok': True, 'scope': scope, 'count': len(files), 'files': files, 'diff': diff_text}))
+"
+}
+
+# branch as JSON: list branches (the read/snapshot form). Creating a branch is
+# a write verb and is not exposed through --json.
+cmd_branch_json() {
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        json_fail "not a git repository"
+    fi
+    local current branch_lines
+    current=$(git branch --show-current 2>/dev/null)
+    branch_lines=$(git branch -a 2>/dev/null)
+    CURRENT="$current" BRANCH_LINES="$branch_lines" python3 -c "
+import os, json
+current = os.environ.get('CURRENT', '')
+branch_lines = os.environ.get('BRANCH_LINES', '')
+branches = []
+for line in branch_lines.split('\n'):
+    line = line.rstrip()
+    if not line:
+        continue
+    is_current = line.startswith('*')
+    name = line.lstrip('* ').strip()
+    branches.append({'name': name, 'current': is_current, 'remote': name.startswith('remotes/')})
+print(json.dumps({'ok': True, 'current': current, 'count': len(branches), 'branches': branches}))
+"
+}
+
 cmd_status() {
     git status --short --branch
 }
@@ -206,36 +322,75 @@ print(json.dumps(snapshot, indent=2))
 }
 
 # Main
+# Strip a --json flag from anywhere in the args. JSON_MODE/JSON_ARGS drive the
+# structured output path; plain text behavior is unchanged when --json is absent.
+parse_json_flag "$@"
+set -- "${JSON_ARGS[@]+"${JSON_ARGS[@]}"}"
+
 case "${1:-help}" in
     status|st)
-        cmd_status
+        if [[ "$JSON_MODE" == "1" ]]; then
+            cmd_snapshot
+        else
+            cmd_status
+        fi
         ;;
     diff|d)
-        cmd_diff
+        if [[ "$JSON_MODE" == "1" ]]; then
+            cmd_diff_json
+        else
+            cmd_diff
+        fi
         ;;
     log|l)
         shift
-        cmd_log "$@"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            cmd_log_json "$@"
+        else
+            cmd_log "$@"
+        fi
         ;;
     commit|ci)
         shift
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "commit is a write verb; --json output is not supported" 1
+        fi
         cmd_commit "$@"
         ;;
     branch|br)
         shift
-        cmd_branch "$@"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            if [[ -n "${1:-}" ]]; then
+                json_fail "creating a branch is a write verb; --json output is not supported" 1
+            fi
+            cmd_branch_json
+        else
+            cmd_branch "$@"
+        fi
         ;;
     stash)
         shift
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "stash is a write verb; --json output is not supported" 1
+        fi
         cmd_stash "$@"
         ;;
     pull)
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "pull is a write verb; --json output is not supported" 1
+        fi
         cmd_pull
         ;;
     push)
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "push is a write verb; --json output is not supported" 1
+        fi
         cmd_push
         ;;
     sync)
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "sync is a write verb; --json output is not supported" 1
+        fi
         cmd_sync
         ;;
     snapshot|snap)
@@ -245,6 +400,9 @@ case "${1:-help}" in
         show_help
         ;;
     *)
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "unknown command: ${1:-}" 1
+        fi
         echo "Unknown command: $1"
         echo "Try: agent-git help"
         exit 1

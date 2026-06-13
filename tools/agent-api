@@ -31,8 +31,8 @@ HTTP request commands:
   delete <url>                          DELETE request
   head <url>                            HEAD request
   snapshot                              API state: environment, base URL, recent history
-  history                               Show last 20 requests with status codes
-  env [name] [url]                      Set/show base URL environment
+  history [--json]                      Show last 20 requests with status codes
+  env [name] [url] [--json]             Set/show base URL environment
 
 HTTP options:
   -H, --header "Key: Value"             Add header
@@ -558,36 +558,59 @@ PYTHON
 
 cmd_history() {
     ensure_api_dirs
-    python3 - "$HISTORY_FILE" "$LEGACY_HISTORY_FILE" << 'PYTHON'
+    local json_output=false
+    for arg in "$@"; do
+        [[ "$arg" == "--json" ]] && json_output=true
+    done
+
+    python3 - "$HISTORY_FILE" "$LEGACY_HISTORY_FILE" "$json_output" << 'PYTHON'
 import json
 import os
 import sys
 
-history_file, legacy_history_file = sys.argv[1:3]
+history_file, legacy_history_file, json_output = sys.argv[1:4]
 history = []
 load_path = history_file if os.path.exists(history_file) else legacy_history_file
 if os.path.exists(load_path):
     with open(load_path, encoding="utf-8") as handle:
         history = json.load(handle)
-if not history:
+recent = history[-20:]
+if json_output == "true":
+    print(json.dumps({"success": True, "requests": recent, "total_requests": len(history)}, indent=2))
+elif not history:
     print("No request history")
 else:
-    for item in history[-20:]:
+    for item in recent:
         print(f"  {item.get('method', '?'):6s}  {item.get('url', '?')}  {item.get('timestamp', '')}")
 PYTHON
 }
 
 cmd_env() {
     ensure_api_dirs
-    local name="${1:-}"
-    local url="${2:-}"
+    local json_output=false
+    local positional=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)
+                json_output=true
+                shift
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+    local name="${positional[0]:-}"
+    local url="${positional[1]:-}"
 
-    python3 - "$ENVS_FILE" "$LEGACY_ENVS_FILE" "$name" "$url" << 'PYTHON'
+    python3 - "$ENVS_FILE" "$LEGACY_ENVS_FILE" "$name" "$url" "$json_output" << 'PYTHON'
 import json
 import os
 import sys
 
-env_file, legacy_env_file, name, url = sys.argv[1:5]
+env_file, legacy_env_file, name, url, json_output = sys.argv[1:6]
+json_output = json_output == "true"
 os.makedirs(os.path.dirname(env_file), exist_ok=True)
 envs = {}
 load_path = env_file if os.path.exists(env_file) else legacy_env_file
@@ -596,7 +619,9 @@ if os.path.exists(load_path):
         envs = json.load(handle)
 
 if not name:
-    if not envs:
+    if json_output:
+        print(json.dumps({"success": True, "environments": envs}, indent=2))
+    elif not envs:
         print("No environments configured")
         print("Usage: agent-api env <name> <base_url>")
     else:
@@ -606,13 +631,22 @@ elif url:
     envs[name] = url
     with open(env_file, "w", encoding="utf-8") as handle:
         json.dump(envs, handle, indent=2)
-    print(f"Set {name} = {url}")
-    print(f'Use: AGENT_API_BASE="{url}" agent-api get /endpoint')
+    if json_output:
+        print(json.dumps({"success": True, "name": name, "base_url": url}, indent=2))
+    else:
+        print(f"Set {name} = {url}")
+        print(f'Use: AGENT_API_BASE="{url}" agent-api get /endpoint')
 else:
     if name in envs:
-        print(envs[name])
+        if json_output:
+            print(json.dumps({"success": True, "name": name, "base_url": envs[name]}, indent=2))
+        else:
+            print(envs[name])
     else:
-        print(f'Environment "{name}" not found')
+        if json_output:
+            print(json.dumps({"success": False, "error": f'Environment "{name}" not found'}, indent=2))
+        else:
+            print(f'Environment "{name}" not found')
         raise SystemExit(1)
 PYTHON
 }
@@ -662,7 +696,8 @@ case "${1:-help}" in
         cmd_snapshot
         ;;
     history|hist)
-        cmd_history
+        shift
+        cmd_history "$@"
         ;;
     env|environment)
         shift

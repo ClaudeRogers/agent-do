@@ -122,6 +122,28 @@ require_booted() {
 # ============================================================================
 
 cmd_list() {
+    if [[ "${1:-}" == "--json" ]]; then
+        xcrun simctl list devices available --json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except (ValueError, EOFError):
+    data = {'devices': {}}
+out = []
+for runtime, devices in (data.get('devices') or {}).items():
+    runtime_name = runtime.split('.')[-1].replace('-', ' ')
+    for dev in devices:
+        out.append({
+            'name': dev.get('name', ''),
+            'udid': dev.get('udid', ''),
+            'state': dev.get('state', ''),
+            'runtime': runtime_name,
+            'booted': dev.get('state') == 'Booted',
+        })
+print(json.dumps({'ok': True, 'simulators': out, 'count': len(out)}))
+"
+        return 0
+    fi
     echo "Available iOS Simulators:"
     echo
     xcrun simctl list devices available --json | python3 -c "
@@ -820,6 +842,32 @@ cmd_location() {
 cmd_status() {
     local udid=$(get_booted_udid)
 
+    if [[ "${1:-}" == "--json" ]]; then
+        if [[ -z "$udid" ]]; then
+            echo '{"ok": true, "running": false, "booted": []}'
+            return 0
+        fi
+        xcrun simctl list devices booted --json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except (ValueError, EOFError):
+    data = {'devices': {}}
+out = []
+for runtime, devices in (data.get('devices') or {}).items():
+    runtime_name = runtime.split('.')[-1].replace('-', ' ')
+    for dev in devices:
+        if dev.get('state') == 'Booted':
+            out.append({
+                'name': dev.get('name', ''),
+                'runtime': runtime_name,
+                'udid': dev.get('udid', ''),
+            })
+print(json.dumps({'ok': True, 'running': bool(out), 'booted': out}))
+"
+        return 0
+    fi
+
     if [[ -z "$udid" ]]; then
         echo "No simulator running"
         echo
@@ -1013,7 +1061,7 @@ cmd_runtime() {
 case "${1:-help}" in
     # Device management
     list|ls)
-        cmd_list
+        shift; cmd_list "$@"
         ;;
     list-booted|booted)
         cmd_list_booted
@@ -1126,7 +1174,7 @@ case "${1:-help}" in
 
     # System
     status)
-        cmd_status
+        shift; cmd_status "$@"
         ;;
     statusbar|status-bar)
         shift; cmd_statusbar "$@"

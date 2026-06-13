@@ -65,10 +65,6 @@ delegate_domain() {
         return 1
     fi
 
-    if [[ "${OUTPUT_FORMAT:-text}" != "json" ]]; then
-        exec "$leaf_exec" "$@"
-    fi
-
     local stdout_file stderr_file status
     stdout_file="$(mktemp)"
     stderr_file="$(mktemp)"
@@ -77,6 +73,34 @@ delegate_domain() {
     "$leaf_exec" "$@" >"$stdout_file" 2>"$stderr_file"
     status=$?
     set -e
+
+    if [[ "${OUTPUT_FORMAT:-text}" != "json" ]]; then
+        local leaf_stdout leaf_stderr
+        leaf_stdout="$(cat "$stdout_file")"
+        leaf_stderr="$(cat "$stderr_file")"
+        rm -f "$stdout_file" "$stderr_file"
+
+        # Pass the leaf's stdout/stderr through verbatim when it produced output,
+        # so existing delegated behavior is preserved.
+        if [[ -n "${leaf_stdout//[$' \t\n']/}" ]]; then
+            printf '%s\n' "$leaf_stdout"
+        fi
+        if [[ -n "${leaf_stderr//[$' \t\n']/}" ]]; then
+            printf '%s\n' "$leaf_stderr" >&2
+        fi
+
+        # Render delegation failures and silent empty results explicitly, so the
+        # wrapper never inherits an unexplained exit-1 or a silent exit-0.
+        if [[ "$status" -ne 0 ]]; then
+            if [[ -z "${leaf_stdout//[$' \t\n']/}" && -z "${leaf_stderr//[$' \t\n']/}" ]]; then
+                echo "Error: agent-$domain $* failed (exit $status) with no output" >&2
+            fi
+        elif [[ -z "${leaf_stdout//[$' \t\n']/}" && -z "${leaf_stderr//[$' \t\n']/}" ]]; then
+            echo "agent-$domain $*: no results"
+        fi
+
+        return "$status"
+    fi
 
     python3 - "$domain" "$status" "$stdout_file" "$stderr_file" "$@" <<'PY'
 import json

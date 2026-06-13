@@ -503,7 +503,12 @@ case "${1:-help}" in
         cmd_export "$@"
         ;;
     platform)
-        echo "$AGENT_DO_CREDS_PLATFORM"
+        shift
+        if [[ "${1:-}" == "--json" ]]; then
+            python3 -c "import json,sys; print(json.dumps({'platform': sys.argv[1]}))" "$AGENT_DO_CREDS_PLATFORM"
+        else
+            echo "$AGENT_DO_CREDS_PLATFORM"
+        fi
         ;;
     help|--help|-h)
         show_help

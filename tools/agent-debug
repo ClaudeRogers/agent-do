@@ -192,6 +192,44 @@ cmd_backtrace() {
     fi
 }
 
+cmd_print() {
+    local expr="${1:-}"
+    local json=0
+    local args=()
+    for a in "$@"; do
+        if [[ "$a" == "--json" ]]; then
+            json=1
+        else
+            args+=("$a")
+        fi
+    done
+    expr="${args[0]:-}"
+
+    if [[ -z "$expr" ]]; then
+        if [[ $json -eq 1 ]]; then
+            printf '{"error": "expression required", "usage": "agent-debug print <expr> (inside an attached pdb/lldb session)"}\n'
+        else
+            echo "Error: expression required"
+            echo "Usage: agent-debug print <expr>"
+            echo "Note: 'print' is a pdb/lldb command issued inside an attached debug session."
+            echo "      Start one with: agent-debug attach <pid>  or  agent-debug python <script>"
+        fi
+        return 1
+    fi
+
+    # Outside an interactive debugger there is no frame to evaluate against.
+    if [[ $json -eq 1 ]]; then
+        printf '{"error": "no active debug session", "expr": %s, "hint": "attach a process first: agent-debug attach <pid>"}\n' \
+            "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$expr")"
+    else
+        echo "Error: no active debug session to evaluate: $expr"
+        echo "Usage: agent-debug print <expr>"
+        echo "Note: 'print' must be issued inside an attached pdb/lldb session."
+        echo "      Start one with: agent-debug attach <pid>  or  agent-debug python <script>"
+    fi
+    return 1
+}
+
 cmd_strace() {
     local pid="${1:-}"
 
@@ -320,6 +358,10 @@ case "${1:-help}" in
     backtrace|bt)
         shift
         cmd_backtrace "$@"
+        ;;
+    print|p)
+        shift
+        cmd_print "$@"
         ;;
     lldb)
         shift

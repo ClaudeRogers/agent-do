@@ -257,9 +257,46 @@ PYTHON
 }
 
 cmd_results() {
+    # Strip --json flag from args; remaining args carry the optional name.
+    local as_json=0
+    local args=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            as_json=1
+        else
+            args+=("$arg")
+        fi
+    done
+    set -- "${args[@]+"${args[@]}"}"
     local name="${1:-}"
 
     if [[ -z "$name" ]]; then
+        if [[ "$as_json" -eq 1 ]]; then
+            # Emit a single JSON document listing all result summaries.
+            AGENT_EVAL_DIR="$EVAL_DIR" python3 << 'PYTHON'
+import json, os, glob
+eval_dir = os.environ['AGENT_EVAL_DIR']
+results = []
+for f in sorted(glob.glob(os.path.join(eval_dir, '*.json'))):
+    try:
+        with open(f) as fh:
+            r = json.load(fh)
+    except (ValueError, OSError):
+        continue
+    summary = r.get('summary', {}) or {}
+    results.append({
+        'name': r.get('name', 'Unknown'),
+        'model': r.get('model', 'Unknown'),
+        'timestamp': r.get('timestamp', None),
+        'passed': summary.get('passed', 0),
+        'failed': summary.get('failed', 0),
+        'total': summary.get('total', 0),
+        'file': os.path.basename(f),
+    })
+print(json.dumps({'success': True, 'count': len(results), 'results': results}, indent=2))
+PYTHON
+            return 0
+        fi
         # List all results
         echo "Evaluation results:"
         echo
@@ -276,8 +313,22 @@ PYTHON
         # Show specific results
         local result_file=$(ls -t "$EVAL_DIR"/${name}*.json 2>/dev/null | head -1)
         if [[ -z "$result_file" ]]; then
+            if [[ "$as_json" -eq 1 ]]; then
+                python3 -c "import json,sys; print(json.dumps({'success': False, 'error': 'No results found for: '+sys.argv[1]}, indent=2))" "$name"
+                return 1
+            fi
             echo "Error: No results found for: $name"
             return 1
+        fi
+
+        if [[ "$as_json" -eq 1 ]]; then
+            AGENT_EVAL_RESULT_FILE="$result_file" python3 << 'PYTHON'
+import json, os
+with open(os.environ['AGENT_EVAL_RESULT_FILE']) as f:
+    r = json.load(f)
+print(json.dumps({'success': True, 'result': r}, indent=2))
+PYTHON
+            return 0
         fi
 
         python3 << PYTHON

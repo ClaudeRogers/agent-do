@@ -22,6 +22,26 @@ Examples:
 EOF
 }
 
+JSON_OUTPUT=0
+
+# Strip --json from args (anywhere), set JSON_OUTPUT; remaining args in CLEAN_ARGS
+parse_json_flag() {
+    CLEAN_ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_OUTPUT=1
+        else
+            CLEAN_ARGS+=("$arg")
+        fi
+    done
+}
+
+# Emit a structured JSON error to stdout and return nonzero
+json_err() {
+    python3 -c "import json,sys; print(json.dumps({'error': sys.argv[1]}))" "$1"
+}
+
 # Detect clipboard command
 get_clipboard_cmd() {
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -76,7 +96,33 @@ PY
 cmd_history() {
     local limit="${1:-10}"
     if [[ ! -f "$HISTORY_FILE" ]]; then
+        if [[ "$JSON_OUTPUT" == "1" ]]; then
+            python3 -c "import json; print(json.dumps({'count': 0, 'entries': [], 'note': 'No clipboard history yet (history records copies made via agent-clipboard)'}))"
+            return 0
+        fi
         echo "No clipboard history yet (history records copies made via agent-clipboard)"
+        return 0
+    fi
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        tail -n "$limit" "$HISTORY_FILE" | python3 -c "
+import json, sys, time
+entries = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        e = json.loads(line)
+    except (ValueError, TypeError):
+        continue
+    ts = e.get('ts')
+    entries.append({
+        'ts': ts,
+        'time': time.strftime('%Y-%m-%d %H:%M', time.localtime(ts)) if isinstance(ts, (int, float)) else None,
+        'text': e.get('text', ''),
+    })
+print(json.dumps({'count': len(entries), 'entries': entries}))
+"
         return 0
     fi
     tail -n "$limit" "$HISTORY_FILE" | python3 -c "
@@ -93,11 +139,25 @@ cmd_paste() {
     local cmds
     cmds=$(get_clipboard_cmd)
     if [[ -z "$cmds" ]]; then
+        if [[ "$JSON_OUTPUT" == "1" ]]; then
+            json_err "No clipboard command found"
+            return 1
+        fi
         echo "Error: No clipboard command found"
         return 1
     fi
 
     local paste_cmd="${cmds##*:}"
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        local content
+        content=$($paste_cmd 2>/dev/null) || content=""
+        python3 -c "
+import json, sys
+content = sys.stdin.read()
+print(json.dumps({'content': content, 'length': len(content)}))
+" <<< "$content"
+        return 0
+    fi
     $paste_cmd
 }
 
@@ -194,7 +254,10 @@ print(json.dumps(snapshot, indent=2))
 " <<< "$content"
 }
 
-# Main
+# Main — strip --json globally so it works as a trailing arg on any verb
+parse_json_flag "$@"
+set -- "${CLEAN_ARGS[@]:-}"
+
 case "${1:-help}" in
     copy|cp)
         shift

@@ -3,6 +3,30 @@
 
 set -euo pipefail
 
+OUTPUT_FORMAT="text"
+
+# Emit a JSON document from newline-separated lines plus a default-printer field.
+emit_json() {
+    # $1 = JSON kind ("printers"|"status"), $2 = raw text, $3 = default printer
+    python3 -c '
+import json, sys
+kind, raw, default = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = [ln.rstrip() for ln in raw.split("\n") if ln.strip()]
+print(json.dumps({"success": True, kind: lines, "default": default or None}, indent=2))
+' "$1" "$2" "${3:-}"
+}
+
+# Emit a structured JSON error and return its code.
+emit_json_error() {
+    local message="$1"
+    local code="${2:-1}"
+    python3 -c '
+import json, sys
+print(json.dumps({"success": False, "error": sys.argv[1], "code": int(sys.argv[2])}, indent=2))
+' "$message" "$code"
+    return "$code"
+}
+
 show_help() {
     cat << 'EOF'
 agent-printer - Printer operations
@@ -32,6 +56,14 @@ EOF
 }
 
 cmd_list() {
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local printers default
+        printers="$(lpstat -p 2>/dev/null || true)"
+        default="$(lpstat -d 2>/dev/null | awk '{print $NF}')"
+        emit_json "printers" "$printers" "$default"
+        return 0
+    fi
+
     if [[ "$(uname)" == "Darwin" ]]; then
         lpstat -p 2>/dev/null | while read -r line; do
             echo "$line"
@@ -61,6 +93,18 @@ cmd_default() {
 
 cmd_status() {
     local printer="${1:-}"
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local status default
+        if [[ -n "$printer" ]]; then
+            status="$(lpstat -p "$printer" 2>/dev/null || true)"
+        else
+            status="$(lpstat -p 2>/dev/null || true)"
+        fi
+        default="$(lpstat -d 2>/dev/null | awk '{print $NF}')"
+        emit_json "status" "$status" "$default"
+        return 0
+    fi
 
     if [[ -n "$printer" ]]; then
         lpstat -p "$printer" 2>/dev/null
@@ -131,6 +175,17 @@ cmd_cancel() {
 cmd_queue() {
     lpq -a 2>/dev/null || lpstat -o 2>/dev/null || echo "No jobs in queue"
 }
+
+# Strip --json from anywhere in the args; set output format.
+_args=()
+for _arg in "$@"; do
+    if [[ "$_arg" == "--json" ]]; then
+        OUTPUT_FORMAT="json"
+    else
+        _args+=("$_arg")
+    fi
+done
+set -- ${_args[@]+"${_args[@]}"}
 
 # Main
 case "${1:-help}" in

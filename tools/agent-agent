@@ -239,8 +239,54 @@ cmd_spawn() {
 }
 
 cmd_list() {
+    local json=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            *) die "unexpected argument: $1" ;;
+        esac
+    done
+
     local sessions
     sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${PREFIX}" || true)
+
+    if $json; then
+        # Emit a JSON array of session objects. Pass NUL-delimited
+        # "name<TAB>type<TAB>status" rows to python for safe serialization.
+        local rows=""
+        if [[ -n "$sessions" ]]; then
+            while IFS= read -r session; do
+                [[ -n "$session" ]] || continue
+                local user_name agent_type status content
+                user_name=$(user_session_name "$session")
+                agent_type=$(tmux show-environment -t "$session" AGENT_TYPE 2>/dev/null | cut -d= -f2 || echo "unknown")
+                status="unknown"
+                content=$(tmux capture-pane -t "$session" -p 2>/dev/null || true)
+                if echo "$content" | grep -qE "${AGENT_BUSY_PATTERN[$agent_type]:-⠋}"; then
+                    status="busy"
+                elif echo "$content" | grep -qE "${AGENT_READY_PATTERN[$agent_type]:-^>}"; then
+                    status="ready"
+                fi
+                rows+="${user_name}"$'\t'"${agent_type}"$'\t'"${status}"$'\0'
+            done <<< "$sessions"
+        fi
+        printf '%s' "$rows" | python3 -c "
+import json, sys
+data = sys.stdin.buffer.read()
+sessions = []
+for row in data.split(b'\0'):
+    if not row:
+        continue
+    parts = row.decode('utf-8', 'replace').split('\t')
+    name = parts[0] if len(parts) > 0 else ''
+    agent_type = parts[1] if len(parts) > 1 else 'unknown'
+    status = parts[2] if len(parts) > 2 else 'unknown'
+    sessions.append({'session': name, 'agent_type': agent_type, 'status': status})
+print(json.dumps(sessions, indent=2))
+"
+        return
+    fi
+
     if [[ -z "$sessions" ]]; then
         echo "No agent sessions."
         return

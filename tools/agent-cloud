@@ -3,6 +3,38 @@
 
 set -euo pipefail
 
+JSON_MODE=0
+
+# Strip a trailing/standalone --json flag from the arg list without disturbing
+# the order of the remaining arguments. Plain-text behavior is unchanged when
+# --json is absent. Sets JSON_MODE and rewrites the positional parameters.
+parse_json_flag() {
+    ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=1
+        else
+            ARGS+=("$arg")
+        fi
+    done
+}
+
+# Emit a single valid JSON error document (stdout) and return nonzero. Used
+# only when JSON_MODE=1 so plain-mode callers keep their existing output.
+json_err() {
+    local message="$1" code="${2:-1}"
+    python3 -c 'import json,sys; print(json.dumps({"tool":"cloud","ok":False,"error":sys.argv[1]}))' "$message"
+    return "$code"
+}
+
+# Wrap raw provider output as a single valid JSON document on stdout.
+json_ok() {
+    local resource="$1" provider="$2" payload="$3"
+    python3 -c 'import json,sys; print(json.dumps({"tool":"cloud","ok":True,"resource":sys.argv[1],"provider":sys.argv[2],"output":sys.argv[3]}))' \
+        "$resource" "$provider" "$payload"
+}
+
 show_help() {
     cat << 'EOF'
 agent-cloud - Cloud provider management
@@ -103,53 +135,81 @@ cmd_list() {
     local cloud=$(detect_cloud)
 
     if [[ -z "$cloud" ]]; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_err "No cloud CLI found (aws, gcloud, or az)"
+            return 1
+        fi
         echo "Error: No cloud CLI found (aws, gcloud, or az)"
         return 1
     fi
 
+    if [[ -z "$resource" ]]; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_err "Missing resource. Usage: agent-cloud list <ec2|s3|lambda|rds>"
+            return 1
+        fi
+        echo "Error: Missing resource argument" >&2
+        echo "Usage: agent-cloud list <resource>" >&2
+        echo "Resources: ec2, s3, lambda, rds (instances, buckets, functions, databases)" >&2
+        return 1
+    fi
+
+    # Resolve the provider command for this resource without running it yet,
+    # so plain mode runs it directly (byte-identical streaming) and JSON mode
+    # captures its output.
+    local -a provider_cmd=()
     case "$resource" in
         ec2|instances)
-            if [[ "$cloud" == "aws" ]]; then
-                aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,InstanceType,PublicIpAddress]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud compute instances list
-            elif [[ "$cloud" == "azure" ]]; then
-                az vm list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,InstanceType,PublicIpAddress]' --output table) ;;
+                gcp) provider_cmd=(gcloud compute instances list) ;;
+                azure) provider_cmd=(az vm list -o table) ;;
+            esac
             ;;
         s3|buckets|storage)
-            if [[ "$cloud" == "aws" ]]; then
-                aws s3 ls
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud storage buckets list
-            elif [[ "$cloud" == "azure" ]]; then
-                az storage account list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws s3 ls) ;;
+                gcp) provider_cmd=(gcloud storage buckets list) ;;
+                azure) provider_cmd=(az storage account list -o table) ;;
+            esac
             ;;
         lambda|functions)
-            if [[ "$cloud" == "aws" ]]; then
-                aws lambda list-functions --query 'Functions[*].[FunctionName,Runtime,LastModified]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud functions list
-            elif [[ "$cloud" == "azure" ]]; then
-                az functionapp list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws lambda list-functions --query 'Functions[*].[FunctionName,Runtime,LastModified]' --output table) ;;
+                gcp) provider_cmd=(gcloud functions list) ;;
+                azure) provider_cmd=(az functionapp list -o table) ;;
+            esac
             ;;
         rds|databases|db)
-            if [[ "$cloud" == "aws" ]]; then
-                aws rds describe-db-instances --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus,Engine]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud sql instances list
-            elif [[ "$cloud" == "azure" ]]; then
-                az sql server list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws rds describe-db-instances --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus,Engine]' --output table) ;;
+                gcp) provider_cmd=(gcloud sql instances list) ;;
+                azure) provider_cmd=(az sql server list -o table) ;;
+            esac
             ;;
         *)
-            echo "Unknown resource: $resource"
-            echo "Try: ec2, s3, lambda, rds"
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_err "Unknown resource: $resource. Try: ec2, s3, lambda, rds"
+                return 1
+            fi
+            echo "Error: Unknown resource: $resource" >&2
+            echo "Try: ec2, s3, lambda, rds" >&2
             return 1
             ;;
     esac
+
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local output rc
+        output=$("${provider_cmd[@]}" 2>&1) && rc=0 || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            json_err "Provider command failed for resource '$resource' on $cloud"
+            return "$rc"
+        fi
+        json_ok "$resource" "$cloud" "$output"
+        return 0
+    fi
+
+    "${provider_cmd[@]}"
 }
 
 cmd_regions() {
@@ -215,7 +275,8 @@ case "${1:-help}" in
         ;;
     list|ls)
         shift
-        cmd_list "$@"
+        parse_json_flag "$@"
+        cmd_list "${ARGS[@]:-}"
         ;;
     deploy)
         shift

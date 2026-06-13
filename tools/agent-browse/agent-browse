@@ -1498,11 +1498,24 @@ main() {
             fi
             case "$1" in
                 list)
+                    local list_json=false
+                    shift
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --json) list_json=true; shift ;;
+                            *) shift ;;
+                        esac
+                    done
                     if [[ ! -d "$skills_dir" ]]; then
-                        echo "(no skills yet)"
+                        if [[ "$list_json" == "true" ]]; then
+                            python3 -c "import json; print(json.dumps({'skills': []}))"
+                        else
+                            echo "(no skills yet)"
+                        fi
                         exit 0
                     fi
                     local found_skill=false
+                    local json_rows=""
                     for dir in "$skills_dir"/*/; do
                         [[ ! -d "$dir" ]] && continue
                         local sname
@@ -1512,10 +1525,34 @@ main() {
                             local count auth_type
                             count=$(grep -m1 'endpoint_count:' "$dir/SKILL.md" 2>/dev/null | awk '{print $2}') || count="?"
                             auth_type=$(grep -m1 'auth_type:' "$dir/SKILL.md" 2>/dev/null | awk '{print $2}') || auth_type="?"
-                            echo "$sname  (${count} endpoints, auth: ${auth_type})"
+                            if [[ "$list_json" == "true" ]]; then
+                                json_rows+="${sname}"$'\t'"${count}"$'\t'"${auth_type}"$'\n'
+                            else
+                                echo "$sname  (${count} endpoints, auth: ${auth_type})"
+                            fi
                         fi
                     done
-                    [[ "$found_skill" == "false" ]] && echo "(no skills yet)"
+                    if [[ "$list_json" == "true" ]]; then
+                        printf '%s' "$json_rows" | python3 -c "
+import sys, json
+skills = []
+for line in sys.stdin.read().splitlines():
+    if not line:
+        continue
+    parts = line.split('\t')
+    name = parts[0] if len(parts) > 0 else ''
+    count = parts[1] if len(parts) > 1 else '?'
+    auth = parts[2] if len(parts) > 2 else '?'
+    try:
+        endpoint_count = int(count)
+    except (ValueError, TypeError):
+        endpoint_count = count
+    skills.append({'name': name, 'endpoint_count': endpoint_count, 'auth_type': auth})
+print(json.dumps({'skills': skills}))
+"
+                    else
+                        [[ "$found_skill" == "false" ]] && echo "(no skills yet)"
+                    fi
                     exit 0
                     ;;
                 show)

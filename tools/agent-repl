@@ -94,6 +94,50 @@ cmd_read() {
 }
 
 cmd_list() {
+    local as_json=false
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            as_json=true
+        fi
+    done
+
+    if [[ "$as_json" == true ]]; then
+        python3 -c "
+import subprocess, json
+
+def run(cmd):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return ''
+
+sessions = []
+raw = run('tmux list-sessions -F \"#{session_name}\t#{session_created}\t#{session_attached}\" 2>/dev/null')
+for line in raw.split('\n'):
+    if not line.strip():
+        continue
+    parts = line.split('\t')
+    name = parts[0]
+    if name.startswith('agent-tui-'):
+        sessions.append({
+            'name': name.replace('agent-tui-', ''),
+            'full_name': name,
+            'attached': parts[2] == '1' if len(parts) > 2 else False,
+        })
+
+print(json.dumps({
+    'ok': True,
+    'tool': 'repl',
+    'command': 'list',
+    'count': len(sessions),
+    'sessions': sessions,
+}, indent=2))
+"
+        return
+    fi
+
     "$AGENT_TUI" list
 }
 
@@ -200,7 +244,8 @@ case "${1:-help}" in
         cmd_snapshot "$@"
         ;;
     list|ls)
-        cmd_list
+        shift
+        cmd_list "$@"
         ;;
     kill|stop)
         shift
