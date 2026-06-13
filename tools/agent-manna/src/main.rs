@@ -87,6 +87,10 @@ enum Commands {
         /// Filter by status (open, in_progress, blocked, done)
         #[arg(long)]
         status: Option<String>,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show issue details
@@ -124,6 +128,10 @@ enum Commands {
         /// Maximum tokens for context (default 8000)
         #[arg(long, default_value = "8000")]
         max_tokens: usize,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -200,6 +208,21 @@ fn output_success<T: Serialize>(data: T) -> ! {
         "{}",
         serde_yaml::to_string(&response).unwrap_or_else(|e| {
             format!("success: false\nerror: \"YAML serialization error: {}\"", e)
+        })
+    );
+    std::process::exit(EXIT_SUCCESS);
+}
+
+/// Output success response as JSON and exit with success code.
+fn output_success_json<T: Serialize>(data: T) -> ! {
+    let response = SuccessResponse {
+        success: true,
+        data,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&response).unwrap_or_else(|e| {
+            format!("{{\"success\":false,\"error\":\"JSON serialization error: {}\"}}", e)
         })
     );
     std::process::exit(EXIT_SUCCESS);
@@ -517,7 +540,7 @@ fn cmd_unblock(id: String, blocker_id: String) -> ! {
     output_success(IssueData { issue });
 }
 
-fn cmd_list(status_filter: Option<String>) -> ! {
+fn cmd_list(status_filter: Option<String>, json: bool) -> ! {
     let store = MannaStore::new(Path::new("."));
 
     if !store.is_initialized() {
@@ -554,6 +577,9 @@ fn cmd_list(status_filter: Option<String>) -> ! {
         })
         .collect();
 
+    if json {
+        output_success_json(IssueListData { issues: summaries });
+    }
     output_success(IssueListData { issues: summaries });
 }
 
@@ -645,7 +671,7 @@ fn cmd_delete(id: String) -> ! {
     output_success(IssueData { issue });
 }
 
-fn cmd_context(max_tokens: usize) -> ! {
+fn cmd_context(max_tokens: usize, json: bool) -> ! {
     let store = MannaStore::new(Path::new("."));
 
     if !store.is_initialized() {
@@ -717,6 +743,9 @@ fn cmd_context(max_tokens: usize) -> ! {
         context.push_str("\n\n[truncated]");
     }
 
+    if json {
+        output_success_json(ContextData { context });
+    }
     output_success(ContextData { context });
 }
 
@@ -736,11 +765,11 @@ fn main() {
         Commands::Abandon { id } => cmd_abandon(id),
         Commands::Block { id, blocker_id } => cmd_block(id, blocker_id),
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
-        Commands::List { status } => cmd_list(status),
+        Commands::List { status, json } => cmd_list(status, json),
         Commands::Show { id } => cmd_show(id),
         Commands::Update { id, title, description, status } => cmd_update(id, title, description, status),
         Commands::Delete { id } => cmd_delete(id),
-        Commands::Context { max_tokens } => cmd_context(max_tokens),
+        Commands::Context { max_tokens, json } => cmd_context(max_tokens, json),
     }
 }
 
