@@ -32,11 +32,54 @@ Examples:
 EOF
 }
 
+# Bounded osascript runner. macOS ships no timeout(1), and a Calendar.app /
+# TCC Automation-permission stall blocks osascript forever. Pipe the script in
+# on stdin; a python3 subprocess bounds the call and converts a hang into a
+# structured error mentioning Automation permission, with a nonzero exit.
+# stdout is passed through byte-for-byte so plain-text output is unchanged.
+run_osascript() {
+    # Any positional args become osascript argv (consumed by `on run argv`).
+    local secs="${OSASCRIPT_TIMEOUT:-10}"
+    python3 - "$secs" "$@" <<'PY'
+import subprocess
+import sys
+
+script = sys.stdin.read()
+timeout = float(sys.argv[1])
+extra = sys.argv[2:]
+try:
+    result = subprocess.run(
+        ["osascript", "-", *extra],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+except subprocess.TimeoutExpired:
+    sys.stderr.write(
+        "Error: Calendar.app did not respond within %gs. Grant Automation "
+        "permission (System Settings > Privacy & Security > Automation) and "
+        "ensure Calendar.app can launch, then retry.\n" % timeout
+    )
+    # Deliberately not 124: surface a structured, explained failure rather than
+    # the opaque "hung" signal, so callers see the permission guidance.
+    sys.exit(75)
+except FileNotFoundError:
+    sys.stderr.write("Error: osascript not found - macOS required for calendar\n")
+    sys.exit(127)
+if result.stdout:
+    sys.stdout.write(result.stdout)
+if result.stderr:
+    sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
+PY
+}
+
 # macOS Calendar via AppleScript
 macos_list_events() {
     local days="${1:-7}"
 
-    osascript << EOF
+    run_osascript << EOF
 set output to ""
 set today to current date
 set endDate to today + ($days * days)
@@ -57,7 +100,7 @@ EOF
 }
 
 macos_today() {
-    osascript << 'EOF'
+    run_osascript << 'EOF'
 set output to ""
 set today to current date
 set tomorrow to today + 1 * days
@@ -88,7 +131,7 @@ macos_create_event() {
     # Parse date and time
     local start_date="$date $time"
 
-    osascript << EOF
+    run_osascript << EOF
 tell application "Calendar"
     set targetCal to first calendar
     if "$calendar" is not "" then
@@ -113,7 +156,7 @@ EOF
 macos_search() {
     local query="$1"
 
-    osascript << EOF
+    run_osascript << EOF
 set output to ""
 set today to current date
 set futureDate to today + 365 * days
@@ -134,7 +177,23 @@ EOF
 }
 
 cmd_list() {
-    local days="${1:-7}"
+    local json=0
+    local days=""
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            json=1
+        elif [[ -z "$days" ]]; then
+            days="$arg"
+        fi
+    done
+    [[ -z "$days" ]] && days=7
+
+    # --json reuses the bounded snapshot path: valid JSON document on success,
+    # JSON error object on stall/failure.
+    if [[ "$json" == "1" ]]; then
+        cmd_snapshot "$days"
+        return $?
+    fi
 
     if [[ "$(uname)" == "Darwin" ]]; then
         echo "Events in next $days days:"
@@ -164,7 +223,7 @@ cmd_today() {
 
 cmd_tomorrow() {
     if [[ "$(uname)" == "Darwin" ]]; then
-        osascript << 'EOF'
+        run_osascript << 'EOF'
 set output to ""
 set tomorrow to (current date) + 1 * days
 set dayAfter to tomorrow + 1 * days
@@ -244,7 +303,7 @@ cmd_delete() {
         echo "Error: delete requires macOS Calendar.app"
         return 1
     fi
-    osascript - "$title" "$calendar" << 'APPLESCRIPT'
+    run_osascript "$title" "$calendar" << 'APPLESCRIPT'
 on run argv
     set eventTitle to item 1 of argv
     set calName to item 2 of argv
@@ -296,7 +355,9 @@ import subprocess, json
 from datetime import datetime
 
 def osascript(script):
-    r = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=15)
+    # Bounded per call so two sequential stalls stay under any outer probe
+    # bound; a Calendar.app/TCC stall becomes a structured JSON error below.
+    r = subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=6)
     return r.stdout.strip()
 
 days = $days
@@ -373,7 +434,7 @@ try:
     print(json.dumps(snapshot, indent=2))
 
 except subprocess.TimeoutExpired:
-    print(json.dumps({'error': 'Calendar.app timed out - may not be running'}))
+    print(json.dumps({'error': 'Calendar.app did not respond - grant Automation permission (System Settings > Privacy & Security > Automation) and ensure Calendar.app can launch'}))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
 "

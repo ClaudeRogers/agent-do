@@ -14,27 +14,74 @@ from pathlib import Path
 from difflib import get_close_matches
 from typing import Any, Optional
 
+# Bounded connect window. A dead or unreachable host must fail fast rather than
+# block forever; macOS ships no timeout(1), so the connect is bounded in-process
+# (driver-native connect timeout + a hard thread-join guard for auth-stage stalls).
+CONNECT_TIMEOUT = max(1, int(os.environ.get('AGENT_DB_CONNECT_TIMEOUT', '8')))
+
+
+class ConnectTimeout(Exception):
+    """Raised when a driver connect attempt exceeds the bounded window."""
+
+
 # Database drivers - imported on demand
 def get_postgres_connection(host, port, database, user, password):
     import psycopg2
-    return psycopg2.connect(host=host, port=port, database=database, user=user, password=password)
+    return psycopg2.connect(host=host, port=port, database=database, user=user,
+                            password=password, connect_timeout=CONNECT_TIMEOUT)
 
 def get_mysql_connection(host, port, database, user, password):
     import pymysql
-    return pymysql.connect(host=host, port=int(port), database=database, user=user, password=password)
+    return pymysql.connect(host=host, port=int(port), database=database, user=user,
+                           password=password, connect_timeout=CONNECT_TIMEOUT,
+                           read_timeout=CONNECT_TIMEOUT)
 
 def get_mssql_connection(host, port, database, user, password):
     try:
         import pymssql
-        return pymssql.connect(server=host, port=str(port), database=database, user=user, password=password)
+        return pymssql.connect(server=host, port=str(port), database=database, user=user,
+                               password=password, login_timeout=CONNECT_TIMEOUT,
+                               timeout=CONNECT_TIMEOUT)
     except ImportError:
         import pyodbc
         conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={host},{port};DATABASE={database};UID={user};PWD={password}"
-        return pyodbc.connect(conn_str)
+        return pyodbc.connect(conn_str, timeout=CONNECT_TIMEOUT)
 
 def get_sqlite_connection(database, **kwargs):
     import sqlite3
-    return sqlite3.connect(database)
+    # The bounded connect runs in a worker thread; allow the resulting
+    # connection to be used from the main thread afterward.
+    return sqlite3.connect(database, timeout=CONNECT_TIMEOUT, check_same_thread=False)
+
+
+def _connect_bounded(connector, **kwargs):
+    """Run a driver connect under a hard time bound.
+
+    Driver-native connect timeouts cover TCP setup, but an auth-stage stall
+    (handshake done, server never replies) can still hang. A worker thread
+    plus a bounded join guarantees the call returns within CONNECT_TIMEOUT.
+    """
+    import threading
+
+    result = {}
+
+    def _worker():
+        try:
+            result['conn'] = connector(**kwargs)
+        except BaseException as exc:  # noqa: BLE001 - surfaced to caller below
+            result['error'] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(CONNECT_TIMEOUT + 1)
+    if thread.is_alive():
+        raise ConnectTimeout(
+            f"connection timed out after {CONNECT_TIMEOUT}s "
+            f"(host unreachable or not responding)"
+        )
+    if 'error' in result:
+        raise result['error']
+    return result['conn']
 
 
 class DatabaseSession:
@@ -169,8 +216,9 @@ class DatabaseSession:
         connector = connectors.get(self.db_type)
         if not connector:
             raise ValueError(f"Unknown database type: {self.db_type}")
-        
-        self.connection = connector(
+
+        self.connection = _connect_bounded(
+            connector,
             host=profile.get('host', 'localhost'),
             port=profile.get('port', self._default_port()),
             database=profile.get('database'),
@@ -514,12 +562,14 @@ class DatabaseSession:
                 result["tables"] = tables
             else:
                 result["tables"] = tables
-            
+
             return result
-        
+
+        except ConnectTimeout as e:
+            return {"ok": False, "error": str(e), "exit_code": 6}
         except Exception as e:
             return {"ok": False, "error": str(e), "exit_code": 8}
-    
+
     def cmd_tables(self, pattern: str = None) -> dict:
         """List tables."""
         result = self.cmd_snapshot(tables_only=True)
@@ -645,12 +695,14 @@ class DatabaseSession:
             
             # Similar implementations for MySQL, MSSQL, SQLite...
             # (abbreviated for length)
-            
+
             return result
-        
+
+        except ConnectTimeout as e:
+            return {"ok": False, "error": str(e), "exit_code": 6}
         except Exception as e:
             return {"ok": False, "error": str(e), "exit_code": 8}
-    
+
     def cmd_sample(self, table: str, n: int = 5, random: bool = False) -> dict:
         """Sample rows from table."""
         try:
@@ -985,7 +1037,12 @@ class DatabaseSession:
 def main():
     """Main entry point."""
     import argparse
-    
+
+    # Output is JSON in every mode, so --json is a no-op accepted for contract
+    # compliance: strip it wherever it appears so argparse never rejects it and
+    # plain-mode output stays byte-for-byte identical.
+    argv = [a for a in sys.argv[1:] if a != '--json']
+
     parser = argparse.ArgumentParser(description='AI-first database tool')
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
@@ -1061,8 +1118,8 @@ def main():
     p = subparsers.add_parser('relations', help='Show FK relationships')
     p.add_argument('table', nargs='?', help='Table name (optional)')
     
-    args = parser.parse_args()
-    
+    args = parser.parse_args(argv)
+
     session = DatabaseSession()
     result = {"ok": False, "error": "Unknown command"}
     
