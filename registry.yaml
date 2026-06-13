@@ -3287,11 +3287,16 @@ tools:
       - manifest
       - contracts validate
       - contracts drift
+      - contracts audit
       save:
       - evidence
       - manifest
       - contracts propose
       attributes:
+        contracts drift:
+        - composite
+        contracts audit:
+        - composite
         evidence:
         - composite
         manifest:
@@ -4040,6 +4045,8 @@ tools:
       save:
       - transcribe
       attributes:
+        listen:
+        - long_running
         record:
         - long_running
         transcribe:

@@ -438,6 +438,8 @@ overrides:
     link: {beats: [snapshot, verify], attributes: [composite, sensitive]}  # emits magic links
   jupyter:
     kernel: {beats: [interact], attributes: [destructive]}  # kernel restart discards in-memory session state
+  voice:
+    listen: {beats: [snapshot], attributes: [long_running]}  # microphone listening is by-design unbounded
   # ── own_state pass (2026-06-12, Erik decision #1): self-confined writers
   # keep concurrency:read; their write verbs carry own_state. Mirrors registry.
   prompt:
