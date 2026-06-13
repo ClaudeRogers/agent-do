@@ -208,15 +208,21 @@ AUDIT_REPORT = agent_do_home() / "audit" / "contracts-audit.md"
 
 def contracts_audit(args: Any) -> dict[str, Any]:
     sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import tempfile  # noqa: WPS433
+    from functools import partial  # noqa: WPS433
     from contracts_audit import audit_registry, render_report  # noqa: WPS433
 
-    payload = audit_registry(
-        load_bundled_registry(),
-        agent_do_cmd,
-        include_network=args.include_network,
-        only_tool=args.tool,
-        timeout=args.timeout,
-    )
+    with tempfile.TemporaryDirectory(prefix="contracts-audit-") as scratch:
+        # Probes run in a throwaway cwd: a verb that mistakes a flag for an
+        # output path (the '--json' PNG incident) litters the scratch, not
+        # the caller's directory.
+        payload = audit_registry(
+            load_bundled_registry(),
+            partial(agent_do_cmd, cwd=Path(scratch)),
+            include_network=args.include_network,
+            only_tool=args.tool,
+            timeout=args.timeout,
+        )
     payload["tool"] = "harness"
     payload["command"] = "contracts audit"
     payload["generated_at"] = now_iso()
