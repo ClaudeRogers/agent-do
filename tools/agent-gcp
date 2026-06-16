@@ -121,7 +121,7 @@ exchange_sa_token() {
     local jwt="${header}.${claims}.${signature}"
 
     # Exchange JWT for access token
-    curl -s -X POST "$TOKEN_API" \
+    curl -s --max-time 30 --connect-timeout 10 -X POST "$TOKEN_API" \
         --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
         --data-urlencode "assertion=$jwt" | \
         python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token', ''))"
@@ -185,7 +185,7 @@ gcp_request() {
     local token
     token=$(get_access_token) || return 1
 
-    local args=(-s -X "$method" "$url" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "$url" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
 
@@ -1241,7 +1241,7 @@ def api_get(url):
         'Content-Type': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:

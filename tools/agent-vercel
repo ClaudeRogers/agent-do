@@ -86,7 +86,7 @@ vercel_request() {
     local tq
     tq=$(team_query "$endpoint")
 
-    local args=(-s -X "$method" "${VERCEL_API}${endpoint}${tq}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${VERCEL_API}${endpoint}${tq}" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
 
@@ -587,7 +587,7 @@ def api_get(path):
         'Content-Type': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:

@@ -109,7 +109,7 @@ okta_request() {
         url="${OKTA_API}${endpoint}"
     fi
 
-    local args=(-s -X "$method" "$url" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "$url" \
         -H "Authorization: SSWS $OKTA_API_TOKEN" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -126,7 +126,7 @@ okta_request() {
     # Handle rate limiting (429)
     if [[ "$http_code" == "429" ]]; then
         local reset_epoch
-        reset_epoch=$(curl -s -o /dev/null -D- -X "$method" "$url" \
+        reset_epoch=$(curl -s --max-time 30 --connect-timeout 10 -o /dev/null -D- -X "$method" "$url" \
             -H "Authorization: SSWS $OKTA_API_TOKEN" \
             -H "Accept: application/json" 2>/dev/null | grep -i 'x-rate-limit-reset' | tr -d '\r' | awk '{print $2}')
         if [[ -n "$reset_epoch" ]]; then
@@ -824,7 +824,7 @@ cmd_app_metadata() {
     app_id=$(resolve_app "$name_or_id") || return 1
 
     # SAML metadata returns XML, not JSON
-    curl -s "https://${OKTA_DOMAIN}/api/v1/apps/$app_id/sso/saml/metadata" \
+    curl -s --max-time 30 --connect-timeout 10 "https://${OKTA_DOMAIN}/api/v1/apps/$app_id/sso/saml/metadata" \
         -H "Authorization: SSWS $OKTA_API_TOKEN" \
         -H "Accept: application/xml"
 }

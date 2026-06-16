@@ -151,7 +151,7 @@ render_request() {
         return 1
     fi
 
-    local args=(-s -X "$method" "${RENDER_API}${endpoint}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${RENDER_API}${endpoint}" \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -178,7 +178,7 @@ render_request_checked() {
     tmp_body="$(mktemp)"
     trap 'rm -f "$tmp_body"' RETURN
 
-    local args=(-sS -o "$tmp_body" -w "%{http_code}" -X "$method" "${RENDER_API}${endpoint}" \
+    local args=(-sS --max-time 30 --connect-timeout 10 -o "$tmp_body" -w "%{http_code}" -X "$method" "${RENDER_API}${endpoint}" \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -996,7 +996,7 @@ def api_get(path):
         'Accept': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:

@@ -207,7 +207,7 @@ supabase_request() {
         return 1
     fi
 
-    local args=(-s -X "$method" "${SUPABASE_API}${endpoint}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${SUPABASE_API}${endpoint}" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
 
@@ -710,7 +710,7 @@ def api_get(path):
         'User-Agent': 'agent-supabase/1.0',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:
@@ -852,7 +852,7 @@ print(json.dumps({
 " "$sql" "$read_only")
 
     local result
-    result=$(curl -s -X POST "${SUPABASE_API}/projects/${ref}/database/query" \
+    result=$(curl -s --max-time 30 --connect-timeout 10 -X POST "${SUPABASE_API}/projects/${ref}/database/query" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d "$body")
@@ -983,7 +983,7 @@ cmd_rest() {
     done
 
     # Build curl args
-    local args=(-s -X "$method" "$url"
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "$url"
         -H "apikey: $service_key"
         -H "Authorization: Bearer $service_key"
         -H "Content-Type: application/json")

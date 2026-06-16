@@ -124,7 +124,7 @@ clerk_request() {
 
     local url="${CLERK_API}${endpoint}"
 
-    local args=(-s -X "$method" "$url" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "$url" \
         -H "Authorization: Bearer $CLERK_SECRET_KEY" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -141,7 +141,7 @@ clerk_request() {
     # Handle rate limiting (429)
     if [[ "$http_code" == "429" ]]; then
         local retry_after
-        retry_after=$(curl -s -o /dev/null -D- -X "$method" "$url" \
+        retry_after=$(curl -s --max-time 30 --connect-timeout 10 -o /dev/null -D- -X "$method" "$url" \
             -H "Authorization: Bearer $CLERK_SECRET_KEY" 2>/dev/null | grep -i 'retry-after' | tr -d '\r' | awk '{print $2}')
         if [[ -n "$retry_after" && "$retry_after" =~ ^[0-9]+$ ]]; then
             sleep "$retry_after"

@@ -104,7 +104,7 @@ def discord_get(endpoint):
     url = f'https://discord.com/api/v10{endpoint}'
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except Exception as e:
         return {'error': str(e)}

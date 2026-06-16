@@ -38,3 +38,9 @@ tools/streamdeck/
 
 # Session handoff docs (local, git-ignored)
 .handoff/
+
+# Agent session dirs (local)
+.opencode/
+
+# Probe debris: a verb that mistakes a flag for an output path
+--json

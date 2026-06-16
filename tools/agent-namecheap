@@ -74,7 +74,7 @@ get_client_ip() {
         return
     fi
     # Auto-detect public IP
-    curl -s https://api.ipify.org 2>/dev/null || curl -s https://ifconfig.me 2>/dev/null || echo "127.0.0.1"
+    curl -s --max-time 10 https://api.ipify.org 2>/dev/null || curl -s --max-time 10 https://ifconfig.me 2>/dev/null || echo "127.0.0.1"
 }
 
 nc_request() {
@@ -107,7 +107,7 @@ nc_request() {
         full_url="${full_url}&${extra_params}"
     fi
 
-    curl -s "$full_url"
+    curl -s --max-time 30 --connect-timeout 10 "$full_url"
 }
 
 # POST version for large payloads (setHosts with many records)
@@ -133,7 +133,7 @@ nc_post() {
         base_data="${base_data}&${post_data}"
     fi
 
-    curl -s -X POST "$url" -d "$base_data"
+    curl -s --max-time 30 --connect-timeout 10 -X POST "$url" -d "$base_data"
 }
 
 # Parse XML response, check for errors, extract data

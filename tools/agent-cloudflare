@@ -75,7 +75,7 @@ cf_request() {
     local endpoint="$2"
     local data="${3:-}"
 
-    local args=(-s -X "$method" "${CF_API}${endpoint}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${CF_API}${endpoint}" \
         -H "Content-Type: application/json")
 
     # Auth: prefer API token, fall back to email+key
@@ -97,7 +97,7 @@ cf_request() {
 
 cf_graphql() {
     local query="$1"
-    local args=(-s -X POST "https://api.cloudflare.com/client/v4/graphql" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X POST "https://api.cloudflare.com/client/v4/graphql" \
         -H "Content-Type: application/json")
 
     if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
