@@ -523,7 +523,21 @@ cmd_ignore() {
     issue_id=$(resolve_issue_id "$short_id") || return 1
 
     local result
-    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"ignored","substatus":"archived_until_escalating"}') || return 1
+    # substatus archived_until_escalating applies reliably via org bulk update, not single-issue PUT
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/?id=${issue_id}" '{"status":"ignored","substatus":"archived_until_escalating"}') || return 1
+    result=$(printf '%s' "$result" | python3 -c "
+import json, sys
+raw = json.load(sys.stdin)
+if isinstance(raw, dict) and 'detail' in raw:
+    print(json.dumps(raw))
+elif isinstance(raw, list):
+    if not raw:
+        print(json.dumps({'detail': 'no issue updated'}))
+    else:
+        print(json.dumps(raw[0]))
+else:
+    print(json.dumps(raw))
+")
     _emit_action_json ignore "$result"
 }
 
