@@ -3,6 +3,29 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../lib/json-output.sh" 2>/dev/null || true
+
+_json_mode=false
+_JSON_ARGS=()
+
+_pop_json_flag() {
+    _json_mode=false
+    _JSON_ARGS=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _json_mode=true
+        else
+            _JSON_ARGS+=("$arg")
+        fi
+    done
+}
+
+_emit_json() {
+    printf '%s' "$1" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$1"
+}
+
 BETTERSTACK_API_V2="https://uptime.betterstack.com/api/v2"
 BETTERSTACK_API_V3="https://uptime.betterstack.com/api/v3"
 
@@ -35,6 +58,8 @@ ON-CALL
 
 ACCOUNT
   snapshot                      Full account state as JSON
+
+All commands accept --json for structured output.
 
 Monitors can be referenced by pronounceable name or numeric ID.
 
@@ -132,8 +157,14 @@ else:
 # --- Commands ---
 
 cmd_monitors() {
+    _pop_json_flag "$@"
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/monitors") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -157,12 +188,18 @@ for item in items:
 }
 
 cmd_show() {
-    local name_or_id="${1:?Usage: agent-betterstack show <monitor>}"
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack show <monitor>}"
     local monitor_id
     monitor_id=$(resolve_monitor "$name_or_id") || return 1
 
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -190,43 +227,37 @@ print(json.dumps({
 }
 
 cmd_availability() {
-    local name_or_id="${1:?Usage: agent-betterstack availability <monitor>}"
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack availability <monitor>}"
     local monitor_id
     monitor_id=$(resolve_monitor "$name_or_id") || return 1
 
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}/sla") || return 1
-
-    echo "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(json.dumps(d, indent=2))
-"
+    _emit_json "$result"
 }
 
 cmd_response_times() {
-    local name_or_id="${1:?Usage: agent-betterstack response-times <monitor>}"
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack response-times <monitor>}"
     local monitor_id
     monitor_id=$(resolve_monitor "$name_or_id") || return 1
 
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}/response-times") || return 1
-
-    echo "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(json.dumps(d, indent=2))
-"
+    _emit_json "$result"
 }
 
 cmd_incidents() {
+    _pop_json_flag "$@"
     local url="${BETTERSTACK_API_V3}/incidents"
     local active_only=false
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --active) active_only=true; shift ;;
-            *) echo "Unknown option: $1" >&2; return 1 ;;
+    local -a args=("${_JSON_ARGS[@]}")
+    while [[ ${#args[@]} -gt 0 ]]; do
+        case "${args[0]}" in
+            --active) active_only=true; args=("${args[@]:1}") ;;
+            *) echo "Unknown option: ${args[0]}" >&2; return 1 ;;
         esac
     done
 
@@ -236,6 +267,11 @@ cmd_incidents() {
 
     local result
     result=$(bs_get "$url") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -261,10 +297,16 @@ for item in items:
 }
 
 cmd_incident() {
-    local incident_id="${1:?Usage: agent-betterstack incident <id>}"
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack incident <id>}"
 
     local result
     result=$(bs_get "${BETTERSTACK_API_V3}/incidents/${incident_id}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -290,9 +332,10 @@ print(json.dumps({
 }
 
 cmd_heartbeats() {
+    _pop_json_flag "$@"
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/heartbeats") || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -315,9 +358,10 @@ for item in items:
 }
 
 cmd_status_pages() {
+    _pop_json_flag "$@"
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/status-pages") || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -338,9 +382,10 @@ for item in items:
 }
 
 cmd_on_call() {
+    _pop_json_flag "$@"
     local result
     result=$(bs_get "${BETTERSTACK_API_V2}/on-calls") || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -366,13 +411,14 @@ for item in items:
 }
 
 cmd_pause() {
-    local name_or_id="${1:?Usage: agent-betterstack pause <monitor>}"
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack pause <monitor>}"
     local monitor_id
     monitor_id=$(resolve_monitor "$name_or_id") || return 1
 
     local result
     result=$(bs_patch "${BETTERSTACK_API_V2}/monitors/${monitor_id}" '{"paused":true}') || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -385,13 +431,14 @@ print(f'Monitor \"{name}\" (id: {mid}): status now {status}')
 }
 
 cmd_resume() {
-    local name_or_id="${1:?Usage: agent-betterstack resume <monitor>}"
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack resume <monitor>}"
     local monitor_id
     monitor_id=$(resolve_monitor "$name_or_id") || return 1
 
     local result
     result=$(bs_patch "${BETTERSTACK_API_V2}/monitors/${monitor_id}" '{"paused":false}') || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -404,11 +451,12 @@ print(f'Monitor \"{name}\" (id: {mid}): status now {status}')
 }
 
 cmd_ack() {
-    local incident_id="${1:?Usage: agent-betterstack ack <incident_id>}"
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack ack <incident_id>}"
 
     local result
     result=$(bs_post "${BETTERSTACK_API_V3}/incidents/${incident_id}/acknowledge") || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -418,11 +466,12 @@ print(f'Incident {d.get(\"data\", {}).get(\"id\", \"\")}: acknowledged at {a.get
 }
 
 cmd_resolve() {
-    local incident_id="${1:?Usage: agent-betterstack resolve <incident_id>}"
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack resolve <incident_id>}"
 
     local result
     result=$(bs_post "${BETTERSTACK_API_V3}/incidents/${incident_id}/resolve") || return 1
-
+    if $_json_mode; then _emit_json "$result"; return; fi
     echo "$result" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -432,6 +481,7 @@ print(f'Incident {d.get(\"data\", {}).get(\"id\", \"\")}: resolved at {a.get(\"r
 }
 
 cmd_snapshot() {
+    _pop_json_flag "$@"
     local token="${BETTERSTACK_API_TOKEN:-}"
     if [[ -z "$token" ]]; then
         echo '{"error": "BETTERSTACK_API_TOKEN not set"}'

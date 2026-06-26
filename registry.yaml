@@ -5826,4 +5826,26 @@ tools:
         check: agent-do betterstack monitors
         fix: agent-do creds store BETTERSTACK_API_TOKEN --stdin
         note: Requires BETTERSTACK_API_TOKEN resolved from env or secure storage
+    contracts:
+      snapshot:
+      - monitors
+      - show
+      - availability
+      - response-times
+      - incidents
+      - incident
+      - heartbeats
+      - status-pages
+      - on-call
+      - snapshot
+      interact:
+      - pause
+      - resume
+      - ack
+      - resolve
+      attributes:
+        ack: [composite]
+        pause: [composite]
+        resolve: [composite]
+        resume: [composite]
     concurrency: mixed
