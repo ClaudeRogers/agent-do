@@ -4,6 +4,62 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../lib/json-output.sh" 2>/dev/null || true
+
+_json_mode=false
+_JSON_ARGS=()
+
+_pop_json_flag() {
+    _json_mode=false
+    _JSON_ARGS=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _json_mode=true
+        else
+            _JSON_ARGS+=("$arg")
+        fi
+    done
+}
+
+_emit_json() {
+    printf '%s' "$1" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$1"
+}
+
+_emit_action_json() {
+    local action="$1"
+    local raw="$2"
+    if $_json_mode; then
+        printf '%s' "$raw" | python3 -c "
+import json, sys
+action = sys.argv[1]
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print(json.dumps({'ok': False, 'error': d['detail']}, indent=2))
+    sys.exit(1)
+print(json.dumps({'ok': True, 'action': action, 'issue': d}, indent=2))
+" "$action"
+        return
+    fi
+    printf '%s' "$raw" | python3 -c "
+import sys, json
+action = sys.argv[1]
+d = json.load(sys.stdin)
+if 'detail' in d:
+    print('Error:', d['detail'], file=sys.stderr)
+    sys.exit(1)
+label = {'resolve': 'resolved', 'unresolve': 'reopened', 'ignore': 'ignored', 'assign': 'assigned'}.get(action, action)
+sid = d.get('shortId', d.get('id', ''))
+if action == 'assign':
+    assignee = d.get('assignedTo') or {}
+    who = assignee.get('email') or assignee.get('name', 'nobody')
+    print('Issue', sid, 'assigned to', who)
+else:
+    print('Issue', sid, label + '.')
+" "$action"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/retry.sh"
 source "${SCRIPT_DIR}/../lib/snapshot.sh"
 
@@ -36,6 +92,8 @@ RELEASES
 
 ACCOUNT
   snapshot                      Full account state as JSON
+
+All commands accept --json for structured output.
 
 The org slug and region URL are auto-detected from the auth token
 payload. Override with SENTRY_ORG and SENTRY_REGION_URL if needed.
@@ -213,12 +271,20 @@ else:
 # --- Commands ---
 
 cmd_projects() {
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
     local result
     result=$(sentry_get "${base_url}/organizations/${org}/projects/") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -248,13 +314,21 @@ for p in data:
 }
 
 cmd_project() {
-    local slug="${1:?Usage: agent-sentry project <slug>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local slug="${args[0]:?Usage: agent-sentry project <slug>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
     local result
     result=$(sentry_get "${base_url}/projects/${org}/${slug}/") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -279,25 +353,28 @@ print(json.dumps({
 }
 
 cmd_issues() {
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
     local base_url org project="" query="is:unresolved" sort="date" limit="25"
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
+    while [[ ${#args[@]} -gt 0 ]]; do
+        case "${args[0]}" in
             --project)
-                if [[ $# -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
-                project="$2"; shift 2 ;;
+                if [[ ${#args[@]} -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
+                project="${args[1]}"; args=("${args[@]:2}") ;;
             --query)
-                if [[ $# -lt 2 ]]; then echo "Error: --query requires a value" >&2; return 1; fi
-                query="$2"; shift 2 ;;
+                if [[ ${#args[@]} -lt 2 ]]; then echo "Error: --query requires a value" >&2; return 1; fi
+                query="${args[1]}"; args=("${args[@]:2}") ;;
             --sort)
-                if [[ $# -lt 2 ]]; then echo "Error: --sort requires a value" >&2; return 1; fi
-                sort="$2"; shift 2 ;;
+                if [[ ${#args[@]} -lt 2 ]]; then echo "Error: --sort requires a value" >&2; return 1; fi
+                sort="${args[1]}"; args=("${args[@]:2}") ;;
             --limit)
-                if [[ $# -lt 2 ]]; then echo "Error: --limit requires a value" >&2; return 1; fi
-                limit="$2"; shift 2 ;;
-            *) echo "Unknown option: $1" >&2; return 1 ;;
+                if [[ ${#args[@]} -lt 2 ]]; then echo "Error: --limit requires a value" >&2; return 1; fi
+                limit="${args[1]}"; args=("${args[@]:2}") ;;
+            *) echo "Unknown option: ${args[0]}" >&2; return 1 ;;
         esac
     done
 
@@ -317,6 +394,11 @@ print(urllib.parse.quote(os.environ['SENTRY_QUERY']))
 
     local result
     result=$(sentry_get "$url") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -342,7 +424,10 @@ for i in data:
 }
 
 cmd_issue() {
-    local short_id="${1:?Usage: agent-sentry issue <short_id>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local short_id="${args[0]:?Usage: agent-sentry issue <short_id>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
@@ -352,6 +437,11 @@ cmd_issue() {
 
     local result
     result=$(sentry_get "${base_url}/organizations/${org}/issues/${issue_id}/") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -387,7 +477,10 @@ print(json.dumps({
 }
 
 cmd_resolve() {
-    local short_id="${1:?Usage: agent-sentry resolve <short_id>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local short_id="${args[0]:?Usage: agent-sentry resolve <short_id>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
@@ -397,19 +490,14 @@ cmd_resolve() {
 
     local result
     result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"resolved"}') || return 1
-
-    printf '%s' "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-if 'detail' in d:
-    print('Error:', d['detail'], file=sys.stderr)
-    sys.exit(1)
-print('Issue', d.get('shortId', d.get('id', '')), 'resolved.')
-"
+    _emit_action_json resolve "$result"
 }
 
 cmd_unresolve() {
-    local short_id="${1:?Usage: agent-sentry unresolve <short_id>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local short_id="${args[0]:?Usage: agent-sentry unresolve <short_id>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
@@ -419,19 +507,14 @@ cmd_unresolve() {
 
     local result
     result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"unresolved"}') || return 1
-
-    printf '%s' "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-if 'detail' in d:
-    print('Error:', d['detail'], file=sys.stderr)
-    sys.exit(1)
-print('Issue', d.get('shortId', d.get('id', '')), 'reopened.')
-"
+    _emit_action_json unresolve "$result"
 }
 
 cmd_ignore() {
-    local short_id="${1:?Usage: agent-sentry ignore <short_id>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local short_id="${args[0]:?Usage: agent-sentry ignore <short_id>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
@@ -440,21 +523,16 @@ cmd_ignore() {
     issue_id=$(resolve_issue_id "$short_id") || return 1
 
     local result
-    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"ignored"}') || return 1
-
-    printf '%s' "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-if 'detail' in d:
-    print('Error:', d['detail'], file=sys.stderr)
-    sys.exit(1)
-print('Issue', d.get('shortId', d.get('id', '')), 'ignored.')
-"
+    result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" '{"status":"ignored","substatus":"archived_until_escalating"}') || return 1
+    _emit_action_json ignore "$result"
 }
 
 cmd_assign() {
-    local short_id="${1:?Usage: agent-sentry assign <short_id> <email>}"
-    local email="${2:?Usage: agent-sentry assign <short_id> <email>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local short_id="${args[0]:?Usage: agent-sentry assign <short_id> <email>}"
+    local email="${args[1]:?Usage: agent-sentry assign <short_id> <email>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
@@ -470,28 +548,24 @@ print(json.dumps({'assignedTo': os.environ['SENTRY_ASSIGN_EMAIL']}))
 
     local result
     result=$(sentry_put "${base_url}/organizations/${org}/issues/${issue_id}/" "$payload") || return 1
-
-    printf '%s' "$result" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-if 'detail' in d:
-    print('Error:', d['detail'], file=sys.stderr)
-    sys.exit(1)
-assignee = d.get('assignedTo')
-assigned = 'nobody'
-if assignee:
-    assigned = assignee.get('email') or assignee.get('name', '')
-print('Issue', d.get('shortId', d.get('id', '')), 'assigned to', assigned)
-"
+    _emit_action_json assign "$result"
 }
 
 cmd_alerts() {
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
     local result
     result=$(sentry_get "${base_url}/organizations/${org}/combined-rules/") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -528,13 +602,21 @@ for r in data:
 }
 
 cmd_alert() {
-    local rule_id="${1:?Usage: agent-sentry alert <rule_id>}"
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
+    local rule_id="${args[0]:?Usage: agent-sentry alert <rule_id>}"
     local base_url org
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
     local result
     result=$(sentry_get "${base_url}/organizations/${org}/alert-rules/${rule_id}/") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     printf '%s' "$result" | python3 -c "
 import sys, json
@@ -547,16 +629,19 @@ print(json.dumps(d, indent=2, default=str))
 }
 
 cmd_releases() {
+    local -a args=()
+    _pop_json_flag "$@"
+    args=("${_JSON_ARGS[@]}")
     local base_url org project=""
     base_url=$(sentry_base_url) || return 1
     org=$(sentry_org) || return 1
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
+    while [[ ${#args[@]} -gt 0 ]]; do
+        case "${args[0]}" in
             --project)
-                if [[ $# -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
-                project="$2"; shift 2 ;;
-            *) echo "Unknown option: $1" >&2; return 1 ;;
+                if [[ ${#args[@]} -lt 2 ]]; then echo "Error: --project requires a value" >&2; return 1; fi
+                project="${args[1]}"; args=("${args[@]:2}") ;;
+            *) echo "Unknown option: ${args[0]}" >&2; return 1 ;;
         esac
     done
 
@@ -564,6 +649,26 @@ cmd_releases() {
 
     local result
     result=$(sentry_get "$url") || return 1
+
+    if $_json_mode; then
+        printf '%s' "$result" | SENTRY_RELEASE_PROJECT="$project" python3 -c "
+import os, sys, json
+data = json.load(sys.stdin)
+project = os.environ.get('SENTRY_RELEASE_PROJECT', '')
+if project:
+    data = [
+        r for r in data
+        if any(
+            str(p.get('slug', '')) == project
+            or str(p.get('id', '')) == project
+            or str(p.get('name', '')) == project
+            for p in r.get('projects', [])
+        )
+    ]
+print(json.dumps(data, indent=2))
+"
+        return
+    fi
 
     printf '%s' "$result" | SENTRY_RELEASE_PROJECT="$project" python3 -c "
 import os, sys, json
@@ -600,6 +705,7 @@ for r in data:
 }
 
 cmd_snapshot() {
+    _pop_json_flag "$@"
     local token
     token=$(sentry_token) || { snapshot_error "SENTRY_AUTH_TOKEN not set" "sentry"; return 1; }
     local org
