@@ -5827,6 +5827,26 @@ tools:
         check: agent-do creds check CRONITOR_API_KEY
         fix: agent-do creds store CRONITOR_API_KEY --stdin
         note: Requires a Cronitor API key with monitor and issue scopes
+    contracts:
+      snapshot:
+      - monitors
+      - show
+      - issues
+      - issue
+      - notifications
+      - snapshot
+      interact:
+      - create
+      - delete
+      - pause
+      - resume
+      - ping
+      attributes:
+        create: [composite]
+        delete: [destructive]
+        pause: [composite]
+        resume: [composite]
+        ping: [composite]
     concurrency: mixed
     concurrency_detail:
       read: [monitors, show, issues, issue, notifications, snapshot]

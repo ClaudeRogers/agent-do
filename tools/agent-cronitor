@@ -3,6 +3,39 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../lib/json-output.sh" 2>/dev/null || true
+
+_json_mode=false
+_JSON_ARGS=()
+
+_pop_json_flag() {
+    _json_mode=false
+    _JSON_ARGS=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _json_mode=true
+        else
+            _JSON_ARGS+=("$arg")
+        fi
+    done
+}
+
+_emit_json() {
+    printf '%s' "$1" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$1"
+}
+
+_emit_ok_json() {
+    local action="$1"
+    local payload="$2"
+    if $_json_mode; then
+        printf '%s' "$payload" | python3 -c "import json,sys; print(json.dumps({'ok': True, 'action': sys.argv[1], 'result': json.loads(sys.argv[2])}, indent=2))" "$action" "$payload"
+    else
+        printf '%s\n' "$payload"
+    fi
+}
+
 CRONITOR_API="https://cronitor.io/api"
 CRONITOR_TELEMETRY="https://cronitor.link/p"
 CRONITOR_VERSION="2025-11-28"
@@ -31,6 +64,8 @@ NOTIFICATIONS
 
 ACCOUNT
   snapshot                    Full account state as JSON
+
+All commands accept --json for structured output.
 
 Monitors are referenced by their key (e.g. TuoCU3, vms-cron-daily).
 
@@ -63,7 +98,7 @@ cr_get() {
     local url="$1"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -K <(printf 'user = "%s:"\n' "$key") \
+    curl -sS --connect-timeout 10 --max-time 60 -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         "$url"
@@ -74,7 +109,7 @@ cr_post() {
     local data="${2:-}"
     local key
     key=$(cr_api_key) || return 1
-    local args=(-sS -X POST -K <(printf 'user = "%s:"\n' "$key") \
+    local args=(-sS --connect-timeout 10 --max-time 60 -X POST -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -89,7 +124,7 @@ cr_put() {
     local data="$2"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -X PUT -K <(printf 'user = "%s:"\n' "$key") \
+    curl -sS --connect-timeout 10 --max-time 60 -X PUT -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
@@ -100,7 +135,7 @@ cr_delete() {
     local url="$1"
     local key
     key=$(cr_api_key) || return 1
-    curl -sS -X DELETE -K <(printf 'user = "%s:"\n' "$key") \
+    curl -sS --connect-timeout 10 --max-time 60 -X DELETE -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -o /dev/null -w "%{http_code}" "$url"
 }
@@ -108,8 +143,14 @@ cr_delete() {
 # --- Commands ---
 
 cmd_monitors() {
+    _pop_json_flag "$@"
     local result
     result=$(cr_get "${CRONITOR_API}/monitors") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -133,10 +174,16 @@ for m in items:
 }
 
 cmd_show() {
-    local monitor_key="${1:?Usage: agent-cronitor show <key>}"
+    _pop_json_flag "$@"
+    local monitor_key="${_JSON_ARGS[0]:?Usage: agent-cronitor show <key>}"
 
     local result
     result=$(cr_get "${CRONITOR_API}/monitors/${monitor_key}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -192,6 +239,10 @@ cmd_create() {
     body=$(echo "$body" | sed '$d')
 
     if [[ "$http_code" == "201" || "$http_code" == "200" ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" || "${_json_mode:-false}" == "true" ]]; then
+            _emit_json "$body"
+            return
+        fi
         echo "$body" | python3 -c "
 import sys, json
 m = json.load(sys.stdin)
@@ -277,13 +328,15 @@ cmd_resume() {
 }
 
 cmd_issues() {
+    _pop_json_flag "$@"
     local url="${CRONITOR_API}/issues"
     local open_only=false
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --open) open_only=true; shift ;;
-            *) echo "Unknown option: $1" >&2; return 1 ;;
+    local -a args=("${_JSON_ARGS[@]}")
+    while [[ ${#args[@]} -gt 0 ]]; do
+        case "${args[0]}" in
+            --open) open_only=true; args=("${args[@]:1}") ;;
+            *) echo "Unknown option: ${args[0]}" >&2; return 1 ;;
         esac
     done
 
@@ -293,6 +346,11 @@ cmd_issues() {
 
     local result
     result=$(cr_get "$url") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -316,10 +374,16 @@ for item in items:
 }
 
 cmd_issue() {
-    local issue_key="${1:?Usage: agent-cronitor issue <key>}"
+    _pop_json_flag "$@"
+    local issue_key="${_JSON_ARGS[0]:?Usage: agent-cronitor issue <key>}"
 
     local result
     result=$(cr_get "${CRONITOR_API}/issues/${issue_key}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -406,8 +470,14 @@ cmd_ping() {
 }
 
 cmd_notifications() {
+    _pop_json_flag "$@"
     local result
     result=$(cr_get "${CRONITOR_API}/notifications") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -428,6 +498,7 @@ for item in items:
 }
 
 cmd_snapshot() {
+    _pop_json_flag "$@"
     local key="${CRONITOR_API_KEY:-}"
     if [[ -z "$key" ]]; then
         echo '{"error": "CRONITOR_API_KEY not set"}'
