@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+# agent-handbrake - Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI
+#
+# Wraps HandBrakeCLI, whose --json scan output is purpose-built for automation.
+# Follows the universal Connect -> Snapshot -> Interact -> Verify:
+#   presets  -> list available encode presets       (Snapshot)
+#   scan     -> probe a file's titles/streams       (Snapshot)
+#   convert  -> transcode one file to .mp4          (Interact)
+#   batch    -> transcode every .mkv in a directory (Interact)
+#   verify   -> confirm output .mp4 files exist     (Verify)
+#   snapshot -> version + preset availability JSON
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$REPO_ROOT/lib/json-output.sh" ]]; then
+    # shellcheck source=lib/json-output.sh
+    source "$REPO_ROOT/lib/json-output.sh"
+fi
+
+OUTPUT_FORMAT="${OUTPUT_FORMAT:-text}"
+DRY_RUN=false
+OVERWRITE=false
+PRESET="${AGENT_HANDBRAKE_PRESET:-Fast 1080p30}"
+
+show_help() {
+    cat << 'EOF'
+agent-handbrake - Convert ripped video to Plex-ready MP4 (wraps HandBrakeCLI)
+
+Commands:
+  presets                                List available encode presets
+  scan <input>                           Probe a file; list titles, streams, duration
+  convert <input> [output]               Transcode one file to .mp4
+  batch <indir> <outdir>                 Transcode every .mkv in indir to .mp4 in outdir
+  verify <path>                          List .mp4 outputs (dir) or check one file
+  version                                Show HandBrake version
+  snapshot                               Version + preset availability (JSON)
+
+Output argument:
+  convert with no output writes <input basename>.mp4 next to the input.
+  If output is an existing directory, the file lands inside it.
+
+Options:
+  --json                                 Structured JSON output
+  --dry-run                              Print the HandBrakeCLI command without running it
+  --preset <name>                        Encode preset (default: Fast 1080p30)
+  --overwrite                            batch: re-encode even if the .mp4 already exists
+
+Environment:
+  AGENT_HANDBRAKE_BIN                    Path to HandBrakeCLI (else PATH, else /Applications)
+  AGENT_HANDBRAKE_PRESET                 Default preset when --preset is not given
+
+Examples:
+  agent-handbrake presets
+  agent-handbrake scan ~/rips/title_t00.mkv --json
+  agent-handbrake convert ~/rips/title_t00.mkv
+  agent-handbrake convert ~/rips/title_t00.mkv ~/plex/movie.mp4 --preset "HQ 1080p30 Surround"
+  agent-handbrake batch ~/rips ~/plex
+  agent-handbrake verify ~/plex
+  agent-handbrake snapshot --json
+EOF
+}
+
+die() { json_error "$1" "${2:-1}"; exit "${2:-1}"; }
+
+# Resolve the HandBrakeCLI binary: explicit override, then PATH, then a
+# manually-installed copy in /Applications (the GUI app does not bundle it).
+resolve_bin() {
+    if [[ -n "${AGENT_HANDBRAKE_BIN:-}" ]]; then
+        # Accept the override only if it is actually runnable (a path or a
+        # command on PATH); otherwise treat it as unresolved.
+        if [[ -x "$AGENT_HANDBRAKE_BIN" ]] || command -v "$AGENT_HANDBRAKE_BIN" &>/dev/null; then
+            echo "$AGENT_HANDBRAKE_BIN"; return 0
+        fi
+        return 1
+    fi
+    if command -v HandBrakeCLI &>/dev/null; then
+        command -v HandBrakeCLI; return 0
+    fi
+    local app="/Applications/HandBrakeCLI"
+    [[ -x "$app" ]] && { echo "$app"; return 0; }
+    return 1
+}
+
+# Run HandBrakeCLI (or echo it in --dry-run).
+hbcli() {
+    local bin
+    bin="$(resolve_bin)" || die "HandBrakeCLI not found. Install it (brew install handbrake) or set AGENT_HANDBRAKE_BIN." 127
+    if $DRY_RUN; then
+        printf '%s' "$bin"
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+    "$bin" "$@"
+}
+
+# Map convert/batch inputs to their .mp4 destination.
+output_path() {
+    local input="$1" out="${2:-}"
+    local base; base="$(basename "$input")"
+    base="${base%.*}.mp4"
+    if [[ -z "$out" ]]; then
+        echo "$(dirname "$input")/$base"
+    elif [[ -d "$out" ]]; then
+        echo "${out%/}/$base"
+    else
+        echo "$out"
+    fi
+}
+
+cmd_presets() {
+    if $DRY_RUN; then
+        hbcli --preset-list; return 0
+    fi
+    local raw
+    raw="$(hbcli --preset-list 2>&1 || true)"
+    [[ -z "$raw" ]] && die "No output from HandBrakeCLI --preset-list"
+    HB_RAW="$raw" python3 - "$OUTPUT_FORMAT" <<'PY'
+import sys, os, json
+fmt = sys.argv[1]
+# --preset-list prints categories as lines ending in "/", presets one indent
+# level deeper, and descriptions deeper still.
+cats, cat, preset_indent = {}, None, None
+for line in os.environ.get("HB_RAW", "").splitlines():
+    stripped = line.strip()
+    if not stripped:
+        continue
+    indent = len(line) - len(line.lstrip())
+    if stripped.endswith("/"):
+        cat = stripped[:-1]
+        cats[cat] = []
+        preset_indent = None
+    elif cat is not None:
+        if preset_indent is None:
+            preset_indent = indent  # first line under a category is a preset
+        if indent == preset_indent:
+            cats[cat].append(stripped)
+cats = {c: ps for c, ps in cats.items() if ps}
+if fmt == "json":
+    result = {"categories": [{"category": c, "presets": ps} for c, ps in cats.items()]}
+    print(json.dumps({"success": True, "result": result}, indent=2))
+else:
+    if not cats:
+        print("No presets reported.")
+    for c, ps in cats.items():
+        print(f"{c}/")
+        for p in ps:
+            print(f"  {p}")
+PY
+}
+
+cmd_scan() {
+    local input="${1:?input file required}"
+    if $DRY_RUN; then
+        hbcli -i "$input" --scan -t 0 --json; return 0
+    fi
+    [[ -e "$input" ]] || die "Input not found: $input"
+    local raw
+    raw="$(hbcli -i "$input" --scan -t 0 --json 2>/dev/null || true)"
+    HB_RAW="$raw" python3 - "$OUTPUT_FORMAT" "$input" <<'PY'
+import sys, json, os
+fmt, path = sys.argv[1], sys.argv[2]
+raw = os.environ.get("HB_RAW", "")
+# HandBrakeCLI --json emits a "JSON Title Set:" marker followed by the scan
+# object; everything after the marker is one JSON value.
+marker = "JSON Title Set:"
+idx = raw.find(marker)
+if idx < 0:
+    msg = f"No title set in scan output for {path}; not a video file?"
+    if fmt == "json":
+        print(json.dumps({"success": False, "error": msg}))
+    else:
+        print(msg, file=sys.stderr)
+    sys.exit(1)
+data = json.loads(raw[idx + len(marker):])
+titles = []
+for t in data.get("TitleList", []):
+    d = t.get("Duration", {})
+    secs = d.get("Hours", 0) * 3600 + d.get("Minutes", 0) * 60 + d.get("Seconds", 0)
+    geo = t.get("Geometry", {})
+    titles.append({
+        "index": t.get("Index"),
+        "name": t.get("Name", ""),
+        "duration": f"{d.get('Hours', 0)}:{d.get('Minutes', 0):02}:{d.get('Seconds', 0):02}",
+        "duration_secs": secs,
+        "video_codec": t.get("VideoCodec", ""),
+        "resolution": f"{geo.get('Width', '?')}x{geo.get('Height', '?')}",
+        "audio_tracks": [
+            {"language": a.get("Language", ""), "codec": a.get("CodecName", "")}
+            for a in t.get("AudioList", [])
+        ],
+        "subtitle_count": len(t.get("SubtitleList", [])),
+    })
+result = {"path": path, "main_feature": data.get("MainFeature"), "titles": titles}
+if fmt == "json":
+    print(json.dumps({"success": True, "result": result}, indent=2))
+else:
+    print(f"File: {path}")
+    for t in titles:
+        aud = ", ".join(f"{a['language']}/{a['codec']}" for a in t["audio_tracks"]) or "no audio"
+        print(f"  #{t['index']}  {t['duration']}  {t['resolution']}  {t['video_codec']}  "
+              f"[{aud}]  {t['subtitle_count']} sub(s)  {t['name']}")
+PY
+}
+
+# Core single-file transcode shared by convert and batch. HandBrakeCLI's own
+# stdout is progress chatter, so it is routed to stderr to keep this tool's
+# stdout structured.
+transcode() {
+    local input="$1" output="$2"
+    hbcli -i "$input" -o "$output" --preset "$PRESET" --format av_mp4 --optimize 1>&2
+}
+
+cmd_convert() {
+    local input="${1:?input file required}" output
+    output="$(output_path "$input" "${2:-}")"
+    if $DRY_RUN; then
+        hbcli -i "$input" -o "$output" --preset "$PRESET" --format av_mp4 --optimize
+        return 0
+    fi
+    [[ -e "$input" ]] || die "Input not found: $input"
+    mkdir -p "$(dirname "$output")"
+    if transcode "$input" "$output"; then
+        # Verify: the output must exist and be non-empty.
+        [[ -s "$output" ]] || die "HandBrakeCLI exited 0 but produced no output: $output"
+        cmd_verify "$output"
+    else
+        die "HandBrakeCLI failed converting $input"
+    fi
+}
+
+cmd_batch() {
+    local indir="${1:?input directory required}" outdir="${2:?output directory required}"
+    [[ -d "$indir" ]] || die "Not a directory: $indir"
+    local inputs=()
+    while IFS= read -r -d '' f; do inputs+=("$f"); done \
+        < <(find "$indir" -maxdepth 1 -name '*.mkv' -print0 | sort -z)
+    [[ ${#inputs[@]} -gt 0 ]] || die "No .mkv files in $indir"
+    local f base out
+    if $DRY_RUN; then
+        for f in "${inputs[@]}"; do
+            base="$(basename "$f")"
+            hbcli -i "$f" -o "${outdir%/}/${base%.*}.mp4" --preset "$PRESET" --format av_mp4 --optimize
+        done
+        return 0
+    fi
+    mkdir -p "$outdir"
+    local converted=0 skipped=0 failed=0
+    for f in "${inputs[@]}"; do
+        base="$(basename "$f")"
+        out="${outdir%/}/${base%.*}.mp4"
+        if [[ -s "$out" ]] && ! $OVERWRITE; then
+            skipped=$((skipped + 1))
+            echo "skip (exists): $(basename "$out")" >&2
+            continue
+        fi
+        if transcode "$f" "$out" && [[ -s "$out" ]]; then
+            converted=$((converted + 1))
+        else
+            failed=$((failed + 1))
+            echo "failed: $(basename "$f")" >&2
+        fi
+    done
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        # Verify pass over the whole outdir, with the batch tally attached.
+        python3 - "$outdir" "$converted" "$skipped" "$failed" <<'PY'
+import sys, os, json
+outdir, converted, skipped, failed = sys.argv[1], *map(int, sys.argv[2:5])
+files = []
+for name in sorted(os.listdir(outdir)):
+    if name.lower().endswith(".mp4"):
+        p = os.path.join(outdir, name)
+        sz = os.path.getsize(p)
+        files.append({"file": name, "path": p, "size_bytes": sz,
+                      "size_mb": round(sz / 1048576, 1)})
+result = {"outdir": outdir, "converted": converted, "skipped": skipped,
+          "failed": failed, "count": len(files), "files": files}
+print(json.dumps({"success": failed == 0, "result": result}, indent=2))
+PY
+    else
+        echo "batch: $converted converted, $skipped skipped, $failed failed"
+        cmd_verify "$outdir"
+    fi
+    [[ $failed -eq 0 ]] || exit 1
+}
+
+cmd_verify() {
+    local target="${1:?path required}"
+    [[ -e "$target" ]] || die "Not found: $target"
+    python3 - "$target" "$OUTPUT_FORMAT" <<'PY'
+import sys, os, json
+target, fmt = sys.argv[1], sys.argv[2]
+files = []
+if os.path.isdir(target):
+    for name in sorted(os.listdir(target)):
+        if name.lower().endswith(".mp4"):
+            p = os.path.join(target, name)
+            files.append((name, p))
+else:
+    files.append((os.path.basename(target), target))
+out = []
+for name, p in files:
+    sz = os.path.getsize(p)
+    out.append({"file": name, "path": p, "size_bytes": sz,
+                "size_mb": round(sz / 1048576, 1)})
+result = {"target": target, "count": len(out), "files": out}
+if fmt == "json":
+    print(json.dumps({"success": True, "result": result}, indent=2))
+else:
+    if not out:
+        print(f"No .mp4 files in {target}")
+    else:
+        for f in out:
+            print(f"{f['size_mb']:>9.1f} MB  {f['file']}")
+        print(f"\n{len(out)} file(s), {round(sum(x['size_bytes'] for x in out)/1048576,1)} MB total")
+PY
+}
+
+cmd_version() {
+    if $DRY_RUN; then
+        hbcli --version; return 0
+    fi
+    local raw
+    raw="$(hbcli --version 2>/dev/null || true)"
+    # First "HandBrake ..." line is the clean version banner.
+    local ver
+    ver="$(printf '%s\n' "$raw" | grep -m1 '^HandBrake' || true)"
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        json_result "$(python3 -c 'import json,sys; print(json.dumps({"version": sys.argv[1] or None}))' "$ver")"
+    else
+        echo "${ver:-unknown}"
+    fi
+}
+
+cmd_snapshot() {
+    local bin ver="" preset_count=0
+    bin="$(resolve_bin)" || die "HandBrakeCLI not found. Install it (brew install handbrake) or set AGENT_HANDBRAKE_BIN." 127
+    ver="$("$bin" --version 2>/dev/null | grep -m1 '^HandBrake' || true)"
+    preset_count="$("$bin" --preset-list 2>&1 | grep -cE '^ {4}[^ ]' || true)"
+    python3 - "$OUTPUT_FORMAT" "$bin" "$ver" "$preset_count" "$PRESET" <<'PY'
+import sys, json
+fmt, bin_, ver, count, preset = sys.argv[1:6]
+snap = {
+    "bin": bin_,
+    "version": ver or None,
+    "preset_count": int(count) if count.isdigit() else 0,
+    "default_preset": preset,
+}
+if fmt == "json":
+    print(json.dumps({"success": True, "result": snap}, indent=2))
+else:
+    print(f"HandBrake: {snap['version'] or 'unknown'}")
+    print(f"  binary: {snap['bin']}")
+    print(f"  presets: {snap['preset_count']}")
+    print(f"  default preset: {snap['default_preset']}")
+PY
+}
+
+# ---- Argument parsing (global flags may appear anywhere) ----
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json) OUTPUT_FORMAT="json"; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --overwrite) OVERWRITE=true; shift ;;
+        --preset) PRESET="${2:?}"; shift 2 ;;
+        --preset=*) PRESET="${1#*=}"; shift ;;
+        -h|--help) show_help; exit 0 ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]:-}"
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift || true
+
+# Preflight: commands that shell out to HandBrakeCLI must fail loudly if it is
+# missing, rather than dying mid-pipeline with a swallowed error.
+case "$cmd" in
+    presets|scan|convert|batch|version|snapshot|snap)
+        resolve_bin >/dev/null 2>&1 || \
+            die "HandBrakeCLI not found. Install it (brew install handbrake) or set AGENT_HANDBRAKE_BIN." 127
+        ;;
+esac
+
+case "$cmd" in
+    presets)         cmd_presets "$@" ;;
+    scan)            cmd_scan "$@" ;;
+    convert)         cmd_convert "$@" ;;
+    batch)           cmd_batch "$@" ;;
+    verify)          cmd_verify "$@" ;;
+    version)         cmd_version "$@" ;;
+    snapshot|snap)   cmd_snapshot "$@" ;;
+    ""|help)         show_help ;;
+    *)               die "Unknown command: $cmd (try --help)" 2 ;;
+esac
