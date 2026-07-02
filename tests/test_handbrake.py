@@ -237,7 +237,7 @@ def main() -> int:
             require(r.returncode != 0, "batch with a failed encode should exit non-zero")
             data = json.loads(r.stdout)["result"]
             require(data["failed"] == 1, f"failure tallied: {data}")
-            leftovers = list(Path(outdir).iterdir())
+            leftovers = list(outdir.iterdir()) if outdir.exists() else []
             require(not leftovers, f"failed encode must leave nothing behind: {leftovers}")
             # A later run must re-attempt (not skip) the failed file.
             r2 = run_tool("batch", str(indir), str(outdir), "--json")
