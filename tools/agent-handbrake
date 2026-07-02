@@ -118,13 +118,20 @@ cmd_presets() {
     local raw
     raw="$(hbcli --preset-list 2>&1 || true)"
     [[ -z "$raw" ]] && die "No output from HandBrakeCLI --preset-list"
-    HB_RAW="$raw" python3 - "$OUTPUT_FORMAT" <<'PY'
-import sys, os, json
+    # Raw CLI output goes through a temp file, not the environment, so large
+    # payloads cannot hit the env-size limit.
+    local tmp; tmp="$(mktemp)"
+    printf '%s' "$raw" > "$tmp"
+    local rc=0
+    python3 - "$OUTPUT_FORMAT" "$tmp" <<'PY' || rc=$?
+import sys, json
 fmt = sys.argv[1]
 # --preset-list prints categories as lines ending in "/", presets one indent
 # level deeper, and descriptions deeper still.
 cats, cat, preset_indent = {}, None, None
-for line in os.environ.get("HB_RAW", "").splitlines():
+with open(sys.argv[2], encoding="utf-8", errors="replace") as f:
+    raw = f.read()
+for line in raw.splitlines():
     stripped = line.strip()
     if not stripped:
         continue
@@ -150,20 +157,27 @@ else:
         for p in ps:
             print(f"  {p}")
 PY
+    rm -f "$tmp"
+    return $rc
 }
 
 cmd_scan() {
-    local input="${1:?input file required}"
+    local input="${1:-}"
+    [[ -n "$input" ]] || die "scan: input file required" 2
     if $DRY_RUN; then
         hbcli -i "$input" --scan -t 0 --json; return 0
     fi
     [[ -e "$input" ]] || die "Input not found: $input"
     local raw
     raw="$(hbcli -i "$input" --scan -t 0 --json 2>/dev/null || true)"
-    HB_RAW="$raw" python3 - "$OUTPUT_FORMAT" "$input" <<'PY'
-import sys, json, os
+    local tmp; tmp="$(mktemp)"
+    printf '%s' "$raw" > "$tmp"
+    local rc=0
+    python3 - "$OUTPUT_FORMAT" "$input" "$tmp" <<'PY' || rc=$?
+import sys, json
 fmt, path = sys.argv[1], sys.argv[2]
-raw = os.environ.get("HB_RAW", "")
+with open(sys.argv[3], encoding="utf-8", errors="replace") as f:
+    raw = f.read()
 # HandBrakeCLI --json emits a "JSON Title Set:" marker followed by the scan
 # object; everything after the marker is one JSON value.
 marker = "JSON Title Set:"
@@ -204,18 +218,30 @@ else:
         print(f"  #{t['index']}  {t['duration']}  {t['resolution']}  {t['video_codec']}  "
               f"[{aud}]  {t['subtitle_count']} sub(s)  {t['name']}")
 PY
+    rm -f "$tmp"
+    return $rc
 }
 
 # Core single-file transcode shared by convert and batch. HandBrakeCLI's own
 # stdout is progress chatter, so it is routed to stderr to keep this tool's
-# stdout structured.
+# stdout structured. Encodes land at a temp path and are renamed into place
+# only after a successful, non-empty result, so a failed encode can never
+# leave a partial .mp4 that a later batch run would skip as complete.
 transcode() {
     local input="$1" output="$2"
-    hbcli -i "$input" -o "$output" --preset "$PRESET" --format av_mp4 --optimize 1>&2
+    local tmp="${output%.mp4}.partial.mp4"
+    if hbcli -i "$input" -o "$tmp" --preset "$PRESET" --format av_mp4 --optimize 1>&2 \
+        && [[ -s "$tmp" ]]; then
+        mv -f "$tmp" "$output"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
 }
 
 cmd_convert() {
-    local input="${1:?input file required}" output
+    local input="${1:-}" output
+    [[ -n "$input" ]] || die "convert: input file required" 2
     output="$(output_path "$input" "${2:-}")"
     if $DRY_RUN; then
         hbcli -i "$input" -o "$output" --preset "$PRESET" --format av_mp4 --optimize
@@ -224,8 +250,6 @@ cmd_convert() {
     [[ -e "$input" ]] || die "Input not found: $input"
     mkdir -p "$(dirname "$output")"
     if transcode "$input" "$output"; then
-        # Verify: the output must exist and be non-empty.
-        [[ -s "$output" ]] || die "HandBrakeCLI exited 0 but produced no output: $output"
         cmd_verify "$output"
     else
         die "HandBrakeCLI failed converting $input"
@@ -233,7 +257,8 @@ cmd_convert() {
 }
 
 cmd_batch() {
-    local indir="${1:?input directory required}" outdir="${2:?output directory required}"
+    local indir="${1:-}" outdir="${2:-}"
+    [[ -n "$indir" && -n "$outdir" ]] || die "batch: input and output directories required" 2
     [[ -d "$indir" ]] || die "Not a directory: $indir"
     local inputs=()
     while IFS= read -r -d '' f; do inputs+=("$f"); done \
@@ -257,7 +282,7 @@ cmd_batch() {
             echo "skip (exists): $(basename "$out")" >&2
             continue
         fi
-        if transcode "$f" "$out" && [[ -s "$out" ]]; then
+        if transcode "$f" "$out"; then
             converted=$((converted + 1))
         else
             failed=$((failed + 1))
@@ -288,7 +313,8 @@ PY
 }
 
 cmd_verify() {
-    local target="${1:?path required}"
+    local target="${1:-}"
+    [[ -n "$target" ]] || die "verify: path required" 2
     [[ -e "$target" ]] || die "Not found: $target"
     python3 - "$target" "$OUTPUT_FORMAT" <<'PY'
 import sys, os, json
@@ -336,6 +362,11 @@ cmd_version() {
 }
 
 cmd_snapshot() {
+    if $DRY_RUN; then
+        hbcli --version
+        hbcli --preset-list
+        return 0
+    fi
     local bin ver="" preset_count=0
     bin="$(resolve_bin)" || die "HandBrakeCLI not found. Install it (brew install handbrake) or set AGENT_HANDBRAKE_BIN." 127
     ver="$("$bin" --version 2>/dev/null | grep -m1 '^HandBrake' || true)"
@@ -366,7 +397,9 @@ while [[ $# -gt 0 ]]; do
         --json) OUTPUT_FORMAT="json"; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --overwrite) OVERWRITE=true; shift ;;
-        --preset) PRESET="${2:?}"; shift 2 ;;
+        --preset)
+            [[ $# -ge 2 ]] || die "--preset requires a value" 2
+            PRESET="$2"; shift 2 ;;
         --preset=*) PRESET="${1#*=}"; shift ;;
         -h|--help) show_help; exit 0 ;;
         *) ARGS+=("$1"); shift ;;

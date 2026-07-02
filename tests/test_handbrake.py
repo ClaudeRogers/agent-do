@@ -67,6 +67,10 @@ EOF
     ;;
   encode)
     [[ -z "$out" ]] && exit 1
+    if [[ -n "${MOCK_HB_FAIL:-}" ]]; then
+      head -c 1024 /dev/zero > "$out"   # failed encode leaves partial output
+      exit 1
+    fi
     echo "Encoding: task 1 of 1, 100.00 %"
     head -c 524288 /dev/zero > "$out"
     ;;
@@ -88,7 +92,11 @@ def make_mock() -> str:
     return path
 
 
-def run_tool(*args: str, bin_override: str | None = "MOCK") -> subprocess.CompletedProcess[str]:
+def run_tool(
+    *args: str,
+    bin_override: str | None = "MOCK",
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     if bin_override == "MOCK":
         env["AGENT_HANDBRAKE_BIN"] = make_mock()
@@ -96,6 +104,9 @@ def run_tool(*args: str, bin_override: str | None = "MOCK") -> subprocess.Comple
         env["AGENT_HANDBRAKE_BIN"] = bin_override
     else:
         env.pop("AGENT_HANDBRAKE_BIN", None)
+    env.pop("MOCK_HB_FAIL", None)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [str(TOOL), *args],
         cwd=ROOT,
@@ -215,6 +226,46 @@ def main() -> int:
             require(data3["converted"] == 2, f"--overwrite should re-encode: {data3}")
 
     check("batch converts, skips existing, honors --overwrite", test_batch_and_skip)
+
+    def test_failed_encode_leaves_no_partial():
+        with tempfile.TemporaryDirectory() as d:
+            indir, outdir = Path(d) / "rips", Path(d) / "plex"
+            indir.mkdir()
+            (indir / "a.mkv").write_bytes(b"x")
+            r = run_tool("batch", str(indir), str(outdir), "--json",
+                         extra_env={"MOCK_HB_FAIL": "1"})
+            require(r.returncode != 0, "batch with a failed encode should exit non-zero")
+            data = json.loads(r.stdout)["result"]
+            require(data["failed"] == 1, f"failure tallied: {data}")
+            leftovers = list(Path(outdir).iterdir())
+            require(not leftovers, f"failed encode must leave nothing behind: {leftovers}")
+            # A later run must re-attempt (not skip) the failed file.
+            r2 = run_tool("batch", str(indir), str(outdir), "--json")
+            data2 = json.loads(r2.stdout)["result"]
+            require(data2["converted"] == 1 and data2["skipped"] == 0,
+                    f"retry should convert, not skip: {data2}")
+
+    check("failed encode leaves no partial mp4 and is retried", test_failed_encode_leaves_no_partial)
+
+    def test_missing_operands_exit_2():
+        for args in (["scan"], ["convert"], ["batch"], ["batch", "/tmp"], ["verify"]):
+            r = run_tool(*args, "--json")
+            require(r.returncode == 2, f"{args} should exit 2, got {r.returncode}")
+            data = json.loads(r.stdout)
+            require(data["success"] is False and "required" in data["error"],
+                    f"{args} should explain the missing operand: {data}")
+        r = run_tool("convert", "in.mkv", "--preset")
+        require(r.returncode == 2, f"--preset with no value should exit 2, got {r.returncode}")
+
+    check("missing operands return structured exit-2 errors", test_missing_operands_exit_2)
+
+    def test_snapshot_dry_run():
+        r = run_tool("snapshot", "--dry-run")
+        require(r.returncode == 0, f"snapshot --dry-run should exit 0: {r.stderr}")
+        require("--version" in r.stdout and "--preset-list" in r.stdout,
+                f"dry-run should print both commands: {r.stdout!r}")
+
+    check("snapshot honors --dry-run", test_snapshot_dry_run)
 
     def test_dry_run():
         with tempfile.TemporaryDirectory() as d:

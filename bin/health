@@ -244,7 +244,10 @@ assert any(item.get("name") == "anthropic" for item in templates)
                 command -v pdflatex &>/dev/null && { status="OK"; } || { status="WARN"; note="pdflatex not found"; }
                 ;;
             handbrake)
-                if command -v HandBrakeCLI &>/dev/null || [[ -x "${AGENT_HANDBRAKE_BIN:-}" ]]; then
+                if command -v HandBrakeCLI &>/dev/null \
+                    || [[ -x "${AGENT_HANDBRAKE_BIN:-}" ]] \
+                    || { [[ -n "${AGENT_HANDBRAKE_BIN:-}" ]] && command -v "$AGENT_HANDBRAKE_BIN" &>/dev/null; } \
+                    || [[ -x "/Applications/HandBrakeCLI" ]]; then
                     status="OK"
                 else
                     status="WARN"; note="HandBrakeCLI not found — brew install handbrake or set AGENT_HANDBRAKE_BIN"
