@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -95,8 +96,51 @@ class Anthropic:
             f"expected log follow-up: {payload}",
         )
 
+    check_compact_candidate_safety()
     print("suggest AI tests passed")
     return 0
+
+
+def check_compact_candidate_safety() -> None:
+    """The rerank candidate context must carry each tool's safety surface."""
+    import warnings
+    from importlib.machinery import SourceFileLoader
+
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    sys.path.insert(0, str(ROOT / "lib"))
+    suggest_mod = SourceFileLoader("suggest_mod", str(ROOT / "bin" / "suggest")).load_module()
+    from registry import load_registry
+
+    reg = load_registry()["tools"]
+    # render has destructive (delete, env-del) and sensitive (secret get) verbs.
+    candidate = suggest_mod.compact_candidate({
+        "tool": "render",
+        "description": reg["render"].get("description", ""),
+        "primary": "agent-do render services",
+        "_info": reg["render"],
+    })
+    require("safety" in candidate, f"candidate must carry safety: {list(candidate)}")
+    safety = candidate["safety"]
+    require(
+        any(v == "delete" for v in safety.get("destructive", [])),
+        f"render destructive verbs must surface: {safety}",
+    )
+    require(
+        "write" in safety and "read_only" in safety,
+        f"safety must split read/write: {safety}",
+    )
+
+    # A pure-read tool reports no destructive/sensitive verbs.
+    sessions = suggest_mod.compact_candidate({
+        "tool": "sessions",
+        "description": reg["sessions"].get("description", ""),
+        "primary": "agent-do sessions list",
+        "_info": reg["sessions"],
+    })
+    require(
+        not sessions["safety"].get("destructive") and not sessions["safety"].get("sensitive"),
+        f"pure-read tool must have no destructive/sensitive: {sessions['safety']}",
+    )
 
 
 if __name__ == "__main__":
