@@ -47,7 +47,7 @@ Applies to `agent-do/`.
 - Keep unrelated non-engineering language out of this file.
 - Use the nearest scoped `AGENTS.md` before changing a deeper package, app, or subsystem.
 - Prefer small, local changes and validate through the manifest that owns the touched code.
-- Every registry tool declares `contracts:` (five beats + attribute flags). New tools cannot merge without one — draft with `agent-do harness contracts propose --tool <name>`, validate with `agent-do harness contracts validate`. The gate runs in `./test.sh` and CI and requires zero contract warnings.
+- Every registry tool declares a `contracts:` block mapping each command verb to the five beats (Connect → Snapshot → Interact → Verify → Save), with `attributes:` flags (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`, `own_state`) for verbs a single beat cannot express. Draft with `agent-do harness contracts propose --tool <name>`; validate with `agent-do harness contracts validate`. The gate runs in `./test.sh` and CI, enforces full coverage (no tool may merge without a block), and requires zero warnings. Companion subcommands: `contracts surface` (machine-readable safety buckets for parallel scheduling), `contracts drift` (registry promises vs each tool's `--help`), and `contracts audit` (bounded behavioral probe of the read surface).
 
 ## Validation
 
