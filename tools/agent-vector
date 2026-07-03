@@ -75,6 +75,65 @@ json_string() {
     python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
 }
 
+# --json support (additive; plain-text output is unchanged).
+VECTOR_JSON=0
+
+# Emit a structured JSON error to stdout so --json stays a single document.
+vjson_error() {
+    python3 -c 'import json,sys; print(json.dumps({"ok":False,"command":sys.argv[1],"error":sys.argv[2]}))' "$1" "$2"
+    return 1
+}
+
+# In --json mode, verify required config; emit a JSON error + return 1 if absent.
+vjson_require_config() {
+    local cmd="$1" miss=""
+    [[ -n "${VECTOR_SUPABASE_URL:-}" ]] || miss="VECTOR_SUPABASE_URL"
+    if [[ -z "${VECTOR_SUPABASE_SERVICE_KEY:-}" ]]; then
+        if [[ -n "$miss" ]]; then miss="$miss, VECTOR_SUPABASE_SERVICE_KEY"; else miss="VECTOR_SUPABASE_SERVICE_KEY"; fi
+    fi
+    if [[ -n "$miss" ]]; then
+        vjson_error "$cmd" "missing required config: $miss (set in $VECTOR_ENV_FILE or via agent-do creds)"
+        return 1
+    fi
+    return 0
+}
+
+json_meta() { python3 -c 'import json,sys; print(json.dumps({sys.argv[1]: sys.argv[2]}))' "$1" "$2"; }
+
+# Build one JSON document from raw PostgREST array sections; a dict payload is a
+# PostgREST error object (successful reads are arrays), surfaced as a clean error.
+vjson_emit() {
+    local cmd="$1" meta="$2"; shift 2
+    python3 - "$cmd" "$meta" "$@" <<'PY'
+import json, sys
+cmd = sys.argv[1]
+try:
+    meta = json.loads(sys.argv[2]) if sys.argv[2] else {}
+except ValueError:
+    meta = {}
+out = {"ok": True, "command": cmd}
+out.update(meta)
+args = sys.argv[3:]
+err = None
+for i in range(0, len(args) - 1, 2):
+    key, raw = args[i], args[i + 1]
+    try:
+        val = json.loads(raw) if raw.strip() else []
+    except ValueError:
+        err = "non-JSON response from Vector for section: " + key
+        break
+    if isinstance(val, dict):
+        err = val.get("message") or val.get("error") or ("Vector request failed for section: " + key)
+        out.setdefault("error_details", val)
+        break
+    out[key] = val
+if err is not None:
+    print(json.dumps({"ok": False, "command": cmd, "error": err}))
+    sys.exit(1)
+print(json.dumps(out))
+PY
+}
+
 vector_request() {
     local method="$1"
     local path="$2"
@@ -83,7 +142,7 @@ vector_request() {
     need_env VECTOR_SUPABASE_SERVICE_KEY
 
     local url="${VECTOR_SUPABASE_URL%/}/rest/v1/${path}"
-    local args=(-sS -X "$method" "$url" \
+    local args=(-sS --max-time 30 --connect-timeout 10 -X "$method" "$url" \
         -H "apikey: ${VECTOR_SUPABASE_SERVICE_KEY}" \
         -H "Authorization: Bearer ${VECTOR_SUPABASE_SERVICE_KEY}" \
         -H "Content-Type: application/json" \
@@ -130,6 +189,7 @@ cmd_ls() {
             --pulse) filters+=("pulse=eq.$(urlencode "$2")"); shift 2 ;;
             --owner) filters+=("owner=eq.$(urlencode "$2")"); shift 2 ;;
             --mine) mine=1; shift ;;
+            --json) VECTOR_JSON=1; shift ;;
             *) echo "Unknown ls option: $1" >&2; return 1 ;;
         esac
     done
@@ -138,6 +198,13 @@ cmd_ls() {
     fi
     local query
     query=$(IFS='&'; echo "${filters[*]}")
+    if [[ "$VECTOR_JSON" -eq 1 ]]; then
+        vjson_require_config ls || return 1
+        local raw
+        raw=$(vector_request GET "projects?${query}" 2>/dev/null) || { vjson_error ls "request to Vector failed"; return 1; }
+        vjson_emit ls '{}' projects "$raw"
+        return
+    fi
     vector_request GET "projects?${query}" | print_table_projects
 }
 
@@ -168,9 +235,20 @@ cmd_today() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --engineer) email="$2"; shift 2 ;;
+            --json) VECTOR_JSON=1; shift ;;
             *) echo "Unknown today option: $1" >&2; return 1 ;;
         esac
     done
+    if [[ "$VECTOR_JSON" -eq 1 ]]; then
+        vjson_require_config today || return 1
+        [[ -n "$email" ]] || { vjson_error today "no engineer set: pass --engineer <email> or set VECTOR_USER_EMAIL"; return 1; }
+        local raw_work raw_commits today_iso
+        raw_work=$(vector_request GET "project_work_items?owner=eq.$(urlencode "$email")&status=neq.done&select=id,title,status,due_at,project_id&order=due_at.asc" 2>/dev/null) || { vjson_error today "open-work request failed"; return 1; }
+        today_iso=$(date -u +"%Y-%m-%dT00:00:00Z")
+        raw_commits=$(vector_request GET "project_activity?kind=eq.commit&actor=eq.$(urlencode "$email")&occurred_at=gte.${today_iso}&select=title,summary,occurred_at,project_id&order=occurred_at.desc&limit=20" 2>/dev/null) || { vjson_error today "commit-activity request failed"; return 1; }
+        vjson_emit today "$(json_meta engineer "$email")" open_work "$raw_work" commits "$raw_commits"
+        return
+    fi
     [[ -n "$email" ]] || { echo "Set VECTOR_USER_EMAIL or pass --engineer" >&2; return 1; }
     echo "Today: $email"
     echo
@@ -200,9 +278,18 @@ cmd_inbox() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --engineer) email="$2"; shift 2 ;;
+            --json) VECTOR_JSON=1; shift ;;
             *) echo "Unknown inbox option: $1" >&2; return 1 ;;
         esac
     done
+    if [[ "$VECTOR_JSON" -eq 1 ]]; then
+        vjson_require_config inbox || return 1
+        local raw_support raw_intake
+        raw_support=$(vector_request GET "project_support_items?status=neq.resolved&select=id,title,priority,status,requester,project_id&order=requested_at.desc&limit=25" 2>/dev/null) || { vjson_error inbox "support request failed"; return 1; }
+        raw_intake=$(vector_request GET "intake?status=eq.new&select=id,title,submitted_by,submitted_at&order=submitted_at.desc&limit=25" 2>/dev/null) || { vjson_error inbox "intake request failed"; return 1; }
+        vjson_emit inbox "$(json_meta engineer "${email:-all}")" support "$raw_support" intake "$raw_intake"
+        return
+    fi
     echo "Inbox: ${email:-all}"
     vector_request GET "project_support_items?status=neq.resolved&select=id,title,priority,status,requester,project_id&order=requested_at.desc&limit=25" | python3 -c '
 import json,sys
@@ -383,11 +470,19 @@ cmd_feed() {
             --project) filters+=("project_id=eq.$(project_id_by_slug "$2")"); shift 2 ;;
             --since) filters+=("occurred_at=gte.$(urlencode "$2")"); shift 2 ;;
             --limit) filters+=("limit=$2"); shift 2 ;;
+            --json) VECTOR_JSON=1; shift ;;
             *) echo "Unknown feed option: $1" >&2; return 1 ;;
         esac
     done
     local query
     query=$(IFS='&'; echo "${filters[*]}")
+    if [[ "$VECTOR_JSON" -eq 1 ]]; then
+        vjson_require_config feed || return 1
+        local raw
+        raw=$(vector_request GET "project_activity?${query}" 2>/dev/null) || { vjson_error feed "request to Vector failed"; return 1; }
+        vjson_emit feed '{}' activity "$raw"
+        return
+    fi
     vector_request GET "project_activity?${query}" | python3 -c '
 import json,sys
 for r in json.load(sys.stdin):

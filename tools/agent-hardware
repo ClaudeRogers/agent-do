@@ -65,14 +65,75 @@ delegate_domain() {
         return 1
     fi
 
-    local stdout_file stderr_file status
+    local stdout_file stderr_file timeout_file status
     stdout_file="$(mktemp)"
     stderr_file="$(mktemp)"
+    timeout_file="$(mktemp)"
 
+    # Bound the delegated leaf command. A delegated read verb (usb disks ->
+    # diskutil, printer status -> lpstat) can stall on an unresponsive disk or
+    # peripheral, and macOS ships no timeout(1); run the leaf through a python
+    # subprocess timeout so a hung device yields a structured error instead of
+    # hanging past an audit/probe bound. A marker file (not a magic exit code a
+    # leaf could itself emit) records that our bound — not the leaf — fired.
+    local timeout_secs="${AGENT_DO_HARDWARE_TIMEOUT:-10}"
     set +e
-    "$leaf_exec" "$@" >"$stdout_file" 2>"$stderr_file"
+    python3 - "$timeout_secs" "$stdout_file" "$stderr_file" "$timeout_file" "$leaf_exec" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+stdout_path, stderr_path, timeout_path = sys.argv[2], sys.argv[3], sys.argv[4]
+cmd = sys.argv[5:]
+
+try:
+    completed = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    with open(stdout_path, "wb") as fh:
+        fh.write(completed.stdout or b"")
+    with open(stderr_path, "wb") as fh:
+        fh.write(completed.stderr or b"")
+    sys.exit(completed.returncode)
+except subprocess.TimeoutExpired:
+    with open(timeout_path, "w", encoding="utf-8") as fh:
+        fh.write("1")
+    sys.exit(1)
+except FileNotFoundError:
+    sys.exit(127)
+PY
     status=$?
     set -e
+
+    # A stalled delegation is bounded above: emit a structured timeout error in
+    # whichever format was requested, then exit nonzero (never 124, so probers
+    # read an explained refusal rather than a raw hang; never a silent stall).
+    if [[ -s "$timeout_file" ]]; then
+        rm -f "$stdout_file" "$stderr_file" "$timeout_file"
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            python3 - "$domain" "$timeout_secs" "$@" <<'PY'
+import json
+import sys
+
+domain = sys.argv[1]
+timeout_secs = sys.argv[2]
+command = sys.argv[3:]
+payload = {
+    "success": False,
+    "tool": "hardware",
+    "domain": domain,
+    "command": command,
+    "timed_out": True,
+    "timeout_seconds": float(timeout_secs),
+    "exit_code": 1,
+    "error": f"agent-{domain} {' '.join(command)} timed out after {timeout_secs}s".strip(),
+}
+print(json.dumps(payload, indent=2))
+PY
+        else
+            echo "Error: agent-$domain $* timed out after ${timeout_secs}s" >&2
+        fi
+        return 1
+    fi
+    rm -f "$timeout_file"
 
     if [[ "${OUTPUT_FORMAT:-text}" != "json" ]]; then
         local leaf_stdout leaf_stderr

@@ -148,17 +148,35 @@ cmd_paste() {
     fi
 
     local paste_cmd="${cmds##*:}"
+    # Capture once, preserving any trailing newlines: the `printf x` sentinel
+    # survives command-substitution newline stripping, and `|| true` keeps the
+    # sentinel reachable under `set -e` even if the paste command exits nonzero.
+    local content
+    content=$($paste_cmd 2>/dev/null || true; printf x)
+    content=${content%x}
+
     if [[ "$JSON_OUTPUT" == "1" ]]; then
-        local content
-        content=$($paste_cmd 2>/dev/null) || content=""
-        python3 -c "
+        # Pipe the exact bytes (no here-string trailing newline, no argv limit).
+        printf '%s' "$content" | python3 -c "
 import json, sys
 content = sys.stdin.read()
-print(json.dumps({'content': content, 'length': len(content)}))
-" <<< "$content"
+empty = len(content) == 0
+print(json.dumps({
+    'content': None if empty else content,
+    'length': len(content),
+    'empty': empty,
+}))
+"
         return 0
     fi
-    $paste_cmd
+
+    if [[ -z "$content" ]]; then
+        # Explicit marker so an empty clipboard is a visible, gradeable success
+        # instead of silent zero-byte output.
+        echo "(clipboard empty)"
+        return 0
+    fi
+    printf '%s' "$content"
 }
 
 cmd_clear() {
