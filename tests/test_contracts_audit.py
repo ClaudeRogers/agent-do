@@ -121,6 +121,50 @@ def check_grading() -> None:
     require(report["ok"] is False, "report not ok while failures exist")
 
 
+def check_schema_stability() -> None:
+    """--schema-check flags snapshot verbs whose JSON shape drifts between calls."""
+    calls = {"n": 0}
+
+    class DriftRunner:
+        def __call__(self, *args, timeout=15):
+            verb = args[1]
+
+            class R:
+                returncode = 0
+                stderr = ""
+            r = R()
+            if "--json" not in args:
+                r.stdout = "plain"
+                return r
+            if verb == "stable":
+                r.stdout = '{"a": 1, "b": 2}'
+            elif verb == "drifty":
+                calls["n"] += 1
+                r.stdout = '{"a": 1}' if calls["n"] % 2 else '{"a": 1, "extra": 9}'
+            return r
+
+    registry = {"tools": {"demo": {
+        "commands": {"stable": "Stable read", "drifty": "Shifting read"},
+        "contracts": {"snapshot": ["stable", "drifty"]},
+    }}}
+    report = audit_registry(registry, DriftRunner(), schema_check=True)
+    results = {r["verb"]: r for r in report["results"]}
+    require(results["stable"]["outcome"] == "ok", f"stable stays ok: {results['stable']}")
+    require(results["stable"].get("schema_stable") is True,
+            f"stable schema flagged stable: {results['stable']}")
+    require(results["drifty"].get("schema_stable") is False,
+            f"drifting top-level keys must be flagged: {results['drifty']}")
+    require(report["summary"].get("schema_unstable") == 1,
+            f"one schema-unstable verb expected: {report['summary']}")
+    # Stability is a warning, not a failure — the gate must stay green.
+    require(report["ok"] is True, f"schema drift must not fail the audit: {report['summary']}")
+
+    # Without the flag, no extra probing and no schema key.
+    plain = audit_registry(registry, DriftRunner())
+    require("schema_stable" not in plain["results"][0],
+            "schema check must be opt-in")
+
+
 def check_timeout_grading() -> None:
     class HangRunner:
         def __call__(self, *args, timeout=15):
@@ -155,6 +199,7 @@ def check_plist() -> None:
 def main() -> int:
     check_eligibility()
     check_grading()
+    check_schema_stability()
     check_timeout_grading()
     check_plist()
     print("contracts audit tests passed")

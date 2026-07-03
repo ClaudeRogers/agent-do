@@ -95,11 +95,36 @@ def _grade(verb_args: list, bare, jsonful) -> tuple[str, str]:
     return "fail", f"exit {bare.returncode} with unexplained output"
 
 
+def _top_level_shape(stdout: str):
+    """Return the sorted top-level key set of a JSON object, or None.
+
+    Only objects have a stable 'schema' worth comparing — a JSON array
+    legitimately varies in length between calls, so lists are exempt.
+    """
+    try:
+        parsed = json.loads((stdout or "").strip())
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, dict):
+        return tuple(sorted(parsed.keys()))
+    return None
+
+
 def audit_registry(registry: dict, runner, include_network: bool = False,
-                   only_tool: str | None = None, timeout: int = 15) -> dict:
-    """Audit every declared verb; runner(*args, timeout=) -> CompletedProcess."""
+                   only_tool: str | None = None, timeout: int = 15,
+                   schema_check: bool = False) -> dict:
+    """Audit every declared verb; runner(*args, timeout=) -> CompletedProcess.
+
+    schema_check adds the contract's stable-schema probe: an ok snapshot verb
+    returning a JSON object is called once more and its top-level key set
+    compared. Drift is a WARNING (schema_stable=False), never a failure — a
+    read of changing state can legitimately shift, so this only flags, and
+    the gate stays green.
+    """
     results = []
     counts = {"ok": 0, "clean-skip": 0, "fail": 0, "skip": 0}
+    if schema_check:
+        counts["schema_unstable"] = 0
     for name, info in sorted((registry.get("tools") or {}).items()):
         if only_tool and name != only_tool:
             continue
@@ -116,9 +141,18 @@ def audit_registry(registry: dict, runner, include_network: bool = False,
             bare = runner(name, *verb_args, timeout=timeout)
             jsonful = runner(name, *verb_args, "--json", timeout=timeout)
             outcome, reason = _grade(verb_args, bare, jsonful)
+            entry = {"tool": name, "verb": verb, "outcome": outcome, "reason": reason}
+            if schema_check and outcome == "ok":
+                first = _top_level_shape(jsonful.stdout)
+                if first is not None:
+                    again = runner(name, *verb_args, "--json", timeout=timeout)
+                    second = _top_level_shape(again.stdout)
+                    stable = second is not None and first == second
+                    entry["schema_stable"] = stable
+                    if not stable:
+                        counts["schema_unstable"] += 1
             counts[outcome] += 1
-            results.append({"tool": name, "verb": verb,
-                            "outcome": outcome, "reason": reason})
+            results.append(entry)
     return {
         "ok": counts["fail"] == 0,
         "summary": counts,

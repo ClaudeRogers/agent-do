@@ -220,6 +220,7 @@ def contracts_audit(args: Any) -> dict[str, Any]:
             load_bundled_registry(),
             partial(agent_do_cmd, cwd=Path(scratch)),
             include_network=args.include_network,
+            schema_check=args.schema_check,
             only_tool=args.tool,
             timeout=args.timeout,
         )
@@ -272,6 +273,11 @@ def render_contracts_audit(payload: dict[str, Any]) -> None:
     print(f"  Probed ok: {summary['ok']}  Clean skips: {summary['clean-skip']}  "
           f"Failures: {summary['fail']}  Policy skips: {summary['skip']}")
     print(f"  Network probing: {'ON' if payload['include_network'] else 'off (--include-network to enable)'}")
+    if "schema_unstable" in summary:
+        print(f"  Schema-unstable snapshots: {summary['schema_unstable']}")
+        for r in payload["results"]:
+            if r.get("schema_stable") is False:
+                print(f"  SCHEMA-DRIFT {r['tool']} {r['verb']}: top-level JSON keys differ between calls")
     for r in payload["results"]:
         if r["outcome"] == "fail":
             print(f"  FAIL {r['tool']} {r['verb']}: {r['reason']}")
@@ -1021,7 +1027,7 @@ Commands:
   contracts propose [--tool X] [--out FILE] [--json]  Lexicon-driven contracts draft + exceptions report
   contracts surface [--json]                        Machine-readable safety surface (merged registry) for orchestrators
   contracts drift [--tool X] [--json]               Registry promises vs tool --help reality; fails on phantom verbs
-  contracts audit [--tool X] [--include-network] [--out FILE] [--notify] [--json]
+  contracts audit [--tool X] [--include-network] [--schema-check] [--out FILE] [--notify] [--json]
                                                     Bounded behavioral probe of the declared read surface (tri-state)
   contracts audit --install-schedule [weekly|daily] Install launchd agent: audit + notify on failures
   contracts audit --uninstall-schedule              Remove the scheduled audit
@@ -1088,6 +1094,7 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--out")
     contracts.add_argument("--json", action="store_true")
     contracts.add_argument("--include-network", action="store_true")
+    contracts.add_argument("--schema-check", action="store_true")
     contracts.add_argument("--timeout", type=int, default=15)
     contracts.add_argument("--notify", action="store_true")
     contracts.add_argument("--install-schedule", nargs="?", const="weekly", choices=["weekly", "daily"])
