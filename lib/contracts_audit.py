@@ -72,6 +72,13 @@ def _structured_error(stdout: str, stderr: str) -> bool:
     return any(marker in lowered for marker in (
         "error", "usage:", "not set", "required", "not initialized",
         "no session", "not found", "not connected", "no responsive",
+        # A tool on a machine without its backing system explains itself
+        # with these too — an honest "nothing here / not set up" is a
+        # clean skip, not an unexplained failure.
+        "not authenticated", "not configured", "not accessible",
+        "not available", "unavailable", "no destinations", "no printers",
+        "grant ", "configure", "only available on", "not installed",
+        "no credentials", "requires macos",
     ))
 
 

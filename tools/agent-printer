@@ -64,15 +64,16 @@ cmd_list() {
         return 0
     fi
 
-    if [[ "$(uname)" == "Darwin" ]]; then
-        lpstat -p 2>/dev/null | while read -r line; do
-            echo "$line"
-        done
-        echo ""
-        echo "Default: $(lpstat -d 2>/dev/null | awk '{print $NF}')"
-    else
-        lpstat -p -d 2>/dev/null || echo "No printers configured"
+    local printers
+    printers="$(lpstat -p 2>/dev/null || true)"
+    if [[ -z "$printers" ]]; then
+        # An empty printer list is a valid state, not an error.
+        echo "No printers configured"
+        return 0
     fi
+    echo "$printers"
+    echo ""
+    echo "Default: $(lpstat -d 2>/dev/null | awk '{print $NF}')"
 }
 
 cmd_default() {
@@ -106,11 +107,17 @@ cmd_status() {
         return 0
     fi
 
+    local status
     if [[ -n "$printer" ]]; then
-        lpstat -p "$printer" 2>/dev/null
+        status="$(lpstat -p "$printer" 2>/dev/null || true)"
     else
-        lpstat -p 2>/dev/null
+        status="$(lpstat -p 2>/dev/null || true)"
     fi
+    if [[ -z "$status" ]]; then
+        echo "No printers configured"
+        return 0
+    fi
+    echo "$status"
 }
 
 cmd_print() {
