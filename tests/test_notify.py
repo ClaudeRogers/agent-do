@@ -528,6 +528,59 @@ print(f"{provider} sent")
         require(messenger_live_payload["success"] is True, f"unexpected messenger live payload: {messenger_live_payload}")
         require(messenger_live_payload["attempts"][0]["provider"] == "messenger", f"unexpected messenger attempt payload: {messenger_live_payload}")
 
+    # ── Robustness slice (2026-07-03, the launchd-silent-failure class) ──
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        env = os.environ.copy()
+        env["AGENT_DO_HOME"] = str(fake_home)
+        env["AGENT_DO_NOTIFY_TIMEOUT"] = "2"
+
+        # 1. Unknown bare alias must ERROR, not ride defaults.via with the
+        #    alias as a raw target (how 'me' became an SMS destination).
+        unknown = run(
+            [str(AGENT_DO), "notify", "send", "nonexistent-alias", "hello"],
+            env=env,
+        )
+        require(unknown.returncode != 0, f"unknown alias must fail: {unknown.stdout}")
+        require(
+            "not configured" in (unknown.stdout + unknown.stderr),
+            f"unknown alias failure must explain itself: {unknown.stdout}{unknown.stderr}",
+        )
+
+        # Raw-looking targets keep the fallback (pre-existing semantics).
+        raw = run(
+            [str(AGENT_DO), "notify", "send", "user@example.com", "hello", "--dry-run"],
+            env=env,
+        )
+        require(raw.returncode == 0, f"raw email target must still plan: {raw.stdout}{raw.stderr}")
+
+        # 2. A stalling provider must be BOUNDED and still leave history.
+        set_pipe = run(
+            [str(AGENT_DO), "notify", "set-recipient", "staller",
+             "--pipe", "sleep 30", "--prefer", "pipe"],
+            env=env,
+        )
+        require(set_pipe.returncode == 0, f"set-recipient failed: {set_pipe.stderr}")
+        stalled = run(
+            [str(AGENT_DO), "notify", "send", "staller", "hello", "--json"],
+            env=env,
+        )
+        payload = json.loads(stalled.stdout)
+        require(payload["success"] is False, f"stalled send must not claim success: {payload}")
+        require(
+            "timed out" in json.dumps(payload),
+            f"stalled send must say it timed out: {payload}",
+        )
+        history_file = fake_home / "notify" / "history.jsonl"
+        require(history_file.exists(), "history must be written even when the provider stalls")
+        entries = [json.loads(line) for line in history_file.read_text().splitlines() if line]
+        require(
+            any(e.get("recipient") == "staller" for e in entries),
+            f"stalled attempt must be recorded: {entries}",
+        )
+
     print("notify tests passed")
     return 0
 
