@@ -15,12 +15,40 @@ import json
 import os
 import sys
 import re
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
-# File lives at <repo>/hooks/claude/agent-do-pretooluse-check.py, so the repo
-# root is two parents up and lib/ is its sibling.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib"))
+# The repo copy lives at <repo>/hooks/claude/, so lib/ is two parents up.
+# But the INSTALLED copy (~/.claude/hooks/) is not inside the repo, so that
+# relative path misses — fall back to AGENT_DO_REPO, the ~/.agent-do install
+# breadcrumb, and a PATH-resolved agent-do so registry-backed safety works
+# wherever the hook is installed.
+def _candidate_lib_dirs() -> list[Path]:
+    seen: list[Path] = []
+    def add(p: Path) -> None:
+        if p not in seen:
+            seen.append(p)
+    add(Path(__file__).resolve().parent.parent.parent / "lib")
+    repo_env = os.environ.get("AGENT_DO_REPO")
+    if repo_env:
+        add(Path(repo_env) / "lib")
+    breadcrumb = Path.home() / ".agent-do" / "install-path"
+    try:
+        if breadcrumb.exists():
+            add(Path(breadcrumb.read_text().strip()) / "lib")
+    except Exception:
+        pass
+    resolved = shutil.which("agent-do")
+    if resolved:
+        add(Path(resolved).resolve().parent / "lib")
+    return seen
+
+
+for _lib_dir in _candidate_lib_dirs():
+    if (_lib_dir / "registry.py").exists():
+        sys.path.insert(0, str(_lib_dir))
+        break
 
 try:
     from registry import load_registry, find_raw_cli_equivalent, get_tool_readiness
@@ -28,6 +56,11 @@ except ModuleNotFoundError:
     load_registry = None
     find_raw_cli_equivalent = None
     get_tool_readiness = None
+
+try:
+    from registry import get_tool_contract_attributes
+except ModuleNotFoundError:
+    get_tool_contract_attributes = None
 
 try:
     from telemetry import record_hook_decision, record_nudge_event
@@ -249,6 +282,41 @@ _AGENT_DO_INVOCATION_RE = re.compile(
 )
 
 
+def _verb_safety_note(tool: str, verb: str) -> str | None:
+    """Advisory safety heads-up if an agent-do verb is destructive/sensitive.
+
+    Reads the contracts safety surface so the nudge carries truth, not a
+    guess. Never blocks — this is nudge mode; the agent stays in control.
+    """
+    if not verb or load_registry is None or get_tool_contract_attributes is None:
+        return None
+    try:
+        info = (load_registry().get("tools") or {}).get(tool) or {}
+    except Exception:
+        return None
+    attributes = get_tool_contract_attributes(info)
+    first = verb.split()[0]
+    flags = sorted({
+        attr
+        for v, attrs in attributes.items()
+        if v == verb or v.split()[0] == first
+        for attr in attrs
+        if attr in ("destructive", "sensitive")
+    })
+    if not flags:
+        return None
+    what = " and ".join(flags)
+    detail = {
+        "destructive": "it can irreversibly remove data",
+        "sensitive": "it emits or persists secret material",
+    }
+    reasons = "; ".join(detail[f] for f in flags)
+    return (
+        f"Safety: `agent-do {tool} {verb}` is marked {what} in its contract "
+        f"({reasons}). Proceeding is allowed — this is a heads-up, not a block."
+    )
+
+
 def _extract_agent_do_invocation(command: str) -> tuple[str | None, str]:
     """Return (tool, verb_or_empty) if command is an agent-do invocation."""
     match = _AGENT_DO_INVOCATION_RE.search(command)
@@ -382,17 +450,22 @@ def main():
     for pattern in SKIP_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             tool, verb = _extract_agent_do_invocation(command)
+            safety_note = _verb_safety_note(tool, verb) if tool else None
             if tool:
                 _record_demonstration(state, tool, verb)
                 _save_session_state(session_id, state)
             if record_hook_decision is not None:
                 try:
                     record_hook_decision(
-                        "PreToolUse", "pretool", "suppress",
-                        reason="skip_pattern_demonstration" if tool else "skip_pattern",
+                        "PreToolUse", "pretool",
+                        "emit" if safety_note else "suppress",
+                        reason="agent_do_safety_headsup" if safety_note
+                        else ("skip_pattern_demonstration" if tool else "skip_pattern"),
                     )
                 except Exception:
                     pass
+            if safety_note:
+                emit_context(safety_note)
             sys.exit(0)
 
     # Docs-fetch nudge — gated.
