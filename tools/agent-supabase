@@ -273,11 +273,48 @@ print(success_msg)
 " "$success_msg"
 }
 
+# Emit a Supabase API JSON response for --json consumers: exactly ONE JSON
+# document to stdout, bypassing the prose formatters. The API already returns
+# valid JSON — an array/object on success, {message}/{error} on failure — so it
+# is printed verbatim (compactly re-serialized). Error bodies stay valid JSON
+# but exit nonzero so callers can detect failure; empty or non-JSON responses
+# become a structured JSON error with a nonzero exit.
+print_json_raw() {
+    python3 -c "
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.stdout.write(json.dumps({'error': 'empty response from Supabase API'}) + '\n')
+    sys.exit(1)
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.stdout.write(json.dumps({'error': 'non-JSON response from Supabase API', 'raw': raw}) + '\n')
+    sys.exit(1)
+sys.stdout.write(json.dumps(d) + '\n')
+sys.exit(1 if isinstance(d, dict) and (d.get('message') or d.get('error')) else 0)
+"
+}
+
 # --- Commands ---
 
 cmd_projects() {
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
     local result
     result=$(supabase_request GET "/projects")
+
+    if [[ "$json_output" == "1" ]]; then
+        local rc=0
+        echo "$result" | print_json_raw || rc=$?
+        return "$rc"
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -624,8 +661,22 @@ except:
 }
 
 cmd_orgs() {
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
     local result
     result=$(supabase_request GET "/organizations")
+
+    if [[ "$json_output" == "1" ]]; then
+        local rc=0
+        echo "$result" | print_json_raw || rc=$?
+        return "$rc"
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -644,8 +695,22 @@ for o in data:
 }
 
 cmd_regions() {
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
+
     local result
     result=$(supabase_request GET "/projects/available-regions")
+
+    if [[ "$json_output" == "1" ]]; then
+        local rc=0
+        echo "$result" | print_json_raw || rc=$?
+        return "$rc"
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -1808,7 +1873,7 @@ cmd_function_delete() {
 
 case "${1:-help}" in
     projects|ls|list)
-        cmd_projects
+        shift; cmd_projects "$@"
         ;;
     show|get)
         shift
@@ -1859,10 +1924,10 @@ case "${1:-help}" in
         cmd_types "$@"
         ;;
     orgs|organizations)
-        cmd_orgs
+        shift; cmd_orgs "$@"
         ;;
     regions)
-        cmd_regions
+        shift; cmd_regions "$@"
         ;;
     postgrest)
         shift

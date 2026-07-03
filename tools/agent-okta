@@ -316,6 +316,23 @@ json_escape() {
     python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"
 }
 
+# Emit a captured API payload as one valid JSON document under --json,
+# bypassing the human pretty-printer. The request helpers already return raw
+# Okta JSON, so this validates it and prints it verbatim. Falls back to a
+# structured error (and nonzero exit) when the payload is empty or not JSON.
+emit_json() {
+    printf '%s' "$1" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw)
+except (ValueError, TypeError):
+    print(json.dumps({"error": "invalid or empty response from Okta API"}))
+    sys.exit(1)
+print(json.dumps(data))
+'
+}
+
 parse_since() {
     local since="${1:-24h}"
     python3 -c "
@@ -363,6 +380,11 @@ cmd_apps() {
 
     local result
     result=$(okta_list "$endpoint")
+
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -855,6 +877,11 @@ cmd_users() {
     local result
     result=$(okta_list "$endpoint")
 
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
+
     echo "$result" | python3 -c "
 import sys, json
 users = json.load(sys.stdin)
@@ -913,6 +940,11 @@ cmd_groups() {
 
     local result
     result=$(okta_list "$endpoint")
+
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -1001,6 +1033,11 @@ cmd_group_remove_user() {
 cmd_auth_servers() {
     local result
     result=$(okta_list "/authorizationServers")
+
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -1137,6 +1174,11 @@ cmd_logs() {
     local result
     result=$(okta_request GET "$endpoint")
 
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
+
     echo "$result" | python3 -c "
 import sys, json
 events = json.load(sys.stdin)
@@ -1159,6 +1201,11 @@ for e in events:
 cmd_trusted_origins() {
     local result
     result=$(okta_list "/trustedOrigins")
+
+    if [[ "${JSON_MODE:-0}" == "1" ]]; then
+        emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -1298,6 +1345,26 @@ print(json.dumps(out, indent=4))
 # --- Dispatch ---
 
 main() {
+    # --json is a global read-surface flag. Strip it from anywhere in the
+    # argument list so it is never mistaken for a positional (users/groups
+    # treat an unknown positional as a search term), and expose it as
+    # JSON_MODE for the read commands.
+    JSON_MODE=0
+    local _args=()
+    local _arg
+    for _arg in "$@"; do
+        if [[ "$_arg" == "--json" ]]; then
+            JSON_MODE=1
+        else
+            _args+=("$_arg")
+        fi
+    done
+    if [[ ${#_args[@]} -gt 0 ]]; then
+        set -- "${_args[@]}"
+    else
+        set --
+    fi
+
     if [[ $# -eq 0 ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
         show_help
         exit 0

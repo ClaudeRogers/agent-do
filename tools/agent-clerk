@@ -289,12 +289,31 @@ json_escape() {
     python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"
 }
 
+# --json detection for read/list verbs. Returns 0 when --json is present.
+# Under --json these verbs emit the raw/assembled API JSON (the same data the
+# pretty table is built from) as one valid JSON document, bypassing the
+# pretty-printer. Plain-text output is unchanged.
+clerk_has_json() {
+    local a
+    for a in "$@"; do
+        [[ "$a" == "--json" ]] && return 0
+    done
+    return 1
+}
+
+# Emit already-fetched JSON ($1) as one pretty-printed JSON document. Falls
+# back to the raw bytes if it does not parse, so the verb still yields output.
+clerk_emit_json() {
+    printf '%s' "$1" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$1"
+}
+
 # --- User Commands ---
 
 cmd_users() {
-    local query=""
+    local query="" as_json=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --json) as_json=1; shift ;;
             --query) query="$2"; shift 2 ;;
             *) query="$1"; shift ;;
         esac
@@ -309,6 +328,11 @@ cmd_users() {
 
     local result
     result=$(clerk_list "$endpoint")
+
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -550,9 +574,10 @@ print(json.dumps(data))
 # --- Organization Commands ---
 
 cmd_orgs() {
-    local query=""
+    local query="" as_json=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --json) as_json=1; shift ;;
             --query) query="$2"; shift 2 ;;
             *) query="$1"; shift ;;
         esac
@@ -567,6 +592,11 @@ cmd_orgs() {
 
     local result
     result=$(clerk_list "$endpoint")
+
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -808,8 +838,14 @@ cmd_org_revoke_invite() {
 # --- Roles & Permissions ---
 
 cmd_roles() {
+    local as_json=0
+    if clerk_has_json "$@"; then as_json=1; fi
     local result
     result=$(clerk_list "/organization_roles")
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
     echo "$result" | python3 -c "
 import sys, json
 roles = json.load(sys.stdin)
@@ -896,9 +932,10 @@ cmd_permission_create() {
 # --- Session Commands ---
 
 cmd_sessions() {
-    local user_id="" status=""
+    local user_id="" status="" as_json=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --json) as_json=1; shift ;;
             --user-id) user_id="$2"; shift 2 ;;
             --status) status="$2"; shift 2 ;;
             *) shift ;;
@@ -915,6 +952,11 @@ cmd_sessions() {
 
     local result
     result=$(clerk_list "$endpoint")
+
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -950,8 +992,14 @@ cmd_session_revoke() {
 # --- OAuth Application Commands ---
 
 cmd_oauth_apps() {
+    local as_json=0
+    if clerk_has_json "$@"; then as_json=1; fi
     local result
     result=$(clerk_list "/oauth_applications")
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
     echo "$result" | python3 -c "
 import sys, json
 apps = json.load(sys.stdin)
@@ -1077,8 +1125,14 @@ print(f\"New Client Secret: {a.get('client_secret', '?')}\")
 # --- Enterprise SSO ---
 
 cmd_enterprise_connections() {
+    local as_json=0
+    if clerk_has_json "$@"; then as_json=1; fi
     local result
     result=$(clerk_list "/enterprise_connections")
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
     echo "$result" | python3 -c "
 import sys, json
 conns = json.load(sys.stdin)
@@ -1156,8 +1210,14 @@ cmd_enterprise_connection_delete() {
 # --- JWT Templates ---
 
 cmd_jwt_templates() {
+    local as_json=0
+    if clerk_has_json "$@"; then as_json=1; fi
     local result
     result=$(clerk_request GET "/jwt_templates") || return 1
+    if [[ "$as_json" == "1" ]]; then
+        clerk_emit_json "$result"
+        return
+    fi
     echo "$result" | python3 -c "
 import sys, json
 templates = json.load(sys.stdin)
