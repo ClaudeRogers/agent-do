@@ -633,6 +633,87 @@ def test_v1_migration(tmp_path: Path, env_base: dict[str, str]) -> None:
     )
 
 
+def test_agent_process_anchor(tmp_path: Path, env_base: dict[str, str]) -> None:
+    """Coord anchors to the long-lived agent process, not the per-call shell.
+
+    Claude Code spawns a fresh shell (its own session leader) for every Bash
+    call, so anchoring to os.getsid(0) would mint a new identity per call and
+    record a pid that dies seconds later. The anchor walk must find the
+    nearest ancestor named like an agent runtime (claude/codex) instead.
+    """
+    project = make_project(tmp_path, "anchor")
+
+    # A fake binary named "claude" cannot be spawned here (macOS AMFI kills
+    # relocated platform binaries; sandboxes stall symlink execs in dyld), so
+    # exercise the same ancestry walk through its extension point: a long-lived
+    # python3 intermediary added to AGENT_DO_COORD_ANCHOR_NAMES. Under the
+    # broken sid-anchor both whoamis still agree (they share the test runner's
+    # session) — the discriminating assertion is the anchored pid.
+    out_dir = tmp_path / "anchor-out"
+    out_dir.mkdir()
+    intermediary = tmp_path / "intermediary.py"
+    intermediary.write_text(
+        "import os, subprocess, sys\n"
+        "out_dir, agent_do, project = sys.argv[1:4]\n"
+        "open(os.path.join(out_dir, 'anchor.pid'), 'w').write(str(os.getpid()))\n"
+        "for n in (1, 2):\n"
+        "    result = subprocess.run(\n"
+        "        [agent_do, 'coord', 'whoami', '--json'],\n"
+        "        capture_output=True, text=True, cwd=project, check=True,\n"
+        "    )\n"
+        "    open(os.path.join(out_dir, f'who{n}.json'), 'w').write(result.stdout)\n"
+    )
+
+    env = clean_env(env_base)
+    env["TMUX_PANE"] = "%40"
+    env["AGENT_DO_COORD_ANCHOR_NAMES"] = "python3"
+    result = subprocess.run(
+        ["python3", str(intermediary), str(out_dir), str(AGENT_DO), str(project)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    require(result.returncode == 0, f"intermediary run failed: {result.stderr}")
+
+    anchor_pid = int((out_dir / "anchor.pid").read_text().strip())
+    who1 = json.loads((out_dir / "who1.json").read_text())
+    who2 = json.loads((out_dir / "who2.json").read_text())
+    require(who1["agent_id"] == who2["agent_id"], f"identity churned across calls: {who1} vs {who2}")
+    require(who1["agent_id"].startswith("session-"), f"expected minted identity: {who1}")
+    require(
+        who1["pid"] == anchor_pid,
+        f"anchor must be the named agent ancestor {anchor_pid}, got {who1['pid']}",
+    )
+
+
+def test_liveness_dead_records_prune(tmp_path: Path, env_base: dict[str, str]) -> None:
+    """Records whose process is verifiably gone age out like tombstones."""
+    project = make_project(tmp_path, "deadprune")
+
+    proc = subprocess.Popen(["sleep", "60"])
+    env_dead = clean_env(env_base)
+    env_dead["TMUX_PANE"] = "%50"
+    env_dead["AGENT_DO_COORD_PID"] = str(proc.pid)
+    env_dead["AGENT_DO_COORD_PID_START"] = lstart(proc.pid)
+    who_dead = coord_json(["whoami"], cwd=project, env=env_dead)
+    proc.kill()
+    proc.wait()
+
+    agents_path = project / ".git" / "agent-do" / "coord" / "agents.json"
+    payload = json.loads(agents_path.read_text())
+    payload["agents"][who_dead["agent_id"]]["last_seen"] = iso_ago(25 * 3600)
+    agents_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    env_other = clean_env(env_base)
+    env_other["CODEX_THREAD_ID"] = "pruner-1"
+    coord_json(["touch"], cwd=project, env=env_other)
+    payload = json.loads(agents_path.read_text())
+    require(
+        who_dead["agent_id"] not in payload["agents"],
+        f"verifiably-dead record must prune after tombstone TTL: {sorted(payload['agents'])}",
+    )
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -648,6 +729,8 @@ def main() -> int:
         test_structured_focus(tmp_path, env_base)
         test_drops_and_history(tmp_path, env_base)
         test_v1_migration(tmp_path, env_base)
+        test_agent_process_anchor(tmp_path, env_base)
+        test_liveness_dead_records_prune(tmp_path, env_base)
 
     print("coord v2 tests passed")
     return 0

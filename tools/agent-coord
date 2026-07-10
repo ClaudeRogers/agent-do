@@ -201,8 +201,64 @@ def ps_lstart(pid: int) -> str | None:
     return value or None
 
 
+ANCHOR_RUNTIME_NAMES = {"claude", "codex"} | {
+    name.strip().lower()
+    for name in os.environ.get("AGENT_DO_COORD_ANCHOR_NAMES", "").split(",")
+    if name.strip()
+}
+
+
+def process_table() -> dict[int, tuple[int, str]]:
+    completed = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,comm="],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    table: dict[int, tuple[int, str]] = {}
+    if completed.returncode != 0:
+        return table
+    for line in completed.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            table[int(parts[0])] = (int(parts[1]), parts[2].strip())
+        except ValueError:
+            continue
+    return table
+
+
+def find_anchor_pid() -> int:
+    """The long-lived process this agent session hangs off.
+
+    Agent harnesses spawn a fresh shell per command (its own session leader,
+    gone seconds later), so os.getsid(0) is unusable there: it would mint a
+    new identity per call and record a pid that immediately dies. Walk the
+    ancestry to the nearest process named like an agent runtime instead;
+    plain interactive shells fall back to the session leader (the pane shell).
+    """
+    table = process_table()
+    pid = os.getpid()
+    for _ in range(25):
+        entry = table.get(pid)
+        if entry is None:
+            break
+        ppid, comm = entry
+        name = os.path.basename(comm).lstrip("-").lower()
+        if pid != os.getpid() and name in ANCHOR_RUNTIME_NAMES:
+            return pid
+        if ppid <= 1:
+            break
+        pid = ppid
+    try:
+        return os.getsid(0)
+    except OSError:
+        return os.getppid()
+
+
 def process_anchor() -> dict[str, Any]:
-    """Long-lived process this agent session hangs off: pid + start time + display hints."""
+    """Anchor process for identity + liveness: pid + start time + display hints."""
     pid_env = os.environ.get("AGENT_DO_COORD_PID")
     pid: int | None = None
     if pid_env:
@@ -211,10 +267,7 @@ def process_anchor() -> dict[str, Any]:
         except ValueError:
             pid = None
     if pid is None:
-        try:
-            pid = os.getsid(0)
-        except OSError:
-            pid = os.getppid()
+        pid = find_anchor_pid()
     start = os.environ.get("AGENT_DO_COORD_PID_START") or ps_lstart(pid) or ""
     return {
         "pid": pid,
@@ -567,6 +620,10 @@ class CoordStore:
             if age is None:
                 continue
             if (record.get("dead") or record.get("stopped")) and age > TOMBSTONE_SECONDS:
+                agents.pop(agent_id)
+                pruned.append(agent_id)
+            elif age > TOMBSTONE_SECONDS and process_liveness(record) is False:
+                # Unflagged but verifiably gone — same aging as tombstones.
                 agents.pop(agent_id)
                 pruned.append(agent_id)
             elif age > PRUNE_SECONDS:
