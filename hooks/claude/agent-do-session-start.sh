@@ -50,6 +50,14 @@ if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
+# --- Pin coord identity to this Claude session ---
+# Every Bash call then derives the same coord agent identity, and the
+# SessionEnd hook can retire exactly that identity via the same session_id.
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
+if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
+    echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+fi
+
 run_native_bootstrap_prompt() {
     local ask_prompt="$1"
     local project_root="$2"
