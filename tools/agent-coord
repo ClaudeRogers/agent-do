@@ -9,9 +9,11 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,13 +24,23 @@ HELP = """agent-coord - Project-local state and interrupt broker
 
 Commands:
   touch                                  Renew local presence lease
-  whoami                                 Show current coordination identity
+  whoami                                 Show current coordination identity (session, pid, runtime)
   alias <name>                           Assign a friendly alias to this agent
   aliases                                List known aliases
-  peers [--all]                          List known peers and their presence state
+  peers [--all] [--active-only] [--writers]
+                                         List known peers: liveness-verified status + last_seen age
+  stop [--note <text>]                   Retire this session cleanly (Stop-hook safe, idempotent)
+  bye                                    Delete this agent's own board records
+  role set <builder|auditor|researcher|overseer> [--mode read-only|writer] --territory <path> [...]
+                                         Declare role and exclusive write-domain
+  territory show                         Render the full territory ownership map
+  guard check [<path> ...] [--staged]    Warn (never block) when paths hit live claims/territories
+  guard install                          Install the warn-only pre-commit guard hook
   status                                 Show current state summary and interrupt counts
-  interrupts [--mark-seen] [--limit N]   Show current contention/dependency/novelty interrupts
-  focus set <goal> --path <path> [...]   Set current work focus
+  interrupts [--mark-seen] [--limit N]   Show contention/notice/dependency/novelty interrupts
+  focus set <goal> [--path <path> ...] [--phase <p>] [--note <text>]
+            [--blocking-on <ref> ...] [--last-ship <text>]
+                                         Set structured focus (phase: building|gating|watching|quiet|blocked|stopped)
   focus show [peer]                      Show current focus
   focus clear                            Clear current focus
   claims                                 List advisory claims
@@ -38,9 +50,13 @@ Commands:
   need list [--all]                      List dependencies
   need clear <key>                       Clear a dependency you own
   publishes                              List published artifacts
-  publish add <key> --status <s> --summary <text> [--ref <ref> ...]
-                                         Publish or update an artifact
+  publish add <key> --status <s> --summary <text> [--ref <ref> ...] [--file <path>]
+                                         Publish or update an artifact (optionally point at a file)
   publish clear <key>                    Clear a published artifact you own
+  drop add <path> --for <agent|role|any> [--note <text>] [--key <need-key>]
+                                         Point a peer at a file on disk (pointers, never content)
+  drops [--for-me]                       List drops (or just the ones addressed to you)
+  history [peer] [--limit N]             Read the coordination event journal, newest first
 
 Options:
   --json                                 Output structured JSON
@@ -48,10 +64,15 @@ Options:
 Examples:
   agent-coord touch
   agent-coord whoami
-  agent-coord focus set "private Render networking" --path recognition-oracle/render.yaml --path dm-ck/render.yaml
+  agent-coord role set builder --territory dm-ephemeris --territory shared/schema.json
+  agent-coord focus set "lane 14 packaging" --path dm-ck --phase building
+  agent-coord focus set "lane 14 packaging" --phase quiet --note "QUIET while tmux-30 audits"
   agent-coord claim recognition-oracle/render.yaml --reason "private Render blueprint wiring"
   agent-coord need add dm-sdk@1.2.2 --why "switch off tarball dependency"
   agent-coord publish add dm-sdk@1.2.2 --status ready --summary "private package published"
+  agent-coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
+  agent-coord guard install
+  agent-coord stop --note "lane 14 shipped"
   agent-coord interrupts --mark-seen
 """
 
@@ -64,7 +85,14 @@ THREAD_CANDIDATES: list[tuple[str, str]] = [
 ]
 
 ACTIVE_WINDOW_SECONDS = int(os.environ.get("AGENT_DO_COORD_ACTIVE_SECONDS", "900"))
-IDLE_WINDOW_SECONDS = int(os.environ.get("AGENT_DO_COORD_IDLE_SECONDS", str(14 * 24 * 60 * 60)))
+IDLE_WINDOW_SECONDS = int(os.environ.get("AGENT_DO_COORD_IDLE_SECONDS", str(2 * 24 * 60 * 60)))
+TOMBSTONE_SECONDS = int(os.environ.get("AGENT_DO_COORD_TOMBSTONE_SECONDS", str(24 * 60 * 60)))
+PRUNE_SECONDS = int(os.environ.get("AGENT_DO_COORD_PRUNE_SECONDS", str(7 * 24 * 60 * 60)))
+
+RUNTIMES = ("claude", "codex", "human", "other")
+FOCUS_PHASES = ("building", "gating", "watching", "quiet", "blocked", "stopped")
+ROLES = ("builder", "auditor", "researcher", "overseer")
+ROLE_DEFAULT_MODES = {"builder": "writer", "auditor": "read-only", "researcher": "read-only", "overseer": "read-only"}
 
 
 def now() -> datetime:
@@ -160,23 +188,142 @@ def resolve_project_paths(cwd: Path) -> dict[str, str]:
     }
 
 
-def derive_identity() -> dict[str, str | None]:
+def ps_lstart(pid: int) -> str | None:
+    completed = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+def process_anchor() -> dict[str, Any]:
+    """Long-lived process this agent session hangs off: pid + start time + display hints."""
+    pid_env = os.environ.get("AGENT_DO_COORD_PID")
+    pid: int | None = None
+    if pid_env:
+        try:
+            pid = int(pid_env)
+        except ValueError:
+            pid = None
+    if pid is None:
+        try:
+            pid = os.getsid(0)
+        except OSError:
+            pid = os.getppid()
+    start = os.environ.get("AGENT_DO_COORD_PID_START") or ps_lstart(pid) or ""
+    return {
+        "pid": pid,
+        "pid_start": start,
+        "pane": os.environ.get("TMUX_PANE"),
+        "host": socket.gethostname(),
+    }
+
+
+def process_liveness(record: dict[str, Any]) -> bool | None:
+    """True = verified alive, False = verified gone/reused, None = unverifiable."""
+    pid = record.get("pid")
+    if pid is None:
+        return None
+    host = record.get("host")
+    if host and host != socket.gethostname():
+        return None
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except OSError:
+        return None
+    expected_start = record.get("pid_start")
+    if expected_start:
+        current_start = ps_lstart(pid)
+        if current_start and current_start != expected_start:
+            return False
+    return True
+
+
+def detect_runtime(identity_source: str) -> str:
+    override = os.environ.get("AGENT_DO_COORD_RUNTIME")
+    if override in RUNTIMES:
+        return override
+    if identity_source.startswith("CODEX"):
+        return "codex"
+    if identity_source.startswith("CLAUDE") or os.environ.get("CLAUDECODE"):
+        return "claude"
+    return "other"
+
+
+def derive_identity(coord_root: Path, anchor: dict[str, Any]) -> dict[str, str | None]:
+    explicit = os.environ.get("AGENT_DO_COORD_SESSION")
+    if explicit:
+        short = compact(explicit)[:12]
+        if short:
+            return {
+                "agent_id": f"session-{short}",
+                "source": "AGENT_DO_COORD_SESSION",
+                "raw": explicit,
+                "session": explicit,
+            }
+
     for prefix, env_key in THREAD_CANDIDATES:
         value = os.environ.get(env_key)
         if not value:
             continue
         short = compact(value)
         if short:
-            return {"agent_id": f"{prefix}-{short}", "source": env_key, "raw": value}
+            return {"agent_id": f"{prefix}-{short}", "source": env_key, "raw": value, "session": None}
 
-    tmux_pane = os.environ.get("TMUX_PANE")
-    if tmux_pane:
-        short = sanitize(tmux_pane).lstrip("%")
-        if short:
-            return {"agent_id": f"tmux-{short}", "source": "TMUX_PANE", "raw": tmux_pane}
+    # Pane/host fallback: mint a session UUID at first contact, keyed by the
+    # anchoring process, so a recycled pane never inherits a dead session's identity.
+    scope = anchor.get("pane") or anchor.get("host") or "local"
+    anchor_key = f"{scope}|{anchor.get('pid')}|{anchor.get('pid_start')}"
+    session = mint_session(coord_root, anchor_key)
+    source = "TMUX_PANE+process" if anchor.get("pane") else "host+process"
+    return {
+        "agent_id": f"session-{session[:12]}",
+        "source": source,
+        "raw": anchor_key,
+        "session": session,
+    }
 
-    fallback = f"{socket.gethostname()}-{os.getpid()}"
-    return {"agent_id": f"host-{compact(fallback)}", "source": "hostname+pid", "raw": fallback}
+
+def mint_session(coord_root: Path, anchor_key: str) -> str:
+    coord_root.mkdir(parents=True, exist_ok=True)
+    sessions_path = coord_root / "sessions.json"
+    lock_path = coord_root / ".lock"
+    with lock_path.open("a+") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            payload: dict[str, Any] = {"anchors": {}}
+            if sessions_path.exists():
+                try:
+                    loaded = json.loads(sessions_path.read_text())
+                    if isinstance(loaded, dict) and isinstance(loaded.get("anchors"), dict):
+                        payload = loaded
+                except json.JSONDecodeError:
+                    pass
+            anchors = payload["anchors"]
+            entry = anchors.get(anchor_key)
+            if isinstance(entry, dict) and isinstance(entry.get("session"), str) and entry["session"]:
+                return entry["session"]
+            session = uuid.uuid4().hex
+            anchors[anchor_key] = {"session": session, "created_at": now_iso()}
+            tmp = sessions_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            tmp.replace(sessions_path)
+            return session
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def normalize_path(project_root: Path, cwd: Path, value: str) -> str:
@@ -206,6 +353,12 @@ def path_overlaps(a: str, b: str) -> bool:
 
 
 def classify_presence(record: dict[str, Any]) -> str:
+    if record.get("dead"):
+        return "dead"
+    if record.get("stopped"):
+        return "stopped"
+    if process_liveness(record) is False:
+        return "dead"
     lease_expires_at = parse_iso(record.get("lease_expires_at"))
     if lease_expires_at and now() <= lease_expires_at:
         return "active"
@@ -217,25 +370,44 @@ def classify_presence(record: dict[str, Any]) -> str:
     return "stale"
 
 
+def format_age(value: str | None) -> str:
+    seconds = age_seconds(value)
+    if seconds is None:
+        return "unknown age"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 class CoordStore:
     def __init__(self, cwd: Path) -> None:
         paths = resolve_project_paths(cwd)
-        ident = derive_identity()
         self.cwd = cwd.resolve()
         self.project_root = Path(paths["project_root"])
         self.coord_root = Path(paths["coord_root"])
         self.storage = paths["storage"]
+
+        self.coord_root.mkdir(parents=True, exist_ok=True)
+
+        self.anchor = process_anchor()
+        ident = derive_identity(self.coord_root, self.anchor)
         self.agent_id = str(ident["agent_id"])
         self.identity_source = str(ident["source"])
         self.identity_raw = ident["raw"]
-
-        self.coord_root.mkdir(parents=True, exist_ok=True)
+        self.session = ident.get("session")
+        self.runtime = detect_runtime(self.identity_source)
+        self.model = os.environ.get("AGENT_DO_COORD_MODEL")
 
         self.agents_path = self.coord_root / "agents.json"
         self.focus_path = self.coord_root / "focus.json"
         self.claims_path = self.coord_root / "claims.json"
         self.needs_path = self.coord_root / "needs.json"
         self.publishes_path = self.coord_root / "publishes.json"
+        self.drops_path = self.coord_root / "drops.json"
         self.events_path = self.coord_root / "events.jsonl"
         self.lock_path = self.coord_root / ".lock"
 
@@ -303,6 +475,14 @@ class CoordStore:
     def _save_publishes(self, publishes: list[dict[str, Any]]) -> None:
         self._write_json(self.publishes_path, {"publishes": publishes})
 
+    def _load_drops(self) -> list[dict[str, Any]]:
+        payload = self._read_json(self.drops_path, {"drops": []})
+        drops = payload.get("drops", [])
+        return drops if isinstance(drops, list) else []
+
+    def _save_drops(self, drops: list[dict[str, Any]]) -> None:
+        self._write_json(self.drops_path, {"drops": drops})
+
     def _load_events(self) -> list[dict[str, Any]]:
         if not self.events_path.exists():
             return []
@@ -357,6 +537,56 @@ class CoordStore:
                 return agent_id, alias
         return token, token
 
+    def _tombstone_superseded(self, agents: dict[str, dict[str, Any]]) -> None:
+        """A pane now anchored to a new process marks its previous occupants DEAD."""
+        pane = self.anchor.get("pane")
+        if not pane:
+            return
+        for agent_id, record in agents.items():
+            if agent_id == self.agent_id or record.get("dead"):
+                continue
+            record_pane = record.get("pane")
+            v1_pane = record.get("identity_raw") if record.get("identity_source") == "TMUX_PANE" else None
+            if pane not in (record_pane, v1_pane):
+                continue
+            if process_liveness(record) is not True:
+                record["dead"] = True
+                record["superseded_by"] = self.agent_id
+                record["tombstoned_at"] = now_iso()
+
+    def _prune(
+        self,
+        agents: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        pruned: list[str] = []
+        for agent_id, record in list(agents.items()):
+            if agent_id == self.agent_id:
+                continue
+            reference = record.get("tombstoned_at") or record.get("stopped_at") or record.get("last_seen")
+            age = age_seconds(reference)
+            if age is None:
+                continue
+            if (record.get("dead") or record.get("stopped")) and age > TOMBSTONE_SECONDS:
+                agents.pop(agent_id)
+                pruned.append(agent_id)
+            elif age > PRUNE_SECONDS:
+                agents.pop(agent_id)
+                pruned.append(agent_id)
+        return pruned
+
+    def _cascade_prune(self, pruned: list[str]) -> None:
+        if not pruned:
+            return
+        gone = set(pruned)
+        focus = self._load_focus()
+        remaining_focus = {agent_id: record for agent_id, record in focus.items() if agent_id not in gone}
+        if len(remaining_focus) != len(focus):
+            self._save_focus(remaining_focus)
+        claims = self._load_claims()
+        remaining_claims = [item for item in claims if item.get("owner") not in gone]
+        if len(remaining_claims) != len(claims):
+            self._save_claims(remaining_claims)
+
     def register_self(self) -> dict[str, Any]:
         with self.locked():
             agents = self._load_agents()
@@ -370,12 +600,27 @@ class CoordStore:
                     ).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                     "project_root": str(self.project_root),
                     "identity_source": self.identity_source,
+                    "pid": self.anchor.get("pid"),
+                    "pid_start": self.anchor.get("pid_start"),
+                    "host": self.anchor.get("host"),
+                    "runtime": self.runtime,
                 }
             )
+            if self.anchor.get("pane"):
+                current["pane"] = self.anchor["pane"]
+            if self.session:
+                current["session"] = self.session
+            if self.model:
+                current["model"] = self.model
             if self.identity_raw:
                 current["identity_raw"] = self.identity_raw
+            for revived_key in ("dead", "superseded_by", "tombstoned_at", "stopped", "stopped_at", "stop_note"):
+                current.pop(revived_key, None)
             agents[self.agent_id] = current
+            self._tombstone_superseded(agents)
+            pruned = self._prune(agents)
             self._save_agents(agents)
+            self._cascade_prune(pruned)
             return current
 
     def self_record(self, refresh: bool = True) -> dict[str, Any]:
@@ -419,24 +664,53 @@ class CoordStore:
             return None
         return self.focus_map().get(agent_id)
 
-    def set_focus(self, goal: str, paths: list[str]) -> dict[str, Any]:
+    def set_focus(
+        self,
+        goal: str,
+        paths: list[str],
+        phase: str | None = None,
+        note: str | None = None,
+        blocking_on: list[str] | None = None,
+        last_ship: str | None = None,
+    ) -> dict[str, Any]:
         self.register_self()
-        normalized = sorted({normalize_path(self.project_root, self.cwd, path) for path in paths if path.strip()})
-        payload = {
-            "agent_id": self.agent_id,
-            "alias": self.self_record(refresh=False).get("alias"),
-            "goal": goal,
-            "paths": normalized,
-            "updated_at": now_iso(),
-        }
+
+        def resolve_text(value: str | None, previous: Any) -> str | None:
+            if value is None:
+                return previous if isinstance(previous, str) and previous else None
+            return value or None
+
         with self.locked():
             focus = self._load_focus()
+            existing = focus.get(self.agent_id, {})
+            if paths:
+                normalized = sorted(
+                    {normalize_path(self.project_root, self.cwd, path) for path in paths if path.strip()}
+                )
+            else:
+                normalized = [str(item) for item in existing.get("paths", [])]
+            resolved_phase = phase or existing.get("phase") or "building"
+            if blocking_on is None:
+                resolved_blocking = [str(item) for item in existing.get("blocking_on", [])]
+            else:
+                resolved_blocking = [item for item in blocking_on if item.strip()]
+            payload = {
+                "agent_id": self.agent_id,
+                "alias": self.self_record(refresh=False).get("alias"),
+                "goal": goal,
+                "phase": resolved_phase,
+                "paths": normalized,
+                "note": resolve_text(note, existing.get("note")),
+                "blocking_on": resolved_blocking,
+                "last_ship": resolve_text(last_ship, existing.get("last_ship")),
+                "updated_at": now_iso(),
+            }
             focus[self.agent_id] = payload
             self._save_focus(focus)
             self._append_event(
                 kind="focus_set",
                 paths=normalized,
-                summary=f"{payload.get('alias') or self.agent_id} set focus: {goal}",
+                summary=f"{payload.get('alias') or self.agent_id} set focus: {goal} [phase:{resolved_phase}]",
             )
         return payload
 
@@ -454,7 +728,12 @@ class CoordStore:
                 )
             return existing
 
-    def peers(self, include_stale: bool = False) -> list[dict[str, Any]]:
+    def peers(
+        self,
+        include_stale: bool = False,
+        active_only: bool = False,
+        writers_only: bool = False,
+    ) -> list[dict[str, Any]]:
         self.register_self()
         focus = self.focus_map()
         peers: list[dict[str, Any]] = []
@@ -462,19 +741,85 @@ class CoordStore:
             status = classify_presence(record)
             if status == "stale" and not include_stale:
                 continue
+            if active_only and status != "active":
+                continue
+            mode = record.get("role_mode") or "writer"
+            if writers_only and (status not in {"active", "idle"} or mode != "writer"):
+                continue
             peer_focus = focus.get(agent_id)
-            peers.append(
-                {
-                    "agent_id": agent_id,
-                    "alias": record.get("alias"),
-                    "status": status,
-                    "last_seen": record.get("last_seen"),
-                    "lease_expires_at": record.get("lease_expires_at"),
-                    "current": agent_id == self.agent_id,
-                    "focus": peer_focus,
-                }
+            peer = {
+                "agent_id": agent_id,
+                "alias": record.get("alias"),
+                "status": status,
+                "last_seen": record.get("last_seen"),
+                "age": format_age(record.get("last_seen")),
+                "age_seconds": age_seconds(record.get("last_seen")),
+                "lease_expires_at": record.get("lease_expires_at"),
+                "current": agent_id == self.agent_id,
+                "runtime": record.get("runtime"),
+                "model": record.get("model"),
+                "pane": record.get("pane"),
+                "role": record.get("role"),
+                "mode": mode,
+                "territory": self._record_territory(record),
+                "phase": (peer_focus or {}).get("phase"),
+                "focus": peer_focus,
+            }
+            if record.get("stop_note"):
+                peer["stop_note"] = record["stop_note"]
+            peers.append(peer)
+        status_rank = {"active": 0, "idle": 1, "stopped": 2, "dead": 3, "stale": 4}
+        peers.sort(
+            key=lambda item: (
+                status_rank.get(str(item.get("status")), 9),
+                0 if item.get("mode") == "writer" else 1,
+                str(item.get("agent_id")),
             )
+        )
         return peers
+
+    def stop(self, note: str | None) -> dict[str, Any]:
+        with self.locked():
+            agents = self._load_agents()
+            current = agents.get(self.agent_id, {"agent_id": self.agent_id})
+            current["last_seen"] = now_iso()
+            current["stopped"] = True
+            current["stopped_at"] = now_iso()
+            if note:
+                current["stop_note"] = note
+            agents[self.agent_id] = current
+            self._save_agents(agents)
+            focus = self._load_focus()
+            existing_focus = focus.get(self.agent_id)
+            if existing_focus:
+                existing_focus["phase"] = "stopped"
+                existing_focus["updated_at"] = now_iso()
+                self._save_focus(focus)
+            label = current.get("alias") or self.agent_id
+            summary = f"{label} stopped" + (f": {note}" if note else "")
+            self._append_event(kind="stop", summary=summary)
+            return current
+
+    def bye(self) -> dict[str, Any]:
+        self.register_self()
+        with self.locked():
+            agents = self._load_agents()
+            record = agents.pop(self.agent_id, None)
+            self._save_agents(agents)
+            focus = self._load_focus()
+            focus.pop(self.agent_id, None)
+            self._save_focus(focus)
+            claims = self._load_claims()
+            remaining_claims = [item for item in claims if item.get("owner") != self.agent_id]
+            if len(remaining_claims) != len(claims):
+                self._save_claims(remaining_claims)
+            needs = self._load_needs()
+            remaining_needs = [item for item in needs if item.get("owner") != self.agent_id]
+            if len(remaining_needs) != len(needs):
+                self._save_needs(remaining_needs)
+            label = (record or {}).get("alias") or self.agent_id
+            self._append_event(kind="bye", summary=f"{label} left the board")
+            return record or {"agent_id": self.agent_id}
 
     def claims(self) -> list[dict[str, Any]]:
         self.register_self()
@@ -628,9 +973,19 @@ class CoordStore:
         publishes.sort(key=lambda item: (item.get("key", ""), item.get("updated_at", "")), reverse=False)
         return publishes
 
-    def add_publish(self, key: str, status: str, summary: str, refs: list[str]) -> dict[str, Any]:
+    def add_publish(
+        self,
+        key: str,
+        status: str,
+        summary: str,
+        refs: list[str],
+        file_path: str | None = None,
+    ) -> dict[str, Any]:
         self.register_self()
         alias = self.self_record(refresh=False).get("alias")
+        normalized_file = (
+            normalize_path(self.project_root, self.cwd, file_path) if file_path else None
+        )
         with self.locked():
             publishes = self._load_publishes()
             existing = next(
@@ -647,6 +1002,7 @@ class CoordStore:
                         "status": status,
                         "summary": summary,
                         "refs": refs,
+                        "file": normalized_file or existing.get("file"),
                         "updated_at": now_iso(),
                     }
                 )
@@ -659,6 +1015,7 @@ class CoordStore:
                     "status": status,
                     "summary": summary,
                     "refs": refs,
+                    "file": normalized_file,
                     "created_at": now_iso(),
                     "updated_at": now_iso(),
                 }
@@ -686,6 +1043,299 @@ class CoordStore:
                     )
                     return True, existing
             return False, None
+
+    def _live_records(self, agents: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        return {
+            agent_id: record
+            for agent_id, record in agents.items()
+            if agent_id != self.agent_id and classify_presence(record) in {"active", "idle"}
+        }
+
+    @staticmethod
+    def _record_mode(record: dict[str, Any]) -> str:
+        return str(record.get("role_mode") or "writer")
+
+    @staticmethod
+    def _record_territory(record: dict[str, Any]) -> list[str]:
+        territory = record.get("territory")
+        if not isinstance(territory, list):
+            return []
+        return [str(item) for item in territory if str(item)]
+
+    def _territory_overlaps(
+        self,
+        mine: list[str],
+        agents: dict[str, dict[str, Any]],
+        mode: str = "writer",
+    ) -> list[dict[str, Any]]:
+        overlaps: list[dict[str, Any]] = []
+        if not mine:
+            return overlaps
+        for agent_id, record in sorted(self._live_records(agents).items()):
+            if self._record_mode(record) != mode:
+                continue
+            theirs = self._record_territory(record)
+            shared = sorted(
+                {
+                    path
+                    for own in mine
+                    for other in theirs
+                    if path_overlaps(own, other)
+                    for path in (own, other)
+                }
+            )
+            if not shared:
+                continue
+            overlaps.append(
+                {
+                    "peer": agent_id,
+                    "peer_label": record.get("alias") or agent_id,
+                    "paths": shared,
+                }
+            )
+        return overlaps
+
+    def set_role(
+        self,
+        role: str,
+        mode: str | None,
+        territory_paths: list[str],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        self.register_self()
+        resolved_mode = mode or ROLE_DEFAULT_MODES.get(role, "writer")
+        normalized = sorted(
+            {
+                normalize_path(self.project_root, self.cwd, path)
+                for path in territory_paths
+                if path.strip()
+            }
+        )
+        with self.locked():
+            agents = self._load_agents()
+            current = agents.get(self.agent_id, {"agent_id": self.agent_id})
+            current["role"] = role
+            current["role_mode"] = resolved_mode
+            current["territory"] = normalized
+            agents[self.agent_id] = current
+            self._save_agents(agents)
+            label = current.get("alias") or self.agent_id
+            self._append_event(
+                kind="role_set",
+                paths=normalized,
+                summary=f"{label} took role {role} ({resolved_mode}) over {', '.join(normalized) or 'no territory'}",
+            )
+            overlaps = (
+                self._territory_overlaps(normalized, agents, mode="writer")
+                if resolved_mode == "writer"
+                else []
+            )
+        payload = {
+            "agent_id": self.agent_id,
+            "alias": current.get("alias"),
+            "role": role,
+            "mode": resolved_mode,
+            "territory": normalized,
+        }
+        return payload, overlaps
+
+    def territory_map(self) -> dict[str, Any]:
+        self.register_self()
+        agents = self._load_agents()
+        territories: list[dict[str, Any]] = []
+        writers: list[tuple[str, str, list[str]]] = []
+        for agent_id, record in sorted(agents.items()):
+            territory = self._record_territory(record)
+            if not territory and not record.get("role"):
+                continue
+            status = classify_presence(record)
+            mode = self._record_mode(record)
+            label = record.get("alias") or agent_id
+            territories.append(
+                {
+                    "agent_id": agent_id,
+                    "label": label,
+                    "role": record.get("role"),
+                    "mode": mode,
+                    "status": status,
+                    "age": format_age(record.get("last_seen")),
+                    "territory": territory,
+                    "current": agent_id == self.agent_id,
+                }
+            )
+            if mode == "writer" and territory and status in {"active", "idle"}:
+                writers.append((agent_id, label, territory))
+        overlaps: list[dict[str, Any]] = []
+        for index, (agent_a, label_a, paths_a) in enumerate(writers):
+            for agent_b, label_b, paths_b in writers[index + 1 :]:
+                shared = sorted(
+                    {
+                        path
+                        for own in paths_a
+                        for other in paths_b
+                        if path_overlaps(own, other)
+                        for path in (own, other)
+                    }
+                )
+                if shared:
+                    overlaps.append(
+                        {
+                            "agents": [agent_a, agent_b],
+                            "labels": [label_a, label_b],
+                            "paths": shared,
+                        }
+                    )
+        return {"territories": territories, "overlaps": overlaps}
+
+    def _drop_targets_me(self, drop: dict[str, Any]) -> bool:
+        target = str(drop.get("for") or "any")
+        if target == "any":
+            return True
+        if drop.get("for_agent_id") == self.agent_id or target == self.agent_id:
+            return True
+        record = self.self_record(refresh=False)
+        alias = record.get("alias")
+        if isinstance(alias, str) and alias and target == alias:
+            return True
+        role = record.get("role")
+        return isinstance(role, str) and bool(role) and target == role
+
+    def add_drop(self, path: str, target: str, note: str | None, key: str | None) -> dict[str, Any]:
+        self.register_self()
+        normalized = normalize_path(self.project_root, self.cwd, path)
+        alias = self.self_record(refresh=False).get("alias")
+        resolved, _ = self._resolve_peer(target)
+        known_agent = resolved in self._load_agents()
+        with self.locked():
+            drops = self._load_drops()
+            payload = {
+                "path": normalized,
+                "owner": self.agent_id,
+                "owner_label": alias or self.agent_id,
+                "for": target,
+                "for_agent_id": resolved if known_agent else None,
+                "note": note,
+                "key": key,
+                "created_at": now_iso(),
+            }
+            drops = [item for item in drops if not (item.get("owner") == self.agent_id and item.get("path") == normalized)]
+            drops.append(payload)
+            self._save_drops(drops)
+            self._append_event(
+                kind="drop_add",
+                paths=[normalized],
+                keys=[key] if key else [],
+                summary=f"{alias or self.agent_id} dropped {normalized} for {target}",
+            )
+            return payload
+
+    def drops(self, for_me: bool = False) -> list[dict[str, Any]]:
+        self.register_self()
+        drops = self._load_drops()
+        if for_me:
+            drops = [item for item in drops if item.get("owner") != self.agent_id and self._drop_targets_me(item)]
+        drops.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        return drops
+
+    def history(self, peer: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        self.register_self()
+        events = self._load_events()
+        if peer:
+            agent_id, _ = self._resolve_peer(peer)
+            events = [item for item in events if item.get("agent_id") == agent_id]
+        events.sort(key=lambda item: int(item.get("seq", 0)), reverse=True)
+        return events[: max(1, limit)]
+
+    def guard_check(self, paths: list[str], staged: bool) -> dict[str, Any]:
+        self.register_self()
+        raw_paths = list(paths)
+        if staged:
+            staged_output = git_output(self.cwd, "diff", "--cached", "--name-only") or ""
+            raw_paths.extend(line for line in staged_output.splitlines() if line.strip())
+        normalized = sorted(
+            {normalize_path(self.project_root, self.cwd, path) for path in raw_paths if path.strip()}
+        )
+        agents = self._load_agents()
+        live = self._live_records(agents)
+        warnings: list[dict[str, Any]] = []
+        claims = self._load_claims()
+        for path in normalized:
+            for claim in claims:
+                owner = str(claim.get("owner"))
+                if owner == self.agent_id or owner not in live:
+                    continue
+                owned = str(claim.get("path", ""))
+                if not path_overlaps(path, owned):
+                    continue
+                warnings.append(
+                    {
+                        "path": path,
+                        "kind": "claim",
+                        "owner": owner,
+                        "owner_label": claim.get("owner_alias") or live[owner].get("alias") or owner,
+                        "owned_path": owned,
+                        "reason": claim.get("reason"),
+                    }
+                )
+            for agent_id, record in sorted(live.items()):
+                for owned in self._record_territory(record):
+                    if not path_overlaps(path, owned):
+                        continue
+                    warnings.append(
+                        {
+                            "path": path,
+                            "kind": "territory",
+                            "owner": agent_id,
+                            "owner_label": record.get("alias") or agent_id,
+                            "owned_path": owned,
+                            "role": record.get("role"),
+                            "mode": self._record_mode(record),
+                        }
+                    )
+        if warnings:
+            label = self.self_record(refresh=False).get("alias") or self.agent_id
+            with self.locked():
+                self._append_event(
+                    kind="guard_warn",
+                    paths=sorted({item["path"] for item in warnings}),
+                    summary=f"{label} touched paths owned by live peers: "
+                    + ", ".join(sorted({item["owner_label"] for item in warnings})),
+                )
+        return {"paths": normalized, "warnings": warnings, "clean": not warnings}
+
+    def guard_install(self) -> dict[str, Any]:
+        hooks_text = git_output(self.cwd, "rev-parse", "--git-path", "hooks")
+        if not hooks_text:
+            return {"installed": False, "error": "not inside a git repository"}
+        hooks_dir = Path(hooks_text)
+        if not hooks_dir.is_absolute():
+            hooks_dir = (self.cwd / hooks_dir).resolve()
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook_path = hooks_dir / "pre-commit"
+
+        dispatcher = Path(__file__).resolve().parents[1] / "agent-do"
+        command = f"{shlex.quote(str(dispatcher))} coord guard check --staged" if dispatcher.exists() else "agent-do coord guard check --staged"
+        marker = "# >>> agent-do coord guard >>>"
+        block = (
+            f"{marker}\n"
+            "# Advisory only: warns when staged paths intersect a live peer's claim or territory.\n"
+            f"{command} || true\n"
+            "# <<< agent-do coord guard <<<\n"
+        )
+
+        already = False
+        if hook_path.exists():
+            content = hook_path.read_text()
+            if marker in content:
+                already = True
+            else:
+                if content and not content.endswith("\n"):
+                    content += "\n"
+                content += "\n" + block
+                hook_path.write_text(content)
+        else:
+            hook_path.write_text("#!/bin/sh\n\n" + block)
+        hook_path.chmod(0o755)
+        return {"installed": True, "already_installed": already, "hook": str(hook_path)}
 
     def _current_paths(self) -> list[str]:
         focus = self.focus_for() or {}
@@ -781,6 +1431,63 @@ class CoordStore:
                 }
             )
 
+        # Territory contention: two live writers with overlapping write-domains, fired for both.
+        my_record = agents.get(self.agent_id, {})
+        my_mode = self._record_mode(my_record)
+        my_territory = self._record_territory(my_record)
+        if my_mode == "writer" and my_territory:
+            for overlap in self._territory_overlaps(my_territory, agents, mode="writer"):
+                interrupts.append(
+                    {
+                        "kind": "contention",
+                        "severity": "warning",
+                        "peer": overlap["peer"],
+                        "peer_label": overlap["peer_label"],
+                        "paths": overlap["paths"],
+                        "keys": [],
+                        "summary": (
+                            f"Exclusive-writer overlap with {overlap['peer_label']}: "
+                            f"{', '.join(overlap['paths'])}"
+                        ),
+                        "new": False,
+                        "event_id": None,
+                    }
+                )
+
+        # Courtesy notice: an auditor is reading paths this writer owns.
+        if my_mode == "writer":
+            my_write_paths = sorted({*my_territory, *my_paths})
+            for agent_id, record in sorted(self._live_records(agents).items()):
+                if self._record_mode(record) != "read-only":
+                    continue
+                reader_paths = self._record_territory(record)
+                reader_focus = self.focus_map().get(agent_id) or {}
+                reader_paths = sorted({*reader_paths, *[str(item) for item in reader_focus.get("paths", [])]})
+                shared = sorted(
+                    {
+                        mine
+                        for mine in my_write_paths
+                        for theirs in reader_paths
+                        if path_overlaps(mine, theirs)
+                    }
+                )
+                if not shared:
+                    continue
+                label = record.get("alias") or agent_id
+                interrupts.append(
+                    {
+                        "kind": "notice",
+                        "severity": "info",
+                        "peer": agent_id,
+                        "peer_label": label,
+                        "paths": shared,
+                        "keys": [],
+                        "summary": f"Auditor {label} active on your paths: {', '.join(shared)}",
+                        "new": False,
+                        "event_id": None,
+                    }
+                )
+
         # Current dependencies.
         for need in my_needs:
             match = self._matching_publish(need, publishes)
@@ -838,6 +1545,41 @@ class CoordStore:
                 }
             )
 
+        # Drops addressed to me (or matching a need key) are dependencies made visible.
+        for drop in self._load_drops():
+            if drop.get("owner") == self.agent_id:
+                continue
+            key = drop.get("key")
+            key_match = bool(key) and str(key) in my_need_keys
+            if not (self._drop_targets_me(drop) or key_match):
+                continue
+            drop_path = str(drop.get("path", ""))
+            latest_event = next(
+                (
+                    event
+                    for event in reversed(self._load_events())
+                    if event.get("kind") == "drop_add"
+                    and drop_path in event.get("paths", [])
+                    and event.get("agent_id") == drop.get("owner")
+                ),
+                None,
+            )
+            seq = int(latest_event.get("seq", 0)) if latest_event else 0
+            note = f" — {drop.get('note')}" if drop.get("note") else ""
+            interrupts.append(
+                {
+                    "kind": "dependency",
+                    "severity": "info",
+                    "peer": drop.get("owner"),
+                    "peer_label": drop.get("owner_label") or drop.get("owner"),
+                    "paths": [drop_path],
+                    "keys": [str(key)] if key else [],
+                    "summary": f"Drop available from {drop.get('owner_label') or drop.get('owner')}: {drop_path}{note}",
+                    "new": seq > last_seen_seq,
+                    "event_id": latest_event.get("id") if latest_event else None,
+                }
+            )
+
         # Relevant novelty since last seen.
         seen_by_novelty: set[int] = set()
         for event in self._load_events():
@@ -874,7 +1616,7 @@ class CoordStore:
 
         interrupts.sort(
             key=lambda item: (
-                {"contention": 0, "dependency": 1, "novelty": 2}.get(str(item.get("kind")), 9),
+                {"contention": 0, "notice": 1, "dependency": 2, "novelty": 3}.get(str(item.get("kind")), 9),
                 0 if item.get("new") else 1,
                 item.get("summary", ""),
             )
@@ -885,7 +1627,7 @@ class CoordStore:
         if mark_seen and max_seq > last_seen_seq:
             self._mark_interrupt_seq(max_seq)
 
-        counts = {"contention": 0, "dependency": 0, "novelty": 0}
+        counts = {"contention": 0, "notice": 0, "dependency": 0, "novelty": 0}
         for item in interrupts:
             kind = str(item.get("kind"))
             counts[kind] = counts.get(kind, 0) + 1
@@ -901,8 +1643,13 @@ class CoordStore:
     def touch(self) -> dict[str, Any]:
         agent = self.register_self()
         current_focus = self.focus_for()
-        peers = self.peers(include_stale=False)
-        active_peers = [peer for peer in peers if not peer["current"] and peer["status"] == "active"]
+        peers = self.peers(include_stale=True)
+        others = [peer for peer in peers if not peer["current"]]
+        active_peers = [peer for peer in others if peer["status"] == "active"]
+        peer_counts = {"active": 0, "idle": 0, "stopped": 0, "dead": 0, "stale": 0}
+        for peer in others:
+            status = str(peer["status"])
+            peer_counts[status] = peer_counts.get(status, 0) + 1
         return {
             "agent": {
                 **agent,
@@ -910,6 +1657,7 @@ class CoordStore:
             },
             "focus": current_focus,
             "active_peers": active_peers,
+            "peer_counts": peer_counts,
             "active_window_seconds": ACTIVE_WINDOW_SECONDS,
             "idle_window_seconds": IDLE_WINDOW_SECONDS,
         }
@@ -953,6 +1701,31 @@ def parser() -> argparse.ArgumentParser:
 
     peers_p = sub.add_parser("peers")
     peers_p.add_argument("--all", action="store_true")
+    peers_p.add_argument("--active-only", action="store_true", dest="active_only")
+    peers_p.add_argument("--writers", action="store_true", dest="writers_only")
+
+    stop_p = sub.add_parser("stop")
+    stop_p.add_argument("--note")
+
+    sub.add_parser("bye")
+
+    role_p = sub.add_parser("role")
+    role_sub = role_p.add_subparsers(dest="role_command")
+    role_set = role_sub.add_parser("set")
+    role_set.add_argument("role", choices=list(ROLES))
+    role_set.add_argument("--mode", choices=["read-only", "writer"])
+    role_set.add_argument("--territory", action="append", default=[], dest="territory")
+
+    territory_p = sub.add_parser("territory")
+    territory_sub = territory_p.add_subparsers(dest="territory_command")
+    territory_sub.add_parser("show")
+
+    guard_p = sub.add_parser("guard")
+    guard_sub = guard_p.add_subparsers(dest="guard_command")
+    guard_check = guard_sub.add_parser("check")
+    guard_check.add_argument("paths", nargs="*")
+    guard_check.add_argument("--staged", action="store_true")
+    guard_sub.add_parser("install")
 
     interrupts_p = sub.add_parser("interrupts")
     interrupts_p.add_argument("--mark-seen", action="store_true")
@@ -962,7 +1735,11 @@ def parser() -> argparse.ArgumentParser:
     focus_sub = focus_p.add_subparsers(dest="focus_command")
     focus_set = focus_sub.add_parser("set")
     focus_set.add_argument("goal")
-    focus_set.add_argument("--path", action="append", required=True, dest="paths")
+    focus_set.add_argument("--path", action="append", default=[], dest="paths")
+    focus_set.add_argument("--phase", choices=list(FOCUS_PHASES))
+    focus_set.add_argument("--note")
+    focus_set.add_argument("--blocking-on", action="append", dest="blocking_on")
+    focus_set.add_argument("--last-ship", dest="last_ship")
     focus_show = focus_sub.add_parser("show")
     focus_show.add_argument("peer", nargs="?")
     focus_sub.add_parser("clear")
@@ -995,8 +1772,24 @@ def parser() -> argparse.ArgumentParser:
     publish_add.add_argument("--status", required=True)
     publish_add.add_argument("--summary", required=True)
     publish_add.add_argument("--ref", action="append", default=[])
+    publish_add.add_argument("--file", dest="file_path")
     publish_clear = publish_sub.add_parser("clear")
     publish_clear.add_argument("key")
+
+    drop_p = sub.add_parser("drop")
+    drop_sub = drop_p.add_subparsers(dest="drop_command")
+    drop_add = drop_sub.add_parser("add")
+    drop_add.add_argument("path")
+    drop_add.add_argument("--for", dest="target", default="any")
+    drop_add.add_argument("--note")
+    drop_add.add_argument("--key")
+
+    drops_p = sub.add_parser("drops")
+    drops_p.add_argument("--for-me", action="store_true", dest="for_me")
+
+    history_p = sub.add_parser("history")
+    history_p.add_argument("peer", nargs="?")
+    history_p.add_argument("--limit", type=int, default=20)
 
     sub.add_parser("help")
     return p
@@ -1006,8 +1799,18 @@ def format_peer(peer: dict[str, Any]) -> str:
     label = peer.get("alias") or peer.get("agent_id")
     current = " current" if peer.get("current") else ""
     focus = peer.get("focus") or {}
-    goal = f' goal:"{focus.get("goal")}"' if focus.get("goal") else ""
-    return f"{label} status:{peer.get('status')}{current}{goal}"
+    parts = [f"{label} status:{peer.get('status')}({peer.get('age')})"]
+    if peer.get("role"):
+        mode = peer.get("mode")
+        role = str(peer.get("role"))
+        parts.append(f"role:{role}[read-only]" if mode == "read-only" else f"role:{role}")
+    if peer.get("phase"):
+        parts.append(f"phase:{peer.get('phase')}")
+    if focus.get("goal"):
+        parts.append(f'goal:"{focus.get("goal")}"')
+    if peer.get("stop_note"):
+        parts.append(f'note:"{peer.get("stop_note")}"')
+    return " ".join(parts) + current
 
 
 def format_interrupt(item: dict[str, Any]) -> str:
@@ -1056,6 +1859,13 @@ def main(argv: list[str]) -> int:
             "agent_id": store.agent_id,
             "alias": record.get("alias"),
             "identity_source": store.identity_source,
+            "session": store.session,
+            "pid": record.get("pid"),
+            "pid_start": record.get("pid_start"),
+            "pane": record.get("pane"),
+            "host": record.get("host"),
+            "runtime": record.get("runtime"),
+            "model": record.get("model"),
             "project_root": str(store.project_root),
             "coord_root": str(store.coord_root),
             "storage": store.storage,
@@ -1083,8 +1893,20 @@ def main(argv: list[str]) -> int:
             print(f'{item["alias"]} -> {item["agent_id"]} status:{item["status"]}{current}')
         return 0
 
+    if args.command == "stop":
+        record = store.stop(args.note)
+        return print_payload({"success": True, "tool": "coord", "agent": record}, args.json)
+
+    if args.command == "bye":
+        record = store.bye()
+        return print_payload({"success": True, "tool": "coord", "removed": record}, args.json)
+
     if args.command == "peers":
-        peers = store.peers(include_stale=args.all)
+        peers = store.peers(
+            include_stale=args.all,
+            active_only=args.active_only,
+            writers_only=args.writers_only,
+        )
         if args.json:
             return print_payload({"success": True, "tool": "coord", "peers": peers}, True)
         if not peers:
@@ -1112,6 +1934,7 @@ def main(argv: list[str]) -> int:
         print(
             "Interrupts:"
             f" contention={payload['interrupts']['counts']['contention']}"
+            f" notice={payload['interrupts']['counts'].get('notice', 0)}"
             f" dependency={payload['interrupts']['counts']['dependency']}"
             f" novelty={payload['interrupts']['counts']['novelty']}"
         )
@@ -1130,7 +1953,14 @@ def main(argv: list[str]) -> int:
 
     if args.command == "focus":
         if args.focus_command == "set":
-            payload = store.set_focus(args.goal, args.paths)
+            payload = store.set_focus(
+                args.goal,
+                args.paths,
+                phase=args.phase,
+                note=args.note,
+                blocking_on=args.blocking_on,
+                last_ship=args.last_ship,
+            )
             return print_payload({"success": True, "tool": "coord", "focus": payload}, args.json)
         if args.focus_command == "show":
             payload = store.focus_for(args.peer)
@@ -1141,6 +1971,58 @@ def main(argv: list[str]) -> int:
             payload = store.clear_focus()
             return print_payload({"success": True, "tool": "coord", "cleared": payload}, args.json)
         return error("focus requires set|show|clear", args.json, code=2)
+
+    if args.command == "role":
+        if args.role_command == "set":
+            payload, overlaps = store.set_role(args.role, args.mode, args.territory)
+            return print_payload(
+                {"success": True, "tool": "coord", "role": payload, "overlaps": overlaps},
+                args.json,
+            )
+        return error("role requires set", args.json, code=2)
+
+    if args.command == "territory":
+        if args.territory_command == "show":
+            payload = store.territory_map()
+            if args.json:
+                return print_payload({"success": True, "tool": "coord", **payload}, True)
+            if not payload["territories"]:
+                print("No territories declared.")
+                return 0
+            for entry in payload["territories"]:
+                current = " (current)" if entry["current"] else ""
+                paths = ", ".join(entry["territory"]) or "-"
+                print(
+                    f'{entry["label"]} ({entry["role"] or "no-role"}, {entry["mode"]}, '
+                    f'{entry["status"]} {entry["age"]}){current}: {paths}'
+                )
+            for overlap in payload["overlaps"]:
+                labels = " & ".join(overlap["labels"])
+                print(f'!! OVERLAP: {", ".join(overlap["paths"])} — {labels}')
+            return 0
+        return error("territory requires show", args.json, code=2)
+
+    if args.command == "guard":
+        if args.guard_command == "check":
+            payload = store.guard_check(args.paths, args.staged)
+            if args.json:
+                print_payload({"success": True, "tool": "coord", **payload}, True)
+            elif payload["clean"]:
+                print("guard: clean — no live claims or territories intersect.")
+            else:
+                for item in payload["warnings"]:
+                    owned = item.get("owned_path")
+                    print(
+                        f'guard WARN: {item["path"]} intersects {item["owner_label"]} '
+                        f'({item["kind"]}: {owned})'
+                    )
+            return 0
+        if args.guard_command == "install":
+            payload = store.guard_install()
+            if not payload.get("installed"):
+                return error(str(payload.get("error") or "guard install failed"), args.json)
+            return print_payload({"success": True, "tool": "coord", **payload}, args.json)
+        return error("guard requires check|install", args.json, code=2)
 
     if args.command == "claims":
         claims = store.claims()
@@ -1176,9 +2058,40 @@ def main(argv: list[str]) -> int:
         payload = store.publishes()
         return print_payload({"success": True, "tool": "coord", "publishes": payload}, args.json)
 
+    if args.command == "drop":
+        if args.drop_command == "add":
+            payload = store.add_drop(args.path, args.target, args.note, args.key)
+            return print_payload({"success": True, "tool": "coord", "drop": payload}, args.json)
+        return error("drop requires add", args.json, code=2)
+
+    if args.command == "drops":
+        payload = store.drops(for_me=args.for_me)
+        if args.json:
+            return print_payload({"success": True, "tool": "coord", "drops": payload}, True)
+        if not payload:
+            print("No drops.")
+            return 0
+        for item in payload:
+            target = item.get("for") or "any"
+            note = f' — {item.get("note")}' if item.get("note") else ""
+            print(f'{item.get("path")} (from {item.get("owner_label")}, for {target}){note}')
+        return 0
+
+    if args.command == "history":
+        events = store.history(peer=args.peer, limit=args.limit)
+        if args.json:
+            return print_payload({"success": True, "tool": "coord", "events": events}, True)
+        if not events:
+            print("No history.")
+            return 0
+        for event in events:
+            label = event.get("agent_alias") or event.get("agent_id")
+            print(f'{event.get("created_at")} {event.get("kind")} {label}: {event.get("summary")}')
+        return 0
+
     if args.command == "publish":
         if args.publish_command == "add":
-            payload = store.add_publish(args.key, args.status, args.summary, args.ref)
+            payload = store.add_publish(args.key, args.status, args.summary, args.ref, file_path=args.file_path)
             return print_payload({"success": True, "tool": "coord", "publish": payload}, args.json)
         if args.publish_command == "clear":
             ok, payload = store.clear_publish(args.key)

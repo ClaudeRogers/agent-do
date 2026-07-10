@@ -3479,42 +3479,59 @@ tools:
   coord:
     description: Project-local agent state and interrupt broker
     capabilities:
-    - derive stable agent identities per tmux/thread session
-    - renew short-lived presence leases and classify peers as active, idle, or stale
-    - declare current focus areas with goal plus project-relative paths
-    - manage advisory claims on files or paths
-    - declare dependencies on artifacts another agent may produce
-    - publish finished artifacts and compute contention, dependency, and novelty interrupts
+    - mint session-UUID identities anchored to process pid + start time (pane reuse never inherits a dead session)
+    - verify peer liveness (kill -0 + start-time match) and classify peers as active, idle, dead, stopped, or stale
+    - declare structured focus (goal, phase, note, blocking_on, last_ship) with project-relative paths
+    - declare roles with exclusive-writer territories and compute overlap contention for both writers
+    - manage advisory claims and a warn-only pre-commit guard over live claims and territories
+    - point peers at files via drops, declare dependencies, publish artifacts with file pointers
+    - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
     commands:
       touch: Renew current agent presence lease and report active peers
-      whoami: Show current coordination identity and broker root
+      whoami: Show current coordination identity, session, pid, and runtime
       alias: 'Assign a friendly alias: alias <name>'
       aliases: List known aliases in this project
-      peers: List known peers and presence state
+      peers: 'List known peers with liveness-verified status and age: peers [--all] [--active-only] [--writers]'
+      stop: 'Retire this session cleanly (Stop-hook safe): stop [--note <text>]'
+      bye: Delete this agent's own board records
+      role: 'Declare role and territory: role set <builder|auditor|researcher|overseer> [--mode read-only|writer] --territory <path>'
+      territory: 'Render the ownership map: territory show'
+      guard: 'Advisory commit guard: guard check [<path> ...] [--staged] | guard install'
       status: Show current focus, needs, publishes, and interrupt counts
       interrupts: 'Show current interrupts: interrupts [--mark-seen] [--limit <n>]'
-      focus: 'Manage focus: focus set|show|clear'
+      focus: 'Manage structured focus: focus set <goal> [--path <p>] [--phase <phase>] [--note <t>] [--blocking-on <ref>] [--last-ship <t>] | show | clear'
       claims: List advisory claims
       claim: 'Claim a file/path: claim <path> [--reason <text>] [--strength soft|strong]'
       release: 'Release a claim you own: release <path>'
       need: 'Manage dependencies: need add|list|clear'
       publishes: List published artifacts
-      publish: 'Manage published artifacts: publish add|clear'
+      publish: 'Manage published artifacts: publish add [--file <path>]|clear'
+      drop: 'Point a peer at a file: drop add <path> --for <agent|role|any> [--note <text>] [--key <need-key>]'
+      drops: 'List drops: drops [--for-me]'
+      history: 'Read the coordination event journal: history [peer] [--limit <n>]'
     examples:
     - intent: see who I am in this project
       command: agent-coord whoami
     - intent: refresh my coordination presence
       command: agent-coord touch
+    - intent: declare my role and exclusive write territory
+      command: agent-coord role set builder --territory dm-ephemeris --territory shared/schema.json
     - intent: declare what I am working on
-      command: agent-coord focus set "private Render networking" --path recognition-oracle/render.yaml --path dm-ck/render.yaml
+      command: agent-coord focus set "private Render networking" --path recognition-oracle/render.yaml --phase building
+    - intent: go quiet while another agent audits
+      command: agent-coord focus set "private Render networking" --phase quiet --note "QUIET while auditor runs"
     - intent: claim a file to avoid overlap
       command: agent-coord claim recognition-oracle/render.yaml --reason "private Render blueprint wiring"
     - intent: declare that I am waiting on a package
       command: agent-coord need add dm-sdk@1.2.2 --why "switch off tarball dependency"
     - intent: publish something another agent may care about
       command: agent-coord publish add dm-sdk@1.2.2 --status ready --summary "private package published"
+    - intent: hand another agent a research file
+      command: agent-coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
     - intent: see whether anything should interrupt me
       command: agent-coord interrupts
+    - intent: retire this session at the end of work
+      command: agent-coord stop --note "lane 14 shipped"
     routing:
       discover_keywords:
       - coordinate with another agent
@@ -3546,6 +3563,10 @@ tools:
       - claims
       - need list
       - publishes
+      - drops
+      - history
+      - territory
+      - guard
       interact:
       - touch
       - alias
@@ -3558,14 +3579,23 @@ tools:
       - need clear
       - publish add
       - publish clear
+      - stop
+      - bye
+      - role
+      - guard
+      - drop
       attributes:
         touch:
         - composite
         interrupts:
         - polymorphic
+        guard:
+        - polymorphic
         need clear:
         - destructive
         publish clear:
+        - destructive
+        bye:
         - destructive
     concurrency: mixed
   3d:

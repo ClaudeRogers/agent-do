@@ -253,14 +253,34 @@ def fallback_focus_command(prompt: str, cwd: str | None) -> str:
 
 
 def compact_peers(active_peers: list[dict]) -> list[dict]:
-    return [
+    peers = [
         {
             "agent": peer.get("alias") or peer.get("agent_id"),
             "goal": ((peer.get("focus") or {}).get("goal")) or "",
             "paths": ((peer.get("focus") or {}).get("paths")) or [],
+            "age": peer.get("age") or "",
+            "phase": peer.get("phase") or "",
+            "mode": peer.get("mode") or "writer",
+            "role": peer.get("role") or "",
         }
         for peer in active_peers[:8]
     ]
+    peers.sort(key=lambda item: 0 if item["mode"] == "writer" else 1)
+    return peers
+
+
+def format_peer_line(peer: dict) -> str:
+    label = str(peer.get("agent"))
+    details = []
+    if peer.get("mode") == "read-only":
+        details.append(f"{peer.get('role') or 'auditor'}, read-only")
+    if peer.get("phase"):
+        details.append(f"phase:{peer['phase']}")
+    if peer.get("age"):
+        details.append(peer["age"])
+    suffix = f" ({', '.join(details)})" if details else ""
+    goal = f" goal: {peer['goal']}" if peer.get("goal") else ""
+    return f"- {label}{suffix}{goal}"
 
 
 def compact_interrupts(interrupts: list[dict]) -> list[dict]:
@@ -532,10 +552,11 @@ def format_coord_requirement(
     if not valid_focus_command(command):
         command = fallback_focus_command(prompt, cwd)
 
-    peer_lines = []
-    for peer in compact_peers(coord_state.get("active_peers") or []):
-        suffix = f" goal: {peer['goal']}" if peer.get("goal") else ""
-        peer_lines.append(f"- {peer.get('agent')}{suffix}")
+    peer_lines = [format_peer_line(peer) for peer in compact_peers(coord_state.get("active_peers") or [])]
+    counts = coord_state.get("peer_counts") or {}
+    hidden = int(counts.get("dead", 0)) + int(counts.get("stale", 0)) + int(counts.get("stopped", 0))
+    if hidden:
+        peer_lines.append(f"- ({hidden} dead/stopped/stale sessions on the board, not shown)")
     peers = "\n".join(peer_lines) if peer_lines else "- active peer present"
 
     return (
@@ -650,7 +671,7 @@ def resolve_agent_do_binary() -> str | None:
 
 
 def load_coord_state(cwd: str | None) -> dict:
-    state = {"active_peers": [], "focus_goal": "", "interrupts": []}
+    state = {"active_peers": [], "peer_counts": {}, "focus_goal": "", "interrupts": []}
     if not cwd:
         return state
     agent_do = resolve_agent_do_binary()
@@ -673,6 +694,7 @@ def load_coord_state(cwd: str | None) -> dict:
 
     touch_payload = json.loads(touched.stdout)
     state["active_peers"] = touch_payload.get("active_peers", [])
+    state["peer_counts"] = touch_payload.get("peer_counts", {})
     state["focus_goal"] = ((touch_payload.get("focus") or {}).get("goal")) or ""
 
     interrupts_run = subprocess.run(

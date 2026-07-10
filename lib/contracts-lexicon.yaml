@@ -405,6 +405,12 @@ overrides:
   coord:
     touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
     interrupts: {beats: [snapshot, interact], attributes: [polymorphic]}  # --mark-seen writes cursor
+    guard: {beats: [snapshot, interact], attributes: [polymorphic]}  # check reads, install writes the hook
+    bye: {beats: [interact], attributes: [destructive]}     # deletes own board records
+    role: {beats: [interact]}                               # role set declares territory
+    territory: {beats: [snapshot]}                          # ownership map render
+    drop: {beats: [interact]}                               # file-pointer handoff onto the board
+    drops: {beats: [snapshot]}                              # list drops
   manna:
     claim: {beats: [interact]}
     done: {beats: [interact]}

@@ -287,13 +287,26 @@ Use:
     active_block=$(echo "$touch_json" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
+peers = data.get('active_peers', [])
+peers.sort(key=lambda item: 0 if (item.get('mode') or 'writer') == 'writer' else 1)
 lines = []
-for peer in data.get('active_peers', []):
+for peer in peers:
     label = peer.get('alias') or peer.get('agent_id')
     focus = peer.get('focus') or {}
-    goal = focus.get('goal')
-    suffix = f' goal: {goal}' if goal else ''
-    lines.append(f'- {label}{suffix}')
+    details = []
+    if (peer.get('mode') or 'writer') == 'read-only':
+        details.append(f\"{peer.get('role') or 'auditor'}, read-only\")
+    if peer.get('phase'):
+        details.append(f\"phase:{peer['phase']}\")
+    if peer.get('age'):
+        details.append(peer['age'])
+    suffix = f\" ({', '.join(details)})\" if details else ''
+    goal = f\" goal: {focus.get('goal')}\" if focus.get('goal') else ''
+    lines.append(f'- {label}{suffix}{goal}')
+counts = data.get('peer_counts') or {}
+hidden = int(counts.get('dead', 0)) + int(counts.get('stopped', 0)) + int(counts.get('stale', 0))
+if hidden:
+    lines.append(f'- ({hidden} dead/stopped/stale sessions on the board, not shown)')
 print('\n'.join(lines))
 " 2>/dev/null || true)
 
