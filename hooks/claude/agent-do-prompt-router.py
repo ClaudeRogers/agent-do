@@ -670,6 +670,48 @@ def resolve_agent_do_binary() -> str | None:
     return None
 
 
+def run_bounded(
+    cmd: list[str],
+    cwd: str | None,
+    env: dict | None,
+    timeout: float,
+) -> tuple[int | None, str]:
+    """Run with a hard wall-clock bound, SIGKILLing the whole process group.
+
+    A plain subprocess.run(timeout=...) kills only the direct child; a wedged
+    grandchild keeps the stdout pipe open and communicate() blocks anyway.
+    start_new_session gives the child its own group so the kill takes the
+    whole tree down and the pipe closes.
+    """
+    import signal
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None, ""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            proc.communicate(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None, ""
+
+
 def load_coord_state(cwd: str | None) -> dict:
     state = {"active_peers": [], "peer_counts": {}, "focus_goal": "", "interrupts": []}
     if not cwd:
@@ -681,34 +723,30 @@ def load_coord_state(cwd: str | None) -> dict:
     hook_env = os.environ.copy()
     hook_env["AGENT_DO_TELEMETRY_SUPPRESS"] = "1"
 
-    touched = subprocess.run(
-        [agent_do, "coord", "touch", "--json"],
-        cwd=cwd,
-        env=hook_env,
-        text=True,
-        capture_output=True,
-        check=False,
+    # Hard per-call budget: the hook itself gets 5s from Claude Code, and a
+    # slow or wedged agent-do spawn must degrade to "no coord context", not
+    # eat the whole hook (which discards ALL hook output).
+    touch_rc, touch_out = run_bounded(
+        [agent_do, "coord", "touch", "--json"], cwd=cwd, env=hook_env, timeout=2.0
     )
-    if touched.returncode != 0 or not touched.stdout.strip():
+    if touch_rc != 0 or not touch_out.strip():
         return state
 
-    touch_payload = json.loads(touched.stdout)
+    touch_payload = json.loads(touch_out)
     state["active_peers"] = touch_payload.get("active_peers", [])
     state["peer_counts"] = touch_payload.get("peer_counts", {})
     state["focus_goal"] = ((touch_payload.get("focus") or {}).get("goal")) or ""
 
-    interrupts_run = subprocess.run(
+    interrupts_rc, interrupts_out = run_bounded(
         [agent_do, "coord", "interrupts", "--json", "--limit", "5"],
         cwd=cwd,
         env=hook_env,
-        text=True,
-        capture_output=True,
-        check=False,
+        timeout=2.0,
     )
-    if interrupts_run.returncode != 0 or not interrupts_run.stdout.strip():
+    if interrupts_rc != 0 or not interrupts_out.strip():
         interrupts_payload = {"interrupts": []}
     else:
-        interrupts_payload = json.loads(interrupts_run.stdout)
+        interrupts_payload = json.loads(interrupts_out)
 
     state["interrupts"] = interrupts_payload.get("interrupts", [])
     return state

@@ -143,7 +143,7 @@ append_bootstrap_prompt() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    bootstrap_json=$("$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
+    bootstrap_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
     [ -n "$bootstrap_json" ] || return 0
 
     needs_bootstrap=$(echo "$bootstrap_json" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('needs_bootstrap') else 'false')" 2>/dev/null || echo "false")
@@ -203,7 +203,7 @@ append_project_tooling() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    suggest_json=$("$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
+    suggest_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
     [ -n "$suggest_json" ] || return 0
 
     project_root=$(echo "$suggest_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project',''))" 2>/dev/null || true)
@@ -243,6 +243,20 @@ Refresh this list any time with:
 \`agent-do suggest --project\`"
 }
 
+# Run a command with a hard wall-clock bound, SIGKILLing its entire process
+# group on expiry so orphaned grandchildren cannot hold pipes open.
+bounded_run() {
+    perl -e '
+        setpgrp(0, 0);
+        $SIG{ALRM} = sub { kill KILL => -$$ };
+        alarm shift(@ARGV);
+        my $pid = fork();
+        if (!$pid) { exec @ARGV or exit 127 }
+        waitpid($pid, 0);
+        exit($? >> 8);
+    ' "$@"
+}
+
 append_coord_context() {
     local touch_json interrupts_json active_count focus_goal active_block interrupt_count interrupt_block
 
@@ -250,13 +264,16 @@ append_coord_context() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    touch_json=$(cd "$CWD" && "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
+    # bounded_run kills the whole process group on timeout: a slow or wedged
+    # agent-do spawn must degrade to "no coord context", never hold the pipe
+    # open and eat the hook's whole timeout budget.
+    touch_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
     [ -n "$touch_json" ] || return 0
 
     active_count=$(echo "$touch_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('active_peers', [])))" 2>/dev/null || echo "0")
     focus_goal=$(echo "$touch_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(((data.get('focus') or {}).get('goal')) or '')" 2>/dev/null || true)
 
-    interrupts_json=$(cd "$CWD" && "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
+    interrupts_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
     interrupt_count=$(echo "$interrupts_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('interrupts', [])))" 2>/dev/null || echo "0")
 
     if [ "$interrupt_count" -gt 0 ]; then

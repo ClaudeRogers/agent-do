@@ -31,5 +31,15 @@ fi
 # AGENT_DO_COORD_SESSION in CLAUDE_ENV_FILE from the same session_id).
 [ -n "$SESSION_ID" ] && export AGENT_DO_COORD_SESSION="$SESSION_ID"
 
-"$AGENT_DO" coord stop --note "session ended" >/dev/null 2>&1
+# Hard bound with process-group SIGKILL so a wedged agent-do spawn cannot
+# hang session teardown or leave orphans holding pipes.
+perl -e '
+    setpgrp(0, 0);
+    $SIG{ALRM} = sub { kill KILL => -$$ };
+    alarm shift(@ARGV);
+    my $pid = fork();
+    if (!$pid) { exec @ARGV or exit 127 }
+    waitpid($pid, 0);
+    exit($? >> 8);
+' 5 "$AGENT_DO" coord stop --note "session ended" >/dev/null 2>&1
 exit 0
