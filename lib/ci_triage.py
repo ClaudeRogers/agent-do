@@ -131,7 +131,11 @@ def parse_updater_errors(log):
 DEP_BRANCH = re.compile(r"^dependabot/([^/]+)/(?:.+/)?(.+?)-([0-9][^/]*)$")
 
 
-def classify(repo, run, run_id):
+def classify(repo, run, run_id, log_fetcher=None):
+    """Classify one failed run. `log_fetcher(repo, run_id) -> str` is injectable
+    so tests run offline against fixture logs."""
+    if log_fetcher is None:
+        log_fetcher = fetch_failed_log
     wf = run.get("workflowName") or ""
     branch = run.get("headBranch") or ""
     event = run.get("event") or ""
@@ -145,7 +149,7 @@ def classify(repo, run, run_id):
     }
 
     if wf == "Dependabot Updates":
-        errors, hints = parse_updater_errors(fetch_failed_log(repo, run_id))
+        errors, hints = parse_updater_errors(log_fetcher(repo, run_id))
         facts["updater_errors"] = errors
         facts["hints"] = hints
         return "C2-dependabot-updater", facts, "high"
@@ -162,7 +166,7 @@ def classify(repo, run, run_id):
     if event in ("push", "schedule", "workflow_dispatch", "release"):
         return "C3-trunk-release", facts, "medium-high"
 
-    facts["log_tail"] = redact("\n".join(fetch_failed_log(repo, run_id).splitlines()[-40:]))
+    facts["log_tail"] = redact("\n".join(log_fetcher(repo, run_id).splitlines()[-40:]))
     return "C5-unknown", facts, "low"
 
 
