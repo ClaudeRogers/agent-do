@@ -356,9 +356,12 @@ agent-do coord claim recognition-oracle/render.yaml --reason "private Render blu
 agent-do coord interrupts
 ```
 
-`coord` is a shared state board, not an agent chat system. It tracks presence,
-focus, claims, needs, publishes, and derived interruptions across parallel agents
-working in the same project.
+`coord` is a shared state board, not an agent chat system. It tracks
+liveness-verified presence (a dead session can never read as an active peer),
+structured focus with phases, roles with exclusive-writer territories, claims,
+needs, publishes, and file-pointer drops across parallel agents in the same
+project — and derives contention, notice, dependency, and novelty interrupts
+from them.
 
 ### Notifications
 

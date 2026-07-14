@@ -237,12 +237,22 @@ agent-do slack send --as-bot "#engineering" "Deploy complete"
 
 ```bash
 agent-do coord touch
-agent-do coord focus set "generation cutover" --path app/api/generate/route.ts
+agent-do coord role set builder --territory app/api            # exclusive write-domain; overlaps interrupt both writers
+agent-do coord focus set "generation cutover" --path app/api/generate/route.ts --phase building
 agent-do coord claim app/api/generate/route.ts --reason "cutover path"
 agent-do coord need add dm-sdk@1.2.2 --why "switch off tarball dependency"
 agent-do coord publish add dm-sdk@1.2.2 --status ready --summary "private package published"
+agent-do coord drop add .dev/research/report.md --for builder-a  # file pointers, never content
+agent-do coord peers --writers                                  # liveness-verified, with last-seen ages
 agent-do coord interrupts
+agent-do coord history --limit 20
+agent-do coord stop --note "lane shipped"                       # clean retirement (Stop-hook safe)
 ```
+
+Presence is liveness-verified: peers render active/idle/dead/stopped with last-seen
+ages, so a recycled tmux pane or a crashed session can never masquerade as an
+active peer. `guard install` adds a warn-only pre-commit hook that flags staged
+paths intersecting a live peer's claim or territory.
 
 `spec` stores repo-local intended behavior specs and active change artifacts.
 

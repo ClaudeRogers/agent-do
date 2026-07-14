@@ -325,9 +325,15 @@ Coding Agent Session
     │     of May 2026; the wrapper at ~/.codex/hooks/ delegates to the
     │     same canonical logic.
     │
-    └─ Stop (Codex only) ──→ stop-quality-gate.sh
-        └─ Optional advisory DPT scoring of the current agent-do browse
-          session, surfaced as additionalContext. Never blocks.
+    ├─ Stop (Codex only) ──→ stop-quality-gate.sh
+    │   └─ Optional advisory DPT scoring of the current agent-do browse
+    │     session, surfaced as additionalContext. Never blocks.
+    │
+    └─ SessionEnd (Claude) ──→ agent-do-coord-stop.sh
+        └─ Retires the session's coord presence (`coord stop`) in repos
+          that already have a board. Session-start pins the coord identity
+          from the session_id so retirement hits the same record. Bounded,
+          silent, never blocks.
 ```
 
 All hooks work independently. You can install any subset.
