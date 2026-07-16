@@ -26,6 +26,7 @@ import sys
 GH_TIMEOUT = 60
 RUN_FIELDS = "databaseId,workflowName,displayTitle,event,headBranch,headSha,conclusion,createdAt,url,jobs"
 LOG_TAIL_LINES = 400
+GATE_AUTHORS = {"ctyrrell-versova"}
 
 
 def sh(args):
@@ -51,8 +52,11 @@ REDACT_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"rnd_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization)([=:]\s*)\S+"),
+    re.compile(r"(?i)\b(authorization)([=:]\s*(?:(?:bearer|basic)\s+)?)\S+"),
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password)([=:]\s*)\S+"),
 ]
+
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
 def redact(text):
@@ -61,7 +65,17 @@ def redact(text):
             text = pat.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
         else:
             text = pat.sub("[REDACTED]", text)
-    return text
+    text = ANSI_ESCAPE.sub("", text)
+    return "".join(ch for ch in text if ch in "\n\t" or ord(ch) >= 32)
+
+
+def markdown_inline(value):
+    """Render GitHub-controlled metadata without allowing Markdown/HTML injection."""
+    text = redact(str(value or "")).replace("\r", " ").replace("\n", " ")
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("`", "\\`"))
 
 
 # --- fetch -------------------------------------------------------------------
@@ -70,17 +84,29 @@ def fetch_run(repo, run_id):
     if rc != 0:
         fail("gh run view failed: %s" % (err.strip() or out.strip()))
     try:
-        return json.loads(out)
+        run = json.loads(out)
     except ValueError:
         fail("gh run view returned non-JSON output")
 
+    rc, out, _err = sh(["gh", "api", "repos/%s/actions/runs/%s" % (repo, run_id)])
+    if rc == 0:
+        try:
+            api_run = json.loads(out)
+            run["actor"] = (api_run.get("actor") or {}).get("login") or ""
+        except ValueError:
+            pass
+
+    rc, out, _err = sh(["gh", "api", "repos/%s" % repo, "--jq", ".default_branch"])
+    if rc == 0:
+        run["defaultBranch"] = out.strip()
+    return run
+
 
 def fetch_failed_log(repo, run_id):
-    """Tail of the failed-step logs. Empty string when logs are expired/absent -
-    classification then proceeds on metadata alone."""
+    """Return a failed-log tail, or None when GitHub cannot provide logs."""
     rc, out, _err = sh(["gh", "run", "view", str(run_id), "-R", repo, "--log-failed"])
     if rc != 0:
-        return ""
+        return None
     lines = out.splitlines()
     return "\n".join(lines[-LOG_TAIL_LINES:])
 
@@ -102,7 +128,7 @@ def failed_steps(run):
 # before matching. Cell 2 is snake_case (e.g. dependency_file_not_resolvable),
 # which conveniently excludes the header row.
 DEP_ROW = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([a-z][a-z_]+)\s*\|")
-TRANSIENT_HINTS = ("ERR_PNPM_BROKEN_METADATA_JSON", "unknown_error", "ETIMEDOUT", "ECONNRESET", "429")
+TRANSIENT_HINTS = ("ERR_PNPM_BROKEN_METADATA_JSON", "ETIMEDOUT", "ECONNRESET", "429")
 STRUCTURAL_HINTS = ("No solution found", "unsatisfiable", "requirements are unsatisfiable")
 
 
@@ -132,7 +158,7 @@ DEP_BRANCH = re.compile(r"^dependabot/([^/]+)/(?:.+/)?(.+?)-([0-9][^/]*)$")
 
 
 def classify(repo, run, run_id, log_fetcher=None):
-    """Classify one failed run. `log_fetcher(repo, run_id) -> str` is injectable
+    """Classify one failed run. `log_fetcher(repo, run_id) -> str | None` is injectable
     so tests run offline against fixture logs."""
     if log_fetcher is None:
         log_fetcher = fetch_failed_log
@@ -146,15 +172,19 @@ def classify(repo, run, run_id, log_fetcher=None):
         "title": run.get("displayTitle") or "",
         "failed": failed_steps(run),
         "url": run.get("url") or "",
+        "actor": run.get("actor") or "",
+        "default_branch": run.get("defaultBranch") or "",
     }
 
     if wf == "Dependabot Updates":
-        errors, hints = parse_updater_errors(log_fetcher(repo, run_id))
+        raw_log = log_fetcher(repo, run_id)
+        facts["log_available"] = raw_log is not None
+        errors, hints = parse_updater_errors(raw_log or "")
         facts["updater_errors"] = errors
         facts["hints"] = hints
-        return "C2-dependabot-updater", facts, "high"
+        return "C2-dependabot-updater", facts, "high" if errors or hints else "low"
 
-    if branch.startswith("ci/"):
+    if branch.startswith("ci/") and facts["actor"] in GATE_AUTHORS:
         return "C4-gate-authoring", facts, "high"
 
     if branch.startswith("dependabot/"):
@@ -163,10 +193,15 @@ def classify(repo, run, run_id, log_fetcher=None):
             facts["ecosystem"], facts["dependency"], facts["version"] = m.groups()
         return "C1-dependabot-pr", facts, "high"
 
-    if event in ("push", "schedule", "workflow_dispatch", "release"):
+    if event in ("schedule", "release"):
         return "C3-trunk-release", facts, "medium-high"
 
-    facts["log_tail"] = redact("\n".join(log_fetcher(repo, run_id).splitlines()[-40:]))
+    if event in ("push", "workflow_dispatch") and facts["default_branch"] and branch == facts["default_branch"]:
+        return "C3-trunk-release", facts, "medium-high"
+
+    raw_log = log_fetcher(repo, run_id)
+    facts["log_available"] = raw_log is not None
+    facts["log_tail"] = redact("\n".join((raw_log or "").splitlines()[-40:]))
     return "C5-unknown", facts, "low"
 
 
@@ -176,7 +211,14 @@ def signature(repo, facts):
     job = fs[0]["job"] if fs else ""
     step = fs[0]["steps"][0] if fs and fs[0].get("steps") else ""
     dep = facts.get("dependency", "")
-    key = "|".join([repo, facts.get("workflow", ""), job, step, dep or facts.get("branch", "")])
+    updater = json.dumps({
+        "errors": facts.get("updater_errors") or [],
+        "hints": facts.get("hints") or [],
+    }, sort_keys=True, separators=(",", ":"))
+    key = "|".join([
+        repo, facts.get("workflow", ""), job, step,
+        dep or facts.get("branch", ""), updater,
+    ])
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
@@ -189,8 +231,8 @@ ACTIONS = {
         "real check - inspect the failed step below before merging anything."
     ),
     "C2-dependabot-updater": (
-        "The updater itself failed - nobody is watching these. Transient hints "
-        "(broken registry metadata, unknown_error) usually clear on the next scheduled "
+        "The updater itself failed - nobody is watching these. Explicit transient hints "
+        "(broken registry metadata, timeouts, connection resets, or rate limits) may clear on the next scheduled "
         "run; structural hints (unsatisfiable resolution on upstream-owned manifests) "
         "will recur every run until the ecosystem is silenced in dependabot.yml or the "
         "conflict is fixed upstream."
@@ -217,29 +259,35 @@ def render_markdown(repo, run_id, cls, facts, confidence, sig):
     lines.append("")
     lines.append("**Class:** %s · **Confidence:** %s · **Signature:** `%s`" % (cls, confidence, sig))
     lines.append("**Workflow:** %s · **Event:** %s · **Branch:** `%s`" % (
-        facts.get("workflow"), facts.get("event"), facts.get("branch")))
+        markdown_inline(facts.get("workflow")), markdown_inline(facts.get("event")),
+        markdown_inline(facts.get("branch"))))
     for f in facts.get("failed") or []:
-        steps = ", ".join(f.get("steps") or []) or "(no step-level failure recorded)"
-        lines.append("**Failed:** %s -> %s" % (f.get("job"), steps))
+        steps = ", ".join(markdown_inline(step) for step in (f.get("steps") or [])) \
+            or "(no step-level failure recorded)"
+        lines.append("**Failed:** %s -> %s" % (markdown_inline(f.get("job")), steps))
     if facts.get("dependency"):
         lines.append("**Dependency:** %s %s (%s)" % (
-            facts.get("dependency"), facts.get("version", "?"), facts.get("ecosystem", "?")))
+            markdown_inline(facts.get("dependency")), markdown_inline(facts.get("version", "?")),
+            markdown_inline(facts.get("ecosystem", "?"))))
     if facts.get("updater_errors"):
         lines.append("")
         lines.append("**Updater errors:**")
         for e in facts["updater_errors"]:
-            lines.append("- `%s` - %s" % (e["dependency"], e["error_type"]))
+            lines.append("- `%s` - %s" % (
+                markdown_inline(e["dependency"]), markdown_inline(e["error_type"])))
     if facts.get("hints"):
-        lines.append("**Hints:** " + ", ".join(facts["hints"]))
+        lines.append("**Hints:** " + ", ".join(markdown_inline(h) for h in facts["hints"]))
     lines.append("")
     lines.append("**Proposed action:** " + ACTIONS[cls])
     if facts.get("log_tail"):
         lines.append("")
         lines.append("<details><summary>Redacted log tail</summary>")
         lines.append("")
-        lines.append("```")
+        longest = max((len(m.group(0)) for m in re.finditer(r"`+", facts["log_tail"])), default=0)
+        fence = "`" * max(3, longest + 1)
+        lines.append(fence)
         lines.append(facts["log_tail"])
-        lines.append("```")
+        lines.append(fence)
         lines.append("</details>")
     lines.append("")
     lines.append("Run: %s" % facts.get("url", ""))

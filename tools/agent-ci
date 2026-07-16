@@ -375,14 +375,30 @@ print(json.dumps({"success": True, "run_id": sys.argv[1], "result": sys.argv[2]}
 
 cmd_triage() {
     check_gh
-    local run_id="" repo=""
+    local run_id="" repo="" post=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --repo)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    emit_json_error "--repo requires owner/repo"
+                    return 1
+                fi
                 repo="${2:-}"
-                shift 2 || shift
+                shift 2
+                ;;
+            --post)
+                post=1
+                shift
+                ;;
+            -*)
+                emit_json_error "Unknown triage option: $1"
+                return 1
                 ;;
             *)
+                if [[ -n "$run_id" ]]; then
+                    emit_json_error "Only one run ID may be supplied"
+                    return 1
+                fi
                 run_id="$1"
                 shift
                 ;;
@@ -407,6 +423,7 @@ cmd_triage() {
 
     local py_args=("$REPO_ROOT/lib/ci_triage.py" "$run_id" --repo "$repo")
     [[ "$OUTPUT_FORMAT" == "json" ]] && py_args+=(--json)
+    [[ "$post" -eq 1 ]] && py_args+=(--post)
     python3 "${py_args[@]}"
 }
 

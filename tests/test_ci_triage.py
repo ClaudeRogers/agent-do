@@ -9,6 +9,7 @@ from), so these are regression tests for the deterministic handlers.
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,7 @@ from ci_triage import (  # noqa: E402
     classify,
     parse_updater_errors,
     redact,
+    render_markdown,
     signature,
 )
 
@@ -77,6 +79,10 @@ def test_c2_classification():
     require(conf == "high", "got %s" % conf)
     require(len(facts["updater_errors"]) == 2, "errors not attached")
 
+    cls, facts, conf = classify("o/r", run, "1", log_fetcher=lambda r, i: None)
+    require(cls == "C2-dependabot-updater" and conf == "low", "missing logs stayed confident")
+    require(facts["log_available"] is False, "missing logs not represented")
+
 
 def test_c1_branch_parse():
     for branch, eco, dep, ver in [
@@ -94,18 +100,28 @@ def test_c1_branch_parse():
 
 
 def test_c3_c4():
-    cls, _, _ = classify("o/r", run_fixture(workflowName="iOS App Store Build", event="push"),
+    cls, _, _ = classify("o/r", run_fixture(workflowName="iOS App Store Build", event="push",
+                                             headBranch="main", defaultBranch="main"),
                          "1", log_fetcher=NO_LOG)
     require(cls == "C3-trunk-release", "push event: got %s" % cls)
-    cls, _, _ = classify("o/r", run_fixture(headBranch="ci/lint-delta-gate"), "1", log_fetcher=NO_LOG)
+    cls, _, _ = classify("o/r", run_fixture(headBranch="ci/lint-delta-gate",
+                                             actor="ctyrrell-versova"), "1", log_fetcher=NO_LOG)
     require(cls == "C4-gate-authoring", "ci/ branch: got %s" % cls)
+    cls, _, _ = classify("o/r", run_fixture(headBranch="ci/not-a-gate", actor="someone-else"),
+                         "1", log_fetcher=NO_LOG)
+    require(cls == "C5-unknown", "untrusted ci/ actor was suppressed: %s" % cls)
+    cls, _, _ = classify("o/r", run_fixture(event="push", headBranch="feature/x",
+                                             defaultBranch="main"), "1", log_fetcher=NO_LOG)
+    require(cls == "C5-unknown", "feature push misclassified as trunk: %s" % cls)
 
 
 def test_c5_low_confidence_and_redaction():
     leaky = "\n".join([
         "Build\tstep\t2026-07-14T00:00:00.0Z export GITHUB_TOKEN=ghp_" + "a" * 30,
         "Build\tstep\t2026-07-14T00:00:00.0Z api_key: super-secret-value",
+        "Build\tstep\t2026-07-14T00:00:00.0Z Authorization: Bearer opaque-service-token",
         "Build\tstep\t2026-07-14T00:00:00.0Z jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        "Build\tstep\t2026-07-14T00:00:00.0Z \x1b]0;unsafe\x07 ``` </details>",
     ])
     cls, facts, conf = classify("o/r", run_fixture(headBranch="feat/thing"), "1",
                                 log_fetcher=lambda r, i: leaky)
@@ -113,8 +129,19 @@ def test_c5_low_confidence_and_redaction():
     tail = facts["log_tail"]
     require("ghp_" not in tail, "GitHub token leaked")
     require("super-secret-value" not in tail, "api_key value leaked")
+    require("opaque-service-token" not in tail, "Bearer token leaked")
     require("eyJhbGciOiJIUzI1NiJ9" not in tail, "JWT leaked")
+    require("\x1b" not in tail and "\x07" not in tail, "terminal control sequence leaked")
     require("[REDACTED]" in tail, "redaction marker absent")
+    rendered = render_markdown("o/r", "1", cls, facts, conf, signature("o/r", facts))
+    require("````\n" in rendered, "log-controlled fence was not lengthened")
+    hostile_facts = dict(facts, workflow="CI\n</details> `unsafe`", failed=[{
+        "job": "</details>", "steps": ["``` injected"],
+    }])
+    hostile = render_markdown("o/r", "1", cls, hostile_facts, conf, signature("o/r", hostile_facts))
+    require("CI &lt;/details&gt; \\`unsafe\\`" in hostile, "workflow metadata injected Markdown")
+    require("**Failed:** &lt;/details&gt; -> \\`\\`\\` injected" in hostile,
+            "job/step metadata injected Markdown")
 
 
 def test_signature_stability():
@@ -124,6 +151,22 @@ def test_signature_stability():
     require(a == b and len(a) == 12, "signature unstable or wrong length: %s/%s" % (a, b))
     facts2 = dict(facts, dependency="tiptap")
     require(signature("o/r", facts2) != a, "signature ignores dependency")
+
+    c2a = dict(facts, dependency="", branch="main",
+               updater_errors=[{"dependency": "a", "error_type": "unknown_error"}], hints=[])
+    c2b = dict(c2a, updater_errors=[{"dependency": "b", "error_type": "unknown_error"}])
+    require(signature("o/r", c2a) != signature("o/r", c2b),
+            "signature ignores C2 updater errors")
+
+
+def test_cli_post_gate():
+    proc = subprocess.run(
+        [str(ROOT / "tools" / "agent-ci"), "triage", "123", "--repo", "o/r", "--post"],
+        capture_output=True, text=True,
+    )
+    require(proc.returncode != 0, "--post unexpectedly succeeded")
+    require("--post is not implemented in Phase 0" in proc.stdout,
+            "wrapper did not forward explicit post gate: %r/%r" % (proc.stdout, proc.stderr))
 
 
 def main() -> int:
