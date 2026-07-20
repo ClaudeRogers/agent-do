@@ -1746,7 +1746,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def show_help() -> None:
     print(
-        """agent-gh - GitHub PR and review work-state
+        """GitHub PR/review operations. For local repository work use: agent-do git
 
 Commands:
   whoami                         Show authenticated GitHub user

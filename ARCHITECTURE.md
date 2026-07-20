@@ -120,7 +120,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # Traffic filtering (removes static, CDN, deduplicates)
 │       ├── auth.js         # Auth extraction from captured headers/cookies
 │       └── generator.js    # Skill package writer → ~/.agent-do/skills/<name>/
-├── tools/agent-*           # 94 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 95 tools (standalone scripts + directory-based tools)
 ├── registry.yaml           # Master tool catalog
 ├── test.sh                 # Test suite
 └── requirements.txt        # Python dependencies
@@ -139,7 +139,7 @@ The master catalog defines all tools with:
 
 ### Contracts Layer
 
-The README's mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 94 tools declare `contracts:`; snapshot/verify verbs are read-only, connect/interact/save verbs write, and attributes mark destruction, secret exposure, opaque passthroughs, and never-returning processes.
+The README's mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 95 tools declare `contracts:`; snapshot/verify verbs are read-only, connect/interact/save verbs write, and attributes mark destruction, secret exposure, opaque passthroughs, and never-returning processes.
 
 - `lib/contracts-lexicon.yaml` — canonical verb→beat/attribute rules plus per-tool overrides (hand-written, always wins)
 - `lib/contracts-lexicon-learned.yaml` — agent-derived classifications with confidence and evidence (regenerable; corrections go in the hand lexicon)

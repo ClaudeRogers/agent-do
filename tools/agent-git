@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 show_help() {
     cat << 'EOF'
-agent-git - Enhanced git operations
+Local repository operations. For GitHub PRs/reviews use: agent-do gh
 
 Commands:
   status           Show working tree status (compact)
