@@ -21,6 +21,7 @@ if str(LIB_DIR) not in sys.path:
 
 from live.errors import LiveApprovalRequiredError
 from live.policy import require_live_control
+from models import resolve
 
 # macOS frameworks
 try:
@@ -796,7 +797,7 @@ class ScreenCapture:
                         "anthropic-version": "2023-06-01"
                     },
                     json={
-                        "model": "claude-sonnet-4-20250514",
+                        "model": resolve("vision")["model"],
                         "max_tokens": 500,
                         "messages": [{
                             "role": "user",

@@ -9,6 +9,7 @@
 - New `own_state` contract attribute: tools whose only writes touch their own cache stay parallel-safe instead of being over-serialized.
 
 ### Added
+- Central capability-aware model roles for agent-do's own internal LLM calls (`models.yaml`, `agent-do models list|resolve`), replacing scattered retired defaults while preserving generated templates and explicit eval model choices.
 - coord v2 (`tools/agent-coord`) — the state board rebuilt around real incidents from multi-session builds:
   - Liveness-verified presence: records carry pid + process start time; `peers` renders active/idle/**dead**/stopped/stale with last-seen ages, plus `--active-only`/`--writers` filters for hook consumption. Idle retention default dropped 14d → 2d; dead/stopped tombstones age out after 24h and verifiably-gone records sweep on the same TTL.
   - Session-UUID identity anchored to the nearest agent-runtime ancestor (`claude`/`codex`, extensible via `AGENT_DO_COORD_ANCHOR_NAMES`) — per-call harness shells no longer mint an identity per command, and a pane reused by a new process mints a fresh identity while the old record tombstones DEAD. `AGENT_DO_COORD_SESSION` pins identity explicitly; records carry `runtime` and optional `model`.

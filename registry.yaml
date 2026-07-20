@@ -4157,6 +4157,37 @@ tools:
         save:
         - own_state
     concurrency: read
+  models:
+    description: Capability-aware model roles for agent-do's internal LLM calls
+    capabilities:
+    - resolve fast, vision, and deep internal model roles
+    - expose provider, endpoint, modality, and generation capability records
+    - preserve explicit user-selected models outside agent-do internals
+    commands:
+      list: Show configured roles, chains, and resolved models
+      resolve: Resolve one internal model role
+    examples:
+    - intent: show agent-do's internal model defaults
+      command: agent-models list
+    - intent: resolve the internal vision model
+      command: agent-models resolve vision --json
+    routing:
+      discover_keywords:
+      - model roles
+      - internal models
+      - model defaults
+      prompt_patterns:
+      - \binternal models?\b
+      - \bmodel (?:roles?|defaults?)\b
+      recommended_entrypoints:
+      - agent-do models list
+      - agent-do models resolve fast --json
+      default_command: list
+    contracts:
+      snapshot:
+      - list
+      - resolve
+    concurrency: read
   eval:
     description: LLM output evaluation and testing
     capabilities:

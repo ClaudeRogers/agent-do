@@ -5,6 +5,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { captureForVision, describePage, findByVisual, analyzePattern } from './vision.js';
+import { resolveModel } from './model-resolver.js';
 
 let anthropicClient = null;
 
@@ -80,7 +81,7 @@ Analyze the screenshot and page state. What action should I take next to achieve
         try {
             const client = getAnthropicClient();
             const response = await client.messages.create({
-                model: 'claude-sonnet-4-20250514',
+                model: resolveModel('vision').model,
                 max_tokens: 1024,
                 system: systemPrompt,
                 messages: [{

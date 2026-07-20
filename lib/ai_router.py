@@ -11,15 +11,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised through fallbacks
     anthropic = None
 
+from models import generation_params, resolve
 
-DEFAULT_FAST_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 64000
-ADAPTIVE_THINKING_MODELS = {
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-mythos-preview",
-}
 
 
 def _flag_value(name: str, override: str | None = None) -> str:
@@ -44,7 +38,7 @@ def ai_requested(name: str, override: str | None = None) -> bool:
 
 
 def ai_model() -> str:
-    return os.environ.get("AGENT_DO_AI_MODEL", DEFAULT_FAST_MODEL)
+    return resolve("fast")["model"]
 
 
 def ai_max_tokens() -> int:
@@ -61,10 +55,6 @@ def ai_max_tokens() -> int:
 
 def ai_effort() -> str:
     return os.environ.get("AGENT_DO_AI_EFFORT", "max")
-
-
-def supports_adaptive_thinking(model: str) -> bool:
-    return model in ADAPTIVE_THINKING_MODELS
 
 
 def _message_text(response: Any) -> str:
@@ -122,9 +112,7 @@ def call_json_model(
             "max_tokens": max_tokens or ai_max_tokens(),
             "messages": [{"role": "user", "content": prompt}],
         }
-        if supports_adaptive_thinking(model):
-            kwargs["thinking"] = {"type": "adaptive", "display": "omitted"}
-            kwargs["output_config"] = {"effort": ai_effort()}
+        kwargs.update(generation_params(model))
         if system:
             kwargs["system"] = system
         response = client.messages.create(**kwargs)
@@ -133,5 +121,5 @@ def call_json_model(
 
     payload = _extract_json(_message_text(response))
     if payload is not None:
-        payload.setdefault("_model", ai_model())
+        payload.setdefault("_model", model)
     return payload

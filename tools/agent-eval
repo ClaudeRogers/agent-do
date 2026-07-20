@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 EVAL_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/evals"
 mkdir -p "$EVAL_DIR"
 
@@ -20,7 +22,7 @@ Commands:
 
 Evaluation format (YAML):
   name: "My Evaluation"
-  model: "claude-3-sonnet"
+  model: "optional explicit provider model; defaults to agent-do's deep role"
   cases:
     - input: "What is 2+2?"
       expected: "4"
@@ -65,7 +67,11 @@ import yaml
 import json
 import os
 import re
+import sys
 from datetime import datetime
+
+sys.path.insert(0, '$ROOT_DIR/lib')
+from models import resolve
 
 try:
     import anthropic
@@ -78,7 +84,7 @@ with open('$eval_file') as f:
     eval_config = yaml.safe_load(f)
 
 name = eval_config.get('name', 'Unnamed')
-model = eval_config.get('model', 'claude-3-sonnet-20240229')
+model = eval_config.get('model') or resolve('deep')['model']
 cases = eval_config.get('cases', [])
 
 results = {
@@ -196,7 +202,6 @@ cmd_create() {
 
     cat > "$file" << YAML
 name: "$name"
-model: "claude-sonnet-4-20250514"
 description: ""
 cases: []
 YAML

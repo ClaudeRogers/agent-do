@@ -28,6 +28,7 @@ from registry import (
     has_tool,
 )
 from telemetry import append_event
+from models import resolve
 
 READ_LEANING = {"show", "list", "get", "what", "check", "view", "read", "find"}
 
@@ -217,7 +218,7 @@ Rules:
 - Use flags dict for named options (--flag value)"""
 
     response = client.messages.create(
-        model=os.environ.get("AGENT_DO_AI_MODEL", "claude-opus-4-5-20251101"),
+        model=resolve("fast")["model"],
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}]
     )

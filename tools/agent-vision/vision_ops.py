@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Any, Optional, List, Dict, Tuple
 import tempfile
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+LIB_DIR = ROOT_DIR / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from models import resolve
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -1205,7 +1212,7 @@ class VisionSession:
             
             client = anthropic.Anthropic()
             response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=resolve("vision")["model"],
                 max_tokens=500,
                 messages=[{
                     "role": "user",

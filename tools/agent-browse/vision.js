@@ -4,6 +4,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { resolveModel } from './model-resolver.js';
 
 // Lazy-loaded API clients
 let anthropicClient = null;
@@ -63,7 +64,7 @@ export async function describePage(page, options = {}) {
     
     const client = getAnthropicClient();
     const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -86,7 +87,7 @@ export async function describePage(page, options = {}) {
     
     return {
         description: response.content[0].text,
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         imageSize: image.size,
     };
 }
@@ -112,7 +113,7 @@ Return ONLY the JSON object, no other text.`;
 
     const client = getAnthropicClient();
     const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         max_tokens: 512,
         messages: [{
             role: 'user',
@@ -190,7 +191,7 @@ export async function analyzePattern(page, pattern, options = {}) {
     
     const client = getAnthropicClient();
     const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -230,7 +231,7 @@ export async function compareScreenshots(image1Base64, image2Base64) {
     const client = getAnthropicClient();
     
     const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -281,7 +282,7 @@ Be specific and practical.`;
 
     const client = getAnthropicClient();
     const response = await client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: resolveModel('vision').model,
         max_tokens: 512,
         messages: [{
             role: 'user',

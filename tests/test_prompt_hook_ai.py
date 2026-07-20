@@ -55,7 +55,7 @@ class _Response:
 class _Messages:
     def create(self, **kwargs):
         prompt = kwargs["messages"][0]["content"]
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-sonnet-5"
         assert kwargs["max_tokens"] == 64000
         assert kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
         assert kwargs["output_config"] == {"effort": "max"}
