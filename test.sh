@@ -118,6 +118,7 @@ check_cmd "coord tests" python3 "$SCRIPT_DIR/tests/test_coord.py"
 check_cmd "coord v2 tests" python3 "$SCRIPT_DIR/tests/test_coord_v2.py"
 check_cmd "obsidian tests" python3 "$SCRIPT_DIR/tests/test_obsidian.py"
 check_cmd "browser import tests" python3 "$SCRIPT_DIR/tests/test_browser_import.py"
+check_cmd "browse daemon isolation tests" python3 "$SCRIPT_DIR/tests/test_browse_daemon_isolation.py"
 check_cmd "browse session default tests" python3 "$SCRIPT_DIR/tests/test_browse_session_defaults.py"
 check_cmd "tool regression tests" python3 "$SCRIPT_DIR/tests/test_tool_regressions.py"
 

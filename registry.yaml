@@ -3691,6 +3691,7 @@ tools:
       screenshot: 'Capture screenshot: screenshot [path] [--full]'
       vision: 'AI vision: vision describe|find|click|analyze|explain|compare'
       agent: 'Autonomous: agent goal|explore|explain|recover'
+      doctor: Diagnose the current session daemon, verified PID identity, socket, ping, and page state
     examples:
     - intent: open a website
       command: agent-browse open https://example.com
@@ -3780,6 +3781,7 @@ tools:
       - auth get-creds
       - tab list
       - screenshot
+      - doctor
       - vision describe
       - vision find
       - vision analyze
