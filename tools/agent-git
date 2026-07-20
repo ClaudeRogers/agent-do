@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 show_help() {
     cat << 'EOF'
 agent-git - Enhanced git operations
@@ -11,7 +14,8 @@ Commands:
   status           Show working tree status (compact)
   diff             Show diff of changes
   log [n]          Show recent commits (default: 10)
-  commit [msg]     Commit staged changes (auto-generates message if not provided)
+  commit [msg]     Commit staged changes after a redacted secret scan
+    --no-scan      Explicitly bypass the scan (warning + telemetry)
   branch           List branches
   branch <name>    Create and switch to branch
   stash            Stash changes
@@ -20,6 +24,14 @@ Commands:
   push             Push to remote
   sync             Pull and push (sync with remote)
   snapshot          Full repo state as JSON (branch, status, log, remotes, stashes)
+  worktree add <branch> [--path <dir>] [--no-seed]
+  worktree list
+  worktree remove <path>
+  snap list|diff
+  snap restore <file> [--in-place]
+  conflicts        List unmerged files and conflict-marker counts
+  recover          Read-only reflog and unreachable-commit report
+  sweep [--apply]  Preview safe local branch cleanup; apply explicitly
 
 Examples:
   agent-git status
@@ -165,17 +177,86 @@ cmd_log() {
 }
 
 cmd_commit() {
-    local msg="$*"
+    local no_scan=0
+    local parts=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--no-scan" ]]; then
+            no_scan=1
+        else
+            parts+=("$arg")
+        fi
+    done
+    local msg="${parts[*]}"
 
-    # Check if there are changes to commit
     if git diff --cached --quiet 2>/dev/null; then
-        # Nothing staged, stage all
-        git add -A
+        local refusal="Nothing is staged. Stage only files you own with: git add <paths>"
+        if [[ "$JSON_MODE" == "1" ]]; then
+            python3 -c 'import json, sys; print(json.dumps({"blocked": True, "reason": "nothing_staged", "findings": [], "error": sys.argv[1]}))' "$refusal"
+        else
+            echo "Error: $refusal" >&2
+        fi
+        return 1
     fi
 
-    if git diff --cached --quiet 2>/dev/null; then
-        echo "No changes to commit"
-        return 0
+    if [[ "$no_scan" == "1" ]]; then
+        echo "WARNING: staged secret scan bypassed by explicit --no-scan" >&2
+        PYTHONPATH="$ROOT_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PYEOF' >/dev/null 2>&1 || true
+from telemetry import append_event
+append_event("git_secret_scan_bypass", "git", command="commit")
+PYEOF
+    else
+        local findings
+        findings=$(git diff --cached --no-color --no-ext-diff --unified=0 | python3 -c '
+import json
+import re
+import sys
+
+detectors = [
+    ("private-key-block", re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
+    ("provider-key-shape", re.compile(r"(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|gh[opusr]_[A-Za-z0-9_]{20,})")),
+    ("api-key", re.compile(r"(?i)\\b(?:api[_-]?key|apikey)\\b\\s*[:=]\\s*[\\\"\\\x27]?\\S+")),
+    ("token", re.compile(r"(?i)\\b(?:access[_-]?token|auth[_-]?token|token)\\b\\s*[:=]\\s*[\\\"\\\x27]?\\S+")),
+    ("password-assignment", re.compile(r"(?i)\\b(?:password|passwd|pwd)\\b\\s*[:=]\\s*[\\\"\\\x27]?\\S+")),
+]
+
+path = None
+new_line = 0
+findings = []
+for raw in sys.stdin:
+    if raw.startswith("+++ b/"):
+        path = raw[6:].rstrip("\\n")
+        continue
+    if raw.startswith("@@"):
+        match = re.search(r"\\+(\\d+)", raw)
+        new_line = int(match.group(1)) if match else 0
+        continue
+    if raw.startswith("+") and not raw.startswith("+++"):
+        value = raw[1:].rstrip("\\n")
+        for detector, pattern in detectors:
+            if pattern.search(value):
+                findings.append({"file": path or "?", "line": new_line, "detector": detector})
+        new_line += 1
+    elif raw.startswith(" "):
+        new_line += 1
+print(json.dumps(findings, separators=(",", ":")))
+')
+        local finding_count
+        finding_count=$(FINDINGS="$findings" python3 -c 'import json, os; print(len(json.loads(os.environ["FINDINGS"])))')
+        if [[ "$finding_count" -gt 0 ]]; then
+            if [[ "$JSON_MODE" == "1" ]]; then
+                FINDINGS="$findings" python3 -c 'import json, os; print(json.dumps({"blocked": True, "findings": json.loads(os.environ["FINDINGS"])}))'
+            else
+                echo "Commit blocked: staged secret scan found $finding_count potential secret(s); matched values are redacted." >&2
+                FINDINGS="$findings" python3 -c '
+import json
+import os
+for item in json.loads(os.environ["FINDINGS"]):
+    print(f"  {item[\"file\"]}:{item[\"line\"]} [{item[\"detector\"]}] value redacted", file=__import__("sys").stderr)
+'
+            fi
+            return 1
+        fi
     fi
 
     if [[ -z "$msg" ]]; then
@@ -188,7 +269,17 @@ cmd_commit() {
         msg="Update: $files_changed ($diff_summary)"
     fi
 
-    git commit -m "$msg"
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local output
+        if ! output=$(git commit -m "$msg" 2>&1); then
+            json_fail "$output"
+        fi
+        local commit_hash
+        commit_hash=$(git rev-parse HEAD)
+        COMMIT_HASH="$commit_hash" COMMIT_MESSAGE="$msg" python3 -c 'import json, os; print(json.dumps({"blocked": False, "commit": os.environ["COMMIT_HASH"], "message": os.environ["COMMIT_MESSAGE"], "findings": []}))'
+    else
+        git commit -m "$msg"
+    fi
 }
 
 cmd_branch() {
@@ -321,6 +412,425 @@ print(json.dumps(snapshot, indent=2))
 "
 }
 
+cmd_worktree_list() {
+    local porcelain
+    porcelain=$(git worktree list --porcelain)
+    if [[ "$JSON_MODE" == "1" ]]; then
+        WORKTREES="$porcelain" python3 -c '
+import json
+import os
+
+items = []
+current = None
+for line in os.environ.get("WORKTREES", "").splitlines():
+    if line.startswith("worktree "):
+        if current:
+            items.append(current)
+        current = {"path": line[9:], "head": None, "branch": None, "bare": False, "detached": False}
+    elif current is not None and line.startswith("HEAD "):
+        current["head"] = line[5:]
+    elif current is not None and line.startswith("branch refs/heads/"):
+        current["branch"] = line[len("branch refs/heads/"):]
+    elif current is not None and line == "bare":
+        current["bare"] = True
+    elif current is not None and line == "detached":
+        current["detached"] = True
+if current:
+    items.append(current)
+print(json.dumps({"ok": True, "worktrees": items}))
+'
+    else
+        git worktree list
+    fi
+}
+
+cmd_worktree_add() {
+    local branch="${1:-}"
+    [[ -n "$branch" ]] || { echo "Usage: agent-git worktree add <branch> [--path <dir>] [--no-seed]" >&2; return 1; }
+    shift
+    git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "Error: invalid branch name: $branch" >&2; return 1; }
+
+    local destination="" seed=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --path) destination="${2:-}"; shift 2 ;;
+            --no-seed) seed=false; shift ;;
+            *) echo "Error: unknown worktree add option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    local repo_root repo_name
+    repo_root=$(git rev-parse --show-toplevel)
+    repo_name=$(basename "$repo_root")
+    if [[ -z "$destination" ]]; then
+        local safe_branch="${branch//\//-}"
+        destination="$(dirname "$repo_root")/${repo_name}-${safe_branch}"
+    fi
+    destination=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$destination")
+    if [[ -e "$destination" ]]; then
+        echo "Error: destination already exists; refusing to overwrite: $destination" >&2
+        return 1
+    fi
+
+    local add_output
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+        add_output=$(git worktree add "$destination" "$branch" 2>&1) || { echo "$add_output" >&2; return 1; }
+    else
+        add_output=$(git worktree add -b "$branch" "$destination" 2>&1) || { echo "$add_output" >&2; return 1; }
+    fi
+
+    local seeded=() skipped=() candidates=()
+    if [[ "$seed" == "true" ]]; then
+        local candidate rel target
+        shopt -s nullglob
+        for candidate in "$repo_root"/.env "$repo_root"/.env.* "$repo_root"/CLAUDE.local.md; do
+            [[ -f "$candidate" ]] && candidates+=("${candidate#"$repo_root"/}")
+        done
+        shopt -u nullglob
+        if [[ -f "$repo_root/.agent-do/worktree-seed" ]]; then
+            while IFS= read -r rel || [[ -n "$rel" ]]; do
+                rel="${rel%%#*}"
+                rel="$(printf '%s' "$rel" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [[ -n "$rel" ]] && candidates+=("$rel")
+            done < "$repo_root/.agent-do/worktree-seed"
+        fi
+
+        declare -A seen=()
+        for rel in "${candidates[@]}"; do
+            if [[ "$rel" == /* || "$rel" == ".." || "$rel" == ../* || "$rel" == */../* || -n "${seen[$rel]:-}" ]]; then
+                continue
+            fi
+            seen[$rel]=1
+            candidate="$repo_root/$rel"
+            [[ -f "$candidate" ]] || continue
+            git -C "$repo_root" check-ignore -q -- "$rel" || continue
+            target="$destination/$rel"
+            if [[ -e "$target" || -L "$target" ]]; then
+                skipped+=("$rel")
+                continue
+            fi
+            mkdir -p "$(dirname "$target")"
+            cp -p "$candidate" "$target"
+            seeded+=("$rel")
+        done
+    fi
+
+    if [[ "$JSON_MODE" == "1" ]]; then
+        DESTINATION="$destination" BRANCH="$branch" SEED="$seed" \
+        SEEDED="$(printf '%s\n' "${seeded[@]}")" SKIPPED="$(printf '%s\n' "${skipped[@]}")" \
+        python3 -c '
+import json
+import os
+lines = lambda name: [line for line in os.environ.get(name, "").splitlines() if line]
+print(json.dumps({
+    "ok": True,
+    "branch": os.environ["BRANCH"],
+    "path": os.environ["DESTINATION"],
+    "seed_enabled": os.environ["SEED"] == "true",
+    "seeded": lines("SEEDED"),
+    "skipped_existing": lines("SKIPPED"),
+}))
+'
+    else
+        echo "$add_output"
+        echo "Worktree: $destination"
+        [[ "$seed" == "true" ]] && echo "Seeded: ${seeded[*]:-(none)}"
+        [[ ${#skipped[@]} -gt 0 ]] && echo "Skipped existing: ${skipped[*]}"
+    fi
+}
+
+cmd_worktree_remove() {
+    local target="${1:-}"
+    [[ -n "$target" ]] || { echo "Usage: agent-git worktree remove <path>" >&2; return 1; }
+    local absolute output
+    absolute=$(python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$target")
+    output=$(git worktree remove "$absolute" 2>&1) || { [[ "$JSON_MODE" == "1" ]] && json_fail "$output" || echo "$output" >&2; return 1; }
+    if [[ "$JSON_MODE" == "1" ]]; then
+        REMOVED="$absolute" python3 -c 'import json, os; print(json.dumps({"ok": True, "removed": os.environ["REMOVED"]}))'
+    else
+        echo "Removed worktree: $absolute"
+    fi
+}
+
+cmd_worktree() {
+    local subcommand="${1:-list}"
+    shift || true
+    case "$subcommand" in
+        add) cmd_worktree_add "$@" ;;
+        list) cmd_worktree_list ;;
+        remove) cmd_worktree_remove "$@" ;;
+        *) echo "Usage: agent-git worktree add|list|remove" >&2; return 1 ;;
+    esac
+}
+
+current_snap_ref() {
+    local branch
+    branch=$(git branch --show-current)
+    [[ -n "$branch" ]] || return 1
+    printf 'refs/auto/%s\n' "$branch"
+}
+
+require_snap_ref() {
+    local ref
+    ref=$(current_snap_ref) || { echo "Error: snapshots require a named current branch" >&2; return 1; }
+    if ! git show-ref --verify --quiet "$ref"; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            REF="$ref" python3 -c 'import json, os; print(json.dumps({"ok": True, "available": False, "ref": os.environ["REF"], "message": "No auto snapshot exists for the current branch."}))'
+        else
+            echo "No auto snapshot exists for the current branch (${ref#refs/auto/})."
+        fi
+        return 2
+    fi
+    printf '%s\n' "$ref"
+}
+
+cmd_snap_list() {
+    local rows
+    rows=$(git for-each-ref refs/auto --format='%(refname:strip=2)%09%(objectname)%09%(creatordate:iso8601-strict)')
+    if [[ "$JSON_MODE" == "1" ]]; then
+        ROWS="$rows" python3 -c '
+import json
+import os
+items = []
+for line in os.environ.get("ROWS", "").splitlines():
+    branch, commit, date = (line.split("\t", 2) + ["", ""])[:3]
+    if branch:
+        items.append({"branch": branch, "ref": f"refs/auto/{branch}", "commit": commit, "date": date})
+print(json.dumps({"ok": True, "snapshots": items}))
+'
+    else
+        if [[ -n "$rows" ]]; then printf '%s\n' "$rows"; else echo "No auto snapshots found."; fi
+    fi
+}
+
+cmd_snap_diff() {
+    local ref
+    if ref=$(require_snap_ref); then
+        :
+    else
+        local rc=$?
+        if [[ $rc -eq 2 ]]; then
+            printf '%s\n' "$ref"
+            return 0
+        fi
+        return "$rc"
+    fi
+    local diff
+    diff=$(git diff "$ref" --)
+    if [[ "$JSON_MODE" == "1" ]]; then
+        REF="$ref" DIFF="$diff" python3 -c 'import json, os; print(json.dumps({"ok": True, "available": True, "ref": os.environ["REF"], "diff": os.environ["DIFF"]}))'
+    else
+        printf '%s\n' "$diff"
+    fi
+}
+
+cmd_snap_restore() {
+    local file="${1:-}" in_place=false
+    [[ -n "$file" ]] || { echo "Usage: agent-git snap restore <file> [--in-place]" >&2; return 1; }
+    shift
+    [[ "${1:-}" == "--in-place" ]] && in_place=true
+    if [[ "$file" == /* || "$file" == ".." || "$file" == ../* || "$file" == */../* ]]; then
+        echo "Error: snapshot restore path must stay inside the repository" >&2
+        return 1
+    fi
+    local ref
+    if ref=$(require_snap_ref); then
+        :
+    else
+        local rc=$?
+        if [[ $rc -eq 2 ]]; then
+            printf '%s\n' "$ref"
+            return 0
+        fi
+        return "$rc"
+    fi
+    git cat-file -e "$ref:$file" 2>/dev/null || { echo "Error: $file is not present in $ref" >&2; return 1; }
+    local root target temporary
+    root=$(git rev-parse --show-toplevel)
+    target="$root/$file"
+    [[ "$in_place" == "false" ]] && target="$target.recovered"
+    if [[ "$in_place" == "false" && ( -e "$target" || -L "$target" ) ]]; then
+        echo "Error: recovery target already exists; refusing to overwrite: $target" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$target")"
+    temporary=$(mktemp "${TMPDIR:-/tmp}/agent-git-recover.XXXXXX")
+    if ! git show "$ref:$file" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    mv "$temporary" "$target"
+    if [[ "$JSON_MODE" == "1" ]]; then
+        REF="$ref" TARGET="$target" IN_PLACE="$in_place" python3 -c 'import json, os; print(json.dumps({"ok": True, "ref": os.environ["REF"], "path": os.environ["TARGET"], "in_place": os.environ["IN_PLACE"] == "true"}))'
+    else
+        echo "Recovered $file to $target"
+    fi
+}
+
+cmd_snap() {
+    local subcommand="${1:-list}"
+    shift || true
+    case "$subcommand" in
+        list) cmd_snap_list ;;
+        diff) cmd_snap_diff ;;
+        restore) cmd_snap_restore "$@" ;;
+        *) echo "Usage: agent-git snap list|diff|restore <file>" >&2; return 1 ;;
+    esac
+}
+
+cmd_conflicts() {
+    JSON_MODE_VALUE="$JSON_MODE" python3 <<'PYEOF'
+import json
+import os
+import subprocess
+from pathlib import Path
+
+raw = subprocess.run(
+    ["git", "diff", "--name-only", "--diff-filter=U", "-z"],
+    check=True,
+    capture_output=True,
+).stdout
+files = []
+for value in raw.split(b"\0"):
+    if not value:
+        continue
+    path = os.fsdecode(value)
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    files.append({
+        "path": path,
+        "markers": text.count("<<<<<<<") + text.count("=======") + text.count(">>>>>>>"),
+    })
+payload = {"ok": True, "count": len(files), "files": files}
+if os.environ["JSON_MODE_VALUE"] == "1":
+    print(json.dumps(payload))
+elif not files:
+    print("No conflicted files.")
+else:
+    for item in files:
+        print(f"{item['path']} ({item['markers']} conflict markers)")
+PYEOF
+}
+
+cmd_recover() {
+    JSON_MODE_VALUE="$JSON_MODE" python3 <<'PYEOF'
+import json
+import os
+import subprocess
+
+def run(args):
+    return subprocess.run(args, text=True, capture_output=True, check=False)
+
+reflog_raw = run(["git", "reflog", "-20", "--format=%H%x1f%gD%x1f%aI%x1f%gs"])
+reflog = []
+for line in reflog_raw.stdout.splitlines():
+    parts = line.split("\x1f", 3)
+    if len(parts) == 4:
+        reflog.append({"commit": parts[0], "selector": parts[1], "date": parts[2], "message": parts[3]})
+
+fsck = run(["git", "fsck", "--unreachable", "--no-reflogs", "--no-progress"])
+unreachable = []
+for line in (fsck.stdout + "\n" + fsck.stderr).splitlines():
+    parts = line.split()
+    if len(parts) == 3 and parts[:2] == ["unreachable", "commit"]:
+        unreachable.append(parts[2])
+
+payload = {"ok": fsck.returncode in (0, 1), "reflog": reflog, "unreachable_commits": sorted(set(unreachable))}
+if os.environ["JSON_MODE_VALUE"] == "1":
+    print(json.dumps(payload))
+else:
+    print("Recent reflog:")
+    for item in reflog:
+        print(f"  {item['selector']} {item['commit'][:12]} {item['message']}")
+    print("Unreachable commits:")
+    for commit in payload["unreachable_commits"]:
+        print(f"  {commit}")
+    if not payload["unreachable_commits"]:
+        print("  (none)")
+raise SystemExit(0 if payload["ok"] else 1)
+PYEOF
+}
+
+cmd_sweep() {
+    local apply=false
+    [[ "${1:-}" == "--apply" ]] && apply=true
+    APPLY="$apply" JSON_MODE_VALUE="$JSON_MODE" python3 <<'PYEOF'
+import json
+import os
+import subprocess
+
+def run(args, check=False):
+    return subprocess.run(args, text=True, capture_output=True, check=check)
+
+current = run(["git", "branch", "--show-current"], check=True).stdout.strip()
+protected = {"main", "master", current}
+default = run(["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+if default.returncode == 0 and default.stdout.strip():
+    protected.add(default.stdout.strip().split("/", 1)[-1])
+
+worktree_branches = set()
+for line in run(["git", "worktree", "list", "--porcelain"], check=True).stdout.splitlines():
+    if line.startswith("branch refs/heads/"):
+        worktree_branches.add(line[len("branch refs/heads/"):])
+
+rows = run([
+    "git", "for-each-ref", "refs/heads",
+    "--format=%(refname:short)%09%(upstream:short)",
+], check=True).stdout.splitlines()
+candidates = []
+excluded = []
+for row in rows:
+    branch, _, upstream = row.partition("\t")
+    if branch in protected:
+        excluded.append({"branch": branch, "reason": "protected"})
+        continue
+    if branch in worktree_branches:
+        excluded.append({"branch": branch, "reason": "checked-out-worktree"})
+        continue
+    if not upstream or run(["git", "rev-parse", "--verify", upstream]).returncode != 0:
+        excluded.append({"branch": branch, "reason": "no-upstream"})
+        continue
+    ahead = run(["git", "rev-list", "--count", f"{upstream}..{branch}"], check=True).stdout.strip()
+    if int(ahead or "0") > 0:
+        excluded.append({"branch": branch, "reason": "unpushed-commits"})
+        continue
+    if run(["git", "merge-base", "--is-ancestor", branch, current]).returncode != 0:
+        excluded.append({"branch": branch, "reason": "not-merged"})
+        continue
+    candidates.append(branch)
+
+deleted = []
+errors = []
+if os.environ["APPLY"] == "true":
+    for branch in candidates:
+        result = run(["git", "branch", "-d", "--", branch])
+        if result.returncode == 0:
+            deleted.append(branch)
+        else:
+            errors.append({"branch": branch, "error": result.stderr.strip() or result.stdout.strip()})
+
+payload = {
+    "ok": not errors,
+    "dry_run": os.environ["APPLY"] != "true",
+    "current": current,
+    "candidates": sorted(candidates),
+    "excluded": sorted(excluded, key=lambda item: item["branch"]),
+    "deleted": deleted,
+    "errors": errors,
+}
+if os.environ["JSON_MODE_VALUE"] == "1":
+    print(json.dumps(payload))
+else:
+    label = "Would delete" if payload["dry_run"] else "Deleted"
+    print(f"{label}: {', '.join(payload['candidates'] if payload['dry_run'] else deleted) or '(none)'}")
+    if payload["dry_run"]:
+        print("Dry run only. Re-run with --apply to delete candidates.")
+raise SystemExit(0 if payload["ok"] else 1)
+PYEOF
+}
+
 # Main
 # Strip a --json flag from anywhere in the args. JSON_MODE/JSON_ARGS drive the
 # structured output path; plain text behavior is unchanged when --json is absent.
@@ -352,9 +862,6 @@ case "${1:-help}" in
         ;;
     commit|ci)
         shift
-        if [[ "$JSON_MODE" == "1" ]]; then
-            json_fail "commit is a write verb; --json output is not supported" 1
-        fi
         cmd_commit "$@"
         ;;
     branch|br)
@@ -393,8 +900,26 @@ case "${1:-help}" in
         fi
         cmd_sync
         ;;
-    snapshot|snap)
+    snapshot)
         cmd_snapshot
+        ;;
+    worktree)
+        shift
+        cmd_worktree "$@"
+        ;;
+    snap)
+        shift
+        cmd_snap "$@"
+        ;;
+    conflicts)
+        cmd_conflicts
+        ;;
+    recover)
+        cmd_recover
+        ;;
+    sweep)
+        shift
+        cmd_sweep "$@"
         ;;
     help|--help|-h)
         show_help

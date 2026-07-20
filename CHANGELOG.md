@@ -9,6 +9,7 @@
 - New `own_state` contract attribute: tools whose only writes touch their own cache stay parallel-safe instead of being over-serialized.
 
 ### Added
+- `agent-do git` now refuses implicit staging, scans staged additions for redacted secret findings, manages env-seeded worktrees, exposes `refs/auto` snapshot recovery, reports conflicts and read-only recovery evidence, and keeps branch sweeping dry-run-only until `--apply`.
 - Browser daemon self-heal is now session-safe: lifecycle signals require PID/argv identity, raw `ping` distinguishes healthy-idle from wedged daemons without launching a page, `browse doctor` diagnoses the current session, and the live two-session gate proves one session's recovery cannot disturb another.
 - ZPC global lessons now participate in bounded agent injection, status counts, and opt-in `query --global` reads; absent global state remains silent and all regression tests use isolated `AGENT_DO_HOME` directories.
 - Capability-aware cross-provider fallback for internal LLM roles: OpenAI GPT-5.6 Responses API candidates, bounded model-list doctor checks, 404-only runtime fallback with telemetry, and warn-only handling for absent optional provider keys.

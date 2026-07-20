@@ -1311,35 +1311,79 @@ tools:
         - long_running
     concurrency: write
   git:
-    description: Enhanced git operations
+    description: Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery
     capabilities:
-    - commit with AI messages
-    - manage branches
-    - resolve conflicts
-    - interactive rebase
+    - commit explicitly staged changes with heuristic messages and a redacted secret-scan gate
+    - inspect status, diffs, logs, conflicts, reflog, and unreachable commits
+    - manage branches, stashes, remotes, and worktrees
+    - seed named gitignored local files into fresh worktrees without overwriting targets
+    - inspect and recover files from refs/auto shadow snapshots
+    - preview safe branch cleanup before explicit apply
     commands:
-      commit: Commit with message
-      branch: Branch operations
-      diff: Show diff
-      log: Show log
-      stash: Stash changes
+      status: Show compact working-tree status
+      diff: Show staged diff, or unstaged diff when the index is empty
+      log: Show recent commits
+      commit: Commit staged changes after secret scanning; --no-scan is explicit and logged
+      branch: List branches or create/switch to a named branch
+      stash: Push, list, or pop stashes
+      pull: Pull with rebase
+      push: Push the current branch and establish upstream when absent
+      sync: Pull with rebase, then push
+      snapshot: Emit full repository state as JSON
+      worktree add: Add a worktree and seed named gitignored files by default
+      worktree list: List registered worktrees
+      worktree remove: Remove a clean registered worktree
+      snap list: List refs/auto shadow snapshots
+      snap diff: Diff the current branch against its refs/auto snapshot
+      snap restore: Recover a file to .recovered, or overwrite only with --in-place
+      conflicts: List unmerged files with conflict-marker counts
+      recover: Read-only reflog and unreachable-commit report
+      sweep: Preview safe local branch deletion; mutate only with --apply
     examples:
-    - intent: commit all changes
-      command: agent-git commit
+    - intent: commit the changes I already staged
+      command: "agent-git commit 'fix: describe the staged change'"
     - intent: show recent commits
       command: agent-git log
+    - intent: create an isolated worktree and carry local env files into it
+      command: agent-git worktree add feature/name --path ../repo-feature-name
+    - intent: recover one file from the automatic shadow snapshot
+      command: agent-git snap restore path/to/file
+    - intent: preview merged branch cleanup
+      command: agent-git sweep
     contracts:
       snapshot:
+      - status
       - branch
       - diff
       - log
+      - snapshot
+      - worktree list
+      - snap list
+      - snap diff
+      - conflicts
+      - recover
+      - sweep
       interact:
       - commit
       - branch
       - stash
+      - pull
+      - push
+      - sync
+      - worktree add
+      - worktree remove
+      - snap restore
+      - sweep
       attributes:
         branch:
         - polymorphic
+        snap restore:
+        - destructive
+        sweep:
+        - polymorphic
+        - destructive
+        worktree remove:
+        - destructive
     concurrency: mixed
   debug:
     description: Control debuggers
