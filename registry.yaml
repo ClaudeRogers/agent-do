@@ -440,7 +440,7 @@ tools:
       decide: Log a decision with rationale
       decide-batch: Batch-log decisions from planning phase
       harvest: Post-build consolidation scan
-      query: Search lessons, decisions, patterns
+      query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
       review: Post-sprint lesson extraction from git history
       promote: Promote lessons to team or global

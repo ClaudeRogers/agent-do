@@ -9,6 +9,7 @@
 - New `own_state` contract attribute: tools whose only writes touch their own cache stay parallel-safe instead of being over-serialized.
 
 ### Added
+- ZPC global lessons now participate in bounded agent injection, status counts, and opt-in `query --global` reads; absent global state remains silent and all regression tests use isolated `AGENT_DO_HOME` directories.
 - Capability-aware cross-provider fallback for internal LLM roles: OpenAI GPT-5.6 Responses API candidates, bounded model-list doctor checks, 404-only runtime fallback with telemetry, and warn-only handling for absent optional provider keys.
 - Central capability-aware model roles for agent-do's own internal LLM calls (`models.yaml`, `agent-do models list|resolve`), replacing scattered retired defaults while preserving generated templates and explicit eval model choices.
 - coord v2 (`tools/agent-coord`) — the state board rebuilt around real incidents from multi-session builds:
