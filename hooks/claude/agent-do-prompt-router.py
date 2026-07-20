@@ -13,8 +13,11 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from shutil import which
 from pathlib import Path
+
+HOOK_START = time.monotonic()
 
 # File lives at <repo>/hooks/claude/agent-do-prompt-router.py, so the repo
 # root is two parents up and lib/ is its sibling.
@@ -483,6 +486,15 @@ Respond with JSON only:
   ]
 }}
 """
+    # Claude Code kills the whole hook at 5s and discards ALL output. Base
+    # stages (registry, coord, models config) already spend 1.5-2s, so the AI
+    # call gets only what remains of a 4.2s safety line, and is skipped
+    # entirely when too little is left. max_tokens stays small: a routing
+    # decision is a tiny JSON object, and a large cap invites generations
+    # that eat the deadline.
+    remaining = 4.2 - (time.monotonic() - HOOK_START)
+    if remaining < 0.9:
+        return None
     return call_json_model(
         prompt_text,
         flag_name="AGENT_DO_HOOK_AI",
@@ -492,8 +504,8 @@ Respond with JSON only:
             "Be engineering-ready, clear, and concise. Use the fewest words that preserve correctness; "
             "do not omit necessary operational detail."
         ),
-        max_tokens=2048,
-        timeout_seconds=2.75,
+        max_tokens=600,
+        timeout_seconds=min(1.75, remaining - 0.25),
         max_retries=0,
     )
 

@@ -74,7 +74,7 @@ class _Messages:
     def create(self, **kwargs):
         prompt = kwargs["messages"][0]["content"]
         assert kwargs["model"] == "claude-haiku-4-5-20251001"
-        assert kwargs["max_tokens"] == 2048
+        assert kwargs["max_tokens"] == 600
         assert "thinking" not in kwargs
         assert "output_config" not in kwargs
         assert '"tool": "vercel"' in prompt
