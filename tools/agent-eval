@@ -71,20 +71,18 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, '$ROOT_DIR/lib')
+from ai_router import llm_call
 from models import resolve
-
-try:
-    import anthropic
-    client = anthropic.Anthropic()
-except ImportError:
-    print("Warning: anthropic not installed, using mock responses")
-    client = None
 
 with open('$eval_file') as f:
     eval_config = yaml.safe_load(f)
 
 name = eval_config.get('name', 'Unnamed')
-model = eval_config.get('model') or resolve('deep')['model']
+explicit_model = eval_config.get('model')
+if explicit_model:
+    os.environ['AGENT_DO_MODEL_DEEP'] = explicit_model
+model = explicit_model or resolve('deep')['model']
+client_available = bool(os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('OPENAI_API_KEY'))
 cases = eval_config.get('cases', [])
 
 results = {
@@ -99,13 +97,15 @@ for i, case in enumerate(cases, 1):
     print(f"Case {i}/{len(cases)}: {case.get('input', '')[:50]}...")
 
     # Get LLM response
-    if client:
-        response = client.messages.create(
-            model=model,
+    if client_available:
+        response = llm_call(
+            'deep',
+            [{"role": "user", "content": case['input']}],
             max_tokens=1024,
-            messages=[{"role": "user", "content": case['input']}]
         )
-        output = response.content[0].text
+        output = response.text
+        results['model'] = response.model
+        results['provider'] = response.provider
     else:
         output = "[Mock response]"
 
@@ -132,16 +132,16 @@ for i, case in enumerate(cases, 1):
     elif eval_type == 'rubric':
         criteria = case.get('criteria', '')
         # Use LLM to evaluate against rubric
-        if client:
-            eval_response = client.messages.create(
-                model=model,
-                max_tokens=256,
-                messages=[{
+        if client_available:
+            eval_response = llm_call(
+                'deep',
+                [{
                     "role": "user",
                     "content": f"Evaluate this response against the criteria. Reply PASS or FAIL with brief reason.\n\nCriteria: {criteria}\n\nResponse: {output}"
-                }]
+                }],
+                max_tokens=256,
             )
-            eval_text = eval_response.content[0].text
+            eval_text = eval_response.text
             passed = 'PASS' in eval_text.upper()
             reason = eval_text
         else:

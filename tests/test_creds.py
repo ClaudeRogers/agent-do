@@ -153,6 +153,13 @@ def main() -> int:
         f"obsidian credentials should describe recommended Voyage semantic setup: {obsidian_creds}",
     )
 
+    models_info = get_tool_info(registry, "models")
+    models_creds = get_tool_credentials(models_info or {})
+    require(
+        models_creds["optional"] == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        f"internal model credentials must remain optional: {models_creds}",
+    )
+
     notion_info = get_tool_info(registry, "notion")
     notion_creds = get_tool_credentials(notion_info or {})
     require(notion_creds["required"] == ["NOTION_TOKEN"], f"unexpected notion credentials: {notion_creds}")
@@ -260,10 +267,62 @@ def main() -> int:
         require(store_demo.returncode == 0, f"demo secret store failed: {store_demo.stderr}")
         store_render = run("./agent-do", "creds", "store", "RENDER_API_KEY", "--stdin", input_text="render-from-store", env=fake_env)
         require(store_render.returncode == 0, f"render secret store failed: {store_render.stderr}")
+        store_models = run("./agent-do", "creds", "store", "ANTHROPIC_API_KEY", "--stdin", input_text="anthropic-from-store", env=fake_env)
+        require(store_models.returncode == 0, f"model secret store failed: {store_models.stderr}")
 
         demo_tool = run("./agent-do", "credsdemo", env=fake_env)
         require(demo_tool.returncode == 0, f"dispatcher did not run demo tool: {demo_tool.stderr}")
         require(demo_tool.stdout.strip() == "from-store", f"dispatcher did not preload secret: {demo_tool.stdout}")
+
+        (tmpdir / "anthropic.py").write_text(
+            textwrap.dedent(
+                """\
+                import json
+                import os
+
+                class _Chunk:
+                    def __init__(self, text): self.text = text
+
+                class _Response:
+                    def __init__(self, payload): self.content = [_Chunk(json.dumps(payload))]
+
+                class _Messages:
+                    def create(self, **kwargs):
+                        assert os.environ.get("ANTHROPIC_API_KEY") == "anthropic-from-store"
+                        return _Response({
+                            "tool": "vercel",
+                            "primary": "agent-do vercel deploy <project>",
+                            "entrypoints": ["agent-do vercel deploy <project>"],
+                            "confidence": 0.9,
+                            "reason": "store credential reached suggest",
+                        })
+
+                class Anthropic:
+                    def __init__(self, **kwargs): self.messages = _Messages()
+                """
+            ),
+            encoding="utf-8",
+        )
+        suggest_env = fake_env.copy()
+        suggest_env.pop("ANTHROPIC_API_KEY", None)
+        suggest_env["PYTHONPATH"] = f"{tmpdir}{os.pathsep}{suggest_env.get('PYTHONPATH', '')}"
+        suggest_env["AGENT_DO_SUGGEST_AI"] = "1"
+        store_backed_suggest = run(
+            "./agent-do",
+            "suggest",
+            "deploy this on vercel",
+            "--json",
+            env=suggest_env,
+        )
+        require(
+            store_backed_suggest.returncode == 0,
+            f"store-backed suggest failed: {store_backed_suggest.stderr}\n{store_backed_suggest.stdout}",
+        )
+        suggest_payload = json.loads(store_backed_suggest.stdout)
+        require(
+            suggest_payload["results"][0]["source"] == "ai",
+            f"suggest did not use store-resolved credential: {suggest_payload}",
+        )
 
         intent_router_check = run(
             "python3",

@@ -173,6 +173,33 @@ assert any(item.get("name") == "anthropic" for item in templates)
                     status="WARN"; note="run: cd tools/agent-manna && cargo build --release"
                 fi
                 ;;
+            models)
+                local models_payload models_summary
+                models_payload=$("$tool_path" doctor --json 2>/dev/null || true)
+                models_summary=$(python3 - "$models_payload" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+providers = payload.get("providers") or {}
+ready = sorted(name for name, item in providers.items() if item.get("status") == "ok")
+warnings = payload.get("warnings") or []
+if not payload.get("ok", False):
+    print("WARN|provider verification failed")
+elif warnings:
+    suffix = f"; ready: {', '.join(ready)}" if ready else ""
+    print(f"WARN|optional provider skipped{suffix}")
+else:
+    print(f"OK|verified {', '.join(ready)}")
+PY
+)
+                if [[ -n "$models_summary" ]]; then
+                    status="${models_summary%%|*}"
+                    note="${models_summary#*|}"
+                else
+                    status="WARN"; note="model doctor returned no readable result"
+                fi
+                ;;
             ios)
                 if command -v xcrun &>/dev/null; then
                     status="OK"

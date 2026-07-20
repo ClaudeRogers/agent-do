@@ -6,24 +6,36 @@ version: 1
 roles:
   fast:
     chain:
-      - claude-sonnet-5
-      - claude-haiku-4-5-20251001
+      - anthropic/claude-haiku-4-5-20251001
+      - openai/gpt-5.6-luna
+      - anthropic/claude-sonnet-5
     env: AGENT_DO_MODEL_FAST
+    generation:
+      effort: low
+      thinking: adaptive
   vision:
     chain:
-      - claude-sonnet-5
-      - claude-haiku-4-5-20251001
+      - anthropic/claude-sonnet-5
+      - openai/gpt-5.6-terra
+      - anthropic/claude-haiku-4-5-20251001
     env: AGENT_DO_MODEL_VISION
+    generation:
+      effort: medium
+      thinking: adaptive
   deep:
     chain:
-      - claude-opus-4-8
-      - claude-sonnet-5
+      - anthropic/claude-opus-4-8
+      - openai/gpt-5.6-sol
+      - anthropic/claude-sonnet-5
     env: AGENT_DO_MODEL_DEEP
+    generation:
+      effort: max
+      thinking: adaptive
 
 # Capability records below were read from Anthropic's complete /v1/models
 # response on 2026-07-20. `agent-do models doctor` refreshes and verifies them.
 models:
-  claude-sonnet-5:
+  anthropic/claude-sonnet-5:
     provider: anthropic
     endpoint: messages
     modalities: [text, image, pdf]
@@ -45,10 +57,7 @@ models:
         high: {supported: true}
         xhigh: {supported: true}
         max: {supported: true}
-    generation:
-      thinking: {type: adaptive, display: omitted}
-      output_config: {effort: max}
-  claude-opus-4-8:
+  anthropic/claude-opus-4-8:
     provider: anthropic
     endpoint: messages
     modalities: [text, image, pdf]
@@ -70,10 +79,7 @@ models:
         high: {supported: true}
         xhigh: {supported: true}
         max: {supported: true}
-    generation:
-      thinking: {type: adaptive, display: omitted}
-      output_config: {effort: max}
-  claude-haiku-4-5-20251001:
+  anthropic/claude-haiku-4-5-20251001:
     provider: anthropic
     endpoint: messages
     modalities: [text, image, pdf]
@@ -89,10 +95,48 @@ models:
           adaptive: {supported: false}
           enabled: {supported: true}
       effort: {supported: false}
-    generation:
-      thinking: {type: enabled, budget_tokens: 1024}
+  openai/gpt-5.6-sol:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+  openai/gpt-5.6-terra:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+  openai/gpt-5.6-luna:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-luna
 
 retired:
   anthropic:
     - claude-3-sonnet-20240229
     - claude-sonnet-4-20250514
+  openai: []

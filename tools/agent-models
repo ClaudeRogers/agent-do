@@ -12,7 +12,16 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR / "lib"))
 
-from models import ModelConfigError, VALID_ROLES, generation_params, resolve, role_snapshot  # noqa: E402
+from models import (  # noqa: E402
+    ModelConfigError,
+    VALID_ROLES,
+    apply_doctor_fixes,
+    candidates,
+    doctor_report,
+    generation_params,
+    resolve,
+    role_snapshot,
+)
 
 
 def emit(payload: dict, json_mode: bool) -> None:
@@ -28,6 +37,21 @@ def emit(payload: dict, json_mode: bool) -> None:
     print(f"{payload['provider']}/{payload['model']}")
 
 
+def emit_doctor(payload: dict, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("agent-do models doctor")
+    for provider, item in payload["providers"].items():
+        print(f"  {provider:<10} {item['status']:<11} {item['models']} models")
+    for item in payload["models"]:
+        print(f"  {item['status']:<11} {item['provider']}/{item['model']}")
+    for warning in payload.get("warnings", []):
+        print(f"  warning: {warning}")
+    if payload.get("fixed"):
+        print("  updated models.yaml")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Resolve agent-do internal LLM models")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -39,13 +63,29 @@ def main(argv: list[str] | None = None) -> int:
     resolve_parser.add_argument("role", choices=VALID_ROLES)
     resolve_parser.add_argument("--json", action="store_true")
 
+    doctor_parser = subparsers.add_parser("doctor", help="Verify provider lists and capabilities")
+    doctor_parser.add_argument("--fix", action="store_true", help="Persist verified retirements and capability refreshes")
+    doctor_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "list":
             emit(role_snapshot(), args.json)
             return 0
+        if args.command == "doctor":
+            report = doctor_report()
+            if args.fix:
+                apply_doctor_fixes(report)
+                report["fixed"] = True
+            emit_doctor(report, args.json)
+            return 0 if report["ok"] else 1
         selected = resolve(args.role)
-        selected["generation_params"] = generation_params(selected["model"], selected["provider"])
+        selected["generation_params"] = generation_params(selected["model"], selected["provider"], args.role)
+        selected["candidates"] = candidates(args.role)
+        for candidate in selected["candidates"]:
+            candidate["generation_params"] = generation_params(
+                candidate["model"], candidate["provider"], args.role
+            )
         emit(selected, args.json)
         return 0
     except ModelConfigError as exc:

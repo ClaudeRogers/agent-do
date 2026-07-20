@@ -3,18 +3,7 @@
  * Phase 6: Enable visual understanding for AI agents.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
-import { resolveModel } from './model-resolver.js';
-
-// Lazy-loaded API clients
-let anthropicClient = null;
-
-function getAnthropicClient() {
-    if (!anthropicClient) {
-        anthropicClient = new Anthropic();
-    }
-    return anthropicClient;
-}
+import { callModel } from './model-resolver.js';
 
 /**
  * Capture screenshot as base64 for vision APIs
@@ -62,9 +51,7 @@ export async function describePage(page, options = {}) {
         prompt = `Focus on the ${focus} area. ` + prompt;
     }
     
-    const client = getAnthropicClient();
-    const response = await client.messages.create({
-        model: resolveModel('vision').model,
+    const response = await callModel('vision', {
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -86,8 +73,9 @@ export async function describePage(page, options = {}) {
     });
     
     return {
-        description: response.content[0].text,
-        model: resolveModel('vision').model,
+        description: response.text,
+        model: response.model,
+        provider: response.provider,
         imageSize: image.size,
     };
 }
@@ -111,9 +99,7 @@ Return a JSON object with:
 
 Return ONLY the JSON object, no other text.`;
 
-    const client = getAnthropicClient();
-    const response = await client.messages.create({
-        model: resolveModel('vision').model,
+    const response = await callModel('vision', {
         max_tokens: 512,
         messages: [{
             role: 'user',
@@ -135,7 +121,7 @@ Return ONLY the JSON object, no other text.`;
     });
     
     try {
-        const text = response.content[0].text;
+        const text = response.text;
         // Extract JSON from response (handle potential markdown code blocks)
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (!jsonMatch) {
@@ -155,7 +141,7 @@ Return ONLY the JSON object, no other text.`;
         
         return result;
     } catch (e) {
-        return { found: false, error: 'Failed to parse vision response', raw: response.content[0].text };
+        return { found: false, error: 'Failed to parse vision response', raw: response.text };
     }
 }
 
@@ -189,9 +175,7 @@ export async function analyzePattern(page, pattern, options = {}) {
     
     const prompt = patterns[pattern] || `Analyze this page for: ${pattern}. Return a structured JSON response.`;
     
-    const client = getAnthropicClient();
-    const response = await client.messages.create({
-        model: resolveModel('vision').model,
+    const response = await callModel('vision', {
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -213,14 +197,14 @@ export async function analyzePattern(page, pattern, options = {}) {
     });
     
     try {
-        const text = response.content[0].text;
+        const text = response.text;
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
         }
         return { raw: text };
     } catch (e) {
-        return { error: 'Failed to parse response', raw: response.content[0].text };
+        return { error: 'Failed to parse response', raw: response.text };
     }
 }
 
@@ -228,10 +212,7 @@ export async function analyzePattern(page, pattern, options = {}) {
  * Compare two screenshots for changes
  */
 export async function compareScreenshots(image1Base64, image2Base64) {
-    const client = getAnthropicClient();
-    
-    const response = await client.messages.create({
-        model: resolveModel('vision').model,
+    const response = await callModel('vision', {
         max_tokens: 1024,
         messages: [{
             role: 'user',
@@ -261,7 +242,7 @@ export async function compareScreenshots(image1Base64, image2Base64) {
     });
     
     return {
-        changes: response.content[0].text,
+        changes: response.text,
     };
 }
 
@@ -280,9 +261,7 @@ export async function explainAction(page, action, target) {
 
 Be specific and practical.`;
 
-    const client = getAnthropicClient();
-    const response = await client.messages.create({
-        model: resolveModel('vision').model,
+    const response = await callModel('vision', {
         max_tokens: 512,
         messages: [{
             role: 'user',
@@ -304,7 +283,7 @@ Be specific and practical.`;
     });
     
     return {
-        prediction: response.content[0].text,
+        prediction: response.text,
         action,
         target,
     };

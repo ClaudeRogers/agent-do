@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import tempfile
@@ -34,6 +35,23 @@ def run_hook(prompt: str, *, cwd: Path | None = None, env: dict[str, str]) -> su
 
 
 def main() -> int:
+    router_path = ROOT / "hooks" / "claude" / "agent-do-prompt-router.py"
+    spec = importlib.util.spec_from_file_location("agent_do_prompt_router_test", router_path)
+    require(spec is not None and spec.loader is not None, "could not load prompt router for catalog check")
+    router = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(router)
+    compact_catalog = router.build_ai_catalog(router.load_registry())
+    encoded_catalog = json.dumps(compact_catalog, separators=(",", ":")).encode("utf-8")
+    require(
+        len(compact_catalog) == len(router.load_registry().get("tools", {})),
+        f"compact classifier catalog lost tools: {len(compact_catalog)}",
+    )
+    require(len(encoded_catalog) < 15_000, f"classifier catalog exceeded 15KB latency budget: {len(encoded_catalog)}")
+    require(
+        all(set(entry) <= {"tool", "description", "entrypoints"} for entry in compact_catalog),
+        "classifier catalog included heavyweight registry fields",
+    )
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         fake = tmp / "anthropic.py"
@@ -55,12 +73,14 @@ class _Response:
 class _Messages:
     def create(self, **kwargs):
         prompt = kwargs["messages"][0]["content"]
-        assert kwargs["model"] == "claude-sonnet-5"
-        assert kwargs["max_tokens"] == 64000
-        assert kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
-        assert kwargs["output_config"] == {"effort": "max"}
+        assert kwargs["model"] == "claude-haiku-4-5-20251001"
+        assert kwargs["max_tokens"] == 2048
+        assert "thinking" not in kwargs
+        assert "output_config" not in kwargs
         assert '"tool": "vercel"' in prompt
         assert '"tool": "context"' in prompt
+        assert '"capabilities"' not in prompt
+        assert '"routing_intents"' not in prompt
         assert "Candidate tools" not in prompt
 
         if "deploy this on vercel and check logs" in prompt:
@@ -125,7 +145,9 @@ class _Messages:
 
 
 class Anthropic:
-    def __init__(self):
+    def __init__(self, **kwargs):
+        assert kwargs["timeout"] <= 3.0
+        assert kwargs["max_retries"] == 0
         self.messages = _Messages()
 """,
             encoding="utf-8",

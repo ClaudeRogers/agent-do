@@ -21,7 +21,7 @@ if str(LIB_DIR) not in sys.path:
 
 from live.errors import LiveApprovalRequiredError
 from live.policy import require_live_control
-from models import resolve
+from ai_router import llm_call
 
 # macOS frameworks
 try:
@@ -740,86 +740,25 @@ class ScreenCapture:
             else:
                 error("No captures available", EXIT_CAPTURE_ERROR)
         
-        # Try OpenAI Vision
-        if os.environ.get("OPENAI_API_KEY"):
-            try:
-                import base64
-                import httpx
-                
-                with open(image_path, "rb") as f:
-                    image_data = base64.b64encode(f.read()).decode()
-                
-                response = httpx.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "gpt-4o",
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Describe what you see on this screen. Focus on the main application, visible UI elements, and any actionable items like buttons, text fields, or links. Be concise."},
-                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
-                            ]
-                        }],
-                        "max_tokens": 500
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    description = response.json()["choices"][0]["message"]["content"]
-                    return {
-                        "ok": True,
-                        "description": description,
-                        "source": "openai",
-                        "image": image_path
-                    }
-            except Exception as e:
-                pass
-        
-        # Try Anthropic
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            try:
-                import base64
-                import httpx
-                
-                with open(image_path, "rb") as f:
-                    image_data = base64.b64encode(f.read()).decode()
-                
-                response = httpx.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                        "Content-Type": "application/json",
-                        "anthropic-version": "2023-06-01"
-                    },
-                    json={
-                        "model": resolve("vision")["model"],
-                        "max_tokens": 500,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_data}},
-                                {"type": "text", "text": "Describe what you see on this screen. Focus on the main application, visible UI elements, and any actionable items like buttons, text fields, or links. Be concise."}
-                            ]
-                        }]
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    description = response.json()["content"][0]["text"]
-                    return {
-                        "ok": True,
-                        "description": description,
-                        "source": "anthropic",
-                        "image": image_path
-                    }
-            except Exception as e:
-                pass
+        try:
+            response = llm_call(
+                "vision",
+                [{
+                    "role": "user",
+                    "content": "Describe what you see on this screen. Focus on the main application, visible UI elements, and any actionable items like buttons, text fields, or links. Be concise.",
+                }],
+                images=[image_path],
+                max_tokens=500,
+            )
+            return {
+                "ok": True,
+                "description": response.text,
+                "source": response.provider,
+                "model": response.model,
+                "image": image_path,
+            }
+        except Exception:
+            pass
         
         # Fallback to OCR summary
         elements = self.ocr_image(image_path)
