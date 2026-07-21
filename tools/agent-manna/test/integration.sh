@@ -551,6 +551,40 @@ check_yaml "$output" "status: open" "reconcile --fix unblocked the dependent"
 output=$("$MANNA" reconcile --dream-age-days 0 --json 2>&1) || true
 check_yaml "$output" "stale_dream" "reconcile --dream-age-days 0 flags the fresh dream"
 
+# ----------------------------------------------------------------------------
+# Test G6: context renders the track tree (and stays v1 without tracks)
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G6: context track tree"
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "## Umbrella track ($TRACK_ID)" "context groups items under the track"
+check_yaml "$output" "## Dreams" "context renders a Dreams section"
+check_yaml "$output" "$DREAM_ID" "context lists the dream"
+if [[ "$output" != *"$A_ID"* ]]; then
+    pass "context still excludes done issues"
+else
+    fail "context still excludes done issues" "done issue leaked: $output"
+fi
+if [[ "$output" != *"## Open Issues"* ]]; then
+    pass "track tree replaces the by-status sections"
+else
+    fail "track tree replaces the by-status sections" "v1 sections leaked into grouped render"
+fi
+
+UNTYPED_DIR=$(mktemp -d)
+cd "$UNTYPED_DIR"
+"$MANNA" init >/dev/null 2>&1
+"$MANNA" create "Plain issue" >/dev/null 2>&1
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "## Open Issues (1)" "untyped board keeps the v1 render"
+if [[ "$output" != *"## Untracked"* && "$output" != *"## Dreams"* ]]; then
+    pass "untyped board has no tree sections"
+else
+    fail "untyped board has no tree sections" "tree sections leaked: $output"
+fi
+cd "$GRAMMAR_DIR"
+rm -rf "$UNTYPED_DIR"
+
 cd "$TEST_DIR"
 rm -rf "$GRAMMAR_DIR"
 

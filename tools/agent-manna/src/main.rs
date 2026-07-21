@@ -927,27 +927,86 @@ fn cmd_delete(id: String) -> ! {
     output_success(IssueData { issue });
 }
 
-fn cmd_context(max_tokens: usize, json: bool) -> ! {
-    let store = MannaStore::new(Path::new("."));
-
-    if !store.is_initialized() {
-        output_error(
-            "Storage not initialized. Run 'manna-core init' first.",
-            EXIT_USER_ERROR,
-        );
+/// One context line for an issue, matching the v1 per-status format.
+fn context_line(issue: &Issue) -> String {
+    match issue.status {
+        IssueStatus::InProgress => {
+            let claimed = issue
+                .claimed_by
+                .as_ref()
+                .map_or("".to_string(), |s| format!(", claimed by {}", s));
+            format!("- {}: {} [in_progress{}]\n", issue.id, issue.title, claimed)
+        }
+        IssueStatus::Blocked => format!(
+            "- {}: {} [blocked by: {}]\n",
+            issue.id,
+            issue.title,
+            issue.blocked_by.join(", ")
+        ),
+        _ => format!("- {}: {} [{}]\n", issue.id, issue.title, issue.status),
     }
+}
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
-
-    // Build context blob
+/// Build the context blob. Boards with track rows render a track tree
+/// (per-track sections, then Untracked, then Dreams); boards with zero
+/// tracks keep the v1 by-status render byte for byte.
+fn build_context(issues: &[Issue]) -> String {
     let mut context = String::new();
     context.push_str("# Manna Context\n\n");
 
-    // Separate issues by status
+    let tracks: Vec<&Issue> = issues
+        .iter()
+        .filter(|i| i.issue_type == IssueType::Track)
+        .collect();
+
+    if !tracks.is_empty() {
+        // Track tree: sections for every track (any status; tracks are
+        // structure, not work lines), done items excluded as always.
+        let track_ids: HashSet<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        for track in &tracks {
+            context.push_str(&format!("## {} ({})\n", track.title, track.id));
+            for issue in issues.iter().filter(|i| {
+                i.issue_type == IssueType::Item
+                    && i.status != IssueStatus::Done
+                    && i.track.as_deref() == Some(track.id.as_str())
+            }) {
+                context.push_str(&context_line(issue));
+            }
+            context.push('\n');
+        }
+
+        // Untracked: trackless items, plus items whose track edge dangles
+        // (pointing at no known track) so no work line ever vanishes.
+        let untracked: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| {
+                i.issue_type == IssueType::Item
+                    && i.status != IssueStatus::Done
+                    && i.track.as_deref().map_or(true, |t| !track_ids.contains(t))
+            })
+            .collect();
+        if !untracked.is_empty() {
+            context.push_str("## Untracked\n");
+            for issue in &untracked {
+                context.push_str(&context_line(issue));
+            }
+            context.push('\n');
+        }
+
+        let dreams: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.issue_type == IssueType::Dream && i.status != IssueStatus::Done)
+            .collect();
+        if !dreams.is_empty() {
+            context.push_str("## Dreams\n");
+            for dream in &dreams {
+                context.push_str(&context_line(dream));
+            }
+        }
+        return context;
+    }
+
+    // Zero-track board: v1 by-status render, unchanged.
     let open: Vec<_> = issues
         .iter()
         .filter(|i| i.status == IssueStatus::Open)
@@ -991,6 +1050,27 @@ fn cmd_context(max_tokens: usize, json: bool) -> ! {
             issue.id, issue.title, blockers
         ));
     }
+
+    context
+}
+
+fn cmd_context(max_tokens: usize, json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+
+    // Load issues
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+
+    let mut context = build_context(&issues);
 
     // Truncate if needed (rough estimate: 1 token ≈ 4 chars)
     let max_chars = max_tokens * 4;
@@ -1744,6 +1824,85 @@ mod tests {
         assert!(validate_track_target(&issues, "mn-bbb222")
             .unwrap_err()
             .contains("not a track"));
+    }
+
+    #[test]
+    fn test_build_context_zero_tracks_byte_stable() {
+        // A board with no track rows must render the v1 by-status format
+        // exactly — pinned here byte for byte.
+        let open = Issue::new("mn-aaa111".to_string(), "Open item".to_string()).unwrap();
+        let mut working = Issue::new("mn-bbb222".to_string(), "Working item".to_string()).unwrap();
+        working.claim("ses_x".to_string()).unwrap();
+        let mut blocked = Issue::new("mn-ccc333".to_string(), "Blocked item".to_string()).unwrap();
+        blocked.add_blocker("mn-aaa111".to_string());
+        let mut finished = Issue::new("mn-ddd444".to_string(), "Done item".to_string()).unwrap();
+        finished.claim("ses_x".to_string()).unwrap();
+        finished.complete().unwrap();
+
+        let context = build_context(&[open, working, blocked, finished]);
+        assert_eq!(
+            context,
+            "# Manna Context\n\n\
+             ## Open Issues (1)\n\
+             - mn-aaa111: Open item [open]\n\n\
+             ## In Progress Issues (1)\n\
+             - mn-bbb222: Working item [in_progress, claimed by ses_x]\n\n\
+             ## Blocked Issues (1)\n\
+             - mn-ccc333: Blocked item [blocked by: mn-aaa111]\n"
+        );
+    }
+
+    #[test]
+    fn test_build_context_track_tree() {
+        let mut track = Issue::new("mn-aaa111".to_string(), "Harness".to_string()).unwrap();
+        track.issue_type = IssueType::Track;
+        let mut on_track = Issue::new("mn-bbb222".to_string(), "Tracked item".to_string()).unwrap();
+        on_track.track = Some("mn-aaa111".to_string());
+        let mut claimed = Issue::new("mn-ccc333".to_string(), "Claimed item".to_string()).unwrap();
+        claimed.track = Some("mn-aaa111".to_string());
+        claimed.claim("ses_x".to_string()).unwrap();
+        let mut done_on_track = Issue::new("mn-ddd444".to_string(), "Done item".to_string()).unwrap();
+        done_on_track.track = Some("mn-aaa111".to_string());
+        done_on_track.claim("ses_x".to_string()).unwrap();
+        done_on_track.complete().unwrap();
+        let loose = Issue::new("mn-eee555".to_string(), "Loose item".to_string()).unwrap();
+        let mut dangling = Issue::new("mn-fff666".to_string(), "Dangling item".to_string()).unwrap();
+        dangling.track = Some("mn-404404".to_string());
+        let mut spark = Issue::new("mn-abc123".to_string(), "Spark".to_string()).unwrap();
+        spark.issue_type = IssueType::Dream;
+
+        let context = build_context(&[track, on_track, claimed, done_on_track, loose, dangling, spark]);
+
+        assert!(context.contains("## Harness (mn-aaa111)\n"));
+        assert!(context.contains("- mn-bbb222: Tracked item [open]\n"));
+        assert!(context.contains("- mn-ccc333: Claimed item [in_progress, claimed by ses_x]\n"));
+        // Done still excluded
+        assert!(!context.contains("mn-ddd444"));
+        // Trackless and dangling-edge items both land under Untracked
+        assert!(context.contains("## Untracked\n"));
+        assert!(context.contains("- mn-eee555: Loose item [open]\n"));
+        assert!(context.contains("- mn-fff666: Dangling item [open]\n"));
+        assert!(context.contains("## Dreams\n- mn-abc123: Spark [open]\n"));
+        // v1 by-status sections replaced by the tree
+        assert!(!context.contains("## Open Issues"));
+        // Ordering: track section, then Untracked, then Dreams
+        let track_pos = context.find("## Harness").unwrap();
+        let untracked_pos = context.find("## Untracked").unwrap();
+        let dreams_pos = context.find("## Dreams").unwrap();
+        assert!(track_pos < untracked_pos && untracked_pos < dreams_pos);
+    }
+
+    #[test]
+    fn test_build_context_track_tree_skips_empty_optional_sections() {
+        let mut track = Issue::new("mn-aaa111".to_string(), "Harness".to_string()).unwrap();
+        track.issue_type = IssueType::Track;
+        let mut on_track = Issue::new("mn-bbb222".to_string(), "Tracked item".to_string()).unwrap();
+        on_track.track = Some("mn-aaa111".to_string());
+
+        let context = build_context(&[track, on_track]);
+        assert!(context.contains("## Harness (mn-aaa111)\n"));
+        assert!(!context.contains("## Untracked"));
+        assert!(!context.contains("## Dreams"));
     }
 
     #[test]
