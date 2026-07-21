@@ -154,6 +154,8 @@ class Anthropic:
         )
 
         env = os.environ.copy()
+        # A real session's pinned coord identity would leak into the hook run.
+        env.pop("AGENT_DO_COORD_SESSION", None)
         env["PYTHONPATH"] = f"{tmp}:{env.get('PYTHONPATH', '')}"
         env["ANTHROPIC_API_KEY"] = "test-key"
         env["AGENT_DO_HOOK_AI"] = "1"

@@ -216,7 +216,7 @@ All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 
 ## Manna Board Conventions
 
-The board (`.manna/`) is the single backlog. The grammar is universal (track | item | dream); full doctrine and machinery: `.handoff/2026-07-21-manna-coherence-design.md`. Schema: `type: track|item|dream` (default `item`), `track: <mn-id>` edge on items, `source: <citation>` for provenance. Set fields through the manna CLI (`--type/--track/--source`); never hand-edit `.manna/issues.jsonl`.
+The board (`.manna/`) is the single backlog. The grammar is universal (track | item | dream); full doctrine and machinery: ARCHITECTURE.md's Manna Subsystem section. Schema: `type: track|item|dream` (default `item`), `track: <mn-id>` edge on items, `source: <citation>` for provenance, `prompt: <path>` pairing an issue with its work order. Set fields through the manna CLI (`--type/--track/--source/--prompt`); never hand-edit `.manna/issues.jsonl`.
 
 - **Trailer rule:** any commit advancing an item carries a `Manna: mn-xxxxxx` trailer (same mechanic as `Co-Authored-By`).
 - **Single-truth rule:** memories and handoff docs point at mn- IDs; they never carry their own checklists.
