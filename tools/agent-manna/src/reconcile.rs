@@ -90,7 +90,12 @@ pub fn extract_manna_ids(line: &str) -> Vec<String> {
     while let Some(pos) = line[start..].find("mn-") {
         let candidate_start = start + pos;
         let candidate_end = candidate_start + 9;
-        if candidate_end <= bytes.len() && is_manna_id(&line[candidate_start..candidate_end]) {
+        // candidate_end can land inside a multibyte char (e.g. "mn-abcd☉x");
+        // slicing there panics, so it cannot be a valid id at all.
+        if candidate_end <= bytes.len()
+            && line.is_char_boundary(candidate_end)
+            && is_manna_id(&line[candidate_start..candidate_end])
+        {
             let followed_by_hex = bytes
                 .get(candidate_end)
                 .map_or(false, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
@@ -119,7 +124,12 @@ pub fn claim_command_ids(text: &str) -> Vec<String> {
         while let Some(pos) = line[start..].find(NEEDLE) {
             let id_start = start + pos + NEEDLE.len();
             let id_end = id_start + 9;
-            if id_end <= bytes.len() && is_manna_id(&line[id_start..id_end]) {
+            // Same boundary guard as extract_manna_ids: a multibyte char inside
+            // the 9-byte window means no valid id and must not panic the slice.
+            if id_end <= bytes.len()
+                && line.is_char_boundary(id_end)
+                && is_manna_id(&line[id_start..id_end])
+            {
                 let followed_by_hex = bytes
                     .get(id_end)
                     .map_or(false, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
@@ -366,6 +376,17 @@ mod tests {
         let mut i = issue(id, title);
         i.issue_type = IssueType::Dream;
         i
+    }
+
+    #[test]
+    fn multibyte_inside_id_window_does_not_panic() {
+        // 9-byte window ends inside '☉' (3 bytes) — must reject, not panic.
+        assert!(extract_manna_ids("mn-abcd☉x").is_empty());
+        assert!(claim_command_ids("agent-do manna claim mn-abcd☉x").is_empty());
+        // The real-world trigger: U+FFFD replacement chars from lossy reads.
+        assert!(extract_manna_ids("mn-ab\u{FFFD}cdef").is_empty());
+        // A valid id after multibyte prose still parses.
+        assert_eq!(extract_manna_ids("☉ glyphs then mn-abc123 ok"), vec!["mn-abc123"]);
     }
 
     // ── ID and trailer parsing ──────────────────────────────────────────
