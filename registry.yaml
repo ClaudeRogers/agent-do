@@ -4346,12 +4346,21 @@ tools:
     - query issue history
     commands:
       init: Initialize manna repository
-      create: Create new issue
-      list: List issues
+      status: Show current session and claimed issues
+      create: Create new issue (--type track|item|dream, --track, --source)
+      claim: Claim an issue for the current session
+      done: Mark a claimed issue as done
+      abandon: Release a claimed issue back to open
+      block: Add a blocker dependency
+      unblock: Remove a blocker dependency
+      list: List issues (--status, --type, --track filters)
       show: Show issue details
-      update: Update issue status
+      update: Update issue title, description, status, type, track, or source
       delete: Delete issue
       context: Get session context
+      dream: File an idea spark on the nearest board or the global inbox
+      lint: Check board grammar; findings exit 1
+      reconcile: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
     examples:
     - intent: initialize manna
       command: agent-manna init
@@ -4361,6 +4370,10 @@ tools:
       command: agent-manna list
     - intent: show issue details
       command: agent-manna show 1
+    - intent: capture an idea for later
+      command: agent-manna dream 'Unify the auth flows'
+    - intent: check the board for drift
+      command: agent-manna reconcile --write-drift
     contracts:
       connect:
       - init
@@ -4368,13 +4381,26 @@ tools:
       - list
       - show
       - context
+      - status
       interact:
       - create
       - update
       - delete
+      - claim
+      - done
+      - abandon
+      - block
+      - unblock
+      - dream
+      - reconcile
+      verify:
+      - lint
+      - reconcile
       attributes:
         delete:
         - destructive
+        reconcile:
+        - polymorphic
     concurrency: write
   learn:
     description: Learning and pattern improvement

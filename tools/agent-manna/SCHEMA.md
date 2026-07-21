@@ -7,6 +7,7 @@ This document defines the exact JSONL (JSON Lines) format for Manna's storage fi
 All data is stored in `.manna/` directory:
 - `.manna/issues.jsonl` - Issue records (one JSON object per line)
 - `.manna/sessions.jsonl` - Session event log (one JSON object per line)
+- `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 
 ## issues.jsonl
 
@@ -30,6 +31,13 @@ Each line is a complete JSON object representing one issue.
 | `blocked_by` | Array | Yes | Array of issue IDs (strings) | Issues blocking this one |
 | `claimed_by` | String or null | No | Session ID or null | Who is working on this |
 | `claimed_at` | String or null | No | ISO8601 timestamp or null | When it was claimed |
+| `type` | String | No | Enum: `track`, `item`, `dream`; omitted when `item` (default) | Issue type: umbrella track, work item, or intake spark |
+| `track` | String or null | No | ID of an existing `type: track` issue; tracks don't nest | Track this issue belongs to |
+| `source` | String or null | No | Free text (note path, URL, conversation) | Where this issue came from |
+
+v1 rows carry none of the three fields; they deserialize as `type: item` and
+re-serialize unchanged (lazy upgrade — the file is never rewritten just to add
+defaults).
 
 ### Status Transitions
 
@@ -79,6 +87,24 @@ Each line is a session event (append-only log).
 | `release` | Issue unclaimed (abandoned) | `session_id`, `event`, `timestamp`, `issue_id` |
 | `done` | Issue completed | `session_id`, `event`, `timestamp`, `issue_id` |
 | `end` | Session ends | `session_id`, `event`, `timestamp`, `context` |
+
+## drift.yaml
+
+Written atomically (temp + rename) by `reconcile --write-drift`. Shape:
+
+```yaml
+generated_at: "<ISO8601 UTC>"
+session: "<session id or null>"   # MANNA_SESSION_ID if pinned, else null
+findings:
+  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|skipped
+    issue_id: "mn-xxxxxx"   # optional
+    detail: "one line"
+    evidence: "sha / file:line / pid"   # optional
+    proposed_fix: "one line"            # optional
+```
+
+Commit trailers feeding the `landed_open` check are body lines of exactly
+`Manna: mn-xxxxxx` (key case-sensitive, one ID per line, multiple lines allowed).
 
 ## File Format Rules
 
