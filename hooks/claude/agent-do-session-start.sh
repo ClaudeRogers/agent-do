@@ -50,12 +50,18 @@ if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
-# --- Pin coord identity to this Claude session ---
+# --- Pin coord + manna identity to this Claude session ---
 # Every Bash call then derives the same coord agent identity, and the
 # SessionEnd hook can retire exactly that identity via the same session_id.
+# Manna gets the same anchor: claims made as the session_id survive pid
+# recycling, so reconcile can probe them meaningfully instead of always
+# finding a dead transient pid.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+fi
+if [ -n "$SESSION_ID" ] && [ -z "${MANNA_SESSION_ID:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
+    echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
 fi
 
 run_native_bootstrap_prompt() {
@@ -212,12 +218,12 @@ import json, sys
 data = json.load(sys.stdin)
 lines = []
 for item in data.get('results', []):
-    lines.append(f\"- {item.get('tool')}: start with `{item.get('primary')}`\")
+    lines.append(f\"- {item.get('tool')}: start with \`{item.get('primary')}\`\")
     readiness = item.get('readiness') or {}
     fix = readiness.get('fix')
     note = readiness.get('note')
     if fix and note:
-        lines.append(f\"  setup: `{fix}` ({note})\")
+        lines.append(f\"  setup: \`{fix}\` ({note})\")
 print('\\n'.join(lines))
 " 2>/dev/null || true)
     signals=$(echo "$suggest_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(', '.join(data.get('signals', [])))" 2>/dev/null || true)
@@ -416,7 +422,7 @@ agent-do -n \"natural language description of what you want\"
 agent-do --how \"...\"     # Explain without executing
 \`\`\`
 
-Discovery: agent-do suggest "<task>" | agent-do suggest --project | agent-do find <keyword> | agent-do --list | agent-do <tool> --help
+Discovery: agent-do suggest \"<task>\" | agent-do suggest --project | agent-do find <keyword> | agent-do --list | agent-do <tool> --help
 
 Prefer agent-do over raw CLI commands when a tool exists.
 Use agent-do <tool> --help to see available commands."

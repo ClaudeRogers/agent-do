@@ -280,6 +280,7 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-session-start.sh|hooks/claude/agent-do-session-start.sh|sh"
     "agent-do-prompt-router.py|hooks/claude/agent-do-prompt-router.py|py"
     "agent-do-pretooluse-check.py|hooks/claude/agent-do-pretooluse-check.py|py"
+    "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
     IFS='|' read -r name rel kind <<< "$spec"
