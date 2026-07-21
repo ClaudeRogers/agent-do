@@ -107,6 +107,10 @@ pub struct Issue {
     /// Where this issue came from (vault note, conversation, commit, ...)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+
+    /// Work-order prompt file paired with this issue (absolute path expected)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 impl Issue {
@@ -140,6 +144,7 @@ impl Issue {
             issue_type: IssueType::default(),
             track: None,
             source: None,
+            prompt: None,
         })
     }
 
@@ -557,22 +562,37 @@ mod tests {
         assert_eq!(issue.issue_type, IssueType::Item);
         assert!(issue.track.is_none());
         assert!(issue.source.is_none());
+        assert!(issue.prompt.is_none());
     }
 
     #[test]
     fn test_v1_row_deserializes_and_reserializes_unchanged() {
-        // A v1 line has no type/track/source fields; it must parse as an item
-        // and re-serialize without adding any of the new fields.
+        // A v1 line has no type/track/source/prompt fields; it must parse as
+        // an item and re-serialize without adding any of the new fields.
         let v1_line = r#"{"id":"mn-abc123","title":"V1 row","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}"#;
         let issue: Issue = serde_json::from_str(v1_line).unwrap();
         assert_eq!(issue.issue_type, IssueType::Item);
         assert!(issue.track.is_none());
         assert!(issue.source.is_none());
+        assert!(issue.prompt.is_none());
 
         let json = serde_json::to_string(&issue).unwrap();
         assert!(!json.contains(r#""type""#));
         assert!(!json.contains(r#""track""#));
         assert!(!json.contains(r#""source""#));
+        assert!(!json.contains(r#""prompt""#));
+    }
+
+    #[test]
+    fn test_prompt_field_roundtrip() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Prompted".to_string()).unwrap();
+        issue.prompt = Some("/abs/path/lane-4.md".to_string());
+
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains(r#""prompt":"/abs/path/lane-4.md""#));
+
+        let deserialized: Issue = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.prompt, Some("/abs/path/lane-4.md".to_string()));
     }
 
     #[test]

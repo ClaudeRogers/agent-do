@@ -15,8 +15,8 @@ use manna_core::id::generate_unique_id;
 use manna_core::issue::{is_default_type, Issue, IssueStatus, IssueType};
 use manna_core::reconcile::{
     check_blocker_desync, check_dangling_track, check_landed_open, check_stale_dream,
-    extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid, Finding, FindingKind,
-    LintFinding,
+    claim_command_ids, extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid,
+    prompt_pointer, Finding, FindingKind, LintFinding,
 };
 use manna_core::store::MannaStore;
 
@@ -61,6 +61,10 @@ enum Commands {
         /// Where this issue came from (note path, URL, conversation)
         #[arg(long)]
         source: Option<String>,
+
+        /// Work-order prompt file paired with this issue (absolute path expected)
+        #[arg(long)]
+        prompt: Option<String>,
     },
 
     /// Claim an issue for the current session
@@ -124,7 +128,7 @@ enum Commands {
         id: String,
     },
 
-    /// Update an issue's title, description, status, type, track, or source
+    /// Update an issue's title, description, status, type, track, source, or prompt
     Update {
         /// Issue ID (e.g., mn-abc123)
         id: String,
@@ -152,6 +156,10 @@ enum Commands {
         /// New source citation (empty string clears it)
         #[arg(long)]
         source: Option<String>,
+
+        /// New work-order prompt file pointer (empty string clears it)
+        #[arg(long)]
+        prompt: Option<String>,
     },
 
     /// Delete an issue permanently
@@ -503,6 +511,7 @@ fn cmd_create(
     issue_type: Option<String>,
     track: Option<String>,
     source: Option<String>,
+    prompt: Option<String>,
 ) -> ! {
     let store = MannaStore::new(Path::new("."));
 
@@ -562,6 +571,9 @@ fn cmd_create(
     issue.issue_type = parsed_type;
     issue.track = track;
     issue.source = source;
+    // No path validation beyond non-empty trim: lint/reconcile are the gate,
+    // so create stays usable mid-staging before the prompt file exists.
+    issue.prompt = prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(String::from);
 
     // Append to store
     if let Err(err) = store.append_issue(&issue) {
@@ -830,6 +842,7 @@ fn cmd_update(
     issue_type: Option<String>,
     track: Option<String>,
     source: Option<String>,
+    prompt: Option<String>,
 ) -> ! {
     let store = MannaStore::new(Path::new("."));
     if !store.is_initialized() {
@@ -844,9 +857,10 @@ fn cmd_update(
         && issue_type.is_none()
         && track.is_none()
         && source.is_none()
+        && prompt.is_none()
     {
         output_error(
-            "Nothing to update: pass --title, --description, --status, --type, --track, or --source",
+            "Nothing to update: pass --title, --description, --status, --type, --track, --source, or --prompt",
             EXIT_USER_ERROR,
         );
     }
@@ -894,6 +908,10 @@ fn cmd_update(
     }
     if let Some(new_source) = source {
         issue.source = if new_source.is_empty() { None } else { Some(new_source) };
+    }
+    if let Some(new_prompt) = prompt {
+        let trimmed = new_prompt.trim();
+        issue.prompt = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
     }
     if issue.issue_type == IssueType::Track && issue.track.is_some() {
         output_error(
@@ -1186,10 +1204,33 @@ fn cmd_lint(json: bool) -> ! {
         Err(err) => handle_manna_error(err),
     };
 
-    let findings = lint_board(&issues);
+    let mut findings = lint_board(&issues);
+    findings.extend(lint_prompt_files(&issues));
     let clean = findings.is_empty();
     let exit_code = if clean { EXIT_SUCCESS } else { EXIT_USER_ERROR };
     output_with_exit(LintData { clean, findings }, json, exit_code);
+}
+
+/// prompt_file lint rule: a prompt pointer that does not resolve to a file.
+///
+/// Skips done issues: archived or renamed prompts must not nag history.
+fn lint_prompt_files(issues: &[Issue]) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    for issue in issues {
+        if issue.status == IssueStatus::Done {
+            continue;
+        }
+        if let Some(pointer) = prompt_pointer(issue) {
+            if !Path::new(&pointer).is_file() {
+                findings.push(LintFinding {
+                    issue_id: issue.id.clone(),
+                    rule: "prompt_file".to_string(),
+                    detail: format!("prompt pointer {} does not resolve to a file", pointer),
+                });
+            }
+        }
+    }
+    findings
 }
 
 /// Collect `Manna: mn-xxxxxx` trailers from recent git history.
@@ -1437,6 +1478,127 @@ fn check_doc_references(issues: &[Issue]) -> Vec<Finding> {
     findings
 }
 
+/// True when two paths name the same file: canonicalize both sides, falling
+/// back to a plain path compare when canonicalization fails.
+fn same_file(pointer: &str, file: &Path) -> bool {
+    match (Path::new(pointer).canonicalize(), file.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => Path::new(pointer) == file,
+    }
+}
+
+/// prompt_pairing forward: an issue's prompt pointer resolves to an existing
+/// file whose content never mentions the issue's id.
+///
+/// Skips done issues; a missing file stays lint's job (`prompt_file`), never
+/// double-reported here.
+fn check_prompt_pairing_forward(issues: &[Issue]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for issue in issues {
+        if issue.status == IssueStatus::Done {
+            continue;
+        }
+        let pointer = match prompt_pointer(issue) {
+            Some(p) => p,
+            None => continue,
+        };
+        let path = Path::new(&pointer);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if !String::from_utf8_lossy(&bytes).contains(&issue.id) {
+            findings.push(Finding {
+                kind: FindingKind::PromptPairing,
+                issue_id: Some(issue.id.clone()),
+                detail: format!("prompt file {} does not reference this issue", pointer),
+                evidence: Some(pointer.clone()),
+                proposed_fix: Some(format!(
+                    "add {} to the prompt file, or repoint --prompt",
+                    issue.id
+                )),
+            });
+        }
+    }
+    findings
+}
+
+/// prompt_pairing reverse: every board id a staged prompt file CLAIMS must
+/// carry a pointer that resolves back to that file.
+///
+/// The claim relationship is the signal: only `manna claim <id>` command
+/// lines bind (any invocation prefix); bare id mentions are data, not
+/// pairing promises. `dir` is the staging directory (`.dev/session-prompts`
+/// at cwd in the CLI); a missing directory is a successful empty scan.
+/// Foreign-board ids are ignored (cross-repo prompts are legal), as are
+/// done issues.
+fn check_prompt_pairing_reverse(issues: &[Issue], dir: &Path) -> Vec<Finding> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md") && p.is_file())
+        .collect();
+    files.sort();
+
+    let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let mut findings = Vec::new();
+    for file in files {
+        let bytes = match std::fs::read(&file) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut ids = claim_command_ids(&text);
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            let issue = match by_id.get(id.as_str()) {
+                Some(i) => *i,
+                None => continue,
+            };
+            if issue.status == IssueStatus::Done {
+                continue;
+            }
+            match prompt_pointer(issue) {
+                None => findings.push(Finding {
+                    kind: FindingKind::PromptPairing,
+                    issue_id: Some(issue.id.clone()),
+                    detail: format!(
+                        "claimed by prompt file {} but has no prompt pointer",
+                        file.display()
+                    ),
+                    evidence: Some(file.display().to_string()),
+                    proposed_fix: Some(format!(
+                        "manna update {} --prompt {}",
+                        issue.id,
+                        file.display()
+                    )),
+                }),
+                Some(pointer) if !same_file(&pointer, &file) => findings.push(Finding {
+                    kind: FindingKind::PromptPairing,
+                    issue_id: Some(issue.id.clone()),
+                    detail: format!(
+                        "prompt pointer {} does not resolve to claiming file {}",
+                        pointer,
+                        file.display()
+                    ),
+                    evidence: Some(file.display().to_string()),
+                    proposed_fix: Some("repoint --prompt or drop the stale claim".to_string()),
+                }),
+                Some(_) => {}
+            }
+        }
+    }
+    findings
+}
+
 /// Write findings to `.manna/drift.yaml` atomically (temp + rename).
 fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
     let report = DriftReport {
@@ -1575,6 +1737,13 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
     // 6. doc_reference
     findings.extend(check_doc_references(&issues));
 
+    // 7. prompt_pairing (forward: pointer content, reverse: staged prompt files)
+    findings.extend(check_prompt_pairing_forward(&issues));
+    findings.extend(check_prompt_pairing_reverse(
+        &issues,
+        &Path::new(".dev").join("session-prompts"),
+    ));
+
     // Findings describe pre-fix drift; `fixed` lists what --fix addressed.
     let (fixed, fix_failures) = if fix {
         apply_reconcile_fixes(&store, &issues, &findings)
@@ -1615,8 +1784,8 @@ fn main() {
     match cli.command {
         Commands::Init => cmd_init(),
         Commands::Status => cmd_status(),
-        Commands::Create { title, description, issue_type, track, source } => {
-            cmd_create(title, description, issue_type, track, source)
+        Commands::Create { title, description, issue_type, track, source, prompt } => {
+            cmd_create(title, description, issue_type, track, source, prompt)
         }
         Commands::Claim { id } => cmd_claim(id),
         Commands::Done { id } => cmd_done(id),
@@ -1625,8 +1794,8 @@ fn main() {
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
         Commands::List { status, issue_type, track, json } => cmd_list(status, issue_type, track, json),
         Commands::Show { id } => cmd_show(id),
-        Commands::Update { id, title, description, status, issue_type, track, source } => {
-            cmd_update(id, title, description, status, issue_type, track, source)
+        Commands::Update { id, title, description, status, issue_type, track, source, prompt } => {
+            cmd_update(id, title, description, status, issue_type, track, source, prompt)
         }
         Commands::Delete { id } => cmd_delete(id),
         Commands::Context { max_tokens, json } => cmd_context(max_tokens, json),
@@ -2120,5 +2289,127 @@ mod tests {
             .filter(|i| i.status == IssueStatus::Done)
             .collect();
         assert_eq!(done_only.len(), 1);
+    }
+
+    // ── prompt pairing ──────────────────────────────────────────────────
+
+    fn issue_with_prompt(id: &str, prompt: &Path) -> Issue {
+        let mut i = Issue::new(id.to_string(), "Prompted".to_string()).unwrap();
+        i.prompt = Some(prompt.to_string_lossy().into_owned());
+        i
+    }
+
+    fn done_issue(mut issue: Issue) -> Issue {
+        issue.claim("ses_x".to_string()).unwrap();
+        issue.complete().unwrap();
+        issue
+    }
+
+    #[test]
+    fn test_lint_prompt_files() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "work order").unwrap();
+
+        let good = issue_with_prompt("mn-aaa111", &real);
+        let missing = issue_with_prompt("mn-bbb222", &temp.path().join("gone.md"));
+        let done_missing = done_issue(issue_with_prompt("mn-ccc333", &temp.path().join("gone.md")));
+        let pointerless = Issue::new("mn-ddd444".to_string(), "Plain".to_string()).unwrap();
+
+        let findings = lint_prompt_files(&[good, missing, done_missing, pointerless]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].issue_id, "mn-bbb222");
+        assert_eq!(findings[0].rule, "prompt_file");
+        assert!(findings[0].detail.contains("gone.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_forward() {
+        let temp = TempDir::new().unwrap();
+        let paired = temp.path().join("paired.md");
+        std::fs::write(&paired, "# order for mn-aaa111 and mn-eee555\n").unwrap();
+        let unpaired = temp.path().join("unpaired.md");
+        std::fs::write(&unpaired, "# no ids here\n").unwrap();
+
+        let good = issue_with_prompt("mn-aaa111", &paired);
+        let bad = issue_with_prompt("mn-bbb222", &unpaired);
+        // Missing file stays lint's job; done issues are exempt.
+        let ghost = issue_with_prompt("mn-ccc333", &temp.path().join("gone.md"));
+        let done_bad = done_issue(issue_with_prompt("mn-ddd444", &unpaired));
+        // The interim description pointer feeds the same check.
+        let mut desc = Issue::new("mn-eee555".to_string(), "Interim".to_string()).unwrap();
+        desc.description = Some(format!("PROMPT: {}\nbody", paired.display()));
+
+        let findings = check_prompt_pairing_forward(&[good, bad, ghost, done_bad, desc]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::PromptPairing);
+        assert_eq!(findings[0].issue_id.as_deref(), Some("mn-bbb222"));
+        assert!(findings[0].detail.contains("unpaired.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("session-prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("lane-a.md"),
+            "Claim first: `agent-do manna claim mn-aaa111`\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lane-b.md"),
+            "Claim: MANNA_SESSION_ID=lane agent-do manna claim mn-bbb222\n\
+             foreign claim: agent-do manna claim mn-f0f0f0\n\
+             done claim: agent-do manna claim mn-ddd444\n\
+             bare mention of mn-ccc333 as data\n",
+        )
+        .unwrap();
+        // Non-markdown files are not staged prompts.
+        std::fs::write(dir.join("notes.txt"), "agent-do manna claim mn-eee555\n").unwrap();
+
+        let pointed = issue_with_prompt("mn-aaa111", &dir.join("lane-a.md"));
+        let pointerless = Issue::new("mn-bbb222".to_string(), "No pointer".to_string()).unwrap();
+        // Bare mentions are data, not pairing promises: no pointer required.
+        let mentioned = Issue::new("mn-ccc333".to_string(), "Only mentioned".to_string()).unwrap();
+        let done = done_issue(Issue::new("mn-ddd444".to_string(), "Done".to_string()).unwrap());
+        let in_txt = Issue::new("mn-eee555".to_string(), "Claimed in .txt".to_string()).unwrap();
+
+        let findings =
+            check_prompt_pairing_reverse(&[pointed, pointerless, mentioned, done, in_txt], &dir);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::PromptPairing);
+        assert_eq!(findings[0].issue_id.as_deref(), Some("mn-bbb222"));
+        assert!(findings[0].detail.contains("no prompt pointer"));
+        assert!(findings[0].evidence.as_deref().unwrap().contains("lane-b.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse_mismatch_and_canonicalize() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("session-prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane-a.md"), "agent-do manna claim mn-aaa111\n").unwrap();
+        let elsewhere = temp.path().join("elsewhere.md");
+        std::fs::write(&elsewhere, "mn-aaa111\n").unwrap();
+
+        // Pointer at a different file than the one referencing the issue.
+        let mispointed = issue_with_prompt("mn-aaa111", &elsewhere);
+        let findings = check_prompt_pairing_reverse(&[mispointed], &dir);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("does not resolve"));
+
+        // An unnormalized pointer to the same file pairs via canonicalize.
+        let dotted = temp.path().join("session-prompts").join("..").join("session-prompts").join("lane-a.md");
+        let normalized = issue_with_prompt("mn-aaa111", &dotted);
+        assert!(check_prompt_pairing_reverse(&[normalized], &dir).is_empty());
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse_missing_dir_is_empty_scan() {
+        let temp = TempDir::new().unwrap();
+        let issue = Issue::new("mn-aaa111".to_string(), "Any".to_string()).unwrap();
+        let findings = check_prompt_pairing_reverse(&[issue], &temp.path().join("absent"));
+        assert!(findings.is_empty());
     }
 }

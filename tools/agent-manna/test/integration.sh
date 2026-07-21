@@ -588,6 +588,74 @@ rm -rf "$UNTYPED_DIR"
 cd "$TEST_DIR"
 rm -rf "$GRAMMAR_DIR"
 
+# ----------------------------------------------------------------------------
+# Test G7: prompt pairing (--prompt field, lint existence, reconcile pairing)
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7: prompt pairing"
+PAIR_DIR=$(mktemp -d)
+PAIR_PHYS=$(cd "$PAIR_DIR" && pwd -P)
+cd "$PAIR_DIR"
+"$MANNA" init >/dev/null 2>&1
+mkdir -p .dev/session-prompts
+PROMPT_A="$PAIR_PHYS/.dev/session-prompts/lane-a.md"
+PROMPT_B="$PAIR_PHYS/.dev/session-prompts/lane-b.md"
+
+output=$("$MANNA" create "Paired work" --prompt "$PROMPT_A" 2>&1) || true
+check_yaml "$output" "success: true" "create --prompt succeeds before the file exists"
+PAIR_ID=$(extract_id "$output")
+
+output=$("$MANNA" show "$PAIR_ID" 2>&1) || true
+check_yaml "$output" "prompt: $PROMPT_A" "show displays the prompt pointer"
+
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint exits 1 on a missing prompt file"
+check_yaml "$output" "prompt_file" "lint names the prompt_file rule"
+check_yaml "$output" "$PAIR_ID" "lint names the pointing issue"
+
+printf '# Lane A work order (%s)\nClaim first: agent-do manna claim %s\n' "$PAIR_ID" "$PAIR_ID" > "$PROMPT_A"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "lint exits 0 once the prompt file exists"
+
+rec_exit=0
+output=$("$MANNA" reconcile --json 2>&1) || rec_exit=$?
+check_exit 0 "$rec_exit" "reconcile exits 0 on a paired board"
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "correctly paired board reports no prompt_pairing finding"
+else
+    fail "correctly paired board reports no prompt_pairing finding" "unexpected finding: $output"
+fi
+
+output=$("$MANNA" create "Pointerless work" 2>&1) || true
+LONE_ID=$(extract_id "$output")
+# A bare id mention is data, not a pairing promise: no finding without a claim command.
+printf '# Lane B notes: relates to %s\n' "$LONE_ID" > "$PROMPT_B"
+output=$("$MANNA" reconcile --json 2>&1) || true
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "bare id mention without a claim command produces no finding"
+else
+    fail "bare id mention without a claim command produces no finding" "unexpected finding: $output"
+fi
+
+printf 'Claim: agent-do manna claim %s\n' "$LONE_ID" >> "$PROMPT_B"
+output=$("$MANNA" reconcile --json 2>&1) || true
+check_yaml "$output" "prompt_pairing" "reconcile flags a claim command whose issue lacks a pointer"
+check_yaml "$output" "$LONE_ID" "reconcile names the pointerless issue"
+
+output=$("$MANNA" update "$LONE_ID" --prompt "$PROMPT_B" 2>&1) || true
+check_yaml "$output" "success: true" "update --prompt succeeds"
+output=$("$MANNA" reconcile --json 2>&1) || true
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "pointer repair clears the pairing finding"
+else
+    fail "pointer repair clears the pairing finding" "finding persisted: $output"
+fi
+
+cd "$TEST_DIR"
+rm -rf "$PAIR_DIR"
+
 # ============================================================================
 # Summary
 # ============================================================================

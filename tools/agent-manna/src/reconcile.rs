@@ -21,6 +21,7 @@ pub enum FindingKind {
     StaleDream,
     DanglingTrack,
     DocReference,
+    PromptPairing,
     Skipped,
 }
 
@@ -100,6 +101,50 @@ pub fn extract_manna_ids(line: &str) -> Vec<String> {
         start = candidate_start + 3;
     }
     ids
+}
+
+/// Extract issue ids targeted by claim commands in a prompt file's text.
+///
+/// A claim command is any line containing `manna claim <id>` — the invocation
+/// prefix is free (`agent-do manna claim`, an absolute-path binary, an env-var
+/// pin like `MANNA_SESSION_ID=... agent-do manna claim`). The id must follow
+/// `manna claim ` immediately, with the same boundary rule as
+/// `extract_manna_ids`; multiple claim commands per file are allowed.
+pub fn claim_command_ids(text: &str) -> Vec<String> {
+    const NEEDLE: &str = "manna claim ";
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        let bytes = line.as_bytes();
+        let mut start = 0;
+        while let Some(pos) = line[start..].find(NEEDLE) {
+            let id_start = start + pos + NEEDLE.len();
+            let id_end = id_start + 9;
+            if id_end <= bytes.len() && is_manna_id(&line[id_start..id_end]) {
+                let followed_by_hex = bytes
+                    .get(id_end)
+                    .map_or(false, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                if !followed_by_hex {
+                    ids.push(line[id_start..id_end].to_string());
+                }
+            }
+            start = start + pos + NEEDLE.len();
+        }
+    }
+    ids
+}
+
+/// Resolve an issue's work-order prompt pointer.
+///
+/// The `prompt` field wins; otherwise a description whose FIRST line is
+/// `PROMPT: <path>` (the blessed interim convention) supplies it. Both
+/// sources are trimmed; an empty pointer is no pointer.
+pub fn prompt_pointer(issue: &Issue) -> Option<String> {
+    if let Some(field) = issue.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        return Some(field.to_string());
+    }
+    let first_line = issue.description.as_deref()?.lines().next()?.trim();
+    let path = first_line.strip_prefix("PROMPT:")?.trim();
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// Parse a pid out of the default `ses_pid{pid}_{ts}` session-id format.
@@ -362,12 +407,69 @@ mod tests {
     }
 
     #[test]
+    fn test_claim_command_ids_tolerates_any_invocation_prefix() {
+        let text = "# Lane 4\n\
+                    **Claim first:** `MANNA_SESSION_ID=lane-pairing agent-do manna claim mn-91dc30`\n\
+                    /abs/path/agent-do manna claim mn-abc123 && echo claimed\n\
+                    bare mention mn-def456 is data, not a claim\n\
+                    Manna: mn-0fff00\n";
+        assert_eq!(claim_command_ids(text), vec!["mn-91dc30", "mn-abc123"]);
+    }
+
+    #[test]
+    fn test_claim_command_ids_multiple_per_line() {
+        let line = "agent-do manna claim mn-aaa111 && agent-do manna claim mn-bbb222";
+        assert_eq!(claim_command_ids(line), vec!["mn-aaa111", "mn-bbb222"]);
+    }
+
+    #[test]
+    fn test_claim_command_ids_rejects_inexact() {
+        // The id must follow `manna claim ` immediately and be a valid id.
+        assert!(claim_command_ids("manna claim mn-abc1234def").is_empty()); // longer hex run
+        assert!(claim_command_ids("manna claim mn-xyz123").is_empty()); // non-hex
+        assert!(claim_command_ids("manna claimmn-abc123").is_empty()); // missing space
+        assert!(claim_command_ids("manna claim  mn-abc123").is_empty()); // double space
+        assert!(claim_command_ids("manna show mn-abc123").is_empty()); // other verb
+    }
+
+    #[test]
     fn test_parse_session_pid() {
         assert_eq!(parse_session_pid("ses_pid1234_1750000000"), Some(1234));
         assert_eq!(parse_session_pid("ses_test_99"), None);
         assert_eq!(parse_session_pid("ses_pid_1750000000"), None);
         assert_eq!(parse_session_pid("ses_pid12ab_1750000000"), None);
         assert_eq!(parse_session_pid("session-4e458bf7ce7d"), None);
+    }
+
+    // ── prompt_pointer ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_prompt_pointer_field_wins_over_description() {
+        let mut i = issue("mn-aaa111", "Prompted");
+        i.prompt = Some("  /field/path.md  ".to_string());
+        i.description = Some("PROMPT: /desc/path.md\nbody".to_string());
+        assert_eq!(prompt_pointer(&i).as_deref(), Some("/field/path.md"));
+    }
+
+    #[test]
+    fn test_prompt_pointer_from_description_first_line() {
+        let mut i = issue("mn-aaa111", "Prompted");
+        i.description = Some("PROMPT:   /desc/path.md \nmore detail".to_string());
+        assert_eq!(prompt_pointer(&i).as_deref(), Some("/desc/path.md"));
+    }
+
+    #[test]
+    fn test_prompt_pointer_ignores_non_first_lines_and_empty() {
+        let mut i = issue("mn-aaa111", "Unprompted");
+        assert_eq!(prompt_pointer(&i), None);
+        // The convention binds only on the FIRST description line.
+        i.description = Some("context first\nPROMPT: /desc/path.md".to_string());
+        assert_eq!(prompt_pointer(&i), None);
+        // An empty pointer is no pointer, from either source.
+        i.description = Some("PROMPT:   ".to_string());
+        assert_eq!(prompt_pointer(&i), None);
+        i.prompt = Some("   ".to_string());
+        assert_eq!(prompt_pointer(&i), None);
     }
 
     // ── landed_open ─────────────────────────────────────────────────────
@@ -568,5 +670,18 @@ mod tests {
         let yaml = serde_yaml::to_string(&f).unwrap();
         assert!(yaml.contains("kind: blocker_desync"));
         assert!(!yaml.contains("evidence"));
+    }
+
+    #[test]
+    fn test_prompt_pairing_kind_serializes_snake_case() {
+        let f = Finding {
+            kind: FindingKind::PromptPairing,
+            issue_id: Some("mn-aaa111".to_string()),
+            detail: "d".to_string(),
+            evidence: None,
+            proposed_fix: None,
+        };
+        let yaml = serde_yaml::to_string(&f).unwrap();
+        assert!(yaml.contains("kind: prompt_pairing"));
     }
 }

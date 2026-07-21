@@ -34,10 +34,36 @@ Each line is a complete JSON object representing one issue.
 | `type` | String | No | Enum: `track`, `item`, `dream`; omitted when `item` (default) | Issue type: umbrella track, work item, or intake spark |
 | `track` | String or null | No | ID of an existing `type: track` issue; tracks don't nest | Track this issue belongs to |
 | `source` | String or null | No | Free text (note path, URL, conversation) | Where this issue came from |
+| `prompt` | String or null | No | Absolute path expected but not enforced | Work-order prompt file paired with this issue |
 
-v1 rows carry none of the three fields; they deserialize as `type: item` and
-re-serialize unchanged (lazy upgrade — the file is never rewritten just to add
-defaults).
+v1 rows carry none of the new optional fields (`type`, `track`, `source`,
+`prompt`); they deserialize as `type: item` and re-serialize unchanged (lazy
+upgrade — the file is never rewritten just to add defaults).
+
+### Prompt pairing
+
+`prompt` points at the work-order prompt file that staged the issue — one
+pointer each way, never copied content: the issue carries the path, the prompt
+file mentions the issue's id. Interim convention until the field is set: a
+description whose FIRST line is `PROMPT: <path>` acts as the pointer (the
+`prompt` field wins when both are present; both sides are trimmed).
+
+The pairing is verified, not enforced at write time: `lint` flags a pointer
+whose file does not exist (rule `prompt_file`), and `reconcile` (kind
+`prompt_pairing`) checks both directions:
+
+- **Forward**: an issue's pointer resolves to an existing file that never
+  mentions the issue's id.
+- **Reverse**: a claim command in `.dev/session-prompts/*.md` — a line
+  containing `manna claim mn-xxxxxx`, any invocation prefix
+  (`agent-do manna claim`, absolute-path binary, `MANNA_SESSION_ID=...`
+  pins) — targets a board issue whose pointer is missing or does not
+  resolve back to that file. The claim relationship is the signal: bare id
+  mentions elsewhere in a prompt file are data, not pairing promises.
+  Foreign-board ids are ignored (cross-repo prompts are legal).
+
+Done issues are exempt from all of it, so archived or renamed prompts never
+nag history.
 
 ### Status Transitions
 
@@ -96,7 +122,7 @@ Written atomically (temp + rename) by `reconcile --write-drift`. Shape:
 generated_at: "<ISO8601 UTC>"
 session: "<session id or null>"   # MANNA_SESSION_ID if pinned, else null
 findings:
-  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|skipped
+  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|skipped
     issue_id: "mn-xxxxxx"   # optional
     detail: "one line"
     evidence: "sha / file:line / pid"   # optional
