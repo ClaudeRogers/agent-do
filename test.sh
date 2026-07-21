@@ -110,6 +110,7 @@ check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drif
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
 check_cmd "routing contracts tests" python3 "$SCRIPT_DIR/tests/test_routing_contracts.py"
 check_cmd "contracts drift channel empty" "$AGENT_DO" harness contracts drift
+check_cmd "tools reference doc in sync" "$SCRIPT_DIR/bin/gen-tools-doc" --check
 check_cmd "health probe tests" python3 "$SCRIPT_DIR/tests/test_health_probes.py"
 check_cmd "hook outcome telemetry tests" python3 "$SCRIPT_DIR/tests/test_hook_outcome_telemetry.py"
 check_cmd "global hook nonblocking tests" python3 "$SCRIPT_DIR/tests/test_global_hooks_nonblocking.py"
