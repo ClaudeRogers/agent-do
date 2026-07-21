@@ -41,11 +41,11 @@
 - `dns`, `usb`, `creds`, `clipboard` corrected `read` → `mixed` (their writes hit provider records, the OS mount table, the keychain, the clipboard); `dns` returned to `read` after its phantom `update` verb was removed.
 - `figma` emits JSON-safe errors and bounded requests; `sheets` create/write pass user input via argv instead of interpolating into python source (injection fix, plus write's double-nested values bug).
 
-### Fixed — the audit's day-one findings (68 → 0)
+### Fixed — the audit's day-one findings (69 → 0)
 - The read surface honors `--json` everywhere: 33 tools gained or repaired JSON output on their snapshot/verify verbs (agent, api, browse api list, ci, clipboard, creds, dpt, eval, gcp, gh doctrine, git log, hardware, homekit, ios, lab, latex, learn, memory, metrics, printer, prompt, repl, serial, ssh, swarm, tail, tui, unbrowse, usb, vm, and more). Plain-text output is unchanged everywhere; `--json` is additive.
 - No read verb can hang anymore: `calendar list` (TCC/Automation stalls), `docker ps` (dead daemon socket), `db tables` (no connection), `meetings active/snapshot` (provider probes), and `vision count/faces/ocr/snapshot` (missing source, stalled camera) all gained bounded execution with structured fail-fast errors.
 - `manna list --json` and `manna context --json` work (clap previously rejected the flag with empty output); `metrics processes` no longer dies of SIGPIPE (exit 141).
-- The weekly scheduled audit now guards all of this: behavioral failures went 68 → 0, with 125 verbs probing clean.
+- The weekly scheduled audit now guards all of this: behavioral failures went 69 → 0, with 125 verbs probing clean.
 - No network call can hang anymore: every `curl` and `urllib` request across the cloud tools (`clerk`, `cloudflare`, `gcp`, `namecheap`, `okta`, `render`, `resend`, `supabase`, `vercel`) and `discord` now carries `--max-time`/`--connect-timeout` (or `urlopen(timeout=)`), including the requests hidden inside embedded-Python helpers — closing the same hang class that froze CI for 40 minutes, now on a flaky connection instead of a dead daemon.
 
 ## v1.3 (2026-06-12)

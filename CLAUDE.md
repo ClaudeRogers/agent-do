@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-agent-do is a universal automation CLI for AI agents with 94 specialized tools. Two modes:
+agent-do is a universal automation CLI for AI agents with 95 specialized tools. Two modes:
 - **Structured API** (AI/scripts): `agent-do <tool> <command> [args...]` (instant, no LLM)
 - **Natural Language** (humans): `agent-do -n "what you want"` (LLM-routed via Claude)
 
@@ -115,7 +115,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │   ├── intent-router       # LLM router (Python): cache, fuzzy, Claude API
 │   ├── pattern-matcher     # Offline router (Python): regex + keyword matching
 │   ├── suggest             # Discovery CLI: task/project to likely tools/commands, optional Sonnet rerank
-│   ├── notify              # Root notification contract over sms/email/slack/pipe
+│   ├── notify              # Root notification contract over sms/email/slack/messenger/pipe
 │   ├── nudges              # Local telemetry summary for hook nudges
 │   ├── health              # Tool dependency checker (bash)
 │   └── status              # Session status display (bash + inline Python)
@@ -208,7 +208,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-20 read-only tools (context, ocr, vision, metrics, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 57 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
+17 read-only tools (ocr, vision, metrics, dns, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 61 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
 
 ### Universal Tool Pattern
 
@@ -239,7 +239,7 @@ The board (`.manna/`) is the single backlog. The grammar is universal (track | i
 
 ## Dependencies
 
-- **Python 3.10+**: `anthropic>=0.97.0`, `pyyaml>=6.0`
+- **Python 3.10+**: `anthropic>=0.97.0`, `openai>=2.0.0`, `pyyaml>=6.0`, `browser-cookie3>=0.20.1`, `ccl_chromium_reader` (git-pinned)
 - **agent-browse**: Node.js with `playwright-core`, `ws`, `zod`
 - **agent-unbrowse**: Node.js with `playwright-core`, `zod`
 - **agent-manna**: Rust with clap, serde, serde_yaml, chrono, sha2, fs2
@@ -251,8 +251,8 @@ The board (`.manna/`) is the single backlog. The grammar is universal (track | i
 - `ANTHROPIC_API_KEY`: Required for natural language mode and optional AI-backed suggest/UserPromptSubmit routing
 - `AGENT_DO_SUGGEST_AI`: `auto|on|off` for AI-backed suggest command selection
 - `AGENT_DO_HOOK_AI`: `auto|on|off` for AI-backed UserPromptSubmit full-catalog routing
-- `AGENT_DO_AI_MODEL`: Defaults to `claude-sonnet-4-6`
-- `AGENT_DO_AI_EFFORT`: Defaults to `max` for Sonnet 4.6 adaptive thinking
+- `AGENT_DO_AI_MODEL`: Model override for AI-backed routing (the `fast` role); defaults come from the `models.yaml` role chains
+- `AGENT_DO_AI_EFFORT`: Defaults to `max`
 - `AGENT_DO_AUTO_DESTRUCTIVE`: Set to `1` to let natural-language routing execute destructive/sensitive verbs without asking; default asks via exit 2 clarification
 - `AGENT_DO_AI_MAX_TOKENS`: Defaults to `64000`, the API-required output ceiling
 - `MANNA_SESSION_ID`: Override session ID for agent-manna
