@@ -1,165 +1,38 @@
-# Claude Code And Codex Integration
+# Integrating agent-do with an Agent Harness
 
-agent-do ships hooks that teach coding agents to prefer `agent-do` tools over raw CLI commands. The hooks use a nudge approach: they add context reminders but do not block commands by default.
+agent-do works with any coding agent that can execute shell commands. Two integration depths exist:
 
-## Quick Setup
+1. **Instructions only**: document the CLI in the harness's instruction file (CLAUDE.md, .cursorrules, AGENTS.md). No hooks, no state; the agent simply knows the tools exist.
+2. **The ambient loop**: install the shipped Claude Code (and optionally Codex) hooks. Sessions then start with the project's work board and drift report injected, prompts get high-confidence tool routing, raw commands get nudged toward native equivalents, and session teardown retires coordination presence and writes the reconcile report the next session greets with.
+
+Everything below is presence-gated: repos without a `.manna/` board or a coord board see none of the board machinery, and the hooks degrade to the plain tooling reminder.
+
+## Installation (install.sh)
 
 ```bash
-./install.sh                # Installs Claude hooks; auto-installs Codex hooks if ~/.codex/ exists
+./install.sh                # Install; auto-installs Codex hooks if ~/.codex/ exists
 ./install.sh --codex        # Force Codex hook install even without ~/.codex/
 ./install.sh --no-codex     # Skip Codex install even when ~/.codex/ is present
-./install.sh --uninstall    # Remove all installed hooks (both surfaces)
+./install.sh --uninstall    # Remove symlink, breadcrumb, generated index, and hook wrappers
 ```
 
-The installer:
-1. Symlinks `agent-do` into `~/.local/bin`
-2. Writes the `~/.agent-do/install-path` breadcrumb (used by wrappers to find the repo)
-3. Installs Claude Code hook wrappers to `~/.claude/hooks/`
-4. Optionally installs Codex hook wrappers to `~/.codex/hooks/`
-5. Installs Python dependencies
-6. Prints a Claude `settings.json` snippet and (when Codex installed) a `~/.codex/hooks.json` template
+What the installer actually does, in order:
 
-## Upgrade Model: Thin Wrappers
+1. Symlinks `agent-do` into `~/.local/bin` (warns if that directory is not on `PATH`)
+2. Writes the repo path to `~/.agent-do/install-path` (the breadcrumb wrappers and hooks resolve)
+3. Generates the discovery index from `registry.yaml` via `bin/gen-index`
+4. Writes four Claude hook **wrappers** to `~/.claude/hooks/`: `agent-do-session-start.sh`, `agent-do-prompt-router.py`, `agent-do-pretooluse-check.py`, `agent-do-coord-stop.sh`
+5. Optionally writes five Codex wrappers to `~/.codex/hooks/` (the three event hooks plus `stop-quality-gate.sh`/`.py`)
+6. Installs Python dependencies (`pip3 install -r requirements.txt`)
+7. Interactively offers `npm install` for browse/unbrowse and `cargo build --release` for manna
+8. Runs `agent-do --health`
+9. Prints the Claude `settings.json` snippet, the Codex `hooks.json` template when Codex install ran, and a project CLAUDE.md snippet
 
-Installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are NOT full
-copies of the repo files. They are tiny **wrappers** (Python `runpy.run_path`
-for `.py`, `exec` for `.sh`) that resolve the repo root and delegate to the
-canonical hook at `<repo>/hooks/<file>` or `<repo>/hooks/codex/<file>`.
+The installer never edits `settings.json` or `hooks.json` itself. Registration is manual, and required: **Claude Code does not auto-discover hooks**; a wrapper sitting in `~/.claude/hooks/` does nothing until it is registered.
 
-This means:
+## Registering the Claude hooks (settings.json)
 
-- **`git pull` updates flow through automatically.** Fixes to the canonical
-  hooks (registry routing, safe-commit logic, bootstrap feedback) take effect
-  on the next event without re-running `install.sh`.
-- **Hook imports work.** Wrappers add `<repo>/lib/` to `sys.path` before
-  delegating, so `from registry import ...` resolves correctly.
-- **The wrapper format is versioned** (`WRAPPER_VERSION` in `install.sh`).
-  When the wrapper logic itself needs to change (rare), bump the version and
-  re-run `install.sh` to refresh the wrappers. The canonical hooks below
-  don't need to know or care.
-
-Repo resolution order inside each wrapper:
-
-1. `AGENT_DO_REPO` environment variable
-2. `~/.agent-do/install-path` breadcrumb (written by `install.sh`)
-3. Wrapper bails with a clear stderr message if neither resolves
-
-What you typically do after `git pull`:
-
-```bash
-git pull
-# Done. Next hook event uses the new behavior.
-```
-
-When you'd re-run `install.sh`:
-
-- After bumping `WRAPPER_VERSION` in the installer (repo will announce this)
-- When a new hook is added (new file in `hooks/` that needs a corresponding wrapper)
-- When you move the repo to a different path (re-running rewrites the breadcrumb)
-- After `--uninstall` if you change your mind
-
-## Repo Layout
-
-Canonical hooks live under symmetric per-runtime directories:
-
-```
-hooks/
-  claude/                          # Claude Code canonical hooks (.sh / .py)
-    agent-do-session-start.sh
-    agent-do-prompt-router.py
-    agent-do-pretooluse-check.py
-  codex/                           # Codex canonical hooks + Codex-only helpers
-    agent-do-session-start.py
-    agent-do-prompt-router.py
-    agent-do-pretooluse-check.py
-    stop-quality-gate.sh           # advisory DPT scoring at Stop
-    stop-quality-gate.py
-    hooks.json.example
-    README.md
-```
-
-The installer writes thin wrappers at `~/.claude/hooks/` and `~/.codex/hooks/`
-that delegate to these canonical files. See "Upgrade Model" above.
-
-## The 3-Layer Hook System
-
-agent-do scopes itself to three hook events: SessionStart, UserPromptSubmit,
-PreToolUse. (Codex adds an advisory Stop hook for DPT scoring.) Anything else
-you might want at Stop (auto-commit, notifications, formatters) is personal
-workflow and belongs in your dotfiles, not in agent-do.
-
-### Layer 1: SessionStart: PATH + Context Injection
-
-**File:** `hooks/claude/agent-do-session-start.sh` (Claude), `hooks/codex/agent-do-session-start.py` (Codex)
-
-Runs once per Claude Code session. Two jobs:
-- **Adds agent-do to PATH** via `CLAUDE_ENV_FILE` so all `Bash` tool calls can find it
-- **Injects a tooling reminder** into Claude's context with the `agent-do` pattern and project-scoped likely tools
-- **Prompts for project bootstrap when needed** with a native macOS dialog at session start when project-local setup like `zpc` or `manna` is missing
-
-SessionStart is not a chat surface, but the current hook can trigger a native macOS bootstrap dialog directly when bootstrap work is pending. If bootstrap is not pending, it falls back to context injection only.
-
-Path auto-detection chain (no hardcoded paths):
-1. `which agent-do` (already in PATH)
-2. `~/.local/bin/agent-do` (symlink from `install.sh`)
-3. `~/.agent-do/install-path` (breadcrumb file)
-
-### Layer 2: UserPromptSubmit: Prompt Routing
-
-**File:** `hooks/claude/agent-do-prompt-router.py` (Claude) and `hooks/codex/agent-do-prompt-router.py` (Codex)
-
-Analyzes every user prompt and suggests relevant agent-do tools only when the match is strong enough to be useful. When `ANTHROPIC_API_KEY` is available, the hook can use Sonnet 4.6 adaptive thinking over the compact full `agent-do` catalog. The model chooses from real registered tools and returns concise, exact commands; weak matches stay silent.
-
-Prompt-time coordination is targeted. UserPromptSubmit emits `Coord Focus Required` context when active peers exist, the current agent has no focus, and the prompt is starting workspace work. The reminder is non-blocking because blocking hooks stop the agent turn instead of letting the model satisfy the requirement.
-
-The deterministic fallback stays conservative: completion/status prompts still get completion-check context, design-quality prompts still get the DPT path, and generic tool suggestions stay silent instead of guessing.
-
-AI prompt routing receives the catalog, not a deterministic shortlist. This keeps the hook from duplicating local matcher effort before the model has decided which tool, if any, is worth surfacing.
-
-Use `AGENT_DO_HOOK_AI=off` for deterministic-only hook behavior, `auto` for best effort, or `on` to require the AI path.
-
-### Layer 3: PreToolUse: Command Interception
-
-**File:** `hooks/claude/agent-do-pretooluse-check.py` (Claude) and `hooks/codex/agent-do-pretooluse-check.py` (Codex; runpy wrapper at `~/.codex/hooks/` forwards to the same canonical logic).
-
-Watches every `Bash` tool call. When an agent tries to run a raw command that has an agent-do equivalent (e.g., `xcrun simctl`, `vercel deploy`, `kubectl`), it injects a hard nudge with the closest native replacement command and any relevant setup hint.
-
-**Codex compatibility:** Codex supports `hookSpecificOutput.additionalContext` on PreToolUse as of the May 2026 hooks release. The same hook works in both runtimes; the prior `agent-do-pretooluse-codex.py` suppress-stdout wrapper is obsolete and was removed. Codex users install a thin runpy pass-through at `~/.codex/hooks/agent-do-pretooluse-check.py` (shipped under `hooks/codex/`); the install handles this automatically.
-
-**Nudge mode (default):** Adds `additionalContext`. The agent sees the reminder but the command still runs.
-
-Examples:
-- `npx playwright test` → `agent-do browse ...` + browser-install hint when relevant
-- `xcrun simctl io booted screenshot` → `agent-do ios screenshot`
-- `psql ...` → `agent-do db ...`
-
-**Block mode (opt-in):** Change `additionalContext` to `permissionDecision: "deny"` in the hook output to block raw commands entirely. Claude Code supports the block decision; Codex parses it but does not enforce it yet (per the May 2026 hooks docs), so block mode is effectively Claude-only.
-
-Intercepted commands include:
-- `vercel`, `npx vercel`, `curl api.vercel.com`
-- `supabase`, `npx supabase`, `curl supabase.co`
-- `render services`, `curl api.render.com`
-- `xcrun simctl`, `simctl`
-- `adb shell/install/logcat`
-- `osascript`, `automator`
-- `docker ps/logs/exec/compose`
-- `kubectl`, `ssh user@host`, `psql`, `mysql`
-- `aws s3/ec2/lambda`, `gcloud`, `az vm/storage`
-- ImageMagick, ffmpeg (image/video/audio)
-
-Safe commands are skipped (git, npm, python, basic shell tools, localhost curl, etc.).
-
-### Codex-only Stop hook: advisory DPT scoring
-
-**File:** `hooks/codex/stop-quality-gate.sh` (dispatcher) + `hooks/codex/stop-quality-gate.py` (scoring helper)
-
-Runs at the end of every Codex turn. The Python helper looks for an active `agent-do browse` session, calls `agent-do dpt score` against the current page, and returns a structured DPT report. The dispatcher emits that as `additionalContext` so the model sees the score before its next move. Pure advisory; never blocks.
-
-No Claude equivalent ships. If you want DPT scoring at Claude Stop too, register `hooks/codex/stop-quality-gate.sh` under a Claude Stop entry yourself; nothing about the script is Codex-specific beyond the install path.
-
-## Registering Hooks in settings.json
-
-Claude Code hooks must be registered in `~/.claude/settings.json`. They are NOT auto-discovered.
+Merge into `~/.claude/settings.json` (into the existing arrays if you already have hooks for these events):
 
 ```json
 {
@@ -200,54 +73,14 @@ Claude Code hooks must be registered in `~/.claude/settings.json`. They are NOT 
         ]
       }
     ],
-  }
-}
-```
-
-agent-do does not register a Claude Stop hook. If you want auto-commit, DPT scoring at turn end, formatters, or notifications, register your own scripts under Stop separately. agent-do scopes itself to agent-first tooling nudges and project bootstrap; everything else is your call.
-
-If you already have hooks in `settings.json`, merge the agent-do entries into the existing arrays for each event.
-
-### Codex registration
-
-Codex uses `~/.codex/hooks.json` instead of Claude's `settings.json`. The installer copies wrappers to `~/.codex/hooks/` and prints the registration template. The full template lives at `hooks/codex/hooks.json.example` and looks like:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
+    "SessionEnd": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ~/.codex/hooks/agent-do-prompt-router.py",
-            "timeout": 5,
-            "statusMessage": "Checking agent-do routing"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 ~/.codex/hooks/agent-do-pretooluse-check.py",
-            "timeout": 10,
-            "statusMessage": "Checking agent-do tool preference"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.codex/hooks/stop-quality-gate.sh",
-            "timeout": 30,
-            "statusMessage": "Finalizing turn"
+            "command": "~/.claude/hooks/agent-do-coord-stop.sh",
+            "timeout": 10
           }
         ]
       }
@@ -256,11 +89,135 @@ Codex uses `~/.codex/hooks.json` instead of Claude's `settings.json`. The instal
 }
 ```
 
-The Codex wrappers under `~/.codex/hooks/` are thin: each one uses `runpy.run_path` to forward stdin/stdout to the matching repo hook at `<repo>/hooks/`. The repo is resolved via `AGENT_DO_REPO`, the `~/.agent-do/install-path` breadcrumb, or a `~/Custom-Coding/agent-do` fallback. Edits to the repo hooks flow through to Codex automatically; no reinstall needed.
+The snippet install.sh prints covers the first three events; the SessionEnd entry above completes the set (the installer writes the `agent-do-coord-stop.sh` wrapper either way). The timeouts are part of the design, not suggestions: SessionStart's subprocess calls are individually bounded (2-3s each) under a 10s registration, the prompt router works against a 4.2s internal safety line under its 5s registration, and SessionEnd budgets coord retirement (5s) plus the manna reconcile advisory (4s) inside its 10s.
 
-## CLAUDE.md Integration
+agent-do registers nothing at `Stop`. Claude Code fires `Stop` every turn; session retirement belongs on `SessionEnd`. Auto-commit, formatters, notifications, and other turn-end behavior are personal workflow for your own dotfiles.
 
-Add this to your project's `CLAUDE.md` so Claude knows about agent-do even without hooks:
+## The wrapper upgrade model
+
+Installed hooks are not copies. Each is a small version-tagged wrapper (`WRAPPER_VERSION` in install.sh, currently 2) that resolves the repo and delegates to the canonical hook at `<repo>/hooks/claude/<file>` or `<repo>/hooks/codex/<file>`:
+
+- Python wrappers use `runpy.run_path` and insert `<repo>/lib/` into `sys.path` first, so hook imports (`from registry import ...`) resolve
+- Bash wrappers `exec` the canonical file
+- Repo resolution order: `AGENT_DO_REPO` env var, then the `~/.agent-do/install-path` breadcrumb; if neither resolves, the wrapper writes one stderr line and exits 0 (hooks fail open, never block a session)
+
+Consequences:
+
+- `git pull` updates flow through automatically; the next hook event runs the current repo code
+- Re-run `install.sh` only when the wrapper format version bumps, a hook file is added, or the repo moves (rewriting the breadcrumb)
+
+## Codex registration (hooks.json)
+
+Codex reads `~/.codex/hooks.json`. The full template lives at `hooks/codex/hooks.json.example` and registers SessionStart (`matcher: "startup|resume"`, 10s), UserPromptSubmit (5s), PreToolUse (`matcher: Bash`, 10s), and Stop (`stop-quality-gate.sh`, 30s). The Codex wrappers under `~/.codex/hooks/` delegate exactly like the Claude ones.
+
+Codex supports `hookSpecificOutput.additionalContext` on PreToolUse (May 2026 hooks release), so the same PreToolUse hook serves both runtimes. Codex parses but does not enforce `permissionDecision: "deny"`, so block mode is effectively Claude-only. The Codex Stop hook is advisory DPT scoring of the active `agent-do browse` session; no Claude equivalent ships, though nothing in the script is Codex-specific beyond its install path.
+
+## Environment the hooks establish
+
+SessionStart writes three exports to `CLAUDE_ENV_FILE`, which Claude Code sources for every subsequent Bash call in the session:
+
+| Export | Purpose |
+|--------|---------|
+| `PATH=<agent-do dir>:$PATH` | Every Bash call can invoke `agent-do` without installation assumptions |
+| `AGENT_DO_COORD_SESSION=<session_id>` | Coord identity anchors to the Claude session; every Bash call derives the same agent id, and SessionEnd retires exactly that identity |
+| `MANNA_SESSION_ID=<session_id>` | Manna claims carry the session id rather than a transient pid, so `manna reconcile` can probe them meaningfully (via coord peer status) instead of always finding a dead pid |
+
+Both identity pins respect pre-existing values: an orchestrator that sets its own `AGENT_DO_COORD_SESSION` or `MANNA_SESSION_ID` (for example, one id per lane in a swarm) wins over the hook.
+
+## Presence gating
+
+The hooks decide what to inject by looking at the repo, not configuration:
+
+| Signal | Effect |
+|--------|--------|
+| `$CWD/.manna/` exists | SessionStart injects the Manna board (`manna context --max-tokens 1500`) and, when `.manna/drift.yaml` contains findings, the drift greeting; SessionEnd runs `manna reconcile --write-drift` |
+| `<git-dir>/agent-do/coord/` exists | SessionEnd runs `coord stop`; SessionStart injects coord interrupts or a focus reminder when active peers exist |
+| `$CWD/.zpc/` exists | SessionStart mentions the experience journal and its status commands |
+| Frontend markers (package.json frameworks, `.tsx`/`.vue`/`.svelte` files, Flutter) | SessionStart injects the design-toolkit workflow |
+| `bootstrap --recommend` reports pending setup | SessionStart raises the bootstrap prompt (native macOS dialog by default, context ask otherwise; `AGENT_DO_BOOTSTRAP_PROMPT_MODE=native|context|disabled` overrides) |
+
+A repo with none of these gets the tooling reminder and project-scoped suggestions only.
+
+## Output conventions an orchestrator can rely on
+
+- **`--json` everywhere it matters**: tools built on `lib/json-output.sh` accept `--json` and emit a `{"success": true|false, ...}` envelope (`json_success` / `json_error` / `json_result` / `json_list`). Snapshot-style reads built on `lib/snapshot.sh` emit a JSON object opening with `tool` and `timestamp` fields; `AGENT_DO_SNAPSHOT_COMPACT=1` forces single-line output.
+- **agent-manna** prints YAML by default (a `success:` envelope) and JSON with `--json`. Its own exit codes are 0 success, 1 user error, 2 system error; `lint` exits 1 on findings, `reconcile` exits 0 on findings (advisory) and nonzero only when `--fix` fails.
+- **agent-coord** emits JSON with `--json` on every verb.
+- **Natural-language mode** (`agent-do --json "intent"`) returns structured status objects: `success`, `tool_error` (with `exit_code`, `stdout`, `stderr`), `needs_input` (with the question), or `error`, plus the resolved route's contract `beats` and `attributes`.
+
+## Natural-language exit codes and the clarification loop
+
+| Code | Meaning |
+|------|---------|
+| `0` | Routed and executed successfully |
+| `1` | Error: no matching tool, tool failure, missing dependency |
+| `2` | Needs input: ambiguous intent, or a destructive/sensitive route that requires confirmation |
+
+On exit 2 the orchestrator answers the question and retries with context:
+
+```bash
+agent-do -n "restore the database"
+# ? Which database session should I target? ... (exit 2)
+agent-do --context "the staging postgres session" -n "restore the database"
+```
+
+Routes that resolve to a verb marked `destructive` or `sensitive` in its contract also return exit 2 with an explanatory question unless `AGENT_DO_AUTO_DESTRUCTIVE=1` is set. The structured API (`agent-do <tool> <verb>`) is never gated; the gate exists because natural language adds interpretation risk.
+
+## Contracts surface for orchestrators
+
+Before scheduling parallel agents, read the safety surface once:
+
+```bash
+agent-do harness contracts surface --json
+```
+
+Alongside the standard success envelope, the payload is bucket lists of `{tool, verb}` objects: `read_only` (beat union ⊆ {snapshot, verify}; safe to run concurrently), `write` (serialize), and one bucket per attribute (`destructive`, `sensitive`, `long_running`, `passthrough`, `polymorphic`, `composite`, `own_state`). Policy that follows directly:
+
+- schedule `read_only` verbs freely in parallel; queue `write` verbs per shared resource
+- treat `own_state` writes as parallel-safe (they touch only the tool's own cache)
+- require confirmation or explicit intent for `destructive` and guard the output of `sensitive`
+- expect `long_running` verbs not to return; run them detached
+- classify `polymorphic`/`passthrough` calls by their payload, not their verb
+
+The coarse per-tool `concurrency: read|write|mixed` field in `registry.yaml` summarizes the same data and is validated against it. `agent-do harness contracts validate --json` is the machine-readable gate result if you want to assert the declarations are intact before trusting them.
+
+## Credential resolution
+
+Tools declare their secrets in `registry.yaml` (`credentials: required/optional/one_of`). Resolution order everywhere (dispatcher, intent router, health checker):
+
+1. the current process environment
+2. the OS secure store via `agent-do creds` (macOS Keychain, Linux Secret Service, Windows per-user store)
+
+```bash
+agent-do creds store RENDER_API_KEY --stdin   # store once
+agent-do creds check --tool render            # verify a tool's declared credentials
+agent-do creds required namecheap             # list what a tool expects
+```
+
+Secrets never belong in command arguments, docs, or committed files; store them once and let resolution find them.
+
+## Board conventions for agent teams
+
+These are the conventions the manna tooling checks mechanically; teams that follow them get drift detection for free.
+
+**The grammar.** Every issue is a **track** (a named grouping with intent), an **item** on a track, or a **dream** (raw intake, exempt from tracking, converted or closed with a written reason). Commits that advance an item cite it with a `Manna: mn-xxxxxx` trailer. The board is the only backlog.
+
+**Commit trailers.** A trailer is a commit-body line that is exactly `Manna: mn-xxxxxx` (key case-sensitive, one id per line, multiple lines allowed). `manna reconcile` scans the last 500 commits for trailers and reports issues that landed but are still open (`landed_open`).
+
+**Session identity.** Set `MANNA_SESSION_ID` before claiming (the SessionStart hook does this automatically; swarm orchestrators typically pin one id per lane: `MANNA_SESSION_ID=lane6-internals agent-do manna claim mn-133ad6`). Claims made under a session id that coord later reports dead, stale, or stopped surface as `dead_claim` findings, and `reconcile --fix` releases them.
+
+**Prompt pairing.** When an issue has a work-order prompt file, pair them explicitly:
+
+- the issue carries `--prompt /absolute/path/to/prompt.md` (or, as the interim convention, a description whose first line is `PROMPT: <path>`)
+- the prompt file contains the claim command for that issue (`... agent-do manna claim mn-xxxxxx`, any invocation prefix)
+
+`manna lint` flags pointers that resolve to no file. `manna reconcile` checks both directions: a pointer whose file never mentions the issue id (forward), and a staged prompt file whose claim command targets an issue that does not point back at it (reverse; the reverse scan covers `*.md` in the repo's prompt staging directory, `.dev/session-prompts/`). Bare id mentions in a file are data, not claims; only `manna claim <id>` command lines bind.
+
+**The loop.** Claim before working, `done` only after verification (done requires the claim), file stray ideas with `agent-do manna dream "<spark>"` (routes to the nearest board walking up from cwd, else the global inbox under `~/.agent-do/inbox`), and let SessionEnd's reconcile write `.manna/drift.yaml` so the next session starts by reconciling the board against reality.
+
+## CLAUDE.md snippet (hookless integration)
+
+For harnesses without hooks, or as reinforcement alongside them, add to the project's instruction file:
 
 ```markdown
 ## agent-do (Universal Automation CLI)
@@ -270,73 +227,22 @@ CHECK if agent-do has a tool:
 
     agent-do <tool> <command> [args...]   # Structured API (AI/scripts)
     agent-do -n "what you want"           # Natural language (humans)
-    agent-do suggest "task"               # likely tool/command for a task
-    agent-do suggest "task" --ai on        # require Sonnet-backed command selection
-    agent-do suggest --project            # likely tools for this repo
-    agent-do find <keyword>               # keyword search across tools
-    agent-do creds check --tool <tool>    # check declared tool credentials
-    agent-do creds store <ENV_VAR> --stdin # store a secret in the secure store
-    agent-do spec list                    # list repo-local specs and changes
-    agent-do spec status --change <id>    # inspect one change package
-    agent-do --health                     # Dependency readiness
-    agent-do bootstrap --recommend        # Detect pending project setup
-    agent-do nudges stats                 # summary of hook nudges on this machine
-    agent-do --list                       # List all 94 tools
+    agent-do suggest "task"               # Likely tool/command for a task
+    agent-do suggest --project            # Likely tools for this repo
+    agent-do find <keyword>               # Keyword search across tools
+    agent-do --list                       # List all registered tools
     agent-do <tool> --help                # Per-tool help
-
-Key tools: vercel, render, supabase, gcp, browse, ios, android, macos, tui, db,
-docker, k8s, cloud, ssh, excel, slack, image, video, audio, git, gh, ci, zpc
+    agent-do --health                     # Dependency readiness
+    agent-do creds check --tool <tool>    # Check declared credentials
 ```
 
-## Nudge vs Block Mode
+Other harnesses follow the same pattern in their own config surface (`.cursorrules`, `.aider.conf.yml`, `.continue/config.json`): document the API, and enforce with hooks where the harness supports them.
 
-By default, hooks use **nudge mode** where the host supports it: they add context reminders but do not prevent commands from running. This is still the recommended approach because:
+## Nudge vs block mode
 
-- Claude learns the pattern over a session (the reminder accumulates)
-- No false positives blocking legitimate commands
-- Users can override when agent-do isn't appropriate
+PreToolUse defaults to nudge mode: `additionalContext` reminders, command still runs. Nudges are session-state-gated (an observed `agent-do` invocation suppresses further nudges for that tool this session) and telemetry-recorded (`agent-do nudges stats`, `agent-do harness nudges effectiveness`). Safe commands are skipped entirely: git, npm, python and friends, file utilities, localhost curl, `--help`/`--version`, and agent-do invocations themselves (which instead get an advisory heads-up when the verb is contract-marked destructive or sensitive).
 
-The difference in `v1.1` is that the nudges are now more exact:
-- prompt-time suggestions are AI-ranked from the full registered catalog and only surface concrete `agent-do <tool> <command>` paths when confidence is high
-- PreToolUse nudges can point at the closest raw-command replacement
-- SessionStart can suggest likely tools for the current repo instead of a generic static list
-- local telemetry is available through `agent-do nudges stats|recent`
-
-To switch Claude PreToolUse to **block mode**, edit `hooks/agent-do-pretooluse-check.py` and change the output from `additionalContext` to `permissionDecision: "deny"`. Do not use block mode for coord focus reminders; those need to be seen by the agent so it can set focus and continue.
-
-## Architecture
-
-```
-Coding Agent Session
-    │
-    ├─ SessionStart ──→ agent-do-session-start
-    │   └─ Adds agent-do to PATH + injects project-aware tool reminder.
-    │     Prompts to bootstrap project-local agent-do state (zpc / manna /
-    │     context) with a macOS dialog. Reports bootstrap result with a
-    │     notification + log on completion.
-    │
-    ├─ UserPromptSubmit ──→ agent-do-prompt-router.py
-    │   └─ AI-classifies prompt intent (coord / tools / docs / design /
-    │     completion) and emits high-confidence context only. Silent when
-    │     AI router is unavailable; state-grounded paths still fire.
-    │
-    ├─ PreToolUse (Bash) ──→ agent-do-pretooluse-check.py
-    │   └─ Same hook in both runtimes. Codex supports additionalContext as
-    │     of May 2026; the wrapper at ~/.codex/hooks/ delegates to the
-    │     same canonical logic.
-    │
-    ├─ Stop (Codex only) ──→ stop-quality-gate.sh
-    │   └─ Optional advisory DPT scoring of the current agent-do browse
-    │     session, surfaced as additionalContext. Never blocks.
-    │
-    └─ SessionEnd (Claude) ──→ agent-do-coord-stop.sh
-        └─ Retires the session's coord presence (`coord stop`) in repos
-          that already have a board. Session-start pins the coord identity
-          from the session_id so retirement hits the same record. Bounded,
-          silent, never blocks.
-```
-
-All hooks work independently. You can install any subset.
+To block instead of nudge, edit `hooks/claude/agent-do-pretooluse-check.py` to emit `permissionDecision: "deny"`. Claude Code enforces it; Codex does not. Do not block coord focus reminders; the agent must see them to act on them.
 
 ## Uninstalling
 
@@ -344,4 +250,4 @@ All hooks work independently. You can install any subset.
 ./install.sh --uninstall
 ```
 
-This removes the symlink, breadcrumb, and hook files. You'll need to manually remove the hook entries from `~/.claude/settings.json`.
+Removes the symlink, breadcrumb, generated index (only when it carries the generator marker), and the agent-do hook wrappers from both `~/.claude/hooks/` and `~/.codex/hooks/`, touching nothing else in those directories. Hook entries in `~/.claude/settings.json` and `~/.codex/hooks.json` must be removed manually.
