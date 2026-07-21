@@ -214,6 +214,28 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 
 All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 
+## Manna Board Conventions
+
+The board (`.manna/`) is the single backlog. Full design: `.handoff/2026-07-21-manna-coherence-design.md`. Doctrine: status is derived from receipts wherever a receipt can exist, asserted only for desire/priority.
+
+**Filing grammar** — every issue takes a thread prefix; every non-umbrella issue names its umbrella (mn- ID) in title prefix or description. No orphans.
+
+| Prefix | Thread |
+|--------|--------|
+| `TRACK:` | Program umbrella; description names children by mn- ID |
+| `Moon trunk X:` | Agentic Work OS (umbrella mn-b7a0cc) |
+| `Companion:` | Companion / Second Chair (umbrella mn-69368a) |
+| `Charter Law N:` | Charter-organ work |
+| `Harness:` | The body itself — tool gaps, audits, releases, memory hemisphere |
+| `DREAM:` | Raw wishlist intake — spark verbatim + guessed umbrella + one line of what done looks like. Wrong is fine; lost is not. Sweep converts or closes with a written reason. |
+
+**Receipts:**
+- Any commit advancing an issue carries a `Manna: mn-xxxxxx` trailer (same mechanic as `Co-Authored-By`).
+- Landed-but-unmerged work is annotated on the issue (never left reading as "not started"); merged work closes it.
+- Memories and handoff docs point at mn- IDs — they never carry their own checklists (single-truth rule).
+
+`agent-do manna reconcile` (mn-2a33a5, planned) audits board↔commits↔claims↔memory drift; until it exists, run the sweep by hand at session end.
+
 ## Adding Tools
 
 1. Create executable at `tools/agent-<name>` (must support `--help` flag)
