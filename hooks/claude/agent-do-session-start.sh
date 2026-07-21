@@ -356,6 +356,55 @@ Set focus before overlapping work starts:
 "
 }
 
+append_manna_board() {
+    local board_json board_block drift_file drift_block
+
+    [ -n "$AGENT_DO_DIR" ] || return 0
+    [ -n "$CWD" ] || return 0
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
+    # Board presence gates everything below: repos without .manna/ take none
+    # of this path, so the emitted envelope stays byte-identical to today.
+    [ -d "$CWD/.manna" ] || return 0
+
+    board_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" manna context --max-tokens 1500 --json 2>/dev/null || true)
+    if [ -n "$board_json" ]; then
+        board_block=$(echo "$board_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('context',''))" 2>/dev/null || true)
+        if [ -n "$board_block" ]; then
+            CONTEXT="$CONTEXT
+
+---
+
+## Manna Board
+
+$board_block
+
+Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified."
+        fi
+    fi
+
+    # Drift greeting: the SessionEnd reconcile advisory writes .manna/drift.yaml;
+    # read-if-exists, so a hand-written file greets before that ever ships.
+    drift_file="$CWD/.manna/drift.yaml"
+    [ -f "$drift_file" ] || return 0
+    grep -q '^findings:' "$drift_file" 2>/dev/null || return 0
+    grep -Eq '^[[:space:]]*-[[:space:]]+kind:' "$drift_file" 2>/dev/null || return 0
+
+    drift_block=$(sed -n '1,30p' "$drift_file" 2>/dev/null)
+    [ -n "$drift_block" ] || return 0
+
+    CONTEXT="$CONTEXT
+
+---
+
+## Board drift (unresolved from last session)
+
+\`\`\`yaml
+$drift_block
+\`\`\`
+
+Reconcile the board against reality before claiming new work, then remove \`.manna/drift.yaml\` once resolved."
+}
+
 # --- Inject tooling reminder ---
 CONTEXT="## TOOLING REMINDER - agent-do
 
@@ -481,6 +530,7 @@ fi
 append_project_tooling
 append_bootstrap_prompt
 append_coord_context
+append_manna_board
 
 ESCAPED=$(echo "$CONTEXT" | jq -Rs .)
 echo "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":$ESCAPED}}"
