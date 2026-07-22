@@ -26,6 +26,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full routing flow and component m
 
 ## Adding a Tool
 
+0. **The taxonomy gate, answered before any code:** is this a new domain, or a new verb on a domain that already exists? The registry grows by family surfaces, never by unbounded flat names. `agent-do hardware <serial|bluetooth|usb|printer|midi>` fronts five domains through one entry; `agent-do meetings` fronts three providers the same way. A capability that reads as a verb on an existing family (a new provider, a new action in a covered territory) joins that family tool instead of claiming a top-level name. Only genuinely new territory earns one. State the answer in the PR description; reviewers ask this question first.
 1. Create an executable at `tools/agent-<name>` that supports `--help`. Standalone scripts and directories with a nested `agent-<name>` executable both work; `--list` discovers tools by filesystem scan.
 2. Add a `registry.yaml` entry with `description`, `capabilities`, `commands`, and `examples`.
    - Add `routing` metadata (discovery keywords, raw CLI equivalents, readiness hints, project signals) when the tool should participate in `suggest`, prompt-hook routing, or PreToolUse nudges.
