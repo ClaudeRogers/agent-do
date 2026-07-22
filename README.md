@@ -4,12 +4,12 @@
   <img src="assets/agent-do-logo.png" alt="agent-do logo" width="360" />
 </p>
 
-<p align="center"><strong>The outer harness for AI coding agents.</strong></p>
+<p align="center"><strong>The world-facing outer harness for AI coding agents.</strong></p>
 
 AI coding agents are strong inside a repository. They read files, write code, run
 tests, and reason through local changes.
 
-The hard part is everything outside that loop: browsers, authentication, cloud
+The hard part is everything that is not your code: browsers, authentication, cloud
 services, databases, screenshots, design review, work tracking, project memory,
 PR triage, notifications, and the local machine itself.
 
@@ -18,6 +18,10 @@ PR triage, notifications, and the local machine itself.
 ```bash
 agent-do <tool> <command> [args...]
 ```
+
+One law runs all of it: snapshot before you act, keep receipts. Every tool
+declares that law as a machine-readable contract, and the work boards hold it
+too: status comes from receipts, never testimony.
 
 It looks like a CLI because the shell is the simplest contract every coding
 agent can already use. But it is not primarily a human productivity CLI.
