@@ -5842,6 +5842,3 @@ tools:
         resolve: [composite]
         unresolve: [composite]
     concurrency: mixed
-    concurrency_detail:
-      read: [projects, project, issues, issue, alerts, alert, releases, snapshot]
-      mutate: [resolve, unresolve, ignore, assign]

@@ -921,7 +921,8 @@ print(json.dumps(snapshot, separators=(',', ':')))
 
 case "${1:-help}" in
     projects|ls|list)
-        cmd_projects
+        shift || true
+        cmd_projects "$@"
         ;;
     project|show)
         shift
@@ -952,7 +953,8 @@ case "${1:-help}" in
         cmd_assign "$@"
         ;;
     alerts|rules)
-        cmd_alerts
+        shift || true
+        cmd_alerts "$@"
         ;;
     alert|rule)
         shift
@@ -963,7 +965,8 @@ case "${1:-help}" in
         cmd_releases "$@"
         ;;
     snapshot|snap)
-        cmd_snapshot
+        shift || true
+        cmd_snapshot "$@"
         ;;
     help|--help|-h)
         show_help

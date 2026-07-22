@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (95 tools)
+## Summary (96 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -93,6 +93,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
+| [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
 | [sheets](#sheets) | Control Google Sheets | mixed | 3 |
@@ -3396,6 +3397,66 @@ agent-do screen type 'hello world'
 
 - Read-only (snapshot/verify; safe to parallelize): `cursor`, `displays`, `elements`, `find`, `snapshot`
 - Write (connect/interact/save): `click`, `press`, `scroll`, `type`
+
+### sentry
+
+Sentry error tracking, issue management, alerts, and releases
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect projects
+- search and filter issues with Sentry query syntax
+- view issue details with assignee, level, and event count
+- resolve, unresolve, ignore, and assign issues
+- list alert rules across all projects
+- list recent releases
+- full account snapshot as JSON
+
+**Commands**
+
+- `projects`: List all projects with platforms
+- `project`: Detailed project info
+- `issues`: List issues (--project, --query, --sort, --limit)
+- `issue`: Detailed issue info by short ID
+- `resolve`: Resolve an issue
+- `unresolve`: Reopen a resolved issue
+- `ignore`: Mark an issue as ignored
+- `assign`: Assign an issue to a user by email
+- `alerts`: List alert rules
+- `alert`: Detailed alert rule info
+- `releases`: List recent releases (--project)
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list sentry projects
+agent-do sentry projects
+# show unresolved sentry issues
+agent-do sentry issues
+# show sentry issues for versova-chat
+agent-do sentry issues --project versova-chat
+# get sentry issue details
+agent-do sentry issue VERSOVA-CHAT-B
+# resolve a sentry issue
+agent-do sentry resolve VERSOVA-CHAT-B
+# list sentry alert rules
+agent-do sentry alerts
+# get sentry account snapshot
+agent-do sentry snapshot
+```
+
+**Credentials**
+
+- Required: `SENTRY_AUTH_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `alert`, `alerts`, `issue`, `issues`, `project`, `projects`, `releases`, `snapshot`
+- Write (connect/interact/save): `assign`, `ignore`, `resolve`, `unresolve`
+- composite (one call performs several beats internally): `assign`, `ignore`, `resolve`, `unresolve`
 
 ### serial
 
