@@ -1,5 +1,6 @@
 #!/bin/bash
-# SessionEnd hook: retire this session's coord presence cleanly.
+# SessionEnd hook: retire this session's coord presence, then run the manna
+# reconcile advisory for the next SessionStart to greet with.
 # Advisory and silent — never blocks, never creates a board where none exists.
 
 INPUT=$(cat 2>/dev/null || true)
@@ -7,10 +8,6 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""' 2>/dev/null)
 [ -n "$CWD" ] || CWD="$PWD"
 cd "$CWD" 2>/dev/null || exit 0
-
-# Only retire in projects that already use coord.
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
-[ -d "$GIT_DIR/agent-do/coord" ] || exit 0
 
 # Resolve agent-do (same chain as agent-do-session-start.sh, condensed).
 AGENT_DO=""
@@ -27,19 +24,39 @@ if [ -z "$AGENT_DO" ]; then
 fi
 [ -n "$AGENT_DO" ] || exit 0
 
-# Retire the same identity the session used (session-start pinned it via
-# AGENT_DO_COORD_SESSION in CLAUDE_ENV_FILE from the same session_id).
-[ -n "$SESSION_ID" ] && export AGENT_DO_COORD_SESSION="$SESSION_ID"
-
 # Hard bound with process-group SIGKILL so a wedged agent-do spawn cannot
 # hang session teardown or leave orphans holding pipes.
-perl -e '
-    setpgrp(0, 0);
-    $SIG{ALRM} = sub { kill KILL => -$$ };
-    alarm shift(@ARGV);
-    my $pid = fork();
-    if (!$pid) { exec @ARGV or exit 127 }
-    waitpid($pid, 0);
-    exit($? >> 8);
-' 5 "$AGENT_DO" coord stop --note "session ended" >/dev/null 2>&1
+bounded_run() {
+    perl -e '
+        setpgrp(0, 0);
+        $SIG{ALRM} = sub { kill KILL => -$$ };
+        alarm shift(@ARGV);
+        my $pid = fork();
+        if (!$pid) { exec @ARGV or exit 127 }
+        waitpid($pid, 0);
+        exit($? >> 8);
+    ' "$@"
+}
+
+# --- Coord retirement: only in projects that already use coord ---
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || true)
+if [ -n "$GIT_DIR" ] && [ -d "$GIT_DIR/agent-do/coord" ]; then
+    # Retire the same identity the session used (session-start pinned it via
+    # AGENT_DO_COORD_SESSION in CLAUDE_ENV_FILE from the same session_id).
+    [ -n "$SESSION_ID" ] && export AGENT_DO_COORD_SESSION="$SESSION_ID"
+    bounded_run 5 "$AGENT_DO" coord stop --note "session ended" >/dev/null 2>&1
+fi
+
+# --- Manna reconcile advisory: only where a board already exists ---
+# Writes .manna/drift.yaml for the next SessionStart's drift greeting. The
+# exit code is deliberately discarded: reconcile is advisory and must never
+# change this hook's exit 0. SessionEnd's registered timeout is 10s; coord
+# stop (5s bound) + reconcile (4s bound) stays inside it.
+if [ -d .manna ]; then
+    # Same session anchor manna claims used during the session, so the drift
+    # file's session field names who last reconciled.
+    [ -n "$SESSION_ID" ] && export MANNA_SESSION_ID="$SESSION_ID"
+    bounded_run 4 "$AGENT_DO" manna reconcile --write-drift --json >/dev/null 2>&1
+fi
+
 exit 0

@@ -40,10 +40,10 @@ class _Response:
 class _Messages:
     def create(self, **kwargs):
         prompt = kwargs["messages"][0]["content"]
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        assert kwargs["model"] == "claude-haiku-4-5-20251001"
         assert kwargs["max_tokens"] == 64000
-        assert kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
-        assert kwargs["output_config"] == {"effort": "max"}
+        assert "thinking" not in kwargs
+        assert "output_config" not in kwargs
         assert "deploy this on vercel and check logs" in prompt
         return _Response({
             "tool": "vercel",
@@ -58,7 +58,7 @@ class _Messages:
 
 
 class Anthropic:
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.messages = _Messages()
 """,
             encoding="utf-8",

@@ -30,6 +30,36 @@ impl std::fmt::Display for IssueStatus {
     }
 }
 
+/// Issue type enum: track (umbrella), item (work unit, default), dream (intake spark)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueType {
+    Track,
+    Item,
+    Dream,
+}
+
+impl Default for IssueType {
+    fn default() -> Self {
+        IssueType::Item
+    }
+}
+
+impl std::fmt::Display for IssueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueType::Track => write!(f, "track"),
+            IssueType::Item => write!(f, "item"),
+            IssueType::Dream => write!(f, "dream"),
+        }
+    }
+}
+
+/// True when the type is the default (`item`); v1 rows round-trip unchanged.
+pub fn is_default_type(issue_type: &IssueType) -> bool {
+    *issue_type == IssueType::Item
+}
+
 /// An issue in Manna.
 ///
 /// See SCHEMA.md for field definitions.
@@ -65,6 +95,22 @@ pub struct Issue {
     /// When it was claimed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<DateTime<Utc>>,
+
+    /// Issue type: track, item (default), or dream
+    #[serde(rename = "type", default, skip_serializing_if = "is_default_type")]
+    pub issue_type: IssueType,
+
+    /// Track this issue belongs to (edge to a `type: track` issue)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+
+    /// Where this issue came from (vault note, conversation, commit, ...)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+
+    /// Work-order prompt file paired with this issue (absolute path expected)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 impl Issue {
@@ -95,6 +141,10 @@ impl Issue {
             blocked_by: Vec::new(),
             claimed_by: None,
             claimed_at: None,
+            issue_type: IssueType::default(),
+            track: None,
+            source: None,
+            prompt: None,
         })
     }
 
@@ -193,7 +243,7 @@ impl Issue {
     }
 
     /// Update blocked status based on blocked_by list
-    fn update_blocked_status(&mut self) {
+    pub fn update_blocked_status(&mut self) {
         if !self.blocked_by.is_empty() && self.status != IssueStatus::Done {
             self.status = IssueStatus::Blocked;
         } else if self.blocked_by.is_empty() && self.status == IssueStatus::Blocked {
@@ -228,6 +278,10 @@ impl Issue {
 
         if self.claimed_by.is_none() && self.claimed_at.is_some() {
             return Err("Issue without claimed_by cannot have claimed_at set".to_string());
+        }
+
+        if self.issue_type == IssueType::Track && self.track.is_some() {
+            return Err("Track issues cannot have a track edge (tracks don't nest)".to_string());
         }
 
         Ok(())
@@ -500,5 +554,87 @@ mod tests {
         let issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
         let json = serde_json::to_string(&issue).unwrap();
         assert!(json.contains(r#""status":"open"#));
+    }
+
+    #[test]
+    fn test_new_issue_defaults_to_item_type() {
+        let issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
+        assert_eq!(issue.issue_type, IssueType::Item);
+        assert!(issue.track.is_none());
+        assert!(issue.source.is_none());
+        assert!(issue.prompt.is_none());
+    }
+
+    #[test]
+    fn test_v1_row_deserializes_and_reserializes_unchanged() {
+        // A v1 line has no type/track/source/prompt fields; it must parse as
+        // an item and re-serialize without adding any of the new fields.
+        let v1_line = r#"{"id":"mn-abc123","title":"V1 row","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}"#;
+        let issue: Issue = serde_json::from_str(v1_line).unwrap();
+        assert_eq!(issue.issue_type, IssueType::Item);
+        assert!(issue.track.is_none());
+        assert!(issue.source.is_none());
+        assert!(issue.prompt.is_none());
+
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(!json.contains(r#""type""#));
+        assert!(!json.contains(r#""track""#));
+        assert!(!json.contains(r#""source""#));
+        assert!(!json.contains(r#""prompt""#));
+    }
+
+    #[test]
+    fn test_prompt_field_roundtrip() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Prompted".to_string()).unwrap();
+        issue.prompt = Some("/abs/path/lane-4.md".to_string());
+
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains(r#""prompt":"/abs/path/lane-4.md""#));
+
+        let deserialized: Issue = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.prompt, Some("/abs/path/lane-4.md".to_string()));
+    }
+
+    #[test]
+    fn test_typed_issue_roundtrip() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Dream".to_string()).unwrap();
+        issue.issue_type = IssueType::Dream;
+        issue.track = Some("mn-def456".to_string());
+        issue.source = Some("vault:+/idea.md".to_string());
+
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains(r#""type":"dream""#));
+        assert!(json.contains(r#""track":"mn-def456""#));
+        assert!(json.contains(r#""source":"vault:+/idea.md""#));
+
+        let deserialized: Issue = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.issue_type, IssueType::Dream);
+        assert_eq!(deserialized.track, Some("mn-def456".to_string()));
+        assert_eq!(deserialized.source, Some("vault:+/idea.md".to_string()));
+    }
+
+    #[test]
+    fn test_track_type_serializes_type_field() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Umbrella".to_string()).unwrap();
+        issue.issue_type = IssueType::Track;
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(json.contains(r#""type":"track""#));
+    }
+
+    #[test]
+    fn test_validate_track_with_track_edge_fails() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Nested track".to_string()).unwrap();
+        issue.issue_type = IssueType::Track;
+        issue.track = Some("mn-def456".to_string());
+        let result = issue.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("tracks don't nest"));
+    }
+
+    #[test]
+    fn test_is_default_type() {
+        assert!(is_default_type(&IssueType::Item));
+        assert!(!is_default_type(&IssueType::Track));
+        assert!(!is_default_type(&IssueType::Dream));
     }
 }

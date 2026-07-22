@@ -71,6 +71,9 @@ check_cmd "v1.1 routing foundation tests" python3 "$SCRIPT_DIR/tests/test_v11_ro
 check_cmd "transcribe tests" python3 "$SCRIPT_DIR/tests/test_transcribe.py"
 check_cmd "suggest AI routing tests" python3 "$SCRIPT_DIR/tests/test_suggest_ai.py"
 check_cmd "prompt hook AI routing tests" python3 "$SCRIPT_DIR/tests/test_prompt_hook_ai.py"
+check_cmd "model resolution tests" python3 "$SCRIPT_DIR/tests/test_models.py"
+check_cmd "generated discovery index tests" bash "$SCRIPT_DIR/tests/test_index_generation.sh"
+check_cmd "zpc global read-surface tests" python3 "$SCRIPT_DIR/tests/test_zpc_global.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"
@@ -98,6 +101,7 @@ check_cmd "psql tests" python3 "$SCRIPT_DIR/tests/test_psql.py"
 check_cmd "vector tests" python3 "$SCRIPT_DIR/tests/test_vector.py"
 check_output "vector --help" "today" "$AGENT_DO" vector --help
 check_cmd "gh tests" python3 "$SCRIPT_DIR/tests/test_gh.py"
+check_cmd "git guardrail tests" python3 "$SCRIPT_DIR/tests/test_git_guardrails.py"
 check_cmd "hardware tests" python3 "$SCRIPT_DIR/tests/test_hardware.py"
 check_cmd "meetings tests" python3 "$SCRIPT_DIR/tests/test_meetings.py"
 check_cmd "harness tests" python3 "$SCRIPT_DIR/tests/test_harness.py"
@@ -106,6 +110,7 @@ check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drif
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
 check_cmd "routing contracts tests" python3 "$SCRIPT_DIR/tests/test_routing_contracts.py"
 check_cmd "contracts drift channel empty" "$AGENT_DO" harness contracts drift
+check_cmd "tools reference doc in sync" "$SCRIPT_DIR/bin/gen-tools-doc" --check
 check_cmd "health probe tests" python3 "$SCRIPT_DIR/tests/test_health_probes.py"
 check_cmd "hook outcome telemetry tests" python3 "$SCRIPT_DIR/tests/test_hook_outcome_telemetry.py"
 check_cmd "global hook nonblocking tests" python3 "$SCRIPT_DIR/tests/test_global_hooks_nonblocking.py"
@@ -116,8 +121,11 @@ check_cmd "coord tests" python3 "$SCRIPT_DIR/tests/test_coord.py"
 check_cmd "coord v2 tests" python3 "$SCRIPT_DIR/tests/test_coord_v2.py"
 check_cmd "obsidian tests" python3 "$SCRIPT_DIR/tests/test_obsidian.py"
 check_cmd "browser import tests" python3 "$SCRIPT_DIR/tests/test_browser_import.py"
+check_cmd "browse daemon isolation tests" python3 "$SCRIPT_DIR/tests/test_browse_daemon_isolation.py"
 check_cmd "browse session default tests" python3 "$SCRIPT_DIR/tests/test_browse_session_defaults.py"
 check_cmd "tool regression tests" python3 "$SCRIPT_DIR/tests/test_tool_regressions.py"
+check_cmd "manna unit tests" cargo test --quiet --manifest-path "$SCRIPT_DIR/tools/agent-manna/Cargo.toml"
+check_cmd "manna integration tests" bash "$SCRIPT_DIR/tools/agent-manna/test/integration.sh"
 
 # lib/snapshot.sh: AGENT_DO_SNAPSHOT_COMPACT=1 produces single-line JSON.
 snapshot_compact_output=$(

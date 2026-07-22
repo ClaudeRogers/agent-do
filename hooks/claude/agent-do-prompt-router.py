@@ -13,8 +13,11 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from shutil import which
 from pathlib import Path
+
+HOOK_START = time.monotonic()
 
 # File lives at <repo>/hooks/claude/agent-do-prompt-router.py, so the repo
 # root is two parents up and lib/ is its sibling.
@@ -145,41 +148,15 @@ KNOWN_DOC_SOURCE_COMMANDS = [
 
 
 def build_ai_catalog(registry: dict) -> list[dict]:
-    """Return the full agent-do catalog in a compact form suitable for hook routing."""
+    """Return every tool as a latency-bounded classifier index."""
     catalog = []
     for tool, info in sorted(registry.get("tools", {}).items()):
-        commands = list((info.get("commands") or {}).keys())
-        examples = []
-        for example in (info.get("examples") or [])[:3]:
-            intent = example.get("intent")
-            command = example.get("command")
-            if intent and command:
-                examples.append({"intent": intent, "command": command})
-        routing_intents = []
-        routing = info.get("routing") or {}
-        for item in (routing.get("intents") or [])[:8]:
-            if not isinstance(item, dict):
-                continue
-            label = item.get("label")
-            if not label:
-                continue
-            routing_intents.append(
-                {
-                    "label": str(label),
-                    "examples": [str(ex) for ex in (item.get("examples") or [])[:4]],
-                    "recommended_entrypoint": str(item.get("recommended_entrypoint") or ""),
-                }
-            )
-
+        description = " ".join(str(info.get("description") or "").split())[:120]
         catalog.append(
             {
                 "tool": tool,
-                "description": info.get("description", ""),
-                "capabilities": [str(item) for item in (info.get("capabilities") or [])[:6]],
-                "commands": commands,
-                "recommended_entrypoints": get_recommended_entrypoints(info) if get_recommended_entrypoints else [],
-                "examples": examples,
-                "routing_intents": routing_intents,
+                "description": description,
+                "entrypoints": (get_recommended_entrypoints(info)[:2] if get_recommended_entrypoints else []),
             }
         )
     return catalog
@@ -460,8 +437,7 @@ Four products share this hook. All of them must be classified by INTENT, not by 
 Rules:
 - "Workspace work" for coord includes editing files, debugging, testing, reviewing code/PRs, committing, pushing, deploying, or "do it/go" continuation of work.
 - Pure discussion, status questions, explanations, model choice, and "no touching" prompts should not be blocked.
-- For tool suggestions, inspect the full catalog and emit only if one or two agent-do commands are clearly stellar and exact.
-- Tools may declare routing_intents with labels and examples. Treat those as classifier labels, not keyword rules. If a prompt matches one, suggest the recommended entrypoint only when it is the right immediate action.
+- For tool suggestions, inspect the complete compact index and emit only if one or two listed entrypoints are clearly stellar and exact.
 - Do not emit generic setup/search/status suggestions unless the prompt directly asks for that operation.
 - It is good to emit nothing. Be conservative on every classification. False positives are worse than false negatives.
 - Never invent tools. Commands must start with `agent-do <tool>`.
@@ -510,6 +486,15 @@ Respond with JSON only:
   ]
 }}
 """
+    # Claude Code kills the whole hook at 5s and discards ALL output. Base
+    # stages (registry, coord, models config) already spend 1.5-2s, so the AI
+    # call gets only what remains of a 4.2s safety line, and is skipped
+    # entirely when too little is left. max_tokens stays small: a routing
+    # decision is a tiny JSON object, and a large cap invites generations
+    # that eat the deadline.
+    remaining = 4.2 - (time.monotonic() - HOOK_START)
+    if remaining < 0.9:
+        return None
     return call_json_model(
         prompt_text,
         flag_name="AGENT_DO_HOOK_AI",
@@ -519,6 +504,9 @@ Respond with JSON only:
             "Be engineering-ready, clear, and concise. Use the fewest words that preserve correctness; "
             "do not omit necessary operational detail."
         ),
+        max_tokens=600,
+        timeout_seconds=min(1.75, remaining - 0.25),
+        max_retries=0,
     )
 
 

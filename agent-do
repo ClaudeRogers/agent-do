@@ -256,6 +256,7 @@ natural_route() {
     local context="$2"
     shift 2
     local intent="$*"
+    load_tool_credentials "models"
     
     local args=()
     [[ "$json_mode" == "true" ]] && args+=(--json)
@@ -310,10 +311,12 @@ case "${1:-}" in
         ;;
     suggest)
         shift || true
+        load_tool_credentials "models"
         exec "$SCRIPT_DIR/bin/suggest" suggest "$@"
         ;;
     find)
         shift || true
+        load_tool_credentials "models"
         exec "$SCRIPT_DIR/bin/suggest" find "$@"
         ;;
     notify)
@@ -341,6 +344,7 @@ case "${1:-}" in
             echo "Usage: agent-do --how \"your question\""
             exit 1
         fi
+        load_tool_credentials "models"
         exec "$SCRIPT_DIR/bin/intent-router" --explain "$*"
         ;;
     --dry-run)
@@ -349,6 +353,7 @@ case "${1:-}" in
             echo "Usage: agent-do --dry-run \"what you want to do\""
             exit 1
         fi
+        load_tool_credentials "models"
         exec "$SCRIPT_DIR/bin/intent-router" --dry-run "$*"
         ;;
     --offline)

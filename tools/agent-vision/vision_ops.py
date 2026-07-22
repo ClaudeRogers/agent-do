@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Any, Optional, List, Dict, Tuple
 import tempfile
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+LIB_DIR = ROOT_DIR / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from ai_router import llm_call
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -1140,88 +1147,33 @@ class VisionSession:
         tmp_path = '/tmp/vision_frame.png'
         cv2.imwrite(tmp_path, frame)
         
-        # Try OpenAI
-        if os.environ.get('OPENAI_API_KEY'):
-            return self._describe_openai(tmp_path, detail, focus)
-        
-        # Try Anthropic
-        if os.environ.get('ANTHROPIC_API_KEY'):
-            return self._describe_anthropic(tmp_path, detail, focus)
-        
-        return None
-    
-    def _describe_openai(self, image_path: str, detail: str, focus: str) -> Optional[str]:
-        """Describe image using OpenAI GPT-4V."""
+        return self._describe_llm(tmp_path, detail, focus)
+
+    def _describe_llm(
+        self,
+        image_path: str,
+        detail: str,
+        focus: str,
+        question: str = None,
+    ) -> Optional[str]:
+        """Describe or query an image through the configured vision role."""
         try:
-            import openai
-            import base64
-            
-            with open(image_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            prompt = "Describe what you see in this image."
-            if focus:
+            prompt = question or "Describe what you see in this image."
+            if focus and not question:
                 prompt = f"Describe what you see in this image, focusing on {focus}."
             if detail == 'high':
                 prompt += " Be very detailed."
             elif detail == 'low':
                 prompt += " Be brief."
-            
-            client = openai.OpenAI()
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/png;base64,{image_data}"
-                        }}
-                    ]
-                }],
-                max_tokens=500
-            )
-            
-            return response.choices[0].message.content
-        except Exception as e:
-            return None
-    
-    def _describe_anthropic(self, image_path: str, detail: str, focus: str) -> Optional[str]:
-        """Describe image using Anthropic Claude."""
-        try:
-            import anthropic
-            import base64
-            
-            with open(image_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            prompt = "Describe what you see in this image."
-            if focus:
-                prompt = f"Describe what you see in this image, focusing on {focus}."
-            if detail == 'high':
-                prompt += " Be very detailed."
-            elif detail == 'low':
-                prompt += " Be brief."
-            
-            client = anthropic.Anthropic()
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+
+            response = llm_call(
+                "vision",
+                [{"role": "user", "content": prompt}],
+                images=[image_path],
                 max_tokens=500,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": image_data
-                        }},
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
             )
-            
-            return response.content[0].text
-        except Exception as e:
+            return response.text
+        except Exception:
             return None
     
     def _ask_about_frame(self, frame: np.ndarray, question: str) -> Optional[str]:
@@ -1229,13 +1181,7 @@ class VisionSession:
         tmp_path = '/tmp/vision_frame.png'
         cv2.imwrite(tmp_path, frame)
         
-        if os.environ.get('OPENAI_API_KEY'):
-            return self._describe_openai(tmp_path, 'medium', None)
-        
-        if os.environ.get('ANTHROPIC_API_KEY'):
-            return self._describe_anthropic(tmp_path, 'medium', None)
-        
-        return None
+        return self._describe_llm(tmp_path, 'medium', None, question=question)
 
 
 def main():

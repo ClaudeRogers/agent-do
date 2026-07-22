@@ -414,6 +414,11 @@ overrides:
   manna:
     claim: {beats: [interact]}
     done: {beats: [interact]}
+    block: {beats: [interact]}
+    unblock: {beats: [interact]}
+    dream: {beats: [interact]}
+    lint: {beats: [verify]}
+    reconcile: {beats: [verify, interact], attributes: [polymorphic]}  # read by default, writes under --fix
   docker:
     exec: {attributes: [passthrough]}
   psql:

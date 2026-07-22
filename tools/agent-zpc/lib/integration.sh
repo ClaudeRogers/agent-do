@@ -9,6 +9,7 @@ cmd_inject() {
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
     local profile_file="$ZPC_MEMORY_DIR/profile.md"
+    local global_lessons_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
 
     local lesson_count decision_count
     lesson_count=$(count_lines "$lessons_file")
@@ -39,7 +40,13 @@ cmd_inject() {
         context+="$(cat "$patterns_file")\n\n"
     fi
 
-    # Section 4: Recent lessons
+    # Section 4: Machine-wide lessons (bounded; omit the section when empty)
+    if [[ -f "$global_lessons_file" && -s "$global_lessons_file" ]]; then
+        context+="--- Global Lessons (machine-wide) ---\n"
+        context+="$(tail -n 10 "$global_lessons_file")\n\n"
+    fi
+
+    # Section 5: Recent project lessons
     context+="--- Recent Lessons (newest last) ---\n"
     if [[ -f "$lessons_file" && -s "$lessons_file" ]]; then
         context+="$(tail -n 20 "$lessons_file")\n"
@@ -48,7 +55,7 @@ cmd_inject() {
     fi
     context+="\n"
 
-    # Section 5: Decisions
+    # Section 6: Decisions
     context+="--- Settled Decisions (do not re-derive) ---\n"
     if [[ -f "$decisions_file" && -s "$decisions_file" ]]; then
         context+="$(python3 << 'PYTHON' - "$decisions_file"
@@ -75,7 +82,7 @@ PYTHON
     fi
     context+="\n"
 
-    # Section 6: Baseline counts
+    # Section 7: Baseline counts
     context+="--- Baseline Counts (your starting point) ---\n"
     context+="lessons.jsonl: ${lesson_count} entries | decisions.jsonl: ${decision_count} entries\n"
     context+="Only count entries YOU append as 'new'. Do not count pre-existing entries.\n"
@@ -279,14 +286,16 @@ cmd_status() {
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
     local harvest_log="$ZPC_STATE_DIR/harvest-log.jsonl"
     local team_lessons="$ZPC_TEAM_DIR/shared-lessons.jsonl"
+    local global_lessons="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
 
     local project_path
     project_path="$(dirname "$ZPC_DIR")"
-    local lesson_count decision_count pattern_count team_count
+    local lesson_count decision_count pattern_count team_count global_count
     lesson_count=$(count_lines "$lessons_file")
     decision_count=$(count_lines "$decisions_file")
     pattern_count=$(grep -c "^## " "$patterns_file" 2>/dev/null) || pattern_count=0
     team_count=$(count_lines "$team_lessons")
+    global_count=$(count_lines "$global_lessons")
 
     # Format issues + consolidation gaps via python
     local health
@@ -361,6 +370,7 @@ PYTHON
         snapshot_num_field "decisions" "$decision_count"
         snapshot_num_field "patterns" "$pattern_count"
         snapshot_num_field "team_lessons" "$team_count"
+        snapshot_num_field "global_lessons" "$global_count"
         snapshot_num_field "format_issues" "$format_issues"
         snapshot_num_field "consolidation_gaps" "$gaps"
         snapshot_field "last_harvest" "$last_harvest"
@@ -372,6 +382,7 @@ PYTHON
         echo "  Decisions:         $decision_count"
         echo "  Patterns:          $pattern_count"
         echo "  Team lessons:      $team_count"
+        echo "  Global lessons:    $global_count"
         echo "  Format issues:     $format_issues"
         echo "  Consolidation gaps: $gaps"
         echo "  Last harvest:      $last_harvest"

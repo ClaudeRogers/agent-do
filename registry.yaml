@@ -440,7 +440,7 @@ tools:
       decide: Log a decision with rationale
       decide-batch: Batch-log decisions from planning phase
       harvest: Post-build consolidation scan
-      query: Search lessons, decisions, patterns
+      query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
       review: Post-sprint lesson extraction from git history
       promote: Promote lessons to team or global
@@ -1311,35 +1311,79 @@ tools:
         - long_running
     concurrency: write
   git:
-    description: Enhanced git operations
+    description: Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery
     capabilities:
-    - commit with AI messages
-    - manage branches
-    - resolve conflicts
-    - interactive rebase
+    - commit explicitly staged changes with heuristic messages and a redacted secret-scan gate
+    - inspect status, diffs, logs, conflicts, reflog, and unreachable commits
+    - manage branches, stashes, remotes, and worktrees
+    - seed named gitignored local files into fresh worktrees without overwriting targets
+    - inspect and recover files from refs/auto shadow snapshots
+    - preview safe branch cleanup before explicit apply
     commands:
-      commit: Commit with message
-      branch: Branch operations
-      diff: Show diff
-      log: Show log
-      stash: Stash changes
+      status: Show compact working-tree status
+      diff: Show staged diff, or unstaged diff when the index is empty
+      log: Show recent commits
+      commit: Commit staged changes after secret scanning; --no-scan is explicit and logged
+      branch: List branches or create/switch to a named branch
+      stash: Push, list, or pop stashes
+      pull: Pull with rebase
+      push: Push the current branch and establish upstream when absent
+      sync: Pull with rebase, then push
+      snapshot: Emit full repository state as JSON
+      worktree add: Add a worktree and seed named gitignored files by default
+      worktree list: List registered worktrees
+      worktree remove: Remove a clean registered worktree
+      snap list: List refs/auto shadow snapshots
+      snap diff: Diff the current branch against its refs/auto snapshot
+      snap restore: Recover a file to .recovered, or overwrite only with --in-place
+      conflicts: List unmerged files with conflict-marker counts
+      recover: Read-only reflog and unreachable-commit report
+      sweep: Preview safe local branch deletion; mutate only with --apply
     examples:
-    - intent: commit all changes
-      command: agent-git commit
+    - intent: commit the changes I already staged
+      command: "agent-git commit 'fix: describe the staged change'"
     - intent: show recent commits
       command: agent-git log
+    - intent: create an isolated worktree and carry local env files into it
+      command: agent-git worktree add feature/name --path ../repo-feature-name
+    - intent: recover one file from the automatic shadow snapshot
+      command: agent-git snap restore path/to/file
+    - intent: preview merged branch cleanup
+      command: agent-git sweep
     contracts:
       snapshot:
+      - status
       - branch
       - diff
       - log
+      - snapshot
+      - worktree list
+      - snap list
+      - snap diff
+      - conflicts
+      - recover
+      - sweep
       interact:
       - commit
       - branch
       - stash
+      - pull
+      - push
+      - sync
+      - worktree add
+      - worktree remove
+      - snap restore
+      - sweep
       attributes:
         branch:
         - polymorphic
+        snap restore:
+        - destructive
+        sweep:
+        - polymorphic
+        - destructive
+        worktree remove:
+        - destructive
     concurrency: mixed
   debug:
     description: Control debuggers
@@ -1587,6 +1631,10 @@ tools:
       command: agent-screen click --text 'OK'
     - intent: type text
       command: agent-screen type 'hello world'
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     contracts:
       snapshot:
       - snapshot
@@ -1626,6 +1674,10 @@ tools:
       command: agent-vision source webcam && agent-vision count person
     - intent: detect faces
       command: agent-vision snapshot --faces
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     contracts:
       connect:
       - source webcam
@@ -3683,6 +3735,7 @@ tools:
       screenshot: 'Capture screenshot: screenshot [path] [--full]'
       vision: 'AI vision: vision describe|find|click|analyze|explain|compare'
       agent: 'Autonomous: agent goal|explore|explain|recover'
+      doctor: Diagnose the current session daemon, verified PID identity, socket, ping, and page state
     examples:
     - intent: open a website
       command: agent-browse open https://example.com
@@ -3751,6 +3804,10 @@ tools:
         check: agent-do browse status
         fix: agent-do browse install
         note: Playwright browser binaries may need installation before first use
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     contracts:
       connect:
       - open
@@ -3768,6 +3825,7 @@ tools:
       - auth get-creds
       - tab list
       - screenshot
+      - doctor
       - vision describe
       - vision find
       - vision analyze
@@ -4157,6 +4215,66 @@ tools:
         save:
         - own_state
     concurrency: read
+  models:
+    description: Capability-aware model roles for agent-do's internal LLM calls
+    capabilities:
+    - resolve fast, vision, and deep internal model roles
+    - expose provider, endpoint, modality, and generation capability records
+    - preserve explicit user-selected models outside agent-do internals
+    commands:
+      list: Show configured roles, chains, and resolved models
+      resolve: Resolve one internal model role
+      doctor: Verify live provider listings and refresh capabilities with --fix
+    examples:
+    - intent: show agent-do's internal model defaults
+      command: agent-models list
+    - intent: resolve the internal vision model
+      command: agent-models resolve vision --json
+    routing:
+      discover_keywords:
+      - model roles
+      - internal models
+      - model defaults
+      prompt_patterns:
+      - \binternal models?\b
+      - \bmodel (?:roles?|defaults?)\b
+      recommended_entrypoints:
+      - agent-do models list
+      - agent-do models resolve fast --json
+      default_command: list
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      features:
+        ANTHROPIC_API_KEY:
+          unlocks: Anthropic internal model calls and live capability verification
+          required_for:
+          - Anthropic runtime candidates
+          - doctor Anthropic verification
+          recommended: true
+          setup: agent-do creds store ANTHROPIC_API_KEY --stdin
+        OPENAI_API_KEY:
+          unlocks: OpenAI Responses API fallback and live model verification
+          required_for:
+          - OpenAI runtime candidates
+          - doctor OpenAI verification
+          recommended: false
+          setup: agent-do creds store OPENAI_API_KEY --stdin
+      notes:
+      - Provider keys are optional individually; doctor warns and skips an unconfigured provider.
+    contracts:
+      snapshot:
+      - list
+      - resolve
+      verify:
+      - doctor
+      save:
+      - doctor
+      attributes:
+        doctor:
+        - composite
+    concurrency: mixed
   eval:
     description: LLM output evaluation and testing
     capabilities:
@@ -4173,6 +4291,10 @@ tools:
       command: agent-eval run math-test
     - intent: show evaluation results
       command: agent-eval results
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     contracts:
       snapshot:
       - results
@@ -4224,12 +4346,21 @@ tools:
     - query issue history
     commands:
       init: Initialize manna repository
-      create: Create new issue
-      list: List issues
+      status: Show current session and claimed issues
+      create: Create new issue (--type track|item|dream, --track, --source)
+      claim: Claim an issue for the current session
+      done: Mark a claimed issue as done
+      abandon: Release a claimed issue back to open
+      block: Add a blocker dependency
+      unblock: Remove a blocker dependency
+      list: List issues (--status, --type, --track filters)
       show: Show issue details
-      update: Update issue status
+      update: Update issue title, description, status, type, track, or source
       delete: Delete issue
       context: Get session context
+      dream: File an idea spark on the nearest board or the global inbox
+      lint: Check board grammar; findings exit 1
+      reconcile: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
     examples:
     - intent: initialize manna
       command: agent-manna init
@@ -4239,6 +4370,10 @@ tools:
       command: agent-manna list
     - intent: show issue details
       command: agent-manna show 1
+    - intent: capture an idea for later
+      command: agent-manna dream 'Unify the auth flows'
+    - intent: check the board for drift
+      command: agent-manna reconcile --write-drift
     contracts:
       connect:
       - init
@@ -4246,13 +4381,26 @@ tools:
       - list
       - show
       - context
+      - status
       interact:
       - create
       - update
       - delete
+      - claim
+      - done
+      - abandon
+      - block
+      - unblock
+      - dream
+      - reconcile
+      verify:
+      - lint
+      - reconcile
       attributes:
         delete:
         - destructive
+        reconcile:
+        - polymorphic
     concurrency: write
   learn:
     description: Learning and pattern improvement

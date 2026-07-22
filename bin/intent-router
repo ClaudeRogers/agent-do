@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Intent router using Claude API.
-Maps natural language intents to agent-* tool commands.
-"""
+"""Provider-aware natural-language router for agent-do tool commands."""
 
 import json
 import os
@@ -10,14 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import anthropic
-except ModuleNotFoundError:
-    anthropic = None
-
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
+from ai_router import llm_call
 from cache import check_cache, cache_result, fuzzy_match, note_route_outcome, infer_project_scope
 from registry import (
     load_registry,
@@ -163,7 +156,7 @@ def route_intent(
     dry_run: bool = False,
     explain: bool = False,
 ) -> dict:
-    """Route intent to tool command using Claude."""
+    """Route intent to a tool command using the configured fast model role."""
 
     # Try cache first
     cached = check_cache(intent, project_scope=project_scope)
@@ -176,14 +169,6 @@ def route_intent(
     if fuzzy and route_is_supported(fuzzy) and not explain:
         fuzzy['from_fuzzy'] = True
         return fuzzy
-
-    # Fall back to LLM
-    if anthropic is None:
-        raise RuntimeError(
-            "The 'anthropic' package is not installed. Install requirements.txt to use natural language routing."
-        )
-
-    client = anthropic.Anthropic()
 
     mode = "explain what tool to use" if explain else "determine the exact command"
 
@@ -216,14 +201,14 @@ Rules:
 - Keep args as a flat list of strings
 - Use flags dict for named options (--flag value)"""
 
-    response = client.messages.create(
-        model=os.environ.get("AGENT_DO_AI_MODEL", "claude-opus-4-5-20251101"),
+    response = llm_call(
+        "fast",
+        [{"role": "user", "content": prompt}],
         max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
     )
 
     # Extract JSON from response
-    text = response.content[0].text
+    text = response.text
     # Handle potential markdown code blocks
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0]
@@ -503,7 +488,7 @@ def main():
             print(f"Error parsing router response: {e}")
         return 1
     except Exception as e:
-        is_api_error = anthropic is not None and isinstance(e, anthropic.APIError)
+        is_api_error = getattr(e, "status_code", getattr(e, "status", None)) is not None
         if args.json:
             error_type = "api_error" if is_api_error else "error"
             print(json.dumps({"status": "error", "error": error_type, "message": str(e)}))
