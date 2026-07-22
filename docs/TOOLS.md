@@ -159,6 +159,33 @@ agent-do gh request-changes ovachiever/agent-do#3 --body-file review.md
 agent-do gh merge ovachiever/agent-do#2 --squash --delete-branch
 ```
 
+## Local Code Review
+
+`coderabbit` is for local diffs before a PR exists. Use `gh` for GitHub PR
+threads, approvals, checks, and merge state.
+
+```bash
+agent-do coderabbit review
+agent-do coderabbit review --base develop
+agent-do coderabbit review --include-untracked
+agent-do coderabbit review --committed
+agent-do coderabbit review --light
+agent-do coderabbit review --json
+agent-do coderabbit findings
+agent-do coderabbit doctor
+agent-do coderabbit snapshot --json
+agent-do coderabbit auth login
+agent-do coderabbit auth org
+```
+
+Browser auth covers the free tier: `agent-do coderabbit auth login` opens the
+CodeRabbit OAuth flow and the CodeRabbit CLI saves that login locally, so later
+reviews work without an API key. For headless API-key review, store
+`CODERABBIT_API_KEY`; CodeRabbit CLI 0.7.0 does not read that environment
+variable directly for local review, so `agent-coderabbit` passes it as
+`--api-key`, which can expose the key through process argv while the review is
+running.
+
 ## Cloud And Platform Tools
 
 Use provider tools instead of hand-written `curl` when a structured surface

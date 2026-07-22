@@ -1785,24 +1785,26 @@ tools:
       - CLERK_SECRET_KEY
     concurrency: mixed
   coderabbit:
-    description: Local AI code review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+    description: Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
     capabilities:
-    - review uncommitted or staged changes against a base branch
+    - review tracked local changes against a base branch, with optional committed, uncommitted, or untracked scopes
     - replay findings from the most recent local review without an API call
     - check auth and connectivity via doctor command
     - support free-tier browser OAuth or API key for unlimited headless use
     commands:
-      review: Review staged and uncommitted changes against the base branch
+      review: Review tracked local changes against the base branch; forwards CodeRabbit review flags like --light, --committed, --uncommitted, --include-untracked, and --dir
       findings: Re-read results from the most recent local review (no API call)
       doctor: Verify installation, authentication, git state, and service connectivity
       snapshot: Auth status, cr version, and last doctor summary
-      auth login: Authenticate via browser (free tier, 3 reviews/hour)
-      auth org: Switch CodeRabbit organization
+      auth login: Authenticate via browser and update local CodeRabbit auth state (free tier, 3 reviews/hour)
+      auth org: Switch active CodeRabbit organization and update local CLI state
     examples:
     - intent: review my changes before opening a PR
       command: agent-do coderabbit review
     - intent: review changes against develop branch
       command: agent-do coderabbit review --base develop
+    - intent: review untracked local files before a PR
+      command: agent-do coderabbit review --include-untracked
     - intent: get structured JSON review output for agent processing
       command: agent-do coderabbit review --json
     - intent: replay last review results without an API call
@@ -1815,12 +1817,12 @@ tools:
       optional:
       - CODERABBIT_API_KEY
       notes:
-      - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth — no API key needed."
-      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'."
+      - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key."
+      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 headless auth requires passing this as --api-key, which can expose the key through process argv while cr is running."
     routing:
       discover_keywords:
       - coderabbit
-      - code review
+      - local code review
       - local review
       - pre-pr review
       - cr review
@@ -1829,7 +1831,7 @@ tools:
       - agent-do coderabbit doctor
       default_command: review
       raw_cli_equivalents:
-      - pattern: \bcr\b\s+(--agent|--plain|--base|review)
+      - pattern: \bcr\b\s+(--agent|--base|--light|--committed|--uncommitted|--include-untracked|--dir|review)
         replacement: agent-do coderabbit
         example: agent-do coderabbit review --base develop
         reason: agent-do coderabbit adds credential management and structured JSON output
@@ -1839,7 +1841,18 @@ tools:
       readiness:
         check: agent-do coderabbit doctor
         fix: brew install --cask coderabbit && agent-do coderabbit auth login
-        note: Free tier requires browser login; set CODERABBIT_API_KEY for unlimited headless use
+        note: Free tier requires browser login saved by the CodeRabbit CLI; set CODERABBIT_API_KEY for unlimited headless use; CodeRabbit CLI 0.7.0 requires passing that key as --api-key argv for headless review
+    contracts:
+      connect:
+      - doctor
+      snapshot:
+      - snapshot
+      - findings
+      interact:
+      - review
+      save:
+      - auth login
+      - auth org
     concurrency: mixed
   ci:
     description: Control CI/CD pipelines
@@ -1925,7 +1938,10 @@ tools:
       discover_keywords:
       - github pull request
       - github pr
+      - github code review
+      - pr code review
       - pr review
+      - review my pr
       - review comments
       - unresolved threads
       - requested review

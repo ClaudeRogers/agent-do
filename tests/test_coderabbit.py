@@ -111,11 +111,11 @@ if clean[:2] == ["review", "findings"]:
     print({FAKE_FINDINGS_OUTPUT!r})
     sys.exit(0)
 
-if "--agent" in clean:
+if clean[:1] == ["review"] and "--agent" in clean:
     print({FAKE_AGENT_JSON!r})
     sys.exit(0)
 
-if "--plain" in clean:
+if clean[:1] == ["review"]:
     print("Plain review output: no issues found.")
     sys.exit(0)
 
@@ -185,12 +185,42 @@ sys.exit(1)
         base_passed = any("--base" in call and "develop" in call for call in calls)
         check("review --base develop passes --base develop to cr", base_passed, str(calls))
 
+        log_path.write_text("")
+        r = run([str(AGENT_DO), "coderabbit", "review", "--base=feature"], env=base_env)
+        check("review --base=feature exits 0", r.returncode == 0, r.stderr)
+        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        inline_base_passed = any("--base" in call and "feature" in call for call in calls)
+        check("review --base=feature passes inline base to cr", inline_base_passed, str(calls))
+
+        for args in (
+            ["review", "--base"],
+            ["review", "--base", "--json"],
+            ["review", "--base="],
+        ):
+            r = run([str(AGENT_DO), "coderabbit", *args], env=base_env)
+            check(f"{' '.join(args)} exits 1", r.returncode == 1, f"rc={r.returncode}")
+            check(f"{' '.join(args)} prints missing base error", "Missing value for --base" in r.stderr, r.stderr[:200])
+
         # ------------------------------------------------------------------
         # 6. findings exits 0
         # ------------------------------------------------------------------
+        log_path.write_text("")
         r = run([str(AGENT_DO), "coderabbit", "findings"], env=base_env)
         check("findings exits 0", r.returncode == 0, r.stderr)
         check("findings produces output", len(r.stdout.strip()) > 0, r.stdout[:200])
+        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        check("findings calls review findings", any(call[:2] == ["review", "findings"] for call in calls), str(calls))
+
+        log_path.write_text("")
+        r = run([str(AGENT_DO), "coderabbit", "findings", "--dir", "src"], env=base_env)
+        check("findings --dir exits 0", r.returncode == 0, r.stderr)
+        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        findings_dir_passed = any(call[:2] == ["review", "findings"] and "--dir" in call and "src" in call for call in calls)
+        check("findings --dir passes scoped directory", findings_dir_passed, str(calls))
+
+        r = run([str(AGENT_DO), "coderabbit", "findings", "--json"], env=base_env)
+        check("findings --json exits 1", r.returncode == 1, f"rc={r.returncode}")
+        check("findings --json explains unsupported mode", "not supported" in r.stderr, r.stderr[:200])
 
         # ------------------------------------------------------------------
         # 7. snapshot --json exits 0 and has required fields
@@ -250,6 +280,8 @@ sys.exit(1)
         calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
         api_key_passed = any("--api-key" in call and "cr-test-key-12345" in call for call in calls)
         check("CODERABBIT_API_KEY injected as --api-key", api_key_passed, str(calls))
+        review_subcommand_passed = any("review" in call for call in calls)
+        check("review invokes coderabbit review subcommand", review_subcommand_passed, str(calls))
 
         # ------------------------------------------------------------------
         # 12. CODERABBIT_API_KEY absent → no --api-key arg passed to cr

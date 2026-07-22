@@ -51,14 +51,14 @@ def main() -> int:
     text_result = run_agent_do("harness", "inspect")
     require(text_result.returncode == 0, f"harness inspect failed: {text_result.stderr}")
     require("agent-do harness" in text_result.stdout, f"unexpected text output: {text_result.stdout}")
-    require("Tools: 93" in text_result.stdout, f"expected current tool count in text output: {text_result.stdout}")
+    require("Tools: 94" in text_result.stdout, f"expected current tool count in text output: {text_result.stdout}")
 
     json_result = run_agent_do("harness", "inspect", "--json")
     require(json_result.returncode == 0, f"harness inspect --json failed: {json_result.stderr}")
     payload = json.loads(json_result.stdout)
     require(payload["ok"] is True, f"expected ok payload: {payload}")
-    require(payload["summary"]["tools"] == 93, f"expected 93 tools: {payload['summary']}")
-    require(payload["summary"]["by_type"]["tool"] == 93, f"expected tool component count: {payload['summary']}")
+    require(payload["summary"]["tools"] == 94, f"expected 94 tools: {payload['summary']}")
+    require(payload["summary"]["by_type"]["tool"] == 94, f"expected tool component count: {payload['summary']}")
     require(payload["summary"]["tools_with_contracts"] >= 2, f"expected contract coverage in summary: {payload['summary']}")
     require(payload["summary"]["contract_errors"] == 0, f"contract shape errors should be zero: {payload['summary']}")
 
@@ -78,6 +78,7 @@ def main() -> int:
         "tool:obsidian",
         "tool:transcribe",
         "tool:appleevents",
+        "tool:coderabbit",
     ]:
         require(component_id in components, f"missing harness component {component_id}")
 

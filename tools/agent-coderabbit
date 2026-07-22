@@ -17,8 +17,8 @@ show_help() {
 agent-coderabbit - Local AI code review via CodeRabbit CLI
 
 REVIEW
-  review [--base BRANCH] [--json]   Review staged and uncommitted changes (default: vs main/master)
-  findings [--json]                 Re-read results from most recent local review (no API call)
+  review [--base BRANCH] [--json]   Review tracked changes (default CodeRabbit behavior)
+  findings [--dir PATH]             Re-read results from most recent local review (no API call)
 
 DIAGNOSTICS
   doctor                            Verify install, auth, git state, and service connectivity
@@ -31,14 +31,22 @@ AUTH
 OPTIONS
   --json        Structured JSON output (uses cr --agent mode for review)
   --base BRANCH Compare against this branch instead of the default base
+  --dir PATH    Read findings for a scoped review directory
+  --light, --committed, --uncommitted, --include-untracked
+                Forwarded to CodeRabbit review when provided
 
 CREDENTIALS
-  Free tier:  agent-do coderabbit auth login   (browser OAuth, no API key needed)
+  Free tier:  agent-do coderabbit auth login   (browser OAuth saved by cr; no API key needed)
   API key:    agent-do creds store CODERABBIT_API_KEY --stdin
+              CodeRabbit CLI 0.7.0 does not read this env var directly for
+              headless review, so agent-coderabbit passes it as --api-key.
+              That can expose the key through process argv while cr is running.
 
 EXAMPLES
   agent-do coderabbit review
   agent-do coderabbit review --base develop
+  agent-do coderabbit review --include-untracked
+  agent-do coderabbit review --light
   agent-do coderabbit review --json
   agent-do coderabbit findings
   agent-do coderabbit doctor
@@ -62,12 +70,14 @@ _resolve_cr() {
     echo "$bin"
 }
 
-# Populate global _CR_BASE_ARGS with common args (injects --api-key when set)
-_CR_BASE_ARGS=()
+# Populate global _CR_AUTH_ARGS with auth args (injects --api-key when set)
+# Probe result for CodeRabbit CLI 0.7.0: CODERABBIT_API_KEY is not read directly
+# by `coderabbit review --agent`; headless API-key auth requires --api-key.
+_CR_AUTH_ARGS=()
 _build_cr_args() {
-    _CR_BASE_ARGS=()
+    _CR_AUTH_ARGS=()
     if [[ -n "${CODERABBIT_API_KEY:-}" ]]; then
-        _CR_BASE_ARGS+=(--api-key "$CODERABBIT_API_KEY")
+        _CR_AUTH_ARGS+=(--api-key "$CODERABBIT_API_KEY")
     fi
 }
 
@@ -87,15 +97,20 @@ cmd_review() {
         case "$1" in
             --json)       json_mode=true; shift ;;
             --base)
-                [[ $# -ge 2 && -n "${2:-}" ]] || _err "Missing value for --base"
+                [[ $# -ge 2 && -n "${2:-}" && "${2:0:1}" != "-" ]] || _err "Missing value for --base"
                 base_branch="$2"; shift 2 ;;
-            --base=*)     base_branch="${1#--base=}"; shift ;;
+            --base=*)
+                base_branch="${1#--base=}"
+                [[ -n "$base_branch" ]] || _err "Missing value for --base"
+                shift ;;
             *)            extra_args+=("$1"); shift ;;
         esac
     done
 
     _build_cr_args
-    local -a cr_args=("${_CR_BASE_ARGS[@]+"${_CR_BASE_ARGS[@]}"}")
+    local -a cr_args=("${_CR_AUTH_ARGS[@]+"${_CR_AUTH_ARGS[@]}"}")
+
+    cr_args+=(review)
 
     if [[ -n "$base_branch" ]]; then
         cr_args+=(--base "$base_branch")
@@ -103,8 +118,6 @@ cmd_review() {
 
     if $json_mode; then
         cr_args+=(--agent)
-    else
-        cr_args+=(--plain)
     fi
 
     cr_args+=("${extra_args[@]+"${extra_args[@]}"}")
@@ -116,24 +129,24 @@ cmd_findings() {
     local cr_bin
     cr_bin=$(_resolve_cr)
 
-    local json_mode=false
+    local -a findings_args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --json) json_mode=true; shift ;;
-            *)      shift ;;
+            --json) _err "findings --json is not supported by the current CodeRabbit CLI" ;;
+            --dir)
+                [[ $# -ge 2 && -n "${2:-}" && "${2:0:1}" != "-" ]] || _err "Missing value for --dir"
+                findings_args+=(--dir "$2"); shift 2 ;;
+            --dir=*)
+                local dir_value="${1#--dir=}"
+                [[ -n "$dir_value" ]] || _err "Missing value for --dir"
+                findings_args+=(--dir "$dir_value"); shift ;;
+            -*)     _err "Unknown findings option: $1" ;;
+            *)      _err "Unexpected findings argument: $1" ;;
         esac
     done
 
-    _build_cr_args
-    local -a cr_args=("${_CR_BASE_ARGS[@]+"${_CR_BASE_ARGS[@]}"}")
-
-    if $json_mode; then
-        cr_args+=(--agent)
-    else
-        cr_args+=(--plain)
-    fi
-
-    cr_args+=(review findings)
+    local -a cr_args=(review findings)
+    cr_args+=("${findings_args[@]+"${findings_args[@]}"}")
 
     exec "$cr_bin" "${cr_args[@]}"
 }
