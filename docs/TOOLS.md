@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (95 tools)
+## Summary (96 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -29,6 +29,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [appleevents](#appleevents) | Control scriptable macOS apps through AppleEvents, AppleScript, and JXA | mixed | 9 |
 | [audio](#audio) | Audio processing | mixed | 3 |
 | [auth](#auth) | Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials | mixed | 13 |
+| [betterstack](#betterstack) | Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call | mixed | 14 |
 | [bluetooth](#bluetooth) | Bluetooth control | mixed | 3 |
 | [browse](#browse) | AI-first headless browser automation with @ref element selection, SSO/MFA login handoff, persistent sessions | mixed | 20 |
 | [burp](#burp) | Burp Suite automation | mixed | 4 |
@@ -448,6 +449,69 @@ agent-do auth advance github
 - sensitive (emits or persists secret material; guard output): `import-browser`
 - long_running (daemon/stream/session; may never return): `ensure`
 - composite (one call performs several beats internally): `advance`, `ensure`, `import-browser`, `probe`
+
+### betterstack
+
+Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect uptime monitors
+- view monitor availability and response times
+- pause and resume monitors
+- list and manage incidents (acknowledge, resolve)
+- list heartbeats
+- list status pages
+- view on-call schedules
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info
+- `availability`: Monitor availability summary
+- `response-times`: Monitor response time data
+- `pause`: Pause a monitor
+- `resume`: Resume a monitor
+- `incidents`: List incidents (--active for unresolved)
+- `incident`: Detailed incident info
+- `ack`: Acknowledge an incident
+- `resolve`: Resolve an incident
+- `heartbeats`: List all heartbeats
+- `status-pages`: List all status pages
+- `on-call`: List on-call schedules
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my betterstack monitors
+agent-do betterstack monitors
+# show betterstack monitor details
+agent-do betterstack show vms-web
+# check active incidents in betterstack
+agent-do betterstack incidents --active
+# check uptime availability
+agent-do betterstack availability versova-chat
+# pause a betterstack monitor
+agent-do betterstack pause vms-web
+# acknowledge a betterstack incident
+agent-do betterstack ack 12345
+# get betterstack account snapshot
+agent-do betterstack snapshot
+```
+
+**Credentials**
+
+- Required: `BETTERSTACK_API_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `availability`, `heartbeats`, `incident`, `incidents`, `monitors`, `on-call`, `response-times`, `show`, `snapshot`, `status-pages`
+- Write (connect/interact/save): `ack`, `pause`, `resolve`, `resume`
+- composite (one call performs several beats internally): `ack`, `pause`, `resolve`, `resume`
 
 ### bluetooth
 

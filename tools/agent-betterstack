@@ -131,9 +131,11 @@ resolve_monitor() {
         return 0
     fi
 
-    # Resolve by pronounceable_name
+    # Resolve by pronounceable_name (URL-encoded)
+    local name_enc
+    name_enc=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$name_or_id")
     local result
-    result=$(bs_get "${BETTERSTACK_API_V2}/monitors?pronounceable_name=${name_or_id}") || return 1
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors?pronounceable_name=${name_enc}") || return 1
 
     local monitor_id
     monitor_id=$(echo "$result" | python3 -c "
@@ -655,7 +657,8 @@ print(json.dumps(snapshot, indent=2))
 
 case "${1:-help}" in
     monitors|ls|list)
-        cmd_monitors
+        shift || true
+        cmd_monitors "$@"
         ;;
     show|get)
         shift
@@ -678,13 +681,16 @@ case "${1:-help}" in
         cmd_incident "$@"
         ;;
     heartbeats)
-        cmd_heartbeats
+        shift || true
+        cmd_heartbeats "$@"
         ;;
     status-pages)
-        cmd_status_pages
+        shift || true
+        cmd_status_pages "$@"
         ;;
     on-call)
-        cmd_on_call
+        shift || true
+        cmd_on_call "$@"
         ;;
     pause)
         shift
@@ -703,7 +709,8 @@ case "${1:-help}" in
         cmd_resolve "$@"
         ;;
     snapshot|snap)
-        cmd_snapshot
+        shift || true
+        cmd_snapshot "$@"
         ;;
     help|--help|-h)
         show_help
