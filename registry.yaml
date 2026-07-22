@@ -5796,6 +5796,9 @@ tools:
       command: agent-cronitor snapshot
     - intent: create a new cronitor monitor
       command: echo '{"type":"job","key":"my-job","schedules":["0 * * * *"]}' | agent-cronitor create
+    credentials:
+      required:
+      - CRONITOR_API_KEY
     routing:
       discover_keywords:
       - cronitor
@@ -5848,6 +5851,3 @@ tools:
         resume: [composite]
         ping: [composite]
     concurrency: mixed
-    concurrency_detail:
-      read: [monitors, show, issues, issue, notifications, snapshot]
-      mutate: [create, delete, pause, resume, ping]

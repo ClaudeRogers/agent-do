@@ -215,6 +215,7 @@ print(json.dumps({
 }
 
 cmd_create() {
+    _pop_json_flag "$@"
     local data
     if [[ -t 0 ]]; then
         echo "Error: pipe monitor JSON to stdin" >&2
@@ -228,7 +229,7 @@ cmd_create() {
     key=$(cr_api_key) || return 1
 
     local body http_code
-    body=$(curl -sS -X POST -K <(printf 'user = "%s:"\n' "$key") \
+    body=$(curl -sS --connect-timeout 10 --max-time 60 -X POST -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
@@ -276,6 +277,8 @@ cmd_delete() {
 }
 
 cmd_pause() {
+    _pop_json_flag "$@"
+    set -- "${_JSON_ARGS[@]}"
     local monitor_key="${1:?Usage: agent-cronitor pause <key> [hours]}"
     local hours="${2:-}"
 
@@ -288,11 +291,14 @@ cmd_pause() {
     local key
     key=$(cr_api_key) || return 1
     local http_code
-    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -K <(printf 'user = "%s:"\n' "$key") \
+    http_code=$(curl -sS --connect-timeout 10 --max-time 60 -o /dev/null -w "%{http_code}" -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" "$url")
 
     if [[ "$http_code" == "200" ]]; then
-        if [[ -n "$hours" ]]; then
+        if $_json_mode; then
+            printf '{"ok": true, "monitor": "%s", "action": "pause", "hours": %s}\n' \
+                "$monitor_key" "${hours:-null}"
+        elif [[ -n "$hours" ]]; then
             echo "Monitor \"${monitor_key}\": paused for ${hours} hour(s)"
         else
             echo "Monitor \"${monitor_key}\": paused indefinitely"
@@ -312,7 +318,7 @@ cmd_resume() {
     local key
     key=$(cr_api_key) || return 1
     local http_code
-    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -K <(printf 'user = "%s:"\n' "$key") \
+    http_code=$(curl -sS --connect-timeout 10 --max-time 60 -o /dev/null -w "%{http_code}" -K <(printf 'user = "%s:"\n' "$key") \
         -H "Cronitor-Version: ${CRONITOR_VERSION}" \
         "${CRONITOR_API}/monitors/${monitor_key}/pause/0")
 
@@ -459,7 +465,7 @@ cmd_ping() {
 
     # Telemetry API returns 200 for all requests (auth validated downstream)
     local http_code
-    http_code=$(curl -sS -o /dev/null -w "%{http_code}" "$url")
+    http_code=$(curl -sS --connect-timeout 10 --max-time 60 -o /dev/null -w "%{http_code}" "$url")
 
     if [[ "$http_code" == "200" ]]; then
         echo "Ping sent: ${monitor_key}${state:+ state=${state}}${message:+ message=${message}}"
@@ -523,7 +529,7 @@ def api_get(url):
     cred = base64.b64encode((KEY + ':').encode()).decode()
     req.add_header('Authorization', 'Basic ' + cred)
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:
@@ -625,14 +631,16 @@ PY
 
 case "${1:-help}" in
     monitors|ls|list)
-        cmd_monitors
+        shift || true
+        cmd_monitors "$@"
         ;;
     show|get)
         shift
         cmd_show "$@"
         ;;
     create)
-        cmd_create
+        shift || true
+        cmd_create "$@"
         ;;
     delete|rm)
         shift
@@ -659,10 +667,12 @@ case "${1:-help}" in
         cmd_ping "$@"
         ;;
     notifications|notify)
-        cmd_notifications
+        shift || true
+        cmd_notifications "$@"
         ;;
     snapshot|snap)
-        cmd_snapshot
+        shift || true
+        cmd_snapshot "$@"
         ;;
     help|--help|-h)
         show_help
