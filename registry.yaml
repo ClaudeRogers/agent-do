@@ -5820,7 +5820,7 @@ tools:
       readiness:
         check: agent-do sentry projects
         fix: agent-do creds store SENTRY_AUTH_TOKEN --stdin
-        note: Requires SENTRY_AUTH_TOKEN resolved from env or secure storage
+        note: 'Requires SENTRY_AUTH_TOKEN resolved from env or secure storage. Minimum token scopes by capability: org:read (project listing), project:read (project detail), event:read (issue searches and details), event:write (resolve/unresolve/ignore/assign)'
     contracts:
       snapshot:
       - projects

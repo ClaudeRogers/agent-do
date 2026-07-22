@@ -103,6 +103,12 @@ Environment:
   SENTRY_ORG                     Org slug override (auto-detected from token)
   SENTRY_REGION_URL              Region URL override (auto-detected from token)
 
+Minimum token scopes by capability:
+  org:read                       projects listing
+  project:read                   project detail
+  event:read                     issues searches and detail
+  event:write                    resolve, unresolve, ignore, assign
+
 Examples:
   agent-sentry projects
   agent-sentry issues --project versova-chat
