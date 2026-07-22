@@ -296,8 +296,11 @@ cmd_pause() {
 
     if [[ "$http_code" == "200" ]]; then
         if $_json_mode; then
-            printf '{"ok": true, "monitor": "%s", "action": "pause", "hours": %s}\n' \
-                "$monitor_key" "${hours:-null}"
+            PAUSE_KEY="$monitor_key" PAUSE_HOURS="$hours" python3 -c '
+import json, os
+h = os.environ.get("PAUSE_HOURS", "")
+print(json.dumps({"ok": True, "monitor": os.environ["PAUSE_KEY"], "action": "pause",
+                  "hours": int(h) if h.isdigit() else (h or None)}))'
         elif [[ -n "$hours" ]]; then
             echo "Monitor \"${monitor_key}\": paused for ${hours} hour(s)"
         else
