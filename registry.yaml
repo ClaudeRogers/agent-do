@@ -2825,7 +2825,8 @@ tools:
     commands:
       whoami: Show authenticated GitHub user
       repos: List or sync accessible repositories
-      inbox: Show actionable PR work across repositories
+      inbox: Show actionable PR work across repositories — maintainer-role and declared-portfolio sweeps of open third-party PRs plus review-request ceremony (--ceremony-only skips the sweeps)
+      portfolio: Manage the declared portfolio of swept repos — add/remove owner/repo or owner/* patterns, list current declarations
       awaiting: Show open PRs likely awaiting your review by broad review heuristics
       prs: Search pull requests
       pr: Show PR details
@@ -2913,6 +2914,7 @@ tools:
       - checks
       - review
       - doctrine
+      - portfolio list
       interact:
       - approve
       - request-changes
@@ -2925,8 +2927,15 @@ tools:
       - merge
       - ready
       - draft
+      - portfolio add
+      - portfolio remove
       verify:
       - audit
+      attributes:
+        portfolio add:
+        - own_state
+        portfolio remove:
+        - own_state
     concurrency: mixed
   logs:
     description: Control log aggregation

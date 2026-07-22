@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `gh inbox` now derives waiting-on-us from maintainer role, not just review-request ceremony: it sweeps open third-party PRs across admin/maintain/push repos (REST-only), classifies each by the viewer's latest review against the head sha (`maintainer_unreviewed` / `maintainer_review_stale` / `maintainer_approved_unmerged`), counts changes-requested-at-head as waiting-on-author, reports every unswept repo and every hit `--limit` cap loudly, and keeps the old four-search view behind `--ceremony-only`. A declared portfolio (`gh portfolio add/remove/list`, exact `owner/repo` or `owner/*` patterns in `~/.agent-do/gh/portfolio.yaml`) sweeps repos whose authority is organizational rather than permission-encoded, tagging reasons `portfolio_*`; role wins on dedupe, and portfolio repos the viewer cannot read report as unswept (no access).
+
 ## v1.4 (2026-07-22)
 
 ### TL;DR
