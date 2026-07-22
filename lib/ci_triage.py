@@ -19,6 +19,7 @@ Classes:
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -26,7 +27,13 @@ import sys
 GH_TIMEOUT = 60
 RUN_FIELDS = "databaseId,workflowName,displayTitle,event,headBranch,headSha,conclusion,createdAt,url,jobs"
 LOG_TAIL_LINES = 400
-GATE_AUTHORS = {"ctyrrell-versova"}
+# Authors whose ci/** branch failures are expected gate-authoring self-tests.
+# Comma-separated logins via AGENT_DO_CI_GATE_AUTHORS; empty by default.
+GATE_AUTHORS = {
+    a.strip()
+    for a in os.environ.get("AGENT_DO_CI_GATE_AUTHORS", "").split(",")
+    if a.strip()
+}
 
 
 def sh(args):
@@ -239,8 +246,9 @@ ACTIONS = {
     ),
     "C3-trunk-release": (
         "Trunk/release failure with no PR author in the loop - highest triage priority. "
-        "Inspect the failed step; if this is an upload/notarize step, check for the "
-        "known fleet-wide Apple PLA 403 block before debugging code."
+        "Inspect the failed step; if this is an upload/notarize/publish step, rule "
+        "out known platform-side outages or account-level blocks (e.g. a store or "
+        "registry rejecting uploads fleet-wide) before debugging code."
     ),
     "C4-gate-authoring": (
         "Expected red: gate-authoring self-test on a ci/** branch. No action."

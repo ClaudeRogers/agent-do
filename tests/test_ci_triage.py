@@ -104,12 +104,24 @@ def test_c3_c4():
                                              headBranch="main", defaultBranch="main"),
                          "1", log_fetcher=NO_LOG)
     require(cls == "C3-trunk-release", "push event: got %s" % cls)
+    # GATE_AUTHORS is env-configured (AGENT_DO_CI_GATE_AUTHORS) and empty by
+    # default; patch the module set to exercise the C4 path.
+    import ci_triage as _ct
+    _saved = _ct.GATE_AUTHORS
+    try:
+        _ct.GATE_AUTHORS = {"gate-author"}
+        cls, _, _ = classify("o/r", run_fixture(headBranch="ci/lint-delta-gate",
+                                                 actor="gate-author"), "1", log_fetcher=NO_LOG)
+        require(cls == "C4-gate-authoring", "ci/ branch: got %s" % cls)
+        cls, _, _ = classify("o/r", run_fixture(headBranch="ci/not-a-gate", actor="someone-else"),
+                             "1", log_fetcher=NO_LOG)
+        require(cls == "C5-unknown", "untrusted ci/ actor was suppressed: %s" % cls)
+    finally:
+        _ct.GATE_AUTHORS = _saved
+    # Default (no env var): ci/** branches classify as C5, never C4.
     cls, _, _ = classify("o/r", run_fixture(headBranch="ci/lint-delta-gate",
-                                             actor="ctyrrell-versova"), "1", log_fetcher=NO_LOG)
-    require(cls == "C4-gate-authoring", "ci/ branch: got %s" % cls)
-    cls, _, _ = classify("o/r", run_fixture(headBranch="ci/not-a-gate", actor="someone-else"),
-                         "1", log_fetcher=NO_LOG)
-    require(cls == "C5-unknown", "untrusted ci/ actor was suppressed: %s" % cls)
+                                             actor="gate-author"), "1", log_fetcher=NO_LOG)
+    require(cls == "C5-unknown", "empty GATE_AUTHORS still produced C4: %s" % cls)
     cls, _, _ = classify("o/r", run_fixture(event="push", headBranch="feature/x",
                                              defaultBranch="main"), "1", log_fetcher=NO_LOG)
     require(cls == "C5-unknown", "feature push misclassified as trunk: %s" % cls)
