@@ -36,12 +36,11 @@ Applies to `agent-do/`.
 - `CHANGELOG.md`: release history
 - `CLAUDE.md`: Claude Code project instructions
 - `CONTRIBUTING.md`: contribution guidelines
-- `INTEGRATION.md`: Claude Code hook wiring
+- `docs/INTEGRATION.md`: Claude Code hook wiring
 - `LICENSE`: MIT license
 - `README.md`: public-facing documentation
 - `SECURITY.md`: vulnerability reporting policy
 - `docs/TOOLS.md`: tool catalog reference
-- `docs/internal/`: current internal design reference (COORD_TOOL)
 
 ## Working Rules
 

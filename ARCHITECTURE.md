@@ -290,7 +290,7 @@ Project-local state-and-interrupt broker for parallel agents. State lives under 
 
 ## Hooks Architecture
 
-Canonical hooks live in the repo (`hooks/claude/`, `hooks/codex/`); installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are thin version-tagged wrappers written by `install.sh` (`WRAPPER_VERSION` 2). Each wrapper resolves the repo root via `AGENT_DO_REPO`, then the `~/.agent-do/install-path` breadcrumb, adds `<repo>/lib/` to `sys.path` for Python hooks, and delegates (bash `exec`, Python `runpy.run_path`). `git pull` on the repo changes hook behavior on the next event with no reinstall. See INTEGRATION.md for registration.
+Canonical hooks live in the repo (`hooks/claude/`, `hooks/codex/`); installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are thin version-tagged wrappers written by `install.sh` (`WRAPPER_VERSION` 2). Each wrapper resolves the repo root via `AGENT_DO_REPO`, then the `~/.agent-do/install-path` breadcrumb, adds `<repo>/lib/` to `sys.path` for Python hooks, and delegates (bash `exec`, Python `runpy.run_path`). `git pull` on the repo changes hook behavior on the next event with no reinstall. See docs/INTEGRATION.md for registration.
 
 All four Claude hooks are advisory: they inject context or run cleanup, and never block.
 
@@ -307,7 +307,7 @@ Resolves agent-do (PATH → `~/.local/bin` symlink → breadcrumb → script-rel
   - coord context (2s bounds): active interrupts if any exist, else a focus reminder when active peers exist and this agent has no focus
   - the **Manna Board**: gated on `$CWD/.manna` existing; injects `manna context --max-tokens 1500` (2s bound) plus claim/done working instructions
   - the **drift greeting**: if `.manna/drift.yaml` exists and contains findings, its first 30 lines are injected with instructions to reconcile before claiming new work
-  - additional gated blocks for always-active skill loading and frontend/zpc project detection (the presence signals are tabulated in INTEGRATION.md)
+  - additional gated blocks for always-active skill loading and frontend/zpc project detection (the presence signals are tabulated in docs/INTEGRATION.md)
 
 Subprocess calls run under `bounded_run`, a perl wrapper that sets a process group and SIGKILLs the whole group on alarm expiry, so a wedged spawn degrades to a missing section instead of eating the hook's registered 10s timeout.
 
@@ -400,4 +400,4 @@ GitHub workflows:
 4. **Declarations must be checkable.** Contracts are validated in shape (gate), against the help surface (drift), and against live behavior (audit). A safety claim no machine can check is a comment, not a contract.
 5. **Tools are composable.** Each tool is standalone, callable directly or via agent-do, with the same interface for AI and humans.
 
-Per-tool depth lives in docs/TOOLS.md; harness integration lives in INTEGRATION.md.
+Per-tool depth lives in docs/TOOLS.md; harness integration lives in docs/INTEGRATION.md.

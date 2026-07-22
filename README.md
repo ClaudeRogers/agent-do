@@ -119,7 +119,7 @@ install; Codex hooks install when `~/.codex/` exists (`--codex` forces,
 and never edits your settings itself. `./install.sh --uninstall` removes the
 symlink and the wrappers.
 
-See [INTEGRATION.md](INTEGRATION.md) for hook registration and behavior.
+See [docs/INTEGRATION.md](docs/INTEGRATION.md) for hook registration and behavior.
 
 ## First Run
 

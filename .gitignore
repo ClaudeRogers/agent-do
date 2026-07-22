@@ -47,3 +47,6 @@ tools/streamdeck/
 
 # Manna drift advisory (per-machine SessionEnd output, not repo truth)
 .manna/drift.yaml
+
+# Tool-local test boards never ship
+tools/agent-manna/.manna/
