@@ -64,5 +64,7 @@ jobs:
         run: brew list tmux >/dev/null 2>&1 || brew install tmux
       - name: Build agent-manna (drift checks the real Rust binary's help)
         run: cd tools/agent-manna && cargo build --release
+      - name: Install agent-browse deps (daemon isolation test imports playwright-core; no browsers needed)
+        run: cd tools/agent-browse && npm ci --omit=dev
       - name: Run test suite
         run: ./test.sh

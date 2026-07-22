@@ -656,17 +656,23 @@ def test_agent_process_anchor(tmp_path: Path, env_base: dict[str, str]) -> None:
         "import os, subprocess, sys\n"
         "out_dir, agent_do, project = sys.argv[1:4]\n"
         "open(os.path.join(out_dir, 'anchor.pid'), 'w').write(str(os.getpid()))\n"
+        # The interpreter's process name varies by build (pyenv: python3;
+        # framework/runner builds: Python), so read this process's real comm
+        # and hand THAT to the anchor walk instead of hardcoding a name.
+        "comm = subprocess.run(['ps', '-o', 'comm=', '-p', str(os.getpid())],\n"
+        "                      capture_output=True, text=True).stdout.strip()\n"
+        "env = dict(os.environ)\n"
+        "env['AGENT_DO_COORD_ANCHOR_NAMES'] = os.path.basename(comm)\n"
         "for n in (1, 2):\n"
         "    result = subprocess.run(\n"
         "        [agent_do, 'coord', 'whoami', '--json'],\n"
-        "        capture_output=True, text=True, cwd=project, check=True,\n"
+        "        capture_output=True, text=True, cwd=project, check=True, env=env,\n"
         "    )\n"
         "    open(os.path.join(out_dir, f'who{n}.json'), 'w').write(result.stdout)\n"
     )
 
     env = clean_env(env_base)
     env["TMUX_PANE"] = "%40"
-    env["AGENT_DO_COORD_ANCHOR_NAMES"] = "python3"
     result = subprocess.run(
         ["python3", str(intermediary), str(out_dir), str(AGENT_DO), str(project)],
         env=env,
