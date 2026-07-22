@@ -64,7 +64,13 @@ jobs:
         run: brew list tmux >/dev/null 2>&1 || brew install tmux
       - name: Build agent-manna (drift checks the real Rust binary's help)
         run: cd tools/agent-manna && cargo build --release
-      - name: Install agent-browse deps (daemon isolation test imports playwright-core; no browsers needed)
-        run: cd tools/agent-browse && npm ci --omit=dev
+      - name: Install agent-browse deps + headless shell (isolation test opens real pages)
+        run: |
+          cd tools/agent-browse
+          npm ci --omit=dev
+          # playwright-core resolves browsers from the ms-playwright cache; install
+          # the headless shell at the exact revision the installed library expects.
+          PW_VERSION=$(node -p "require('./node_modules/playwright-core/package.json').version")
+          npx -y "playwright@$PW_VERSION" install chromium-headless-shell
       - name: Run test suite
         run: ./test.sh
