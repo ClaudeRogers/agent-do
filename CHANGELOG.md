@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.4 (2026-07-22)
 
 ### TL;DR
 - The board can no longer lie. Manna grows a universal grammar as schema — every issue is a `track`, an `item` on a track, or a `dream` (raw intake with a nearest-board-else-global-inbox router); `source:` records provenance as citation. Status is derived from receipts: `Manna: mn-xxxxxx` commit trailers bind work to items, `manna lint` enforces the grammar (wiring the long-dormant `validate()`), and `manna reconcile [--fix]` catches the drift classes that receipts expose — landed-but-open items, dead-session claims, blocker desync (`done` never auto-unblocked; reconcile clears the residue), stale dreams, dangling track edges, and doc references to nonexistent issues. v1 boards round-trip byte-identical and upgrade lazily on write; `context` renders the track tree on typed boards and is unchanged on untyped ones.
