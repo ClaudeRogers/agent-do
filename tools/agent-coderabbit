@@ -39,8 +39,9 @@ CREDENTIALS
   Free tier:  agent-do coderabbit auth login   (browser OAuth saved by cr; no API key needed)
   API key:    agent-do creds store CODERABBIT_API_KEY --stdin
               CodeRabbit CLI 0.7.0 does not read this env var directly for
-              headless review, so agent-coderabbit passes it as --api-key.
-              That can expose the key through process argv while cr is running.
+              headless review. agent-coderabbit does not pass it through argv
+              by default; set AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 only in
+              trusted automation if you accept process-list exposure.
 
 EXAMPLES
   agent-do coderabbit review
@@ -65,18 +66,19 @@ _resolve_cr() {
     local bin
     bin=$(command -v cr 2>/dev/null || command -v coderabbit 2>/dev/null || true)
     if [[ -z "$bin" ]]; then
-        _err "CodeRabbit CLI not found. Install with: brew install --cask coderabbit"
+        _err "CodeRabbit CLI not found. Install with: brew install coderabbit"
     fi
     echo "$bin"
 }
 
-# Populate global _CR_AUTH_ARGS with auth args (injects --api-key when set)
+# Populate global _CR_AUTH_ARGS with auth args.
 # Probe result for CodeRabbit CLI 0.7.0: CODERABBIT_API_KEY is not read directly
-# by `coderabbit review --agent`; headless API-key auth requires --api-key.
+# by `coderabbit review --agent`; argv API-key auth is opt-in because it is
+# visible to process-list observers while cr is running.
 _CR_AUTH_ARGS=()
 _build_cr_args() {
     _CR_AUTH_ARGS=()
-    if [[ -n "${CODERABBIT_API_KEY:-}" ]]; then
+    if [[ -n "${CODERABBIT_API_KEY:-}" && "${AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY:-}" == "1" ]]; then
         _CR_AUTH_ARGS+=(--api-key "$CODERABBIT_API_KEY")
     fi
 }

@@ -930,7 +930,7 @@ agent-do coderabbit snapshot --json
 
 - Optional: `CODERABBIT_API_KEY`
 - Note: Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key.
-- Note: Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 headless auth requires passing this as --api-key, which can expose the key through process argv while cr is running.
+- Note: Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running.
 
 **Safety (from contracts)**
 

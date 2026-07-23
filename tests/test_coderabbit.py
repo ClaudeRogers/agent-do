@@ -137,7 +137,11 @@ sys.exit(1)
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
             "CODERABBIT_API_KEY": "",  # cleared by default; set per-test when needed
+            "AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY": "",
         }
+
+        def read_calls() -> list[list[str]]:
+            return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
 
         # ------------------------------------------------------------------
         # 1. --help exits 0 and contains usage text
@@ -181,16 +185,14 @@ sys.exit(1)
         log_path.write_text("")  # reset log
         r = run([str(AGENT_DO), "coderabbit", "review", "--base", "develop"], env=base_env)
         check("review --base develop exits 0", r.returncode == 0, r.stderr)
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        base_passed = any("--base" in call and "develop" in call for call in calls)
-        check("review --base develop passes --base develop to cr", base_passed, str(calls))
+        calls = read_calls()
+        check("review --base develop passes exact argv to cr", ["review", "--base", "develop"] in calls, str(calls))
 
         log_path.write_text("")
         r = run([str(AGENT_DO), "coderabbit", "review", "--base=feature"], env=base_env)
         check("review --base=feature exits 0", r.returncode == 0, r.stderr)
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        inline_base_passed = any("--base" in call and "feature" in call for call in calls)
-        check("review --base=feature passes inline base to cr", inline_base_passed, str(calls))
+        calls = read_calls()
+        check("review --base=feature passes exact argv to cr", ["review", "--base", "feature"] in calls, str(calls))
 
         for args in (
             ["review", "--base"],
@@ -208,15 +210,14 @@ sys.exit(1)
         r = run([str(AGENT_DO), "coderabbit", "findings"], env=base_env)
         check("findings exits 0", r.returncode == 0, r.stderr)
         check("findings produces output", len(r.stdout.strip()) > 0, r.stdout[:200])
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        check("findings calls review findings", any(call[:2] == ["review", "findings"] for call in calls), str(calls))
+        calls = read_calls()
+        check("findings calls exact review findings argv", ["review", "findings"] in calls, str(calls))
 
         log_path.write_text("")
         r = run([str(AGENT_DO), "coderabbit", "findings", "--dir", "src"], env=base_env)
         check("findings --dir exits 0", r.returncode == 0, r.stderr)
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        findings_dir_passed = any(call[:2] == ["review", "findings"] and "--dir" in call and "src" in call for call in calls)
-        check("findings --dir passes scoped directory", findings_dir_passed, str(calls))
+        calls = read_calls()
+        check("findings --dir passes exact scoped argv", ["review", "findings", "--dir", "src"] in calls, str(calls))
 
         r = run([str(AGENT_DO), "coderabbit", "findings", "--json"], env=base_env)
         check("findings --json exits 1", r.returncode == 1, f"rc={r.returncode}")
@@ -271,29 +272,45 @@ sys.exit(1)
         check("auth login exits 0", r.returncode == 0, r.stderr)
 
         # ------------------------------------------------------------------
-        # 11. CODERABBIT_API_KEY set → --api-key passed to cr
+        # 11. CODERABBIT_API_KEY set → no --api-key argv by default
         # ------------------------------------------------------------------
         log_path.write_text("")
         key_env = {**base_env, "CODERABBIT_API_KEY": "cr-test-key-12345"}
         r = run([str(AGENT_DO), "coderabbit", "review"], env=key_env)
         check("review with API key exits 0", r.returncode == 0, r.stderr)
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
-        api_key_passed = any("--api-key" in call and "cr-test-key-12345" in call for call in calls)
-        check("CODERABBIT_API_KEY injected as --api-key", api_key_passed, str(calls))
-        review_subcommand_passed = any("review" in call for call in calls)
-        check("review invokes coderabbit review subcommand", review_subcommand_passed, str(calls))
+        calls = read_calls()
+        api_key_absent = not any("--api-key" in call or "cr-test-key-12345" in call for call in calls)
+        check("CODERABBIT_API_KEY is not injected as --api-key by default", api_key_absent, str(calls))
+        check("review invokes exact coderabbit review argv", ["review"] in calls, str(calls))
 
         # ------------------------------------------------------------------
-        # 12. CODERABBIT_API_KEY absent → no --api-key arg passed to cr
+        # 12. Explicit argv API-key opt-in passes --api-key
+        # ------------------------------------------------------------------
+        log_path.write_text("")
+        argv_key_env = {
+            **key_env,
+            "AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY": "1",
+        }
+        r = run([str(AGENT_DO), "coderabbit", "review"], env=argv_key_env)
+        check("review with argv API-key opt-in exits 0", r.returncode == 0, r.stderr)
+        calls = read_calls()
+        check(
+            "argv API-key opt-in passes exact auth argv",
+            ["--api-key", "cr-test-key-12345", "review"] in calls,
+            str(calls),
+        )
+
+        # ------------------------------------------------------------------
+        # 13. CODERABBIT_API_KEY absent → no --api-key arg passed to cr
         # ------------------------------------------------------------------
         log_path.write_text("")
         r = run([str(AGENT_DO), "coderabbit", "review"], env=base_env)
-        calls = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        calls = read_calls()
         no_api_key = not any("--api-key" in call for call in calls)
         check("no CODERABBIT_API_KEY → no --api-key arg", no_api_key, str(calls))
 
         # ------------------------------------------------------------------
-        # 13. Unknown command exits 1
+        # 14. Unknown command exits 1
         # ------------------------------------------------------------------
         r = run([str(AGENT_DO), "coderabbit", "notacommand"], env=base_env)
         check("unknown command exits 1", r.returncode == 1, f"rc={r.returncode}")

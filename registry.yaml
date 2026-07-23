@@ -2825,7 +2825,7 @@ tools:
       - CODERABBIT_API_KEY
       notes:
       - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key."
-      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 headless auth requires passing this as --api-key, which can expose the key through process argv while cr is running."
+      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running."
     routing:
       discover_keywords:
       - coderabbit
@@ -2847,8 +2847,8 @@ tools:
       - .coderabbit
       readiness:
         check: agent-do coderabbit doctor
-        fix: brew install --cask coderabbit && agent-do coderabbit auth login
-        note: Free tier requires browser login saved by the CodeRabbit CLI; set CODERABBIT_API_KEY for unlimited headless use; CodeRabbit CLI 0.7.0 requires passing that key as --api-key argv for headless review
+        fix: brew install coderabbit && agent-do coderabbit auth login
+        note: Free tier requires browser login saved by the CodeRabbit CLI; CODERABBIT_API_KEY is not passed through argv unless AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 is set in trusted automation
     contracts:
       connect:
       - doctor
