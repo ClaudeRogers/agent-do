@@ -392,6 +392,33 @@ else:
         require("data" in gql, f"missing data key in graphql response: {gql}")
         require(gql["data"]["data"]["viewer"]["login"] == "ovachiever", f"bad graphql data: {gql}")
 
+        # ── api GET ────────────────────────────────────────────────────────────
+        api_r = run(
+            [str(AGENT_DO), "gh", "api", "GET", "/rate_limit", "--json"],
+            cwd=ROOT, env=env,
+        )
+        require(api_r.returncode == 0, f"api GET failed: {api_r.stderr}")
+        ap = json.loads(api_r.stdout)
+        require("data" in ap, f"missing data key in api response: {ap}")
+        require("resources" in ap["data"], f"missing resources in api response: {ap}")
+
+        calls_api = [json.loads(line) for line in log_path.read_text().splitlines()]
+        require(
+            any("--method" in c and "GET" in c and "/rate_limit" in c
+                for c in calls_api if isinstance(c, list)),
+            f"gh api --method GET not found in calls: {calls_api}",
+        )
+
+        # ── graphql ────────────────────────────────────────────────────────────
+        gql_r = run(
+            [str(AGENT_DO), "gh", "graphql", "{ viewer { login } }", "--json"],
+            cwd=ROOT, env=env,
+        )
+        require(gql_r.returncode == 0, f"graphql failed: {gql_r.stderr}")
+        gql = json.loads(gql_r.stdout)
+        require("data" in gql, f"missing data key in graphql response: {gql}")
+        require(gql["data"]["data"]["viewer"]["login"] == "ovachiever", f"bad graphql data: {gql}")
+
     print("gh phase1 tests passed")
     return 0
 
