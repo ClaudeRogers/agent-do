@@ -10,13 +10,14 @@ MongoDB and Azure CosmosDB (MongoDB API) plugin for agent-do. Provides structure
 
 ## Connection credentials
 
-URIs are never stored in plain metadata files. Each profile's connection string lives in `~/.agent-do/mongo/.creds/<profile>` (mode `0o600`), inside a `0o700` directory. The metadata file (`~/.agent-do/mongo/connections.json`) holds only non-secret fields: `provider`, `added_at`, `source`.
+URIs are never stored in plain metadata files. Each profile's connection string can live in `agent-do creds` as `MONGO_CONNECTION_<PROFILE>` or in `~/.agent-do/mongo/.creds/<profile>` (mode `0o600`), inside a `0o700` directory. The metadata file (`~/.agent-do/mongo/connections.json`) holds only non-secret fields: `provider`, `added_at`, `source`.
 
 **Resolution order at connect time:**
 
 1. `MONGO_CONNECTION_<PROFILE>` environment variable (uppercase, hyphens → underscores)
-2. Per-profile creds file (`~/.agent-do/mongo/.creds/<profile>`)
-3. `MONGO_CONNECTION_STRING` environment variable (fallback / default profile)
+2. `agent-do creds` entry named `MONGO_CONNECTION_<PROFILE>`
+3. Per-profile creds file (`~/.agent-do/mongo/.creds/<profile>`)
+4. `MONGO_CONNECTION_STRING` environment variable (fallback / default profile)
 
 ---
 
@@ -26,7 +27,7 @@ URIs are never stored in plain metadata files. Each profile's connection string 
 
 ```bash
 agent-do mongo connections list
-agent-do mongo connections add <name> --uri <mongodb-uri> [--provider mongodb|cosmosdb] [--default]
+agent-do mongo connections add <name> [--stdin] [--provider mongodb|cosmosdb] [--default]
 agent-do mongo connections remove <name>
 agent-do mongo connections set-default <name>
 agent-do mongo connections import-from-aks --secret <k8s-secret> [--namespace <ns>] [--key connectionString] [--profile <name>]
@@ -36,10 +37,15 @@ Profile names must match `[a-zA-Z0-9_-]` — they become filenames. AKS secret n
 
 **Examples:**
 ```bash
-agent-do mongo connections add prod --uri "mongodb+srv://user:pass@cluster.mongodb.net/" --default
-agent-do mongo connections add cosmos-staging --uri "mongodb://..." --provider cosmosdb
+printf '%s' "$MONGO_URI" | agent-do mongo connections add prod --stdin --default
+printf '%s' "$COSMOS_URI" | agent-do mongo connections add cosmos-staging --stdin --provider cosmosdb
+printf '%s' "$COSMOS_URI" | agent-do creds store MONGO_CONNECTION_COSMOS_STAGING --stdin
+agent-do mongo connections add cosmos-staging --provider cosmosdb --default
 agent-do mongo connections import-from-aks --secret cosmos-conn-str --profile cosmos-prod --namespace myapp
 ```
+
+`connections add` does not accept URI values in argv. Use `--stdin` or store
+`MONGO_CONNECTION_<PROFILE>` with `agent-do creds store <KEY> --stdin` first.
 
 ---
 
@@ -67,7 +73,7 @@ agent-do mongo schema <db> <collection> [--sample N] [--connection <profile>] [-
 Samples up to N documents (default 20) and infers field paths, types, and nullability. Handles nested documents up to 3 levels deep. Correctly handles BSON types: `ObjectId`, `datetime`, `Decimal128`, `Int64`.
 
 ```bash
-agent-do mongo schema prism_bcc events --sample 50
+agent-do mongo schema appdb events --sample 50
 agent-do mongo schema mydb users --json
 ```
 
@@ -80,7 +86,7 @@ agent-do mongo indexes <db> <collection> [--connection <profile>] [--json]
 ```
 
 ```bash
-agent-do mongo indexes prism_bcc events
+agent-do mongo indexes appdb events
 ```
 
 ---
@@ -100,7 +106,7 @@ agent-do mongo query <db> <collection> \
 Default limit is 20. Use `--limit 0` for unlimited.
 
 ```bash
-agent-do mongo query prism_bcc events --where status=active --limit 100
+agent-do mongo query appdb events --where status=active --limit 100
 agent-do mongo query mydb users --where '{"role": "admin"}' --projection '{"email": 1}' --json
 agent-do mongo query mydb orders --where '{"createdAt": {"$gt": "2024-01-01"}}' --sort '{"createdAt": -1}'
 ```
@@ -114,7 +120,7 @@ agent-do mongo count <db> <collection> [--where <filter>] [--connection <profile
 ```
 
 ```bash
-agent-do mongo count prism_bcc events --where status=pending
+agent-do mongo count appdb events --where status=pending
 ```
 
 ---
@@ -131,7 +137,7 @@ Pipelines containing `$out` or `$merge` stages are **destructive** (they write t
 
 ```bash
 # Read-only pipeline
-agent-do mongo aggregate prism_bcc events \
+agent-do mongo aggregate appdb events \
   --pipeline '[{"$match": {"status": "active"}}, {"$group": {"_id": "$type", "count": {"$sum": 1}}}]'
 
 # From a file
@@ -155,7 +161,7 @@ agent-do mongo explain <db> <collection> [--where <filter>] [--connection <profi
 Runs `explain` with `executionStats` verbosity. Useful for inspecting index usage and RU cost on CosmosDB.
 
 ```bash
-agent-do mongo explain prism_bcc events --where status=active
+agent-do mongo explain appdb events --where status=active
 ```
 
 ---
@@ -188,7 +194,7 @@ Guards:
 - `--multi` to update all matching documents (default: first match only)
 
 ```bash
-agent-do mongo update prism_bcc events --where status=pending --set status=processed --dry-run
+agent-do mongo update appdb events --where status=pending --set status=processed --dry-run
 agent-do mongo update mydb users --where '{"role": "admin"}' --set '{"tier": "premium"}' --multi
 agent-do mongo update mydb config --where key=theme --set @config_update.json --upsert
 ```
@@ -229,7 +235,7 @@ Every command accepts `--json` and returns a structured envelope:
 ```json
 {
   "tool": "query",
-  "ref": "prism_bcc.events",
+  "ref": "appdb.events",
   "timestamp": "2026-05-20T14:00:00Z",
   "data": {
     "filter": {"status": "active"},
@@ -250,7 +256,7 @@ Set `--provider cosmosdb` when adding a profile. The `explain` command is especi
 
 ## Regression test coverage
 
-Test suite: `tests/test_mongo.py` (173 assertions, all passing). Run via:
+Test suite: `tests/test_mongo.py` (205 assertions, all passing). Run via:
 
 ```bash
 python3 tests/test_mongo.py
@@ -264,7 +270,7 @@ python3 tests/test_mongo.py
 |------|---------------|
 | Connection profiles | add, list, remove, set-default, remove-default promotion |
 | Credential security | URIs stored in 0o600 creds file, not connections.json |
-| Profile validation | Invalid names rejected, whitespace-only `--uri` rejected |
+| Profile validation | Invalid names rejected, whitespace-only stdin URI rejected |
 | AKS import | Secret decode, dot-name hint, missing `kubectl` clean error |
 | Snapshot | Database/collection enumeration |
 | Schema | Field path inference, nested docs, BSON types |

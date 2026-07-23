@@ -12,9 +12,10 @@ agent-mongo - MongoDB / CosmosDB exploration and querying
 
 CONNECTION MANAGEMENT
   connections list                          List saved connection profiles
-  connections add <name> --uri <uri>        Save a connection profile
+  connections add <name> --stdin            Save a connection profile from stdin
     [--provider cosmosdb]                   Tag provider for CosmosDB-aware behaviour
     [--default]                             Set as default connection
+  connections add <name>                    Register a profile whose URI is in agent-do creds
   connections remove <name>                 Remove a profile
   connections set-default <name>            Change the default profile
   connections import-from-aks               Import URI from a Kubernetes secret
@@ -71,6 +72,7 @@ SAFE WRITES (always use --dry-run first)
 
 ENVIRONMENT
   MONGO_CONNECTION_STRING                   URI used when no profile is set/specified
+  MONGO_CONNECTION_<PROFILE>                Per-profile URI, resolved from env or agent-do creds
   AGENT_DO_HOME                             Config dir (default: ~/.agent-do)
 
 EXIT CODES
@@ -80,32 +82,36 @@ EXIT CODES
 
 EXAMPLES
   # Save your CosmosDB connection
-  agent-do mongo connections add prism_bcc \
-    --uri "$COSMOS_CONNECTION_STRING" \
-    --provider cosmosdb --default
+  printf '%s' "$COSMOS_CONNECTION_STRING" | \
+    agent-do mongo connections add app_cosmos --stdin --provider cosmosdb --default
+
+  # Or store the URI in agent-do creds first, then register profile metadata
+  printf '%s' "$COSMOS_CONNECTION_STRING" | \
+    agent-do creds store MONGO_CONNECTION_APP_COSMOS --stdin
+  agent-do mongo connections add app_cosmos --provider cosmosdb --default
 
   # Or import from AKS secret
   agent-do mongo connections import-from-aks \
-    --secret cosmos-connection-string --namespace prism --profile prism_bcc
+    --secret cosmos-connection-string --namespace app --profile app_cosmos
 
   # Explore
   agent-do mongo snapshot
-  agent-do mongo schema prism_bcc expectations
-  agent-do mongo indexes prism_bcc expectations
+  agent-do mongo schema appdb events
+  agent-do mongo indexes appdb events
 
   # Query
-  agent-do mongo query prism_bcc expectations --where externalId=x --json
-  agent-do mongo query prism_bcc expectations --where '{"status":"pending"}' --limit 5
-  agent-do mongo count prism_bcc expectations --where status=pending
-  agent-do mongo explain prism_bcc expectations --where externalId=x
+  agent-do mongo query appdb events --where externalId=x --json
+  agent-do mongo query appdb events --where '{"status":"pending"}' --limit 5
+  agent-do mongo count appdb events --where status=pending
+  agent-do mongo explain appdb events --where externalId=x
 
   # Safe writes
-  agent-do mongo insert prism_bcc expectations --doc '{"externalId":"y"}' --dry-run
-  agent-do mongo update prism_bcc expectations \
+  agent-do mongo insert appdb events --doc '{"externalId":"y"}' --dry-run
+  agent-do mongo update appdb events \
     --where externalId=x --set status=done --dry-run
-  agent-do mongo delete prism_bcc expectations \
+  agent-do mongo delete appdb events \
     --where externalId=x --dry-run
-  agent-do mongo delete prism_bcc expectations \
+  agent-do mongo delete appdb events \
     --where externalId=x --confirm
 EOF
 }
@@ -117,8 +123,7 @@ run_ops() {
 check_pymongo() {
     if ! python3 -c "import pymongo" 2>/dev/null; then
         echo "Error: pymongo is not installed." >&2
-        echo "  pip install pymongo" >&2
-        echo "  # For CosmosDB TLS: pip install pymongo[srv]" >&2
+        echo '  pip install "pymongo[srv]"' >&2
         exit 1
     fi
 }

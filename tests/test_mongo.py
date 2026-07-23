@@ -188,8 +188,13 @@ def make_exec(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-def run(cmd: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, env=env, text=True, capture_output=True, check=False)
+def run(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, env=env, input=input_text, text=True, capture_output=True, check=False)
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -267,11 +272,35 @@ def main() -> int:
 
         # add second profile (non-default)
         r = run(
-            [str(AGENT_DO), "mongo", "connections", "add", "dev_local",
-             "--uri", "mongodb://localhost:27017"],
+            [str(AGENT_DO), "mongo", "connections", "add", "dev_local", "--stdin"],
             env=base_env,
+            input_text="mongodb://localhost:27017\n",
         )
         check("connections add second exit 0", r.returncode == 0, r.stderr)
+
+        # agent-do creds backed profile URI: register only metadata, resolve the URI
+        # dynamically from MONGO_CONNECTION_<PROFILE> in the secure store.
+        make_exec(
+            fake_bin / "secret-tool",
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['lookup', 'service', 'agent-do', 'account', 'MONGO_CONNECTION_KEYCHAIN_PROFILE']:\n"
+            "    print('mongodb://keychain:pass@localhost:27017')\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(1)\n",
+        )
+        conn_json = json.loads((fake_home / "mongo" / "connections.json").read_text())
+        conn_json["profiles"]["keychain_profile"] = {"provider": "mongodb", "added_at": "2026-01-01T00:00:00Z"}
+        (fake_home / "mongo" / "connections.json").write_text(json.dumps(conn_json))
+        keychain_env = {**base_env, "AGENT_DO_CREDS_PLATFORM": "linux"}
+        r = run(
+            [str(AGENT_DO), "mongo", "query", "keychain_profile", "expectations", "--limit", "1", "--json"],
+            env=keychain_env,
+        )
+        check("profile URI resolves from agent-do creds store", r.returncode == 0, r.stderr)
+        check("profile URI not stored in local creds file",
+              not (fake_home / "mongo" / ".creds" / "keychain_profile").exists())
 
         # set-default
         r = run([str(AGENT_DO), "mongo", "connections", "set-default", "dev_local"], env=base_env)
@@ -919,14 +948,14 @@ def main() -> int:
         # Profile names are now used as filenames in the creds store.
         # Path-traversal characters (slashes, dots-dot) must be rejected upfront.
         r = run([str(AGENT_DO), "mongo", "connections", "add", "../../../etc/shadow",
-                 "--uri", "mongodb://localhost:27017"], env=base_env)
+                 "--stdin"], env=base_env, input_text="mongodb://localhost:27017\n")
         check("profile name with path traversal chars rejected (not stored as file path)",
               r.returncode != 0)
         check("profile name rejection error is clear", "Invalid profile name" in r.stderr)
 
         # Names with spaces or special chars also rejected
         r = run([str(AGENT_DO), "mongo", "connections", "add", "bad name!",
-                 "--uri", "mongodb://localhost:27017"], env=base_env)
+                 "--stdin"], env=base_env, input_text="mongodb://localhost:27017\n")
         check("profile name with space/special chars rejected", r.returncode != 0)
 
         # import-from-aks with a secret name that contains dots — should error with
@@ -939,6 +968,24 @@ def main() -> int:
         )
         check("import-from-aks dotted secret name rejected with hint", r.returncode != 0)
         check("import-from-aks dot hint mentions --profile", "--profile" in r.stderr)
+
+        r = run(
+            [str(AGENT_DO), "mongo", "connections", "import-from-aks",
+             "--secret", "cosmos-connection-string",
+             "--namespace", "prism",
+             "--profile", "typo_profile",
+             "--defualt"],
+            env=base_env,
+        )
+        check("import-from-aks unknown flag rejected", r.returncode != 0)
+        check("import-from-aks unknown flag error is clear", "Unknown" in r.stderr)
+
+        r = run(
+            [str(AGENT_DO), "mongo", "connections", "import-from-aks",
+             "--secret", "--namespace", "prism"],
+            env=base_env,
+        )
+        check("import-from-aks missing --secret value rejected", r.returncode != 0)
 
         # --set @file on update: verify file-based JSON update payloads are accepted.
         # Write a small update payload to a temp file and use it via --set @path.
@@ -965,18 +1012,35 @@ def main() -> int:
         check("insert mistyped flag is rejected", r.returncode != 0)
         check("insert mistyped flag error is clear", "Unknown argument" in r.stderr)
 
-        # --uri with whitespace only must be rejected — not stored as garbage creds
-        r = run([str(AGENT_DO), "mongo", "connections", "add", "wstest",
-                 "--uri", "   "], env=base_env)
-        check("connections add whitespace-only --uri rejected", r.returncode != 0)
+        # stdin with whitespace only must be rejected — not stored as garbage creds
+        r = run([str(AGENT_DO), "mongo", "connections", "add", "wstest", "--stdin"],
+                env=base_env, input_text="   ")
+        check("connections add whitespace-only stdin URI rejected", r.returncode != 0)
 
         r = run(
             [str(AGENT_DO), "mongo", "connections", "add", "badprovider",
-             "--uri", "mongodb://localhost:27017", "--provider", "not-a-real-provider"],
+             "--stdin", "--provider", "not-a-real-provider"],
             env=base_env,
+            input_text="mongodb://localhost:27017\n",
         )
         check("connections add invalid provider rejected", r.returncode != 0)
         check("connections add invalid provider message", "provider" in r.stderr.lower())
+
+        r = run([str(AGENT_DO), "mongo", "connections", "add", "typo",
+                 "--stdin", "--defualt"],
+                env=base_env, input_text="mongodb://localhost:27017\n")
+        check("connections add unknown flag rejected", r.returncode != 0)
+        check("connections add unknown flag error is clear", "Unknown" in r.stderr)
+
+        r = run([str(AGENT_DO), "mongo", "connections", "add", "argv_secret",
+                 "--uri", "mongodb://localhost:27017"],
+                env=base_env)
+        check("connections add rejects --uri argv secret path", r.returncode != 0)
+        check("connections add --uri rejection is clear", "Unknown" in r.stderr)
+
+        r = run([str(AGENT_DO), "mongo", "connections", "add", "missing_safe_uri"], env=base_env)
+        check("connections add without stdin or stored creds rejected", r.returncode != 0)
+        check("connections add missing safe URI hint mentions agent-do creds", "agent-do creds store" in r.stderr)
 
         # import-from-aks when kubectl not installed gives clean error (not unhandled exception).
         # Inject a fake kubectl that exits 127 (command not found) to simulate missing binary
