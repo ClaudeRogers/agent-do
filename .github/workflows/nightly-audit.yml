@@ -1,0 +1,51 @@
+name: nightly-audit
+
+# Behavioral audit of the declared read surface, in CI, nightly. The local
+# launchd schedule (Erik's machine) may be off; this is the always-on guard.
+# Network probing stays OFF — no cloud creds in CI — so this grades the
+# local/offline read surface. Failures (a verb violating its declared shape)
+# fail the job; schema drift is surfaced but non-fatal.
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # 08:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: Contracts behavioral audit (macOS)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml
+      - name: Install modern bash (runner ships 3.2; dispatcher needs mapfile)
+        run: |
+          brew list bash >/dev/null 2>&1 || brew install bash
+          mkdir -p "$HOME/.cibin"
+          ln -sf "$(brew --prefix)/bin/bash" "$HOME/.cibin/bash"
+          echo "$HOME/.cibin" >> "$GITHUB_PATH"
+      - name: Behavioral audit (network off, schema-check on)
+        run: |
+          ./agent-do harness contracts audit --schema-check --out audit-report.md --json > audit.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('audit.json'))
+          s = d['summary']
+          print('summary:', s)
+          fails = [r for r in d['results'] if r['outcome'] == 'fail']
+          for r in fails:
+              print('FAIL', r['tool'], r['verb'], '-', r['reason'])
+          sys.exit(1 if fails else 0)
+          "
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-audit-report
+          path: |
+            audit-report.md
+            audit.json

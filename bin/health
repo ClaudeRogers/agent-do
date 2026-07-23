@@ -10,6 +10,26 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOLS_DIR="$ROOT_DIR/tools"
 CREDS_TOOL="$TOOLS_DIR/agent-creds"
 
+probe() {
+    # probe <seconds> <cmd...> — bounded liveness check. External daemons
+    # (docker, kubectl) can block forever on a dead socket; macOS ships no
+    # timeout(1), so bound the probe via python3. Exit 124 on timeout.
+    local secs="$1"
+    shift
+    python3 - "$secs" "$@" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(sys.argv[2:], capture_output=True, timeout=float(sys.argv[1]))
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+PY
+}
+
 resolve_tool_path() {
     local name="$1"
 
@@ -131,12 +151,53 @@ check_tool() {
                     status="WARN"; note="run: cd tools/agent-$name && npm install"
                 fi
                 ;;
+            api)
+                if "$tool_path" list --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+templates = payload.get("templates") or []
+assert any(item.get("name") == "anthropic" for item in templates)
+' 2>/dev/null; then
+                    status="OK"; note="anthropic template ready"
+                else
+                    status="WARN"; note="canonical templates not ready"
+                fi
+                ;;
             manna)
                 local manna_bin="$TOOLS_DIR/agent-manna/target/release/manna-core"
                 if [[ -x "$manna_bin" ]]; then
                     status="OK"; note="binary built"
                 else
                     status="WARN"; note="run: cd tools/agent-manna && cargo build --release"
+                fi
+                ;;
+            models)
+                local models_payload models_summary
+                models_payload=$("$tool_path" doctor --json 2>/dev/null || true)
+                models_summary=$(python3 - "$models_payload" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+providers = payload.get("providers") or {}
+ready = sorted(name for name, item in providers.items() if item.get("status") == "ok")
+warnings = payload.get("warnings") or []
+if not payload.get("ok", False):
+    print("WARN|provider verification failed")
+elif warnings:
+    suffix = f"; ready: {', '.join(ready)}" if ready else ""
+    print(f"WARN|optional provider skipped{suffix}")
+else:
+    print(f"OK|verified {', '.join(ready)}")
+PY
+)
+                if [[ -n "$models_summary" ]]; then
+                    status="${models_summary%%|*}"
+                    note="${models_summary#*|}"
+                else
+                    status="WARN"; note="model doctor returned no readable result"
                 fi
                 ;;
             ios)
@@ -148,10 +209,10 @@ check_tool() {
                 ;;
             docker)
                 if command -v docker &>/dev/null; then
-                    if docker info &>/dev/null; then
+                    if probe 10 docker info; then
                         status="OK"; note="Docker running"
                     else
-                        status="WARN"; note="Docker installed but not running"
+                        status="WARN"; note="Docker installed but not responding"
                     fi
                 else
                     status="WARN"; note="docker not found"
@@ -159,7 +220,7 @@ check_tool() {
                 ;;
             k8s)
                 if command -v kubectl &>/dev/null; then
-                    if kubectl cluster-info &>/dev/null 2>&1; then
+                    if probe 10 kubectl cluster-info; then
                         status="OK"; note="cluster reachable"
                     else
                         status="WARN"; note="kubectl found but no cluster"
@@ -262,10 +323,12 @@ main() {
         result="$(check_tool "$name" 2>/dev/null || true)"
         [[ -n "$result" ]] || result="  ✗  MISS  $name"
         echo "$result"
-        case "$result" in
-            *"OK"*) ok=$((ok + 1)) ;;
-            *"WARN"*) warn=$((warn + 1)) ;;
-            *"CONF"*) conf=$((conf + 1)) ;;
+        status="$(awk '{print $2}' <<<"$result")"
+        case "$status" in
+            OK) ok=$((ok + 1)) ;;
+            WARN) warn=$((warn + 1)) ;;
+            CONF) conf=$((conf + 1)) ;;
+            MISS|ERR) miss=$((miss + 1)) ;;
             *) miss=$((miss + 1)) ;;
         esac
     done

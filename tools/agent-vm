@@ -162,8 +162,54 @@ libvirt_stop() {
     virsh shutdown "$vm"
 }
 
+# Emit a structured "no hypervisor" error in the active output format.
+no_platform_error() {
+    local context="${1:-No supported VM platform found}"
+    if [[ "${JSON_OUT:-0}" == "1" ]]; then
+        python3 -c "
+import json, sys
+print(json.dumps({
+    'ok': False,
+    'error': sys.argv[1],
+    'supported': ['VirtualBox', 'VMware', 'Parallels', 'UTM', 'libvirt'],
+}, indent=2))
+" "$context"
+    else
+        echo "Error: $context"
+        echo "Supported: VirtualBox, VMware, Parallels, UTM, libvirt"
+    fi
+    return 1
+}
+
 cmd_list() {
     local platform=$(detect_platform)
+
+    if [[ -z "$platform" ]]; then
+        no_platform_error "No supported VM platform found"
+        return 1
+    fi
+
+    if [[ "${JSON_OUT:-0}" == "1" ]]; then
+        local raw
+        case "$platform" in
+            virtualbox) raw="$(vbox_list)" ;;
+            vmware) raw="$(vmware_list)" ;;
+            parallels) raw="$(parallels_list)" ;;
+            utm) raw="$(utm_list)" ;;
+            libvirt) raw="$(libvirt_list)" ;;
+        esac
+        python3 -c "
+import json, sys
+platform = sys.argv[1]
+listing = sys.argv[2]
+print(json.dumps({
+    'ok': True,
+    'platform': platform,
+    'listing': listing,
+}, indent=2))
+" "$platform" "$raw"
+        return 0
+    fi
 
     case "$platform" in
         virtualbox) vbox_list ;;
@@ -171,11 +217,6 @@ cmd_list() {
         parallels) parallels_list ;;
         utm) utm_list ;;
         libvirt) libvirt_list ;;
-        *)
-            echo "No supported VM platform found"
-            echo "Supported: VirtualBox, VMware, Parallels, UTM, libvirt"
-            return 1
-            ;;
     esac
 }
 
@@ -392,6 +433,18 @@ print(json.dumps(snapshot, indent=2))
 }
 
 # Main
+# Strip a --json flag from anywhere in the args; remaining args drive dispatch.
+JSON_OUT=0
+_args=()
+for _a in "$@"; do
+    if [[ "$_a" == "--json" ]]; then
+        JSON_OUT=1
+    else
+        _args+=("$_a")
+    fi
+done
+set -- "${_args[@]:-}"
+
 case "${1:-help}" in
     list|ls)
         cmd_list

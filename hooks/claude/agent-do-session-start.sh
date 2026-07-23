@@ -35,9 +35,33 @@ if [ -z "$AGENT_DO_DIR" ] && [ -f "$HOME/.agent-do/install-path" ]; then
     fi
 fi
 
+# 4. Script-relative fallback: this hook lives at <repo>/hooks/claude/, so a
+#    bare checkout (fresh contributor, CI) resolves its own dispatcher without
+#    any install artifacts.
+if [ -z "$AGENT_DO_DIR" ]; then
+    SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+    if [ -n "$SCRIPT_REPO" ] && [ -x "$SCRIPT_REPO/agent-do" ]; then
+        AGENT_DO_DIR="$SCRIPT_REPO"
+    fi
+fi
+
 # --- Add to PATH if found ---
 if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+fi
+
+# --- Pin coord + manna identity to this Claude session ---
+# Every Bash call then derives the same coord agent identity, and the
+# SessionEnd hook can retire exactly that identity via the same session_id.
+# Manna gets the same anchor: claims made as the session_id survive pid
+# recycling, so reconcile can probe them meaningfully instead of always
+# finding a dead transient pid.
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
+if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
+    echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+fi
+if [ -n "$SESSION_ID" ] && [ -z "${MANNA_SESSION_ID:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
+    echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
 fi
 
 run_native_bootstrap_prompt() {
@@ -125,7 +149,7 @@ append_bootstrap_prompt() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    bootstrap_json=$("$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
+    bootstrap_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
     [ -n "$bootstrap_json" ] || return 0
 
     needs_bootstrap=$(echo "$bootstrap_json" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('needs_bootstrap') else 'false')" 2>/dev/null || echo "false")
@@ -185,7 +209,7 @@ append_project_tooling() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    suggest_json=$("$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
+    suggest_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
     [ -n "$suggest_json" ] || return 0
 
     project_root=$(echo "$suggest_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project',''))" 2>/dev/null || true)
@@ -194,12 +218,12 @@ import json, sys
 data = json.load(sys.stdin)
 lines = []
 for item in data.get('results', []):
-    lines.append(f\"- {item.get('tool')}: start with `{item.get('primary')}`\")
+    lines.append(f\"- {item.get('tool')}: start with \`{item.get('primary')}\`\")
     readiness = item.get('readiness') or {}
     fix = readiness.get('fix')
     note = readiness.get('note')
     if fix and note:
-        lines.append(f\"  setup: `{fix}` ({note})\")
+        lines.append(f\"  setup: \`{fix}\` ({note})\")
 print('\\n'.join(lines))
 " 2>/dev/null || true)
     signals=$(echo "$suggest_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(', '.join(data.get('signals', [])))" 2>/dev/null || true)
@@ -225,6 +249,20 @@ Refresh this list any time with:
 \`agent-do suggest --project\`"
 }
 
+# Run a command with a hard wall-clock bound, SIGKILLing its entire process
+# group on expiry so orphaned grandchildren cannot hold pipes open.
+bounded_run() {
+    perl -e '
+        setpgrp(0, 0);
+        $SIG{ALRM} = sub { kill KILL => -$$ };
+        alarm shift(@ARGV);
+        my $pid = fork();
+        if (!$pid) { exec @ARGV or exit 127 }
+        waitpid($pid, 0);
+        exit($? >> 8);
+    ' "$@"
+}
+
 append_coord_context() {
     local touch_json interrupts_json active_count focus_goal active_block interrupt_count interrupt_block
 
@@ -232,13 +270,16 @@ append_coord_context() {
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    touch_json=$(cd "$CWD" && "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
+    # bounded_run kills the whole process group on timeout: a slow or wedged
+    # agent-do spawn must degrade to "no coord context", never hold the pipe
+    # open and eat the hook's whole timeout budget.
+    touch_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
     [ -n "$touch_json" ] || return 0
 
     active_count=$(echo "$touch_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('active_peers', [])))" 2>/dev/null || echo "0")
     focus_goal=$(echo "$touch_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(((data.get('focus') or {}).get('goal')) or '')" 2>/dev/null || true)
 
-    interrupts_json=$(cd "$CWD" && "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
+    interrupts_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
     interrupt_count=$(echo "$interrupts_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('interrupts', [])))" 2>/dev/null || echo "0")
 
     if [ "$interrupt_count" -gt 0 ]; then
@@ -277,13 +318,26 @@ Use:
     active_block=$(echo "$touch_json" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
+peers = data.get('active_peers', [])
+peers.sort(key=lambda item: 0 if (item.get('mode') or 'writer') == 'writer' else 1)
 lines = []
-for peer in data.get('active_peers', []):
+for peer in peers:
     label = peer.get('alias') or peer.get('agent_id')
     focus = peer.get('focus') or {}
-    goal = focus.get('goal')
-    suffix = f' goal: {goal}' if goal else ''
-    lines.append(f'- {label}{suffix}')
+    details = []
+    if (peer.get('mode') or 'writer') == 'read-only':
+        details.append(f\"{peer.get('role') or 'auditor'}, read-only\")
+    if peer.get('phase'):
+        details.append(f\"phase:{peer['phase']}\")
+    if peer.get('age'):
+        details.append(peer['age'])
+    suffix = f\" ({', '.join(details)})\" if details else ''
+    goal = f\" goal: {focus.get('goal')}\" if focus.get('goal') else ''
+    lines.append(f'- {label}{suffix}{goal}')
+counts = data.get('peer_counts') or {}
+hidden = int(counts.get('dead', 0)) + int(counts.get('stopped', 0)) + int(counts.get('stale', 0))
+if hidden:
+    lines.append(f'- ({hidden} dead/stopped/stale sessions on the board, not shown)')
 print('\n'.join(lines))
 " 2>/dev/null || true)
 
@@ -308,6 +362,55 @@ Set focus before overlapping work starts:
 "
 }
 
+append_manna_board() {
+    local board_json board_block drift_file drift_block
+
+    [ -n "$AGENT_DO_DIR" ] || return 0
+    [ -n "$CWD" ] || return 0
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
+    # Board presence gates everything below: repos without .manna/ take none
+    # of this path, so the emitted envelope stays byte-identical to today.
+    [ -d "$CWD/.manna" ] || return 0
+
+    board_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" manna context --max-tokens 1500 --json 2>/dev/null || true)
+    if [ -n "$board_json" ]; then
+        board_block=$(echo "$board_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('context',''))" 2>/dev/null || true)
+        if [ -n "$board_block" ]; then
+            CONTEXT="$CONTEXT
+
+---
+
+## Manna Board
+
+$board_block
+
+Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified."
+        fi
+    fi
+
+    # Drift greeting: the SessionEnd reconcile advisory writes .manna/drift.yaml;
+    # read-if-exists, so a hand-written file greets before that ever ships.
+    drift_file="$CWD/.manna/drift.yaml"
+    [ -f "$drift_file" ] || return 0
+    grep -q '^findings:' "$drift_file" 2>/dev/null || return 0
+    grep -Eq '^[[:space:]]*-[[:space:]]+kind:' "$drift_file" 2>/dev/null || return 0
+
+    drift_block=$(sed -n '1,30p' "$drift_file" 2>/dev/null)
+    [ -n "$drift_block" ] || return 0
+
+    CONTEXT="$CONTEXT
+
+---
+
+## Board drift (unresolved from last session)
+
+\`\`\`yaml
+$drift_block
+\`\`\`
+
+Reconcile the board against reality before claiming new work, then remove \`.manna/drift.yaml\` once resolved."
+}
+
 # --- Inject tooling reminder ---
 CONTEXT="## TOOLING REMINDER - agent-do
 
@@ -319,7 +422,7 @@ agent-do -n \"natural language description of what you want\"
 agent-do --how \"...\"     # Explain without executing
 \`\`\`
 
-Discovery: agent-do suggest "<task>" | agent-do suggest --project | agent-do find <keyword> | agent-do --list | agent-do <tool> --help
+Discovery: agent-do suggest \"<task>\" | agent-do suggest --project | agent-do find <keyword> | agent-do --list | agent-do <tool> --help
 
 Prefer agent-do over raw CLI commands when a tool exists.
 Use agent-do <tool> --help to see available commands."
@@ -433,6 +536,7 @@ fi
 append_project_tooling
 append_bootstrap_prompt
 append_coord_context
+append_manna_board
 
 ESCAPED=$(echo "$CONTEXT" | jq -Rs .)
 echo "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":$ESCAPED}}"

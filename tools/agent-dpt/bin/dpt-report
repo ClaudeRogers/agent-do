@@ -799,8 +799,27 @@ def narrate_recommendations(data, lines):
 # ──────────────────────────────────────────────────────────────────────
 
 def main():
-    data = load_data(sys.argv[1:])
+    args = sys.argv[1:]
+    data = load_data(args)
     meta = data.get('meta', {})
+
+    if '--json' in args:
+        syn = data.get('synthesis', {})
+        report = {
+            'meta': meta,
+            'overall_score': syn.get('overall_score'),
+            'overall_grade': syn.get('overall_grade'),
+            'dimensions': syn.get('dimensions', {}),
+            'critical_failures': syn.get('critical_failures', []),
+            'top_strengths': syn.get('top_strengths', []),
+            'chromatic_field': data.get('chromatic_field', {}),
+            'typographic_skeleton': data.get('typographic_skeleton', {}),
+            'spatial_rhythm': data.get('spatial_rhythm', {}),
+            'attention_architecture': data.get('attention_architecture', {}),
+            'coherence': data.get('coherence', {}),
+        }
+        print(json.dumps(report))
+        return
 
     lines = []
     lines.append('')

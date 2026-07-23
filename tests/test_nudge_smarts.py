@@ -39,6 +39,7 @@ def run_hook(command: str, session_id: str, home: Path) -> tuple[dict, dict]:
     }
     env = dict(os.environ)
     env["HOME"] = str(home)
+    env["AGENT_DO_HOME"] = str(home / ".agent-do")
     proc = subprocess.run(
         ["python3", str(HOOK)],
         input=json.dumps(payload),
@@ -55,7 +56,7 @@ def run_hook(command: str, session_id: str, home: Path) -> tuple[dict, dict]:
         except json.JSONDecodeError as exc:
             raise AssertionError(f"hook stdout was not JSON: {proc.stdout[:200]} ({exc})")
 
-    state_dir = home / ".agent-do" / "nudges"
+    state_dir = Path(env["AGENT_DO_HOME"]) / "nudges"
     state_files = list(state_dir.glob(f"session-*.json")) if state_dir.exists() else []
     state = {}
     for state_file in state_files:

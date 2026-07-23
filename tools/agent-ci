@@ -3,6 +3,52 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Shared --json helpers (json_error, OUTPUT_FORMAT). Sourcing is best-effort so
+# the tool still works standalone; the JSON paths below guard on OUTPUT_FORMAT.
+if [[ -f "$REPO_ROOT/lib/json-output.sh" ]]; then
+    # shellcheck source=lib/json-output.sh
+    source "$REPO_ROOT/lib/json-output.sh"
+fi
+OUTPUT_FORMAT="${OUTPUT_FORMAT:-text}"
+
+# Emit a single valid JSON document built from key/value/raw triples.
+# Usage: emit_json key1 value1 key2 value2 ...   (values are JSON strings)
+#        emit_json_raw '<json>'                   (pass a pre-built document)
+emit_json_raw() {
+    local doc="$1"
+    python3 -c '
+import json, sys
+raw = sys.argv[1]
+try:
+    print(json.dumps(json.loads(raw), indent=2))
+except Exception:
+    print(json.dumps({"success": True, "result": raw}, indent=2))
+' "$doc"
+}
+
+emit_json_text() {
+    # Wrap arbitrary text output as a JSON success document.
+    local text="$1"
+    python3 -c '
+import json, sys
+print(json.dumps({"success": True, "result": sys.argv[1]}, indent=2))
+' "$text"
+}
+
+emit_json_error() {
+    # Structured JSON error to stdout (the audit reads stdout), nonzero exit.
+    local message="$1"
+    local code="${2:-1}"
+    python3 -c '
+import json, sys
+print(json.dumps({"success": False, "error": sys.argv[1], "code": int(sys.argv[2])}, indent=2))
+' "$message" "$code"
+    return "$code"
+}
+
 show_help() {
     cat << 'EOF'
 agent-ci - CI/CD pipeline management
@@ -28,28 +74,63 @@ Examples:
 EOF
 }
 
-# Check for gh CLI
+# Check for gh CLI. In JSON mode, emit a structured error instead of plain text.
 check_gh() {
     if ! command -v gh &> /dev/null; then
+        if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+            emit_json_error "gh CLI not found (install: brew install gh)"
+            exit 1
+        fi
         echo "Error: gh CLI not found"
         echo "Install: brew install gh"
         exit 1
     fi
 }
 
-# Get repo from git remote
+# Get repo from git remote. Tolerant of missing remote under set -e/pipefail:
+# a non-GitHub or absent origin yields empty output, never a nonzero exit.
 get_repo() {
-    git remote get-url origin 2>/dev/null | sed -E 's/.*github.com[:/]([^/]+\/[^.]+)(\.git)?/\1/'
+    { git remote get-url origin 2>/dev/null || true; } \
+        | sed -E 's/.*github.com[:/]([^/]+\/[^.]+)(\.git)?/\1/'
+}
+
+# Emit a no-repo error in the active format.
+no_repo_error() {
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        emit_json_error "Not in a git repository with GitHub remote"
+        return 1
+    fi
+    echo "Error: Not in a git repository with GitHub remote"
+    return 1
 }
 
 cmd_status() {
     check_gh
     local workflow="${1:-}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$repo" ]]; then
-        echo "Error: Not in a git repository with GitHub remote"
+        no_repo_error
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local fields="databaseId,name,displayTitle,status,conclusion,headBranch,event,createdAt,url"
+        local out
+        if [[ -n "$workflow" ]]; then
+            out=$(gh run list --workflow "$workflow" --limit 5 --repo "$repo" --json "$fields" 2>&1) || {
+                emit_json_error "$out"
+                return 1
+            }
+        else
+            out=$(gh run list --limit 10 --repo "$repo" --json "$fields" 2>&1) || {
+                emit_json_error "$out"
+                return 1
+            }
+        fi
+        emit_json_raw "$out"
+        return 0
     fi
 
     if [[ -n "$workflow" ]]; then
@@ -62,11 +143,30 @@ cmd_status() {
 cmd_runs() {
     check_gh
     local workflow="${1:-}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$repo" ]]; then
-        echo "Error: Not in a git repository with GitHub remote"
+        no_repo_error
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local fields="databaseId,name,displayTitle,status,conclusion,headBranch,event,createdAt,url"
+        local out
+        if [[ -n "$workflow" ]]; then
+            out=$(gh run list --limit 20 --repo "$repo" --workflow "$workflow" --json "$fields" 2>&1) || {
+                emit_json_error "$out"
+                return 1
+            }
+        else
+            out=$(gh run list --limit 20 --repo "$repo" --json "$fields" 2>&1) || {
+                emit_json_error "$out"
+                return 1
+            }
+        fi
+        emit_json_raw "$out"
+        return 0
     fi
 
     local args=(--limit 20 --repo "$repo")
@@ -79,17 +179,32 @@ cmd_trigger() {
     check_gh
     local workflow="${1:-}"
     local ref="${2:-$(git branch --show-current)}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$workflow" ]]; then
+        if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+            emit_json_error "Workflow file required (usage: agent-ci trigger <workflow.yml> [ref])"
+            return 1
+        fi
         echo "Error: Workflow file required"
         echo "Usage: agent-ci trigger <workflow.yml> [ref]"
         return 1
     fi
 
     if [[ -z "$repo" ]]; then
-        echo "Error: Not in a git repository with GitHub remote"
+        no_repo_error
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh workflow run "$workflow" --ref "$ref" --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        emit_json_text "Triggered $workflow on $ref"
+        return 0
     fi
 
     gh workflow run "$workflow" --ref "$ref" --repo "$repo"
@@ -99,16 +214,36 @@ cmd_trigger() {
 cmd_logs() {
     check_gh
     local run_id="${1:-}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$run_id" ]]; then
         # Get latest run
-        run_id=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$repo")
+        run_id=$(gh run list --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$repo" 2>/dev/null || true)
         if [[ -z "$run_id" ]]; then
+            if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+                emit_json_error "No runs found"
+                return 1
+            fi
             echo "Error: No runs found"
             return 1
         fi
-        echo "Showing logs for latest run: $run_id"
+        if [[ "$OUTPUT_FORMAT" != "json" ]]; then
+            echo "Showing logs for latest run: $run_id"
+        fi
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh run view "$run_id" --log --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        python3 -c '
+import json, sys
+print(json.dumps({"success": True, "run_id": sys.argv[1], "log": sys.argv[2]}, indent=2))
+' "$run_id" "$out"
+        return 0
     fi
 
     gh run view "$run_id" --log --repo "$repo"
@@ -117,11 +252,26 @@ cmd_logs() {
 cmd_cancel() {
     check_gh
     local run_id="${1:-}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$run_id" ]]; then
+        if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+            emit_json_error "Run ID required"
+            return 1
+        fi
         echo "Error: Run ID required"
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh run cancel "$run_id" --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        emit_json_text "Cancelled run $run_id"
+        return 0
     fi
 
     gh run cancel "$run_id" --repo "$repo"
@@ -132,11 +282,26 @@ cmd_artifacts() {
     check_gh
     local run_id="${1:-}"
     local output="${2:-.}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$run_id" ]]; then
+        if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+            emit_json_error "Run ID required"
+            return 1
+        fi
         echo "Error: Run ID required"
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh run download "$run_id" --dir "$output" --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        emit_json_text "Downloaded artifacts to $output"
+        return 0
     fi
 
     gh run download "$run_id" --dir "$output" --repo "$repo"
@@ -145,11 +310,26 @@ cmd_artifacts() {
 
 cmd_secrets() {
     check_gh
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$repo" ]]; then
-        echo "Error: Not in a git repository with GitHub remote"
+        no_repo_error
         return 1
+    fi
+
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh secret list --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        python3 -c '
+import json, sys
+names = [line.split()[0] for line in sys.argv[1].splitlines() if line.strip()]
+print(json.dumps({"success": True, "secrets": names}, indent=2))
+' "$out"
+        return 0
     fi
 
     echo "Repository secrets:"
@@ -159,19 +339,49 @@ cmd_secrets() {
 cmd_watch() {
     check_gh
     local run_id="${1:-}"
-    local repo=$(get_repo)
+    local repo
+    repo=$(get_repo)
 
     if [[ -z "$run_id" ]]; then
         # Get latest in-progress run
-        run_id=$(gh run list --status in_progress --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$repo")
+        run_id=$(gh run list --status in_progress --limit 1 --json databaseId --jq '.[0].databaseId' --repo "$repo" 2>/dev/null || true)
         if [[ -z "$run_id" ]]; then
+            if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+                emit_json_text "No in-progress runs"
+                return 0
+            fi
             echo "No in-progress runs"
             return 0
         fi
     fi
 
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        local out
+        out=$(gh run watch "$run_id" --repo "$repo" 2>&1) || {
+            emit_json_error "$out"
+            return 1
+        }
+        python3 -c '
+import json, sys
+print(json.dumps({"success": True, "run_id": sys.argv[1], "result": sys.argv[2]}, indent=2))
+' "$run_id" "$out"
+        return 0
+    fi
+
     gh run watch "$run_id" --repo "$repo"
 }
+
+# Strip --json from the argument list (anywhere) so it never leaks to gh, and
+# set OUTPUT_FORMAT. Plain-mode invocations are untouched.
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--json" ]]; then
+        OUTPUT_FORMAT="json"
+    else
+        ARGS+=("$arg")
+    fi
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 # Main
 case "${1:-help}" in

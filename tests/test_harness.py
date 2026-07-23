@@ -10,8 +10,16 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def registry_tool_count() -> int:
+    """Authoritative tool count from the registry — the harness must match it."""
+    registry = yaml.safe_load((ROOT / "registry.yaml").read_text(encoding="utf-8"))
+    return len(registry["tools"])
 
 
 def require(condition: bool, message: str) -> None:
@@ -51,14 +59,15 @@ def main() -> int:
     text_result = run_agent_do("harness", "inspect")
     require(text_result.returncode == 0, f"harness inspect failed: {text_result.stderr}")
     require("agent-do harness" in text_result.stdout, f"unexpected text output: {text_result.stdout}")
-    require("Tools: 94" in text_result.stdout, f"expected current tool count in text output: {text_result.stdout}")
+    expected_tools = registry_tool_count()
+    require(f"Tools: {expected_tools}" in text_result.stdout, f"expected harness tool count to match registry ({expected_tools}): {text_result.stdout}")
 
     json_result = run_agent_do("harness", "inspect", "--json")
     require(json_result.returncode == 0, f"harness inspect --json failed: {json_result.stderr}")
     payload = json.loads(json_result.stdout)
     require(payload["ok"] is True, f"expected ok payload: {payload}")
-    require(payload["summary"]["tools"] == 94, f"expected 94 tools: {payload['summary']}")
-    require(payload["summary"]["by_type"]["tool"] == 94, f"expected tool component count: {payload['summary']}")
+    require(payload["summary"]["tools"] == expected_tools, f"expected {expected_tools} tools (registry count): {payload['summary']}")
+    require(payload["summary"]["by_type"]["tool"] == expected_tools, f"expected tool component count to match registry ({expected_tools}): {payload['summary']}")
     require(payload["summary"]["tools_with_contracts"] >= 2, f"expected contract coverage in summary: {payload['summary']}")
     require(payload["summary"]["contract_errors"] == 0, f"contract shape errors should be zero: {payload['summary']}")
 
@@ -86,7 +95,10 @@ def main() -> int:
     require("tools/agent-harness" in harness_tool["files"], f"missing harness tool file: {harness_tool}")
     for command in ["inspect", "nudges", "evidence", "manifest"]:
         require(command in harness_tool["commands"], f"missing {command} command: {harness_tool}")
-    require(harness_tool["concurrency"] == "read", f"harness should be read-only: {harness_tool}")
+    require(
+        harness_tool["concurrency"] == "mixed",
+        f"harness is mixed: evidence/manifest write files, inspect/nudges read: {harness_tool}",
+    )
 
     transcribe_tool = components["tool:transcribe"]
     require(transcribe_tool["contract_validation"]["declared"] is True,

@@ -9,10 +9,16 @@ agent-figma - Figma design tool integration
 
 Commands:
   files                      List recent files
+  list                       List recent files (alias of files)
   file <key>                 Get file info
+  inspect <key>              Inspect file/elements (alias of file)
   export <key> <node-ids>    Export nodes as images
   comments <key>             List comments on file
   styles <key>               List styles in file
+
+Options:
+  --json                     Emit the raw Figma API response (read commands:
+                             files/list, file/inspect, comments, styles)
 
 Environment:
   FIGMA_TOKEN                Personal access token
@@ -35,16 +41,36 @@ figma_request() {
     local endpoint="$1"
     local token="${FIGMA_TOKEN:-}"
 
+    # Always emit valid JSON: every consumer pipes this into json.load.
     if [[ -z "$token" ]]; then
-        echo "Error: FIGMA_TOKEN not set"
-        return 1
+        echo '{"error": "FIGMA_TOKEN not set"}'
+        return 0
     fi
 
-    curl -s -H "X-Figma-Token: $token" "${FIGMA_API}${endpoint}"
+    curl -s --max-time 30 -H "X-Figma-Token: $token" "${FIGMA_API}${endpoint}" \
+        || echo '{"error": "figma api request failed"}'
 }
 
 cmd_files() {
-    figma_request "/me" | python3 -c "
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    # figma_request always yields valid JSON (API response or {"error": ...}).
+    local result
+    result=$(figma_request "/me")
+
+    if [[ "$json_output" == "1" ]]; then
+        # Emit the raw API JSON verbatim; skip the human summary and the note.
+        echo "$result"
+        return 0
+    fi
+
+    echo "$result" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 if 'email' in r:
@@ -62,14 +88,33 @@ else:
 }
 
 cmd_file() {
-    local file_key="${1:-}"
+    local file_key=""
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) [[ -z "$file_key" ]] && file_key="$1"; shift ;;
+        esac
+    done
 
     if [[ -z "$file_key" ]]; then
+        if [[ "$json_output" == "1" ]]; then
+            echo '{"error": "File key required"}'
+            return 1
+        fi
         echo "Error: File key required"
         return 1
     fi
 
-    figma_request "/files/${file_key}" | python3 -c "
+    local result
+    result=$(figma_request "/files/${file_key}")
+
+    if [[ "$json_output" == "1" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    echo "$result" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 if 'name' in r:
@@ -128,14 +173,33 @@ else:
 }
 
 cmd_comments() {
-    local file_key="${1:-}"
+    local file_key=""
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) [[ -z "$file_key" ]] && file_key="$1"; shift ;;
+        esac
+    done
 
     if [[ -z "$file_key" ]]; then
+        if [[ "$json_output" == "1" ]]; then
+            echo '{"error": "File key required"}'
+            return 1
+        fi
         echo "Error: File key required"
         return 1
     fi
 
-    figma_request "/files/${file_key}/comments" | python3 -c "
+    local result
+    result=$(figma_request "/files/${file_key}/comments")
+
+    if [[ "$json_output" == "1" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    echo "$result" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 if 'comments' in r:
@@ -151,14 +215,33 @@ else:
 }
 
 cmd_styles() {
-    local file_key="${1:-}"
+    local file_key=""
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) [[ -z "$file_key" ]] && file_key="$1"; shift ;;
+        esac
+    done
 
     if [[ -z "$file_key" ]]; then
+        if [[ "$json_output" == "1" ]]; then
+            echo '{"error": "File key required"}'
+            return 1
+        fi
         echo "Error: File key required"
         return 1
     fi
 
-    figma_request "/files/${file_key}/styles" | python3 -c "
+    local result
+    result=$(figma_request "/files/${file_key}/styles")
+
+    if [[ "$json_output" == "1" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    echo "$result" | python3 -c "
 import sys, json
 r = json.load(sys.stdin)
 if 'meta' in r and 'styles' in r['meta']:
@@ -172,9 +255,10 @@ else:
 # Main
 case "${1:-help}" in
     files|list)
-        cmd_files
+        shift
+        cmd_files "$@"
         ;;
-    file|get|info)
+    file|get|info|inspect)
         shift
         cmd_file "$@"
         ;;

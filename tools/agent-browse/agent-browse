@@ -46,11 +46,22 @@ print("default")
 PY
 }
 
-SESSION="${AGENT_BROWSER_SESSION:-$(derive_auto_session)}"
+if [[ -n "${AGENT_BROWSER_SESSION:-}" ]]; then
+    SESSION="$AGENT_BROWSER_SESSION"
+    SESSION_SOURCE="AGENT_BROWSER_SESSION"
+else
+    SESSION="$(derive_auto_session)"
+    SESSION_SOURCE="auto identity/default"
+fi
 # Note: daemon.js uses os.tmpdir() which on macOS is /var/folders/...
 TMPDIR_ACTUAL="$(python3 -c 'import tempfile; print(tempfile.gettempdir())')"
-SOCKET_PATH="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.sock"
-PID_FILE="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.pid"
+refresh_session_paths() {
+    SOCKET_PATH="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.sock"
+    PID_FILE="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.pid"
+    STREAM_PORT_FILE="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.stream"
+    DAEMON_LOG="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.log"
+}
+refresh_session_paths
 PERSISTENT_SESSIONS_DIR="${HOME}/.agent-browse/sessions"
 
 saved_session_path() {
@@ -267,6 +278,7 @@ BROWSER CONTROL:
   close                          Close browser and daemon
   restart [url]                  Kill and restart browser (optionally navigate)
   status                         Show daemon status
+  doctor                         Diagnose this session's daemon, socket, and page state
 
 CAPTURE (API skill generation):
   capture start                Start capturing API traffic on current page
@@ -326,22 +338,146 @@ is_daemon_running() {
         return 1
     fi
     local pid
-    pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
-    kill -0 "$pid" 2>/dev/null
+    pid=$(cat "$PID_FILE" 2>/dev/null) || { cleanup_session_files; return 1; }
+    if ! daemon_identity_matches "$pid"; then
+        cleanup_session_files
+        return 1
+    fi
+    return 0
+}
+
+cleanup_session_files() {
+    rm -f "$SOCKET_PATH" "$PID_FILE" "$STREAM_PORT_FILE" "$DAEMON_LOG"
+}
+
+daemon_identity_matches() {
+    local pid="${1:-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    local command
+    command=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+    _BROWSE_DAEMON_COMMAND="$command" \
+    _BROWSE_DAEMON_SESSION="$SESSION" \
+    _BROWSE_DAEMON_SOCKET="$SOCKET_PATH" \
+    python3 <<'PYEOF' >/dev/null 2>&1
+import os
+import shlex
+import sys
+from pathlib import Path
+
+try:
+    argv = shlex.split(os.environ["_BROWSE_DAEMON_COMMAND"])
+except ValueError:
+    raise SystemExit(1)
+
+def has_pair(flag, value):
+    return any(argv[index:index + 2] == [flag, value] for index in range(len(argv) - 1))
+
+is_daemon = any(Path(arg).name == "daemon.js" for arg in argv)
+ok = (
+    is_daemon
+    and has_pair("--session", os.environ["_BROWSE_DAEMON_SESSION"])
+    and has_pair("--socket", os.environ["_BROWSE_DAEMON_SOCKET"])
+)
+sys.exit(0 if ok else 1)
+PYEOF
+}
+
+signal_daemon() {
+    local pid="$1"
+    local signal_name="$2"
+    daemon_identity_matches "$pid" || return 1
+    kill -"$signal_name" "$pid" 2>/dev/null
+}
+
+raw_socket_command() {
+    local json="$1"
+    local timeout="${2:-1}"
+    [[ -S "$SOCKET_PATH" ]] || return 1
+    _BROWSE_CMD="$json" _BROWSE_SOCK="$SOCKET_PATH" _BROWSE_TIMEOUT="$timeout" python3 <<'PYEOF'
+import json, os, socket, sys
+
+msg = os.environ["_BROWSE_CMD"].encode("utf-8") + b"\n"
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(float(os.environ["_BROWSE_TIMEOUT"]))
+try:
+    s.connect(os.environ["_BROWSE_SOCK"])
+    s.sendall(msg)
+    raw = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        raw += chunk
+        if b"\n" in raw:
+            break
+    resp = json.loads(raw.decode("utf-8").strip())
+    print(json.dumps(resp, separators=(",", ":")))
+    sys.exit(0 if resp.get("success") else 1)
+except Exception:
+    sys.exit(1)
+finally:
+    try:
+        s.close()
+    except Exception:
+        pass
+PYEOF
+}
+
+daemon_ping() {
+    local response
+    response=$(raw_socket_command '{"id":"ping","action":"ping"}' "${AGENT_BROWSER_PING_TIMEOUT:-1}") || return 1
+    _BROWSE_PING="$response" _BROWSE_SESSION="$SESSION" python3 <<'PYEOF' >/dev/null 2>&1
+import json
+import os
+import sys
+
+try:
+    payload = json.loads(os.environ["_BROWSE_PING"])
+except (KeyError, json.JSONDecodeError):
+    raise SystemExit(1)
+sys.exit(0 if payload.get("success") is True and payload.get("session") == os.environ["_BROWSE_SESSION"] else 1)
+PYEOF
+    echo "$response"
+}
+
+daemon_page_responsive() {
+    local response
+    response=$(daemon_ping) || return 1
+    _BROWSE_PING="$response" python3 -c 'import json, os, sys; sys.exit(0 if int(json.loads(os.environ["_BROWSE_PING"]).get("children", 0)) > 0 else 1)'
+}
+
+require_responsive_daemon() {
+    # Emit a structured "no responsive daemon" error and exit when no live
+    # browser is reachable within a few seconds. $1 = output format (text|json).
+    local fmt="${1:-text}"
+    if daemon_page_responsive; then
+        return 0
+    fi
+    local msg="No responsive agent-browser daemon for session '$SESSION'. Start: agent-do browse open <url>"
+    if [[ "$fmt" == "json" ]]; then
+        _BROWSE_MSG="$msg" python3 -c 'import json, os; print(json.dumps({"success": False, "error": os.environ["_BROWSE_MSG"], "action_required": "START_BROWSER"}))'
+    else
+        echo "Error: $msg" >&2
+    fi
+    exit 1
 }
 
 start_daemon() {
     if is_daemon_running; then
-        return 0
+        if [[ -S "$SOCKET_PATH" ]]; then
+            return 0
+        fi
+        stop_daemon
     fi
-    
-    # Clean up stale socket
-    rm -f "$SOCKET_PATH" "$PID_FILE"
+
+    cleanup_session_files
     
     # Start daemon in background (disown so parent bash can exit cleanly)
     AGENT_BROWSER_SESSION="$SESSION" \
     AGENT_BROWSER_HEADED="${AGENT_BROWSER_HEADED:-0}" \
-    node "$DAEMON_DIR/daemon.js" &
+    node "$DAEMON_DIR/daemon.js" --session "$SESSION" --socket "$SOCKET_PATH" \
+        </dev/null >>"$DAEMON_LOG" 2>&1 &
 
     local daemon_pid=$!
     disown "$daemon_pid" 2>/dev/null
@@ -355,6 +491,7 @@ start_daemon() {
         # Check if daemon died
         if ! kill -0 "$daemon_pid" 2>/dev/null; then
             echo "Error: Daemon failed to start" >&2
+            tail -n 20 "$DAEMON_LOG" >&2 2>/dev/null || true
             rm -f "$PID_FILE"
             return 1
         fi
@@ -362,8 +499,9 @@ start_daemon() {
     
     if [[ ! -S "$SOCKET_PATH" ]]; then
         echo "Error: Daemon socket not created" >&2
-        kill "$daemon_pid" 2>/dev/null || true
-        rm -f "$PID_FILE"
+        tail -n 20 "$DAEMON_LOG" >&2 2>/dev/null || true
+        signal_daemon "$daemon_pid" TERM 2>/dev/null || true
+        cleanup_session_files
         return 1
     fi
 }
@@ -372,11 +510,144 @@ stop_daemon() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null) || true
-        if [[ -n "$pid" ]]; then
-            kill "$pid" 2>/dev/null || true
+        if [[ -n "$pid" ]] && daemon_identity_matches "$pid"; then
+            signal_daemon "$pid" TERM 2>/dev/null || true
+            local attempts=0
+            while kill -0 "$pid" 2>/dev/null && [[ $attempts -lt 20 ]]; do
+                sleep 0.1
+                attempts=$((attempts + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+                signal_daemon "$pid" KILL 2>/dev/null || true
+            fi
         fi
-        rm -f "$PID_FILE" "$SOCKET_PATH"
     fi
+    cleanup_session_files
+}
+
+preflight_daemon() {
+    if ! is_daemon_running; then
+        start_daemon
+        return
+    fi
+    if [[ ! -S "$SOCKET_PATH" ]]; then
+        stop_daemon
+        start_daemon
+        return
+    fi
+    if daemon_ping >/dev/null; then
+        return
+    fi
+
+    stop_daemon
+    start_daemon
+    echo "agent-browse: daemon for session '$SESSION' was wedged — auto-restarted (saved sessions persist on disk)" >&2
+}
+
+daemon_doctor() {
+    local pid="" pid_present=false pid_alive=false identity_verified=false socket_present=false
+    local pingable=false children=0 uptime_s=0 state diagnosis ping_response=""
+
+    if [[ -f "$PID_FILE" ]]; then
+        pid_present=true
+        pid=$(cat "$PID_FILE" 2>/dev/null) || pid=""
+    fi
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        pid_alive=true
+        if daemon_identity_matches "$pid"; then
+            identity_verified=true
+        fi
+    fi
+    [[ -S "$SOCKET_PATH" ]] && socket_present=true
+
+    if [[ "$identity_verified" == "true" && "$socket_present" == "true" ]]; then
+        if ping_response=$(daemon_ping); then
+            pingable=true
+            read -r children uptime_s < <(
+                _BROWSE_PING="$ping_response" python3 -c 'import json, os; p=json.loads(os.environ["_BROWSE_PING"]); print(int(p.get("children", 0)), int(p.get("uptime_s", 0)))'
+            )
+        fi
+    fi
+
+    if [[ "$pid_present" == "false" ]]; then
+        state="cold"
+        diagnosis="No daemon pid file; the next browser command will cold-start this session."
+    elif [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+        state="invalid-pid"
+        diagnosis="The session pid file is invalid and will be cleaned on the next browser command."
+    elif [[ "$pid_alive" == "false" ]]; then
+        state="stale-pid"
+        diagnosis="The recorded process is dead; this session will clean its files and cold-start."
+    elif [[ "$identity_verified" == "false" ]]; then
+        state="identity-mismatch"
+        diagnosis="The pid belongs to another process; it will not be signaled. Only this session's files will be cleaned."
+    elif [[ "$socket_present" == "false" ]]; then
+        state="socket-missing"
+        diagnosis="The verified daemon has no session socket and will be restarted."
+    elif [[ "$pingable" == "false" ]]; then
+        state="wedged"
+        diagnosis="The verified daemon is not answering ping and will self-heal before the next browser command."
+    elif [[ "$children" -eq 0 ]]; then
+        state="healthy-idle"
+        diagnosis="The daemon is healthy and idle; ping did not launch a browser page."
+    else
+        state="healthy"
+        diagnosis="The daemon and browser page are responsive."
+    fi
+
+    _BROWSE_SESSION="$SESSION" \
+    _BROWSE_SESSION_SOURCE="$SESSION_SOURCE" \
+    _BROWSE_PID="$pid" \
+    _BROWSE_PID_FILE="$PID_FILE" \
+    _BROWSE_PID_PRESENT="$pid_present" \
+    _BROWSE_PID_ALIVE="$pid_alive" \
+    _BROWSE_IDENTITY="$identity_verified" \
+    _BROWSE_SOCKET="$SOCKET_PATH" \
+    _BROWSE_DAEMON_LOG="$DAEMON_LOG" \
+    _BROWSE_SOCKET_PRESENT="$socket_present" \
+    _BROWSE_PINGABLE="$pingable" \
+    _BROWSE_CHILDREN="$children" \
+    _BROWSE_UPTIME="$uptime_s" \
+    _BROWSE_STATE="$state" \
+    _BROWSE_DIAGNOSIS="$diagnosis" \
+    python3 <<'PYEOF'
+import json
+import os
+
+truth = lambda name: os.environ[name] == "true"
+pid_text = os.environ["_BROWSE_PID"]
+payload = {
+    "success": True,
+    "session": {
+        "name": os.environ["_BROWSE_SESSION"],
+        "derivation": os.environ["_BROWSE_SESSION_SOURCE"],
+    },
+    "pid": {
+        "file": os.environ["_BROWSE_PID_FILE"],
+        "present": truth("_BROWSE_PID_PRESENT"),
+        "value": int(pid_text) if pid_text.isdigit() else None,
+        "alive": truth("_BROWSE_PID_ALIVE"),
+        "identity_verified": truth("_BROWSE_IDENTITY"),
+    },
+    "socket": {
+        "path": os.environ["_BROWSE_SOCKET"],
+        "present": truth("_BROWSE_SOCKET_PRESENT"),
+    },
+    "daemon": {
+        "running": truth("_BROWSE_PID_ALIVE") and truth("_BROWSE_IDENTITY"),
+        "pingable": truth("_BROWSE_PINGABLE"),
+        "children": int(os.environ["_BROWSE_CHILDREN"]),
+        "uptime_s": int(os.environ["_BROWSE_UPTIME"]),
+        "log": os.environ["_BROWSE_DAEMON_LOG"],
+    },
+    "browser": {
+        "responsive": truth("_BROWSE_PINGABLE") and int(os.environ["_BROWSE_CHILDREN"]) > 0,
+    },
+    "state": os.environ["_BROWSE_STATE"],
+    "diagnosis": os.environ["_BROWSE_DIAGNOSIS"],
+}
+print(json.dumps(payload, indent=2))
+PYEOF
 }
 
 send_command() {
@@ -727,8 +998,8 @@ main() {
                 ;;
             --session)
                 SESSION="$2"
-                SOCKET_PATH="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.sock"
-                PID_FILE="${TMPDIR_ACTUAL}/agent-browser-${SESSION}.pid"
+                SESSION_SOURCE="--session"
+                refresh_session_paths
                 shift 2
                 ;;
             --headed)
@@ -760,6 +1031,19 @@ main() {
     
     local cmd="$1"
     shift
+
+    case "$cmd" in
+        open|back|forward|reload|click|dblclick|fill|type|press|hover|focus|check|uncheck|select|upload|snapshot|get|clipboard|wait|screenshot|pdf|eval|login|tab|network|vision|agent|capture|is|console|errors|highlight|viewport)
+            preflight_daemon
+            ;;
+        auth)
+            case "${1:-}" in
+                check-creds|get-creds|store-creds) ;;
+                *) preflight_daemon ;;
+            esac
+            ;;
+        *) ;;
+    esac
     
     local json response
     
@@ -859,9 +1143,22 @@ main() {
             ;;
         clipboard)
             [[ $# -lt 1 ]] && { echo "Usage: agent-browse clipboard <read|copy|paste>" >&2; exit 1; }
-            case "$1" in
+            local clip_op="$1"; shift
+            # Global option parsing only catches flags before the verb; honor a
+            # trailing --json so `clipboard read --json` emits JSON, not text.
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) output_format="json"; shift ;;
+                    *) shift ;;
+                esac
+            done
+            case "$clip_op" in
                 read|copy|paste)
-                    json=$(build_clipboard_cmd "$1")
+                    # Clipboard is page-scoped. With no live browser the daemon
+                    # auto-launches a blank page and navigator.clipboard.readText()
+                    # never returns. Fail fast with a structured error instead.
+                    require_responsive_daemon "$output_format"
+                    json=$(build_clipboard_cmd "$clip_op")
                     ;;
                 *)
                     echo "Usage: agent-browse clipboard <read|copy|paste>" >&2
@@ -898,6 +1195,7 @@ main() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --full|-f) full=true; shift ;;
+                    --json) output_format="json"; shift ;;
                     *) path="$1"; shift ;;
                 esac
             done
@@ -1498,11 +1796,24 @@ main() {
             fi
             case "$1" in
                 list)
+                    local list_json=false
+                    shift
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --json) list_json=true; shift ;;
+                            *) shift ;;
+                        esac
+                    done
                     if [[ ! -d "$skills_dir" ]]; then
-                        echo "(no skills yet)"
+                        if [[ "$list_json" == "true" ]]; then
+                            python3 -c "import json; print(json.dumps({'skills': []}))"
+                        else
+                            echo "(no skills yet)"
+                        fi
                         exit 0
                     fi
                     local found_skill=false
+                    local json_rows=""
                     for dir in "$skills_dir"/*/; do
                         [[ ! -d "$dir" ]] && continue
                         local sname
@@ -1512,10 +1823,34 @@ main() {
                             local count auth_type
                             count=$(grep -m1 'endpoint_count:' "$dir/SKILL.md" 2>/dev/null | awk '{print $2}') || count="?"
                             auth_type=$(grep -m1 'auth_type:' "$dir/SKILL.md" 2>/dev/null | awk '{print $2}') || auth_type="?"
-                            echo "$sname  (${count} endpoints, auth: ${auth_type})"
+                            if [[ "$list_json" == "true" ]]; then
+                                json_rows+="${sname}"$'\t'"${count}"$'\t'"${auth_type}"$'\n'
+                            else
+                                echo "$sname  (${count} endpoints, auth: ${auth_type})"
+                            fi
                         fi
                     done
-                    [[ "$found_skill" == "false" ]] && echo "(no skills yet)"
+                    if [[ "$list_json" == "true" ]]; then
+                        printf '%s' "$json_rows" | python3 -c "
+import sys, json
+skills = []
+for line in sys.stdin.read().splitlines():
+    if not line:
+        continue
+    parts = line.split('\t')
+    name = parts[0] if len(parts) > 0 else ''
+    count = parts[1] if len(parts) > 1 else '?'
+    auth = parts[2] if len(parts) > 2 else '?'
+    try:
+        endpoint_count = int(count)
+    except (ValueError, TypeError):
+        endpoint_count = count
+    skills.append({'name': name, 'endpoint_count': endpoint_count, 'auth_type': auth})
+print(json.dumps({'skills': skills}))
+"
+                    else
+                        [[ "$found_skill" == "false" ]] && echo "(no skills yet)"
+                    fi
                     exit 0
                     ;;
                 show)
@@ -1594,27 +1929,23 @@ main() {
             ;;
         close)
             json=$(build_close_cmd)
-            response=$(send_command "$json" 2>/dev/null) || true
+            if is_daemon_running && daemon_ping >/dev/null; then
+                raw_socket_command "$json" 5 >/dev/null 2>&1 || true
+            fi
             stop_daemon
             echo "Browser closed"
             exit 0
             ;;
         restart)
-            # Kill browser and daemon completely, then relaunch
-            json=$(build_close_cmd)
-            send_command "$json" 2>/dev/null || true
+            # Stop only the identity-verified daemon for this session.
             stop_daemon
-            # Kill any orphaned daemon processes
-            pkill -f "node.*agent-browse.*daemon.js" 2>/dev/null || true
-            rm -f "$SOCKET_PATH" "$PID_FILE"
-            sleep 1
             # Always relaunch: if URL provided, open it; otherwise just launch the browser
             if [[ $# -gt 0 ]]; then
-                "$0" open "$1"
+                "$0" --session "$SESSION" open "$1"
                 exit $?
             fi
             # Start daemon + browser, wait until responsive
-            "$0" launch > /dev/null 2>&1 || true
+            "$0" --session "$SESSION" launch > /dev/null 2>&1 || true
             # Poll until browser is responsive (up to 10 seconds)
             local ready=false
             for i in $(seq 1 20); do
@@ -1634,35 +1965,18 @@ main() {
             exit 0
             ;;
         status)
-            local daemon_running=false browser_ok=false pid="" suggestion=""
-            if is_daemon_running; then
-                daemon_running=true
-                pid=$(cat "$PID_FILE")
-                # Check if browser is responsive by getting URL
-                if url_result=$(send_command '{"id":"status-check","action":"url"}' 2>/dev/null); then
-                    if echo "$url_result" | grep -q '"success":true'; then
-                        browser_ok=true
-                    fi
-                fi
-            fi
-            if [[ "$daemon_running" == "false" ]]; then
-                suggestion="Run 'open <url>' to start browser"
-            elif [[ "$browser_ok" == "false" ]]; then
-                suggestion="Run 'restart' to recover browser"
-            fi
-            echo "{"
-            echo "  \"daemon\": {\"running\": $daemon_running, \"pid\": ${pid:-null}, \"session\": \"$SESSION\"},"
-            echo "  \"browser\": {\"responsive\": $browser_ok},"
-            echo "  \"socket\": \"$SOCKET_PATH\""
-            [[ -n "$suggestion" ]] && echo "  ,\"suggestion\": \"$suggestion\""
-            echo "}"
+            daemon_doctor
+            exit 0
+            ;;
+        doctor)
+            daemon_doctor
             exit 0
             ;;
             
         *)
             echo "Unknown command: $cmd" >&2
             # Suggest similar commands (prefix match)
-            local commands="launch open back forward reload click dblclick fill type press hover focus check uncheck select upload snapshot get clipboard wait screenshot pdf eval login session tab network auth vision agent capture api is console errors highlight install close restart status"
+            local commands="launch open back forward reload click dblclick fill type press hover focus check uncheck select upload snapshot get clipboard wait screenshot pdf eval login session tab network auth vision agent capture api is console errors highlight install close restart status doctor"
             local suggestions=""
             for c in $commands; do
                 if [[ "$c" == "$cmd"* ]]; then

@@ -6,6 +6,27 @@ set -euo pipefail
 MEMORY_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/memory"
 mkdir -p "$MEMORY_DIR"
 
+JSON_OUTPUT=0
+
+# Strip --json from args (anywhere), set JSON_OUTPUT; remaining args in CLEAN_ARGS
+parse_json_flag() {
+    CLEAN_ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_OUTPUT=1
+        else
+            CLEAN_ARGS+=("$arg")
+        fi
+    done
+}
+
+# Emit a structured JSON error to stdout and return nonzero
+json_err() {
+    python3 -c "import json,sys; print(json.dumps({'error': sys.argv[1]}))" "$1"
+    return 1
+}
+
 show_help() {
     cat << 'EOF'
 agent-memory - Persistent memory and context management
@@ -105,8 +126,49 @@ cmd_recall() {
     done
 
     if [[ -z "$key" ]]; then
+        if [[ "$JSON_OUTPUT" == "1" ]]; then
+            json_err "Key required"
+            return 1
+        fi
         echo "Error: Key required"
         return 1
+    fi
+
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        python3 << PYTHON
+import json
+import glob
+import os
+
+key = '$key'
+mem_type = '$mem_type'
+
+if mem_type:
+    stores = [f"$MEMORY_DIR/{mem_type}.json"]
+else:
+    stores = glob.glob("$MEMORY_DIR/*.json")
+
+for store in sorted(stores):
+    if os.path.exists(store):
+        store_type = os.path.splitext(os.path.basename(store))[0]
+        with open(store) as f:
+            data = json.load(f)
+        if key in data:
+            mem = data[key]
+            print(json.dumps({
+                'found': True,
+                'key': key,
+                'value': mem.get('value', ''),
+                'type': mem.get('type', store_type),
+                'created': mem.get('created'),
+                'updated': mem.get('updated'),
+            }))
+            exit(0)
+
+print(json.dumps({'found': False, 'key': key, 'error': f'Memory not found: {key}'}))
+exit(1)
+PYTHON
+        return
     fi
 
     python3 << PYTHON
@@ -139,8 +201,40 @@ cmd_search() {
     local query="${1:-}"
 
     if [[ -z "$query" ]]; then
+        if [[ "$JSON_OUTPUT" == "1" ]]; then
+            json_err "Search query required"
+            return 1
+        fi
         echo "Error: Search query required"
         return 1
+    fi
+
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        python3 << PYTHON
+import json
+import glob
+import os
+
+query = '''$query'''.lower()
+results = []
+
+for store in sorted(glob.glob("$MEMORY_DIR/*.json")):
+    store_type = os.path.splitext(os.path.basename(store))[0]
+    with open(store) as f:
+        data = json.load(f)
+
+    for key, mem in data.items():
+        value = mem.get('value', '')
+        if query in key.lower() or query in value.lower():
+            results.append({
+                'key': key,
+                'value': value,
+                'type': mem.get('type', store_type),
+            })
+
+print(json.dumps({'count': len(results), 'query': '''$query''', 'results': results}))
+PYTHON
+        return
     fi
 
     python3 << PYTHON
@@ -177,6 +271,44 @@ PYTHON
 cmd_list() {
     local mem_type="${1:-}"
 
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        python3 << PYTHON
+import json
+import glob
+import os
+
+mem_type = '$mem_type'
+
+if mem_type:
+    stores = [f"$MEMORY_DIR/{mem_type}.json"]
+else:
+    stores = glob.glob("$MEMORY_DIR/*.json")
+
+groups = []
+total = 0
+for store in sorted(stores):
+    if not os.path.exists(store):
+        continue
+    store_type = os.path.splitext(os.path.basename(store))[0]
+    with open(store) as f:
+        data = json.load(f)
+    items = []
+    for key, mem in data.items():
+        items.append({
+            'key': key,
+            'value': mem.get('value', ''),
+            'type': mem.get('type', store_type),
+            'created': mem.get('created'),
+            'updated': mem.get('updated'),
+        })
+    total += len(items)
+    groups.append({'type': store_type, 'count': len(items), 'items': items})
+
+print(json.dumps({'count': total, 'groups': groups}))
+PYTHON
+        return
+    fi
+
     python3 << PYTHON
 import json
 import glob
@@ -189,6 +321,7 @@ if mem_type:
 else:
     stores = glob.glob("$MEMORY_DIR/*.json")
 
+printed = False
 for store in stores:
     if not os.path.exists(store):
         continue
@@ -205,6 +338,10 @@ for store in stores:
             print(f"  {key}: {preview}")
         if len(data) > 10:
             print(f"  ... and {len(data) - 10} more")
+        printed = True
+
+if not printed:
+    print("No memories found")
 PYTHON
 }
 
@@ -389,7 +526,10 @@ print(f"Total: {total_memories} memories ({total_size / 1024:.1f} KB)")
 PYTHON
 }
 
-# Main
+# Main — strip --json globally so it works as a trailing arg on any verb
+parse_json_flag "$@"
+set -- "${CLEAN_ARGS[@]:-}"
+
 case "${1:-help}" in
     store|set|save)
         shift

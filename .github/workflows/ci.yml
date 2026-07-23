@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    name: Syntax (bash -n, py_compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Bash and Python syntax sweep
+        run: |
+          fails=0
+          for f in agent-do bin/* tools/agent-*; do
+            if [ -f "$f" ] && head -1 "$f" | grep -q bash; then
+              bash -n "$f" || { echo "BASH FAIL: $f"; fails=1; }
+            fi
+          done
+          for d in tools/agent-*/; do
+            entry="$d$(basename "$d")"
+            if [ -f "$entry" ] && head -1 "$entry" | grep -q bash; then
+              bash -n "$entry" || { echo "BASH FAIL: $entry"; fails=1; }
+            fi
+          done
+          python3 -m py_compile lib/*.py || fails=1
+          for f in bin/* tools/agent-* tools/agent-*/*; do
+            if [ -f "$f" ] && head -1 "$f" | grep -q python; then
+              python3 -m py_compile "$f" || { echo "PY FAIL: $f"; fails=1; }
+            fi
+          done
+          exit $fails
+
+  test-suite:
+    name: Full test suite (macOS)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install modern bash (runner ships 3.2; dispatcher needs mapfile, bash 4+)
+        run: |
+          brew list bash >/dev/null 2>&1 || brew install bash
+          # Shadow ONLY bash — prepending all of brew bin would shadow
+          # setup-python's python3 and lose its installed packages.
+          mkdir -p "$HOME/.cibin"
+          ln -sf "$(brew --prefix)/bin/bash" "$HOME/.cibin/bash"
+          echo "$HOME/.cibin" >> "$GITHUB_PATH"
+          "$HOME/.cibin/bash" --version | head -1
+      - name: Install Python dependencies
+        run: pip install pyyaml anthropic pyobjc
+      - name: Install PostgreSQL client (psql tests need the binary, no server)
+        run: |
+          brew list libpq >/dev/null 2>&1 || brew install libpq
+          echo "$(brew --prefix libpq)/bin" >> "$GITHUB_PATH"
+      - name: Install tmux (agent-tui dependency; drift checks its real help)
+        run: brew list tmux >/dev/null 2>&1 || brew install tmux
+      - name: Build agent-manna (drift checks the real Rust binary's help)
+        run: cd tools/agent-manna && cargo build --release
+      - name: Install agent-browse deps + headless shell (isolation test opens real pages)
+        run: |
+          cd tools/agent-browse
+          npm ci --omit=dev
+          # playwright-core resolves browsers from the ms-playwright cache; install
+          # the headless shell at the exact revision the installed library expects.
+          PW_VERSION=$(node -p "require('./node_modules/playwright-core/package.json').version")
+          npx -y "playwright@$PW_VERSION" install chromium-headless-shell
+      - name: Run test suite
+        run: ./test.sh

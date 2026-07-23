@@ -13,6 +13,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+TEST_HOME = tempfile.TemporaryDirectory()
+TEST_AGENT_DO_HOME = Path(TEST_HOME.name)
+
+# This file simulates multi-session coord scenarios via CODEX_THREAD_ID
+# fixtures; a real session's pinned identity would collapse them into one
+# writer (env dicts here are os.environ copies, including raw subprocess
+# calls that bypass run()). Scrub once at module level.
+os.environ.pop("AGENT_DO_COORD_SESSION", None)
 
 from registry import load_registry, match_prompt_tools, find_raw_cli_equivalent  # noqa: E402
 
@@ -21,6 +29,7 @@ def run(*args: str, input_text: str | None = None, env: dict[str, str] | None = 
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
+    run_env.setdefault("AGENT_DO_HOME", str(TEST_AGENT_DO_HOME))
     run_env.setdefault("AGENT_DO_SUGGEST_AI", "0")
     run_env.setdefault("AGENT_DO_HOOK_AI", "0")
     run_env.setdefault("AGENT_DO_HOOK_RUNTIME", "claude")

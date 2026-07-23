@@ -166,7 +166,11 @@ send_aws() {
 
 cmd_list() {
     if [[ "$(uname)" != "Darwin" ]]; then
-        echo "Error: Message listing only available on macOS"
+        if [[ "$AGENT_SMS_OUTPUT_JSON" == "1" ]]; then
+            echo '{"error": "Message listing only available on macOS"}'
+        else
+            echo "Error: Message listing only available on macOS"
+        fi
         return 1
     fi
 
@@ -174,9 +178,37 @@ cmd_list() {
     local db="$HOME/Library/Messages/chat.db"
 
     if [[ ! -f "$db" ]]; then
-        echo "Error: Messages database not accessible"
-        echo "Grant Full Disk Access in System Preferences > Security"
+        if [[ "$AGENT_SMS_OUTPUT_JSON" == "1" ]]; then
+            echo '{"error": "Messages database not accessible. Grant Full Disk Access in System Preferences > Security."}'
+        else
+            echo "Error: Messages database not accessible"
+            echo "Grant Full Disk Access in System Preferences > Security"
+        fi
         return 1
+    fi
+
+    if [[ "$AGENT_SMS_OUTPUT_JSON" == "1" ]]; then
+        local rows
+        rows="$(sqlite3 -json "$db" 2>/dev/null << 'SQL' || true
+SELECT
+    datetime(message.date/1000000000 + 978307200, 'unixepoch', 'localtime') as date,
+    CASE WHEN message.is_from_me THEN 'Me' ELSE handle.id END as sender,
+    message.text
+FROM message
+LEFT JOIN handle ON message.handle_id = handle.ROWID
+WHERE message.text IS NOT NULL
+ORDER BY message.date DESC
+LIMIT 20;
+SQL
+)"
+        if [[ -z "$rows" ]]; then
+            # Empty result or an access failure both yield an empty string;
+            # a valid empty array keeps the JSON contract either way.
+            echo "[]"
+        else
+            echo "$rows"
+        fi
+        return 0
     fi
 
     echo "Recent messages:"

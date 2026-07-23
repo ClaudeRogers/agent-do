@@ -37,6 +37,7 @@ NOTES
   create <name> [opts]       Create a new note
   append <name> <text>       Append text to a note
   search <query> [opts]      Search the active vault
+  refresh [--full]           Rebuild the local vault index
   embed status|refresh       Manage semantic embeddings for local vault chunks
   context build <query>      Build cited retrieval context for an agent
   chat <question>            Answer from vault context with citations

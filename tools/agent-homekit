@@ -12,6 +12,7 @@ Commands:
   rooms                      List rooms
   scenes                     List scenes
   run <scene>                Run a scene
+  scene <name>               Run a scene (alias of run)
   set <accessory> <state>    Set accessory state
   snapshot                   HomeKit state as JSON (accessories, rooms, scenes)
 
@@ -35,6 +36,43 @@ EOF
 
 # Note: HomeKit API is not directly accessible via command line
 # We use AppleScript/Shortcuts as a bridge
+
+cmd_list_json() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        python3 -c "import json; print(json.dumps({'success': False, 'error': 'HomeKit requires macOS'}, indent=2))"
+        return 1
+    fi
+
+    python3 -c "
+import subprocess, json
+
+def run(args):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip()
+    except Exception:
+        return ''
+
+shortcuts_path = run(['which', 'shortcuts'])
+result = {
+    'platform': 'macOS HomeKit',
+    'shortcuts_available': bool(shortcuts_path),
+    'note': 'HomeKit accessories require the Home app or Shortcuts. Create Shortcuts and run them via: shortcuts run \"Your Shortcut Name\"',
+}
+
+home_shortcuts = []
+if shortcuts_path:
+    listing = run(['shortcuts', 'list'])
+    if listing:
+        for line in listing.split('\n'):
+            name = line.strip()
+            if name and 'home' in name.lower():
+                home_shortcuts.append(name)
+result['home_shortcuts'] = home_shortcuts
+
+print(json.dumps({'success': True, 'result': result}, indent=2))
+"
+}
 
 cmd_list() {
     # Use AppleScript to get Home app data
@@ -206,7 +244,12 @@ case "${1:-help}" in
         cmd_snapshot
         ;;
     list|devices|accessories)
-        cmd_list
+        shift
+        if [[ "${1:-}" == "--json" ]] || [[ "${2:-}" == "--json" ]]; then
+            cmd_list_json
+        else
+            cmd_list
+        fi
         ;;
     rooms)
         cmd_rooms

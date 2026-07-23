@@ -151,7 +151,7 @@ render_request() {
         return 1
     fi
 
-    local args=(-s -X "$method" "${RENDER_API}${endpoint}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${RENDER_API}${endpoint}" \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -178,7 +178,7 @@ render_request_checked() {
     tmp_body="$(mktemp)"
     trap 'rm -f "$tmp_body"' RETURN
 
-    local args=(-sS -o "$tmp_body" -w "%{http_code}" -X "$method" "${RENDER_API}${endpoint}" \
+    local args=(-sS --max-time 30 --connect-timeout 10 -o "$tmp_body" -w "%{http_code}" -X "$method" "${RENDER_API}${endpoint}" \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json")
@@ -368,6 +368,8 @@ cmd_services() {
     local result
     result=$(render_request GET "/services?limit=50")
 
+    if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+
     echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
@@ -497,7 +499,7 @@ cmd_logs() {
     local until=""
     local limit="20"
     local direction="backward"
-    local json_output=0
+    local json_output="${RENDER_JSON:-0}"
     local -a type_filters=()
     local -a level_filters=()
     local -a text_filters=()
@@ -960,6 +962,8 @@ cmd_projects() {
     local result
     result=$(render_request GET "/projects?limit=50")
 
+    if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+
     echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
@@ -996,7 +1000,7 @@ def api_get(path):
         'Accept': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:
@@ -1124,6 +1128,7 @@ if items:
 cmd_owners() {
     local result
     result=$(render_request GET "/owners?limit=50")
+    if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
     echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
@@ -1138,6 +1143,7 @@ for item in items:
 cmd_whoami() {
     local result
     result=$(render_request_checked GET "/users") || return 1
+    if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
     echo "$result" | python3 -c "
 import sys, json
 u = json.load(sys.stdin)
@@ -1229,7 +1235,7 @@ cmd_create() {
     local disk_name="" disk_size="" disk_mount=""
     local publish_path=""
     local auto_deploy="yes"
-    local json_output=0
+    local json_output="${RENDER_JSON:-0}"
     local dry_run=0
     local -a env_pairs=()
     local -a env_groups=()
@@ -1804,7 +1810,7 @@ cmd_db_create() {
     local name="" plan="basic_256mb" version="16" region="oregon"
     local db_name="" db_user="" owner="" ha="" disk="" disk_auto=""
     local environment=""
-    local json_output=0
+    local json_output="${RENDER_JSON:-0}"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2026,7 +2032,9 @@ cmd_kv() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/key-value?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/key-value?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No Key Value instances'); sys.exit(0)
@@ -2133,7 +2141,9 @@ cmd_env_group() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/env-groups?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/env-groups?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No env groups'); sys.exit(0)
@@ -2283,7 +2293,9 @@ cmd_blueprint() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/blueprints?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/blueprints?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No blueprints'); sys.exit(0)
@@ -2544,7 +2556,9 @@ cmd_disk() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/disks?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/disks?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No disks'); sys.exit(0)
@@ -2641,7 +2655,9 @@ cmd_dedicated_ip() {
             done
             [[ -z "$owner" ]] && owner=$(default_owner_id)
             owner=$(resolve_owner "$owner") || return 1
-            render_request GET "/dedicated-ips?ownerId=$owner&limit=50" | python3 -c "
+            local result; result=$(render_request GET "/dedicated-ips?ownerId=$owner&limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 if isinstance(data, dict) and 'message' in data:
@@ -2686,7 +2702,9 @@ cmd_registry() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/registrycredentials?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/registrycredentials?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No registry credentials'); sys.exit(0)
@@ -2812,6 +2830,38 @@ cmd_environment() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in --project|-p) project="$2"; shift 2 ;; *) shift ;; esac
             done
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then
+                if [[ -n "$project" ]]; then
+                    local result; result=$(render_request GET "/environments?projectId=$project")
+                    printf '%s\n' "$result"
+                    return 0
+                fi
+                # No project given: aggregate every project's environments into one JSON array.
+                local projects_json pids pid
+                projects_json=$(render_request GET "/projects?limit=100")
+                pids=$(echo "$projects_json" | python3 -c "
+import sys, json
+for it in json.load(sys.stdin):
+    print(it.get('project', it).get('id', ''))
+" 2>/dev/null)
+                local -a bodies=()
+                for pid in $pids; do
+                    bodies+=("$(render_request GET "/environments?projectId=$pid")")
+                done
+                python3 -c "
+import sys, json
+out = []
+for raw in sys.argv[1:]:
+    try:
+        data = json.loads(raw)
+    except Exception:
+        continue
+    if isinstance(data, list):
+        out.extend(data)
+print(json.dumps(out))
+" ${bodies[@]+"${bodies[@]}"}
+                return 0
+            fi
             if [[ -z "$project" ]]; then
                 # Render requires projectId; iterate over projects.
                 local projects_json
@@ -2916,7 +2966,9 @@ cmd_webhook() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/webhooks?limit=50" | python3 -c "
+            local result; result=$(render_request GET "/webhooks?limit=50")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No webhooks'); sys.exit(0)
@@ -3052,7 +3104,9 @@ cmd_audit() {
     done
     [[ -z "$owner" ]] && owner=$(default_owner_id)
     owner=$(resolve_owner "$owner") || return 1
-    render_request GET "/owners/$owner/audit-logs?limit=$limit" | python3 -c "
+    local result; result=$(render_request GET "/owners/$owner/audit-logs?limit=$limit")
+    if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+    echo "$result" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 if isinstance(data, dict) and 'message' in data:
@@ -3074,7 +3128,9 @@ cmd_maintenance() {
     local subcmd="${1:-list}"; shift || true
     case "$subcmd" in
         list|ls)
-            render_request GET "/maintenance?limit=20" | python3 -c "
+            local result; result=$(render_request GET "/maintenance?limit=20")
+            if [[ "${RENDER_JSON:-0}" == "1" ]]; then printf '%s\n' "$result"; return 0; fi
+            echo "$result" | python3 -c "
 import sys, json
 items = json.load(sys.stdin)
 if not items: print('No maintenance runs'); sys.exit(0)
@@ -3104,6 +3160,20 @@ for item in items:
 }
 
 # --- Main ---
+
+# Global --json: a bare --json anywhere in the argument list switches read
+# verbs to raw API JSON passthrough. Strip it here so subcommand dispatchers
+# and positional parsers never mistake it for a subcommand or a positional value.
+RENDER_JSON=0
+_render_argv=()
+for _arg in "$@"; do
+    if [[ "$_arg" == "--json" ]]; then
+        RENDER_JSON=1
+    else
+        _render_argv+=("$_arg")
+    fi
+done
+set -- ${_render_argv[@]+"${_render_argv[@]}"}
 
 case "${1:-help}" in
     # --- workspace primitives ---

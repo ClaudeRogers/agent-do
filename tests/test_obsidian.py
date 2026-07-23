@@ -604,6 +604,50 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     require(payload["record"]["path"].startswith("+/"), f"save should use inbox folder: {payload}")
     require(fm["log"] != "[[{today}]]", f"save should expand date tokens: {payload}")
 
+    r = run(str(AGENT_OBSIDIAN), "save",
+            "--title", "YAML Property Check",
+            "--content", "# YAML Property Check\nBody only.",
+            "--up", "[[Hub]]",
+            "--related", "[\"[[Alpha]]\", \"[[Beta]]\"]",
+            "--tags", "[\"aldebaran\", \"#field-engine\"]",
+            "--json", env=env)
+    require(r.returncode == 0, f"save should preserve typed YAML frontmatter: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    fm = payload["record"]["frontmatter"]
+    require(fm["tags"] == ["aldebaran", "field-engine"],
+            f"save should parse tags as a YAML list, not a string: {payload}")
+    require(fm["related"] == ["[[Alpha]]", "[[Beta]]"],
+            f"save should parse related as a YAML list and preserve wikilinks: {payload}")
+    require(fm["up"] == "[[Hub]]",
+            f"save should preserve the up wikilink as a YAML scalar: {payload}")
+    require(not any(line.startswith(("Tags:", "Up:", "Related:")) for line in payload["record"]["body"].splitlines()),
+            f"save must not render fake metadata lines into the body: {payload}")
+    raw_note = (vault / "+" / "YAML Property Check.md").read_text(encoding="utf-8")
+    require("tags:\n  - aldebaran\n  - field-engine" in raw_note,
+            f"tags should be emitted as block YAML: {raw_note}")
+    require('up: "[[Hub]]"' in raw_note and '  - "[[Alpha]]"' in raw_note,
+            f"wikilink properties should be quoted YAML scalars: {raw_note}")
+
+    r = run(str(AGENT_OBSIDIAN), "prop", "set", "tags", "[\"changed\", \"#again\"]",
+            "--file", "+/YAML Property Check.md", "--json", env=env)
+    require(r.returncode == 0, f"prop set tags should preserve list type: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["record"]["frontmatter"]["tags"] == ["changed", "again"],
+            f"prop set tags must not coerce arrays into strings: {payload}")
+    r = run(str(AGENT_OBSIDIAN), "prop", "set", "related", "[\"[[One]]\", \"[[Two]]\"]",
+            "--file", "+/YAML Property Check.md", "--json", env=env)
+    require(r.returncode == 0, f"prop set related should preserve list type: {r.stdout} / {r.stderr}")
+    payload = json.loads(r.stdout)
+    require(payload["record"]["frontmatter"]["related"] == ["[[One]]", "[[Two]]"],
+            f"prop set related must preserve wikilink list values: {payload}")
+    raw_note = (vault / "+" / "YAML Property Check.md").read_text(encoding="utf-8")
+    require("tags:\n  - changed\n  - again" in raw_note,
+            f"prop set tags should write block YAML: {raw_note}")
+    require('related:\n  - "[[One]]"\n  - "[[Two]]"' in raw_note,
+            f"prop set related should write quoted wikilink list YAML: {raw_note}")
+    require("Tags:" not in raw_note and "\nUp:" not in raw_note and "\nRelated:" not in raw_note,
+            f"properties should not leak as fake body metadata: {raw_note}")
+
     r = run(str(AGENT_OBSIDIAN), "save-group", "Hub",
             "--child", "Child A:body a", "--child", "Child B:body b",
             "--scope", "team", "--child-scope", "Child B:local", "--json", env=env)
@@ -612,6 +656,11 @@ def test_local_vault_v2_surface(tmp: Path, log_file: Path) -> None:
     scopes = {item["title"]: item["frontmatter"]["scope"] for item in payload["records"]}
     require(scopes["Hub"] == "team" and scopes["Child A"] == "team" and scopes["Child B"] == "local",
             f"save-group should inherit and override scope: {payload}")
+    records = {item["title"]: item for item in payload["records"]}
+    require(records["Hub"]["frontmatter"]["related"] == ["[[Child A]]", "[[Child B]]"],
+            f"save-group hub related should be typed wikilinks: {payload}")
+    require(records["Child A"]["frontmatter"]["up"] == "[[Hub]]",
+            f"save-group child up should be a wikilink property: {payload}")
 
     r = run(str(AGENT_OBSIDIAN), "move", "Alpha", "Projects/Renamed Alpha",
             "--update-links", "--json", env=env)

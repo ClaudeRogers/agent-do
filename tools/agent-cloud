@@ -3,6 +3,38 @@
 
 set -euo pipefail
 
+JSON_MODE=0
+
+# Strip a trailing/standalone --json flag from the arg list without disturbing
+# the order of the remaining arguments. Plain-text behavior is unchanged when
+# --json is absent. Sets JSON_MODE and rewrites the positional parameters.
+parse_json_flag() {
+    ARGS=()
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            JSON_MODE=1
+        else
+            ARGS+=("$arg")
+        fi
+    done
+}
+
+# Emit a single valid JSON error document (stdout) and return nonzero. Used
+# only when JSON_MODE=1 so plain-mode callers keep their existing output.
+json_err() {
+    local message="$1" code="${2:-1}"
+    python3 -c 'import json,sys; print(json.dumps({"tool":"cloud","ok":False,"error":sys.argv[1]}))' "$message"
+    return "$code"
+}
+
+# Wrap raw provider output as a single valid JSON document on stdout.
+json_ok() {
+    local resource="$1" provider="$2" payload="$3"
+    python3 -c 'import json,sys; print(json.dumps({"tool":"cloud","ok":True,"resource":sys.argv[1],"provider":sys.argv[2],"output":sys.argv[3]}))' \
+        "$resource" "$provider" "$payload"
+}
+
 show_help() {
     cat << 'EOF'
 agent-cloud - Cloud provider management
@@ -13,6 +45,8 @@ Commands:
   azure <cmd>                Run az command
 
   list <resource>            List resources (ec2, s3, gcs, vms, etc.)
+  deploy <provider> <args>   Deploy via provider CLI (routed passthrough)
+  logs <provider> <args>     View logs via provider CLI (routed passthrough)
   regions                    List available regions
   whoami                     Show current identity
 
@@ -44,6 +78,34 @@ detect_cloud() {
     fi
 }
 
+provider_route() {
+    local action="$1" provider="${2:-}"
+    shift 2 || true
+    case "$provider" in
+        aws) command -v aws >/dev/null || { echo "Error: aws CLI not found"; return 1; }; aws "$@" ;;
+        gcp|gcloud|google) command -v gcloud >/dev/null || { echo "Error: gcloud not found"; return 1; }; gcloud "$@" ;;
+        azure|az) command -v az >/dev/null || { echo "Error: az not found"; return 1; }; az "$@" ;;
+        *)
+            echo "Usage: agent-cloud $action <aws|gcp|azure> <provider-args...>"
+            if [[ "$action" == "deploy" ]]; then
+                echo "Examples:"
+                echo "  agent-cloud deploy gcp app deploy"
+                echo "  agent-cloud deploy aws cloudformation deploy --template-file t.yaml --stack-name s"
+                echo "  agent-cloud deploy azure webapp up --name myapp"
+            else
+                echo "Examples:"
+                echo "  agent-cloud logs gcp logging read 'severity>=ERROR' --limit 20"
+                echo "  agent-cloud logs aws logs tail /aws/lambda/fn --since 1h"
+                echo "  agent-cloud logs azure webapp log tail --name myapp"
+            fi
+            return 1
+            ;;
+    esac
+}
+
+cmd_deploy() { provider_route deploy "$@"; }
+cmd_logs() { provider_route logs "$@"; }
+
 cmd_aws() {
     if ! command -v aws &> /dev/null; then
         echo "Error: AWS CLI not found"
@@ -73,53 +135,81 @@ cmd_list() {
     local cloud=$(detect_cloud)
 
     if [[ -z "$cloud" ]]; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_err "No cloud CLI found (aws, gcloud, or az)"
+            return 1
+        fi
         echo "Error: No cloud CLI found (aws, gcloud, or az)"
         return 1
     fi
 
+    if [[ -z "$resource" ]]; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_err "Missing resource. Usage: agent-cloud list <ec2|s3|lambda|rds>"
+            return 1
+        fi
+        echo "Error: Missing resource argument" >&2
+        echo "Usage: agent-cloud list <resource>" >&2
+        echo "Resources: ec2, s3, lambda, rds (instances, buckets, functions, databases)" >&2
+        return 1
+    fi
+
+    # Resolve the provider command for this resource without running it yet,
+    # so plain mode runs it directly (byte-identical streaming) and JSON mode
+    # captures its output.
+    local -a provider_cmd=()
     case "$resource" in
         ec2|instances)
-            if [[ "$cloud" == "aws" ]]; then
-                aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,InstanceType,PublicIpAddress]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud compute instances list
-            elif [[ "$cloud" == "azure" ]]; then
-                az vm list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId,State.Name,InstanceType,PublicIpAddress]' --output table) ;;
+                gcp) provider_cmd=(gcloud compute instances list) ;;
+                azure) provider_cmd=(az vm list -o table) ;;
+            esac
             ;;
         s3|buckets|storage)
-            if [[ "$cloud" == "aws" ]]; then
-                aws s3 ls
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud storage buckets list
-            elif [[ "$cloud" == "azure" ]]; then
-                az storage account list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws s3 ls) ;;
+                gcp) provider_cmd=(gcloud storage buckets list) ;;
+                azure) provider_cmd=(az storage account list -o table) ;;
+            esac
             ;;
         lambda|functions)
-            if [[ "$cloud" == "aws" ]]; then
-                aws lambda list-functions --query 'Functions[*].[FunctionName,Runtime,LastModified]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud functions list
-            elif [[ "$cloud" == "azure" ]]; then
-                az functionapp list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws lambda list-functions --query 'Functions[*].[FunctionName,Runtime,LastModified]' --output table) ;;
+                gcp) provider_cmd=(gcloud functions list) ;;
+                azure) provider_cmd=(az functionapp list -o table) ;;
+            esac
             ;;
         rds|databases|db)
-            if [[ "$cloud" == "aws" ]]; then
-                aws rds describe-db-instances --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus,Engine]' --output table
-            elif [[ "$cloud" == "gcp" ]]; then
-                gcloud sql instances list
-            elif [[ "$cloud" == "azure" ]]; then
-                az sql server list -o table
-            fi
+            case "$cloud" in
+                aws) provider_cmd=(aws rds describe-db-instances --query 'DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus,Engine]' --output table) ;;
+                gcp) provider_cmd=(gcloud sql instances list) ;;
+                azure) provider_cmd=(az sql server list -o table) ;;
+            esac
             ;;
         *)
-            echo "Unknown resource: $resource"
-            echo "Try: ec2, s3, lambda, rds"
+            if [[ "$JSON_MODE" == "1" ]]; then
+                json_err "Unknown resource: $resource. Try: ec2, s3, lambda, rds"
+                return 1
+            fi
+            echo "Error: Unknown resource: $resource" >&2
+            echo "Try: ec2, s3, lambda, rds" >&2
             return 1
             ;;
     esac
+
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local output rc
+        output=$("${provider_cmd[@]}" 2>&1) && rc=0 || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            json_err "Provider command failed for resource '$resource' on $cloud"
+            return "$rc"
+        fi
+        json_ok "$resource" "$cloud" "$output"
+        return 0
+    fi
+
+    "${provider_cmd[@]}"
 }
 
 cmd_regions() {
@@ -185,7 +275,16 @@ case "${1:-help}" in
         ;;
     list|ls)
         shift
-        cmd_list "$@"
+        parse_json_flag "$@"
+        cmd_list "${ARGS[@]:-}"
+        ;;
+    deploy)
+        shift
+        cmd_deploy "$@"
+        ;;
+    logs)
+        shift
+        cmd_logs "$@"
         ;;
     regions)
         cmd_regions

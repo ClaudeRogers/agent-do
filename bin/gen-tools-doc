@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Render docs/TOOLS.md from the bundled registry.yaml.
+
+The tool reference is a build product: edit registry.yaml, then regenerate.
+Reads only the bundled registry (public doc = bundled truth; no user or
+plugin overlays). --check diffs a fresh render against docs/TOOLS.md and
+exits 1 on drift.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+
+from registry import (  # noqa: E402
+    _load_yaml_data,
+    get_tool_contract_attributes,
+    get_tool_contracts,
+    get_tool_credentials,
+)
+
+REGISTRY_PATH = ROOT / "registry.yaml"
+DOC_PATH = ROOT / "docs" / "TOOLS.md"
+
+READ_ONLY_BEATS = {"snapshot", "verify"}
+
+# Presentation order and blurbs mirror lib/contracts.py render_markdown.
+ATTRIBUTE_LABELS = (
+    ("destructive", "irreversible data loss; confirm before auto-running"),
+    ("sensitive", "emits or persists secret material; guard output"),
+    ("passthrough", "arbitrary-payload escape hatch; beat decided by the argument"),
+    ("long_running", "daemon/stream/session; may never return"),
+    ("polymorphic", "beat decided by payload or flag at call time"),
+    ("composite", "one call performs several beats internally"),
+    ("own_state", "writes only its own cache/state; parallel-safe"),
+)
+
+
+def prose(text: str) -> str:
+    """Escape registry text for markdown prose: keep `<usage>` tokens literal."""
+    return str(text).replace("<", "\\<")
+
+
+def cell(text: str) -> str:
+    """Escape registry text for a markdown table cell."""
+    return re.sub(r"\s+", " ", prose(text)).replace("|", "\\|").strip()
+
+
+def code_list(verbs: list[str]) -> str:
+    return ", ".join(f"`{verb}`" for verb in verbs)
+
+
+def example_command(command: str, tool: str) -> str:
+    """Rewrite internal `agent-<tool>` invocations to the public `agent-do <tool>` shape."""
+    return re.sub(
+        rf"(^|(?<=[\s=]))agent-{re.escape(tool)}(?=\s|$)",
+        f"agent-do {tool}",
+        str(command),
+    )
+
+
+def safety_lines(info: dict) -> list[str]:
+    """Derive the per-tool safety note from its contracts block.
+
+    Read/write classification matches lib/contracts.py safety_surface: a verb
+    whose beat membership stays within {snapshot, verify} is read-only.
+    """
+    contracts = get_tool_contracts(info)
+    attributes = get_tool_contract_attributes(info)
+    membership: dict[str, set] = {}
+    for beat, verbs in contracts.items():
+        for verb in verbs:
+            membership.setdefault(verb, set()).add(beat)
+    read_only = sorted(v for v, beats in membership.items() if beats <= READ_ONLY_BEATS)
+    write = sorted(v for v in membership if v not in read_only)
+
+    lines = []
+    if read_only:
+        lines.append(f"- Read-only (snapshot/verify; safe to parallelize): {code_list(read_only)}")
+    if write:
+        lines.append(f"- Write (connect/interact/save): {code_list(write)}")
+    for attr, blurb in ATTRIBUTE_LABELS:
+        flagged = sorted(v for v, attrs in attributes.items() if attr in attrs)
+        if flagged:
+            lines.append(f"- {attr} ({blurb}): {code_list(flagged)}")
+    return lines
+
+
+def credential_lines(info: dict) -> list[str]:
+    credentials = get_tool_credentials(info)
+    lines = []
+    if credentials["required"]:
+        lines.append(f"- Required: {code_list(credentials['required'])}")
+    if credentials["optional"]:
+        lines.append(f"- Optional: {code_list(credentials['optional'])}")
+    for group in credentials["one_of"]:
+        lines.append("- One of: " + " | ".join(f"`{key}`" for key in group))
+    for key, meta in (credentials.get("features") or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        label = meta.get("unlocks") or meta.get("description") or ""
+        suffix = " [recommended]" if meta.get("recommended") is True else ""
+        if label:
+            lines.append(f"- `{key}`: {prose(label)}{suffix}")
+    for note in credentials.get("notes") or []:
+        lines.append(f"- Note: {prose(note)}")
+    return lines
+
+
+def render_tool(name: str, info: dict) -> list[str]:
+    lines = [f"### {name}", ""]
+    description = str(info.get("description") or "").strip()
+    if description:
+        lines += [prose(description), ""]
+    lines.append(f"Concurrency: `{info.get('concurrency', 'unknown')}`")
+    lines.append("")
+
+    capabilities = info.get("capabilities") or []
+    if capabilities:
+        lines.append("**Capabilities**")
+        lines.append("")
+        lines += [f"- {prose(cap)}" for cap in capabilities]
+        lines.append("")
+
+    commands = info.get("commands") or {}
+    if commands:
+        lines.append("**Commands**")
+        lines.append("")
+        lines += [f"- `{verb}`: {prose(one_liner)}" for verb, one_liner in commands.items()]
+        lines.append("")
+
+    examples = info.get("examples") or []
+    if examples:
+        lines.append("**Examples**")
+        lines.append("")
+        lines.append("```bash")
+        for example in examples:
+            intent = str(example.get("intent") or "").strip()
+            if intent:
+                lines.append(f"# {intent}")
+            lines.append(example_command(example.get("command") or "", name))
+        lines.append("```")
+        lines.append("")
+
+    creds = credential_lines(info)
+    if creds:
+        lines.append("**Credentials**")
+        lines.append("")
+        lines += creds
+        lines.append("")
+
+    safety = safety_lines(info)
+    if safety:
+        lines.append("**Safety (from contracts)**")
+        lines.append("")
+        lines += safety
+        lines.append("")
+    return lines
+
+
+def render(registry_path: Path) -> str:
+    registry = _load_yaml_data(registry_path)
+    tools = registry.get("tools")
+    if not isinstance(tools, dict) or not tools:
+        raise ValueError(f"Registry has no tools mapping: {registry_path}")
+
+    lines = [
+        "# agent-do Tool Reference",
+        "",
+        "GENERATED FILE. Edit registry.yaml, not this file.",
+        "Regenerate with: `bin/gen-tools-doc`",
+        "",
+        "Every tool shares one command shape:",
+        "",
+        "```bash",
+        "agent-do <tool> <command> [args...]",
+        "```",
+        "",
+        "Discovery: `agent-do --list`, `agent-do <tool> --help`,",
+        "`agent-do find <keyword>`, `agent-do suggest \"task\"`.",
+        "",
+        "Concurrency: `read` tools are safe to run in parallel, `write` tools",
+        "mutate state and run serially, `mixed` tools carry both kinds of",
+        "commands. Per-verb truth lives in each tool's safety note, derived",
+        "from its `contracts:` block: verbs touching only the snapshot and",
+        "verify beats are read-only; connect, interact, and save verbs write.",
+        "",
+        f"## Summary ({len(tools)} tools)",
+        "",
+        "| Tool | Description | Concurrency | Commands |",
+        "|------|-------------|-------------|----------|",
+    ]
+    for name in sorted(tools):
+        info = tools[name]
+        lines.append(
+            f"| [{name}](#{name}) | {cell(info.get('description') or '')} "
+            f"| {info.get('concurrency', 'unknown')} | {len(info.get('commands') or {})} |"
+        )
+    lines += ["", "## Tools", ""]
+    for name in sorted(tools):
+        lines += render_tool(name, tools[name])
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def write_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit 1 if docs/TOOLS.md drifts from a fresh render",
+    )
+    args = parser.parse_args()
+    try:
+        content = render(REGISTRY_PATH)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"gen-tools-doc: {exc}", file=sys.stderr)
+        return 1
+    if args.check:
+        current = DOC_PATH.read_text(encoding="utf-8") if DOC_PATH.exists() else ""
+        if current != content:
+            print("gen-tools-doc: docs/TOOLS.md is stale against registry.yaml", file=sys.stderr)
+            print("regenerate with: bin/gen-tools-doc", file=sys.stderr)
+            return 1
+        return 0
+    write_atomic(DOC_PATH, content)
+    tool_count = content.count("\n### ")
+    print(f"gen-tools-doc: wrote docs/TOOLS.md ({tool_count} tools, {content.count(chr(10))} lines)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

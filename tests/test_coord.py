@@ -53,6 +53,8 @@ def main() -> int:
         subprocess.run(["git", "init", "-q"], cwd=project, check=True)
 
         env_base = dict(os.environ)
+        # A real session's pinned identity would override the fixture identities.
+        env_base.pop("AGENT_DO_COORD_SESSION", None)
         env_base["AGENT_DO_HOME"] = str(fake_home)
 
         env_a = dict(env_base)

@@ -2,14 +2,14 @@
 
 ## Overview
 
-agent-do is a universal automation layer that works with any AI coding agent. It provides:
+agent-do is a universal automation layer for AI coding agents. One bash dispatcher fronts 95 registered tools and five cross-cutting layers:
 
-1. **Structured CLI API**: direct tool invocation without LLM overhead
-2. **Credential resolution layer**: secure-store and env-var loading for API-oriented tools
-3. **Natural Language Mode**: LLM-routed for human users
-4. **Discovery + nudge layer**: task suggestions, project-scoped tool ranking, and hook nudges
-5. **Bootstrap + health flow**: explicit setup path for stateful tools and dependency checks
-6. **89 specialized tools**: browser, iOS, database, spreadsheet, messaging, infrastructure, memory, harness observability, and more
+1. **Structured CLI API**: direct tool invocation, no LLM in the path
+2. **Contracts layer**: machine-readable per-verb safety declarations, validated and audited
+3. **Natural language mode**: LLM-routed intent resolution for humans, with cached route memory
+4. **Credential resolution**: secure-store and env-var loading driven by registry metadata
+5. **Internal model roles**: capability-driven model selection for agent-do's own LLM calls
+6. **Discovery, nudges, and hooks**: task suggestions, project-scoped ranking, and an ambient Claude Code / Codex hook loop
 
 ## Routing Flow
 
@@ -22,11 +22,11 @@ agent-do is a universal automation layer that works with any AI coding agent. It
          is_tool()?       -n / --natural     --offline
                │               │               │
                │         ┌─────┴─────┐    bin/pattern-matcher
-               │         │  3-tier   │    (regex + keywords)
-               │         │ fallback: │
+               │         │  3-tier   │    (registry routing +
+               │         │ fallback: │     regex + keywords)
                │         │ 1. cache  │
                │         │ 2. fuzzy  │
-               │         │ 3. Claude │
+               │         │ 3. LLM    │
                │         └─────┬─────┘
                └───────────────┼───────────────┘
                                │
@@ -39,124 +39,305 @@ agent-do is a universal automation layer that works with any AI coding agent. It
 
 ### Mode Selection (agent-do main script)
 
-The bash entry point checks the first argument:
+The bash entry point first consumes at most one `+live(...)` runtime modifier (explicit approval for live desktop/browser control, exported via `lib/live.sh`), then switches on the next argument:
 
-| First Arg | Mode | Path |
+| First arg | Mode | Path |
 |-----------|------|------|
 | Known tool name | Structured API | `exec_tool()` → `tools/agent-<name>` |
-| `creds` | Secure credential management | `tools/agent-creds` |
-| `suggest` / `find` / `nudges` | Discovery + telemetry | `bin/suggest`, `bin/nudges`, optional `lib/ai_router.py` |
+| `suggest` / `find` | Discovery | `bin/suggest` (optional AI rerank via `lib/ai_router.py`) |
 | `notify` | Root notification contract | `bin/notify` + `lib/notify.py` |
+| `nudges` | Hook telemetry | `bin/nudges` |
 | `bootstrap` | Project setup | `bin/bootstrap` |
-| `-n` / `--natural` | Natural language | `bin/intent-router` (Claude API) |
-| `--offline` | Offline NL | `bin/pattern-matcher` (regex) |
-| `--dry-run` | Dry run | `bin/intent-router --dry-run` |
-| `--how` | Explain | `bin/intent-router --explain` |
+| `--status` / `--health` | State and readiness | `bin/status`, `bin/health` |
+| `-n` / `--natural` | Natural language | `bin/intent-router` |
+| `--json "intent"` | Natural language, JSON envelope | `bin/intent-router --json` |
+| `--offline` | Offline NL | `bin/pattern-matcher` |
+| `--dry-run` / `--how` | Preview / explain | `bin/intent-router --dry-run` / `--explain` |
+| `--raw <tool>` | Explicit direct execution | `exec_tool()` bypassing NL routing |
+
+Every structured execution is wrapped in telemetry (`lib/telemetry.py:record_tool_call` / `record_tool_result`) unless `AGENT_DO_TELEMETRY_SUPPRESS=1`.
 
 ### Credential Resolution
 
-Before running a tool, `agent-do` loads any declared secret env vars from:
+Before running a tool, the dispatcher loads any secret env vars the registry declares for it (`credentials:` block) from:
 
 1. the current process environment
-2. the OS secure credential store via `tools/agent-creds`
+2. the OS secure store via `tools/agent-creds` (`lib/creds-helper.sh`)
 
-The same registry-driven metadata is used by the bash dispatcher, `bin/intent-router`, and `bin/health`, so structured execution, natural-language execution, and readiness checks agree on what a tool needs.
+`bin/intent-router` and `bin/health` read the same registry metadata, so structured execution, natural-language execution, and readiness checks agree on what a tool needs.
 
 ### Natural Language Fallback Chain
 
 `bin/intent-router` tries three strategies in order:
 
-1. **SQLite route memory** (`lib/cache.py:check_cache`): exact match on normalized intent, preferring project-scoped history
-2. **Weighted fuzzy match** (`lib/cache.py:fuzzy_match`): Jaccard similarity ranked by project scope and past route success
-3. **Claude API**: full LLM call with registry + session state in context
+1. **SQLite route memory** (`lib/cache.py:check_cache`): exact match on the normalized intent, keyed `project_scope::intent`, preferring project-scoped rows
+2. **Weighted fuzzy match** (`lib/cache.py:fuzzy_match`): Jaccard word overlap (threshold 0.6) plus a project-scope bonus, success-rate bonus, and failure penalty from recorded route outcomes
+3. **LLM call**: `lib/ai_router.py:llm_call("fast", ...)` with the registry catalog and session state in context
 
-Successful routes are cached and then scored by later outcomes, so the router can prefer the route that actually works in the current repo and reduce later LLM calls.
+Successful LLM routes are cached; every execution then feeds `note_route_outcome`, so the router learns which route actually works in the current repo. If the LLM call errors, the router retries fuzzy matching at a lower threshold (0.4) before giving up. Route source labels (`cache` / `fuzzy` / `registry` / `llm`) travel with each outcome record.
+
+After the route resolves (and strictly after cache writes, so safety data is never persisted and replayed stale), the router annotates the result with the verb's contract beats and attributes, logs a telemetry event when a read-leaning intent lands on a write-shaped route, and applies the destructive gate described under Contracts below.
 
 ### Discovery AI
 
-`bin/suggest` remains registry-first. It builds candidate tools and commands from `registry.yaml`, then can optionally ask Claude Sonnet 4.6 with adaptive thinking to choose the best first command from those candidates. The model is not allowed to invent tools or shell pipelines; if the call is unavailable or returns an unsafe command, `suggest` falls back to deterministic local matching.
-
-### Prompt Hook AI
-
-`hooks/agent-do-prompt-router.py` uses the same Sonnet 4.6 adaptive-thinking helper for UserPromptSubmit routing, but with a different contract: it sends a compact full catalog to the model and asks whether any tool suggestion is worth surfacing. The hook emits nothing for weak matches, exact `agent-do <tool> ...` guidance for high-confidence matches, and non-blocking coord focus context when active peers exist and the current agent has no focus.
+`bin/suggest` is registry-first: it builds candidate tools and commands from `registry.yaml` routing metadata, then can optionally ask the configured fast model role to choose the best first command from those candidates. The model cannot invent tools or shell pipelines; if the call is unavailable or returns an unsafe command, `suggest` falls back to deterministic local matching. `AGENT_DO_SUGGEST_AI=auto|on|off` controls the AI path.
 
 ### Offline Pattern Matching
 
-`bin/pattern-matcher` now uses shared routing metadata from `registry.yaml` before falling back to legacy regex patterns. No API key needed. Handles common intents like "screenshot iOS", "list docker containers", and migrated discovery cases like "deploy this on vercel".
+`bin/pattern-matcher` needs no API key. It tries cached fuzzy matches, then shared registry routing metadata (`match_prompt_tools`), then legacy regex patterns, then keyword matching. Each resolved route gets the same contract annotation and destructive gate as the LLM path, expressed through the clarification mechanism (exit 2).
 
 ## Tool Resolution
 
-Tools live in `tools/agent-*`. The dispatcher (`exec_tool()`) checks in order:
+Tools live in `tools/agent-*`. The dispatcher (`resolve_tool_exec()`) checks in order:
 
-1. `tools/agent-<name>/agent-<name>` (directory with nested executable, e.g., agent-browse)
+1. `tools/agent-<name>/agent-<name>` (directory with nested executable, e.g. agent-browse)
 2. `tools/agent-<name>` (standalone executable)
-3. `agent-<name>` in `$PATH` (external tool, only when `<name>` is registered in `registry.yaml`)
+3. `agent-<name>` on `$PATH`, only when `<name>` is declared in the merged registry
 
-Most tools are standalone bash scripts. Some are directory-based with Python or Node.js backends.
+Most tools are standalone bash scripts. Some are directory-based with Python, Node.js, or Rust backends. `--list` auto-discovers by filesystem scan of `tools/agent-*`.
 
 ## Key Components
 
 ```
 agent-do                    # Main entry (bash): mode selection + tool dispatch
 ├── bin/
-│   ├── intent-router       # LLM router (Python): 3-tier fallback
-│   ├── pattern-matcher     # Offline router (Python): shared registry routing + regex fallbacks
-│   ├── suggest             # Discovery CLI: task/project to likely tools, optional Sonnet rerank
-│   ├── notify              # Root notification contract: routing + aliases
+│   ├── intent-router       # NL router (Python): cache → fuzzy → LLM, contract-aware
+│   ├── pattern-matcher     # Offline router (Python): registry routing + regex + keywords
+│   ├── suggest             # Discovery CLI: task/project → likely tools, optional AI rerank
+│   ├── notify              # Root notification contract: routing, aliases, rules
 │   ├── nudges              # Local telemetry summary for hook nudges
 │   ├── bootstrap           # Stateful-tool bootstrap recommender/executor
-│   ├── health              # Dependency checker (bash): per-tool health status
-│   └── status              # Session status display (bash + Python)
+│   ├── gen-index           # Generated discovery index from registry.yaml
+│   ├── health              # Per-tool dependency and credential checker
+│   └── status              # Session status display
 ├── lib/
+│   ├── registry.py         # Registry loader, routing helpers, contract validation
+│   ├── contracts.py        # Lexicon-driven proposal engine + gate + safety surface
+│   ├── contracts_drift.py  # Registry-vs---help drift detection
+│   ├── contracts_audit.py  # Bounded behavioral audit of the read surface
+│   ├── contracts-lexicon.yaml          # Canonical verb → beat/attribute rules (hand-written)
+│   ├── contracts-lexicon-learned.yaml  # Agent-derived classifications (hand lexicon wins)
+│   ├── models.py           # Internal model roles: resolution, capabilities, doctor
+│   ├── ai_router.py        # llm_call over model roles; JSON helpers for suggest/hooks
+│   ├── cache.py            # Project-aware route memory + fuzzy matching (SQLite)
 │   ├── state.py            # Session state CRUD (~/.agent-do/state.yaml)
-│   ├── registry.py         # Registry loader + shared routing helpers
-│   ├── ai_router.py        # Optional Claude JSON helper for suggest and prompt-hook routing
-│   ├── cache.py            # Project-aware route memory + fuzzy matching
-│   ├── telemetry.py        # JSONL telemetry for suggestions and hard nudges
+│   ├── telemetry.py        # JSONL telemetry for nudges, routes, tool calls
 │   ├── snapshot.sh         # Shared JSON snapshot helpers for bash tools
 │   ├── json-output.sh      # Shared --json flag support for bash tools
+│   ├── retry.sh            # Shared API retry/backoff for curl-based tools
+│   ├── live/ + live.sh     # +live(...) runtime gating for desktop/browser control
 │   └── capture/            # Shared capture pipeline (browse + unbrowse)
-│       ├── capture.js      # CaptureSession: request/response correlation
-│       ├── filter.js       # Traffic filtering (removes static, CDN, deduplicates)
-│       ├── auth.js         # Auth extraction from captured headers/cookies
-│       └── generator.js    # Skill package writer → ~/.agent-do/skills/<name>/
-├── tools/agent-*           # 94 tools (standalone scripts + directory-based tools)
-├── registry.yaml           # Master tool catalog
-├── test.sh                 # Test suite
-└── requirements.txt        # Python dependencies
+├── hooks/
+│   ├── claude/             # Canonical Claude Code hooks (4 events)
+│   └── codex/              # Canonical Codex hooks + Stop quality gate
+├── tools/agent-*           # 95 tools (standalone scripts + directory-based tools)
+├── models.yaml             # Internal model roles: chains, capabilities, retired list
+├── registry.yaml           # Master tool catalog with contracts
+└── test.sh                 # Test suite (gate inventory below)
 ```
 
 ### Registry (registry.yaml)
 
-The master catalog defines all tools with:
+The master catalog defines every tool with:
+
 - `description`: what the tool does
 - `capabilities`: list of actions it supports
-- `commands`: subcommands with descriptions
-- `examples`: intent-to-command mappings (used by LLM router and pattern matcher)
-- `routing`: optional discovery metadata (keywords, regexes, raw CLI equivalents, readiness hints, project signals)
-- `credentials`: optional secret env vars a tool can resolve from env or secure storage
+- `commands`: subcommands with descriptions (a curated subset for some tools)
+- `examples`: intent-to-command mappings (used by the LLM router and pattern matcher)
+- `routing`: optional discovery metadata (keywords, prompt patterns, raw CLI equivalents, readiness hints, project signals, recommended entrypoints)
+- `credentials`: secret env vars resolvable from env or secure storage (`required` / `optional` / `one_of`)
+- `concurrency`: `read` | `write` | `mixed`, validated against the contracts write surface
+- `contracts`: required; maps each command verb to its five-beat roles plus per-verb attributes
 
 ### Registry Loading Order (lib/registry.py)
 
-Registries merge in reverse priority (higher-priority wins):
+Registries merge with higher priority overwriting lower:
+
 1. `~/.agent-do/registry.yaml` (user overrides, highest priority)
 2. `./registry.yaml` (bundled)
-3. `~/.agent-do/plugins/*.yaml` (plugin extensions)
+3. `~/.agent-do/plugins/*.yaml` (plugin extensions, lowest priority)
 
-### Session State (lib/state.py)
+`load_registry()` loads them in reverse order so later (higher-priority) entries win per tool.
 
-Tracks active sessions in `~/.agent-do/state.yaml`:
-- TUI/REPL sessions (ID, command, label)
-- iOS/Android simulator state
-- Docker containers
-- SSH connections
-- Tail sessions (dev server log capture)
+## Contracts Layer
 
-The intent router includes state in LLM context so ambiguous references ("my python session", "the postgres container") resolve correctly.
+The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 95 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 95 Declared: 95` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
 
-### Framework Libraries
+| Attribute | Meaning |
+|-----------|---------|
+| `destructive` | irreversible data loss; confirm before auto-running |
+| `long_running` | daemon/stream/session verb; may never return |
+| `polymorphic` | beat decided by payload or flag at call time (sql, query) |
+| `composite` | one call performs several beats internally (ensure, doctor) |
+| `sensitive` | emits or persists secret material |
+| `passthrough` | arbitrary-code escape hatch (shell/eval); belongs to no beat |
+| `own_state` | writes confined to the tool's own cache/state; parallel-safe |
+
+Only `passthrough` and `long_running` may stand alone without beat membership.
+
+### The pipeline, end to end
+
+**1. Lexicon** (`lib/contracts-lexicon.yaml`). The canonical verb → beat/attribute mapping: exact verbs, single-wildcard patterns, and per-tool `overrides:`. `lib/contracts-lexicon-learned.yaml` holds agent-derived classifications with confidence and evidence; `lib/contracts.py:load_lexicon` merges it underneath, and the hand lexicon always wins. Rule resolution per verb: override → exact → first matching pattern; anything unresolved lands in the exceptions report for human review. A gate test rejects duplicate YAML keys in either file.
+
+**2. Propose** (`agent-do harness contracts propose [--tool X] [--out FILE] [--json]`). Applies the lexicon mechanically to each tool's commands map (extracting `a|b|c` subcommand tokens from descriptions when the bare verb does not classify), preserves already-declared blocks verbatim, and renders the reviewable inventory. The inventory is a regenerable build product, never hand-edited: to change a classification, change the lexicon and regenerate.
+
+**3. Gate** (`agent-do harness contracts validate`, enforced by `tests/test_contracts_gate.py` in `./test.sh` and CI). Rules, all in `lib/registry.py:validate_tool_contracts`:
+
+- unknown beats and unknown attributes are errors; the vocabulary is closed
+- every contract verb must match a declared command; multi-word verbs ("embed status") match by first token (`_contract_command_exists`)
+- a verb under multiple beats warns unless marked `polymorphic` or `composite`
+- an attribute on a verb with no beat warns unless the attribute is `passthrough` or `long_running`
+- concurrency must agree with the write surface: `concurrency: read` with world-write verbs is an error (`own_state` writes are exempt); `write`/`mixed` with zero write verbs warns as overdeclared
+- full coverage: every registry tool must declare contracts and warnings must be zero (the grandfather baseline emptied on 2026-06-11 and was deleted; `lib/contracts.py:validate_gate` still honors a baseline file if one ever reappears, and fails on stale entries so the ratchet only tightens)
+
+**4. Drift** (`agent-do harness contracts drift [--tool X]`, `lib/contracts_drift.py`). Diffs registry command promises against each tool's live `--help` output. Two asymmetric channels: `declared_only` (registry promises a verb the help lacks) fails `./test.sh`; `help_only` is advisory only, because registry command maps are intentionally curated subsets. Help that yields no parseable commands is reported as a runtime-dependency error, not N phantom verbs.
+
+**5. Behavioral audit** (`agent-do harness contracts audit [--include-network] [--schema-check] [--out F] [--notify]`, `lib/contracts_audit.py`). Bounded live probe of the declared read surface: only verbs whose beat union is a subset of {snapshot, verify}, with no attributes, needing no arguments. Credentialed tools sit behind `--include-network` (default off). Outcomes are tri-state: `ok` (ran clean; `--json` output parsed), `clean-skip` (refused with a structured or explanatory error: the contract held, the host didn't), `fail` (hung, crashed, emitted nothing, or lied about `--json`). `--schema-check` calls each ok JSON-object verb twice and flags top-level key drift as a warning, never a failure. `--install-schedule [weekly|daily]` writes a launchd agent (weekly = Monday 09:00) that runs the audit and notifies on failures only; CI also runs it nightly (see Test/CI surface).
+
+**6. Safety surface for orchestrators** (`agent-do harness contracts surface --json`). Aggregates the merged registry into machine-readable buckets: `read_only` (beat union ⊆ {snapshot, verify}), `write`, plus one bucket per attribute, each a list of `{tool, verb}` objects. This is the scheduling contract: read_only verbs parallelize freely; write verbs serialize; attribute buckets drive confirmation and guarding policy.
+
+**7. Routing consumers.** `build_registry_context` emits a compact per-tool `Safety:` line (write verbs plus destructive/sensitive/passthrough flags) into the LLM router catalog. `bin/intent-router` and `bin/pattern-matcher` annotate resolved routes with the verb's beats and attributes, after cache writes so route memory never persists safety data. Natural-language routes to `destructive` or `sensitive` verbs ask first via exit 2 unless `AGENT_DO_AUTO_DESTRUCTIVE=1`; the structured API is never gated. `bin/suggest`'s AI rerank picks only from registry candidates, and the PreToolUse hook reads the same attributes to emit an advisory safety heads-up when an agent invokes a destructive or sensitive agent-do verb directly.
+
+No tool merges without a contracts declaration: the gate runs in `./test.sh` and in the `contracts-gate` GitHub workflow on every push and pull request.
+
+## Internal Model Roles
+
+agent-do's own LLM calls (intent routing, suggest rerank, hook routing) never hardcode a model. `models.yaml` is the source of truth; `lib/models.py` resolves it; `lib/ai_router.py:llm_call(role, ...)` executes it. Generated templates and user-selected engines are out of scope by design.
+
+- **Roles**: `fast`, `vision`, `deep`. Each declares a provider-qualified candidate `chain` (Anthropic and OpenAI models interleaved), an env override (`AGENT_DO_MODEL_FAST` / `_VISION` / `_DEEP`; `fast` also honors the older `AGENT_DO_AI_MODEL`), and a role-level `generation` policy (effort + thinking mode).
+- **Resolution** (`models.resolve(role)`): env override first, then the chain in order, skipping anything on the `retired` list. `models.candidates(role)` returns the full usable chain.
+- **Capability records**: per-model entries pin provider, endpoint (`messages` vs `responses`), modalities, token ceilings, and capability maps (thinking types, effort values). `generation_params` maps the role policy onto what the model actually advertises, so an unsupported effort or thinking type is silently dropped rather than sent. Requested `max_tokens` is capped to the model's recorded ceiling.
+- **Cross-provider fallback**: `llm_call` filters the chain to providers whose SDK and API key are both present, then walks it, crossing providers only on model-not-found (HTTP 404). Every fallback is reported to stderr and recorded as a `model_fallback` telemetry event. Other errors propagate; a 404 chain exhaustion raises.
+- **`agent-do models doctor`**: fetches each provider's complete model listing (Anthropic paginated to the end; pagination that claims more without a cursor fails loud), then classifies configured models: present in the listing = available; missing models get an individual probe where 404 = retired, 403 = unavailable-to-these-credentials (never auto-retired), anything else = error. `--fix` persists only verified retirements and Anthropic-published capability refreshes, atomically. `agent-do models list` and `agent-do models resolve <role>` expose the resolved state.
+
+## Manna Subsystem (tools/agent-manna, Rust)
+
+Git-backed issue tracking with a typed board grammar. Every issue is a **track** (a named grouping with intent), an **item** on a track, or a **dream** (raw intake, exempt from tracking, converted or closed with a written reason). Commits that advance an item cite it with a `Manna: mn-xxxxxx` trailer. The board is the only backlog.
+
+### Storage and locking (src/store.rs)
+
+- `.manna/issues.jsonl` (issue records) and `.manna/sessions.jsonl` (session event log: start/claim/release/done/end)
+- Appends take an exclusive `fs2` file lock; updates and deletes rewrite the whole file to a `.tmp` sibling and atomically rename
+- Malformed lines are skipped with a stderr warning, never fatal
+- Output is YAML by default (`success:` envelope), JSON with `--json`. Exit codes: 0 success, 1 user error, 2 system error (I/O, lock)
+
+### Schema (src/issue.rs)
+
+`id` (`mn-` + 6 lowercase hex), `title` (1-500 chars), `status`, `description`, timestamps, `blocked_by`, `claimed_by`/`claimed_at`, plus the typed fields:
+
+- `type`: `track` | `item` (default, omitted on disk so v1 rows round-trip byte-identical) | `dream`
+- `track`: edge to a `type: track` issue; tracks cannot themselves carry a track edge (tracks don't nest)
+- `source`: where the issue came from (vault note, conversation, commit)
+- `prompt`: absolute path of the work-order prompt file paired with the issue
+
+### State machine
+
+- `claim` requires status `open` and no claimant; sets `in_progress` with `claimed_by` = `MANNA_SESSION_ID` (or a generated `ses_pid<pid>_<ts>` fallback)
+- `done` requires `in_progress`: an issue cannot complete without having been claimed
+- `abandon` requires a claim and `in_progress`; returns to `open`
+- `block`/`unblock` maintain `blocked_by` and derive `blocked` status; completing a blocker does **not** auto-unblock dependents. That residue is deliberate: `reconcile` reports it (`blocker_desync`) and `reconcile --fix` clears it through the same state machine
+- Validation invariants: `in_progress` requires `claimed_by`; `claimed_by` and `claimed_at` come and go together
+
+### Lint (`manna lint`)
+
+Board-grammar gate: findings exit 1, clean exits 0. Rules:
+
+- per-issue `validate()` invariants
+- `untracked_item`: items need a track once the board has any tracks (young boards don't nag)
+- `dangling_track`: track edges must point at existing track rows
+- `dream_status`: dreams only carry `open` or `done`
+- `prompt_file`: a prompt pointer on a non-done issue must resolve to a file
+
+### Reconcile (`manna reconcile [--fix] [--write-drift] [--dream-age-days N]`)
+
+Drift detection between the board and reality. Advisory verb: findings alone never fail the run; only `--fix` failures exit nonzero. Checks run in a fixed order, and a check that cannot run records a `skipped` finding with the reason:
+
+1. `landed_open`: issues cited by `Manna:` trailers in the last 500 commits but not yet done (report-only; merge judgment stays human)
+2. `dead_claim`: claims held by provably-gone sessions. Default-format `ses_pid...` sessions are probed with `kill -0`; other session ids are matched against `agent-do coord peers --json` (bounded to 2s) and count as dead only when coord reports `dead`/`stale`/`stopped`. Absent from coord is inconclusive, not dead
+3. `blocker_desync`: `blocked` status out of sync with `blocked_by` (all blockers done or missing, or an empty list)
+4. `stale_dream`: open dreams strictly older than the threshold (default 14 days)
+5. `dangling_track`: track edges to missing or non-track issues
+6. `doc_reference`: `mn-` ids mentioned in `.handoff/`, `.dev/`, `.zpc/`, and the per-project Claude memory directory that do not exist on this board (files ≤ 1MB, symlinks skipped, deduplicated per file+id)
+7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a staged prompt file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. The reverse scan reads `*.md` under `.dev/session-prompts/`; a missing directory is a successful empty scan, and foreign-board ids are ignored
+
+The prompt pointer itself comes from the `prompt` field, or as a blessed interim convention, a description whose first line is `PROMPT: <path>`.
+
+`--fix` applies only the safe subset through the existing state machine: releasing dead claims and removing resolved blockers. `--write-drift` serializes the findings to `.manna/drift.yaml` (atomic temp + rename, `generated_at` quoted so YAML 1.1 parsers keep it a string, `session` from `MANNA_SESSION_ID`). The SessionEnd hook writes this file; the next SessionStart greets with it.
+
+### Trailer grammar
+
+A trailer is a commit-body line that is exactly `Manna: <id>` (key case-sensitive, one id per line, multiple lines allowed). `mn-` ids embedded in longer hex runs do not match.
+
+### Dream routing (`manna dream "<spark>" [--track id] [--source ref]`)
+
+Walks up from the current directory to the first `.manna/` board; falls back to the global inbox at `$AGENT_DO_HOME/inbox` (auto-created on first use). The response names the receiving board and notes when it was the inbox.
+
+### Context (`manna context [--max-tokens N]`)
+
+Boards with track rows render a track tree: one section per track, then Untracked (including items whose track edge dangles, so no work line ever vanishes), then Dreams; done items excluded. Zero-track boards keep the by-status render. Output truncates to roughly 4 chars per token against the budget.
+
+## Coord v2 (tools/agent-coord, Python)
+
+Project-local state-and-interrupt broker for parallel agents. State lives under `<git-dir>/agent-do/coord/` (JSON files plus an `events.jsonl` journal, one flock-guarded lock file); outside a git repo it falls back to `$AGENT_DO_HOME/projects/<path-hash>/coord/`.
+
+- **Identity anchoring**: precedence is `AGENT_DO_COORD_SESSION` (pinned by the SessionStart hook from the Claude session id) → thread env vars (`CODEX_THREAD_ID`, `CLAUDE_THREAD_ID`, `CLAUDE_SESSION_ID`, `CLAUDE_AGENT_ID`) → a session UUID minted at first contact, keyed to the anchoring process (tmux pane or host + pid + process start time). A recycled pane therefore never inherits a dead session's identity; the previous occupants of a re-anchored pane are tombstoned dead.
+- **Liveness classification**: presence is verified, not assumed. `kill -0` plus a `ps lstart` start-time match distinguishes a live process from a recycled pid. Peers render as `active` (lease current), `idle` (seen within the idle window, default 48h), `dead` (process gone or tombstoned), `stopped` (retired via `stop`/`bye`), or `stale`. `peers --active-only` and `--writers` filter; `stop` and `bye` are Stop-hook-safe lifecycle verbs.
+- **Roles and territories**: `role set builder|auditor|researcher|overseer [--mode writer|read-only] --territory <path>...` declares exclusive write domains (builder defaults to writer; the rest to read-only). Overlapping writers generate a contention interrupt on both sides; an auditor on a writer's paths generates a courtesy notice.
+- **Structured focus**: goal, phase (`building|gating|watching|quiet|blocked|stopped`), note, `blocking_on`, `last_ship`.
+- **Board primitives**: advisory `claims` on paths, `needs` (declared dependencies), `publishes` (produced artifacts), and `drops` (file pointers handed to a peer, role, or anyone; pointers, never content). Interrupts are computed from this state (contention/notice/dependency/novelty), not delivered as chat.
+- **Guard**: `guard install` drops a warn-only pre-commit hook that flags staged paths hitting live claims or foreign territories; `guard check` runs the same check ad hoc.
+- **History**: `history [peer] [--limit N]` reads the events journal newest-first.
+
+## Hooks Architecture
+
+Canonical hooks live in the repo (`hooks/claude/`, `hooks/codex/`); installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are thin version-tagged wrappers written by `install.sh` (`WRAPPER_VERSION` 2). Each wrapper resolves the repo root via `AGENT_DO_REPO`, then the `~/.agent-do/install-path` breadcrumb, adds `<repo>/lib/` to `sys.path` for Python hooks, and delegates (bash `exec`, Python `runpy.run_path`). `git pull` on the repo changes hook behavior on the next event with no reinstall. See docs/INTEGRATION.md for registration.
+
+All four Claude hooks are advisory: they inject context or run cleanup, and never block.
+
+### SessionStart (`hooks/claude/agent-do-session-start.sh`)
+
+Resolves agent-do (PATH → `~/.local/bin` symlink → breadcrumb → script-relative repo fallback for bare checkouts), then:
+
+- **PATH**: appends an export line to `CLAUDE_ENV_FILE` so every Bash call finds `agent-do`
+- **Identity pins**: exports `AGENT_DO_COORD_SESSION` and `MANNA_SESSION_ID` (both from the hook payload's `session_id`) into `CLAUDE_ENV_FILE`, so coord identity and manna claims anchor to the Claude session rather than transient pids, and SessionEnd retires exactly the same identity
+- **Injected context sections**, each independently gated:
+  - the tooling reminder (prefer agent-do over raw CLI; discovery commands)
+  - project-scoped tooling (`suggest --project`, 3s bound): top likely tools with readiness fixes
+  - a bootstrap prompt when `bootstrap --recommend` (3s bound) reports pending setup; on macOS this defaults to a native dialog that can run `bootstrap --yes` directly and notify with a log, otherwise it becomes a context ask
+  - coord context (2s bounds): active interrupts if any exist, else a focus reminder when active peers exist and this agent has no focus
+  - the **Manna Board**: gated on `$CWD/.manna` existing; injects `manna context --max-tokens 1500` (2s bound) plus claim/done working instructions
+  - the **drift greeting**: if `.manna/drift.yaml` exists and contains findings, its first 30 lines are injected with instructions to reconcile before claiming new work
+  - additional gated blocks for always-active skill loading and frontend/zpc project detection (the presence signals are tabulated in docs/INTEGRATION.md)
+
+Subprocess calls run under `bounded_run`, a perl wrapper that sets a process group and SIGKILLs the whole group on alarm expiry, so a wedged spawn degrades to a missing section instead of eating the hook's registered 10s timeout.
+
+### UserPromptSubmit (`hooks/claude/agent-do-prompt-router.py`)
+
+Classifies each prompt and emits high-confidence context only. Claude Code kills the hook at its registered 5s and discards all output, so the hook works against a 4.2s internal safety line: base stages (registry, coord state, models config) spend their share first, the optional AI call gets what remains capped at 1.75s, and is skipped entirely below 0.9s. With `AGENT_DO_HOOK_AI` on/auto and a key present, the AI path receives the compact full catalog (not a deterministic shortlist) and returns tool suggestions, coord assessments, and context-retrieval pointers; weak matches stay silent. `Coord Focus Required` context is emitted, non-blocking, when active peers exist, this agent has no focus, and the prompt starts workspace work. Deterministic fallbacks (completion-check context, design-quality path) still fire without AI.
+
+### PreToolUse, matcher Bash (`hooks/claude/agent-do-pretooluse-check.py`)
+
+Nudge mode: emits `hookSpecificOutput.additionalContext`; the command always runs. Per-session state (keyed by session id) gates repetition: an observed `agent-do <tool>` invocation is recorded as a demonstration that suppresses future nudges for that tool, and emission frequency decays. The cascade per command:
+
+1. skip-patterns (git, npm, python, localhost curl, and other safe commands); an `agent-do` invocation additionally gets an advisory safety heads-up when the verb is marked `destructive` or `sensitive` in its contract
+2. docs-fetch nudge toward `agent-do context`
+3. registry-driven hard nudge via `routing.raw_cli_equivalents` (closest replacement command plus readiness fix)
+4. legacy friendly-reminder patterns
+
+Every decision (emit or suppress, with reason) lands in telemetry; `agent-do nudges stats` and `agent-do harness nudges effectiveness` summarize it. Block mode (changing the output to `permissionDecision: "deny"`) is a documented opt-in edit, not the default.
+
+### SessionEnd (`hooks/claude/agent-do-coord-stop.sh`)
+
+Presence-gated cleanup, always exit 0. In repos whose git dir already has a coord board, it re-exports `AGENT_DO_COORD_SESSION` from the payload's `session_id` and runs `coord stop --note "session ended"` (5s bound). In repos with `.manna/`, it pins `MANNA_SESSION_ID` the same way and runs `manna reconcile --write-drift --json` (4s bound), discarding the exit code: reconcile is advisory. The budget arithmetic is deliberate: 5s + 4s stays inside the hook's registered 10s timeout. Claude Code's `Stop` event fires every turn; session retirement belongs on `SessionEnd`, and agent-do registers nothing at `Stop`.
+
+### Codex
+
+`hooks/codex/` carries SessionStart/UserPromptSubmit/PreToolUse equivalents plus an advisory Stop quality gate (`stop-quality-gate.sh` + `.py`) that DPT-scores the active `agent-do browse` page and reports it as `additionalContext`. Codex supports `hookSpecificOutput.additionalContext` on PreToolUse (May 2026 hooks release); it parses but does not enforce deny decisions, so block mode is effectively Claude-only.
+
+## Framework Libraries
 
 **`lib/snapshot.sh`**: JSON snapshot output for bash tools:
+
 ```bash
 source lib/snapshot.sh
 snapshot_begin "tool-name"
@@ -166,154 +347,57 @@ snapshot_end
 # → {"tool": "tool-name", "timestamp": "...", "key": "value", "data": {"nested": true}}
 ```
 
+Values round-trip the full RFC 8259 control range; invalid UTF-8 in one field is replaced without poisoning sibling fields; `AGENT_DO_SNAPSHOT_COMPACT=1` emits single-line JSON.
+
 **`lib/json-output.sh`**: `--json` flag support:
+
 ```bash
 source lib/json-output.sh
-parse_output_format "$@"    # Detects --json flag
-json_success "result"       # {"success": true, "result": "..."}
-json_error "message"        # {"success": false, "error": "..."}
-json_result '{"key": "val"}' # Pass-through raw JSON
+parse_output_format "$@"     # Detects --json
+json_success "result"        # {"success": true, "result": "..."}
+json_error "message"         # {"success": false, "error": "..."}
+json_result '{"key": "v"}'   # Pass-through raw JSON
+json_list ...                # JSON array output
 ```
 
-**`lib/retry.sh`**: Shared error recovery for API tools:
-```bash
-source lib/retry.sh
-result=$(api_request GET "$url" -H "Authorization: Bearer $TOKEN")
-# Automatic retry: 429→respect Retry-After, 5xx→exponential backoff, network→immediate retry
-# with_retry 3 some_command   # Generic command retry
-# AGENT_DO_PERSISTENT=1       # CI/CD mode: retry 429/5xx indefinitely
-```
+**`lib/retry.sh`**: shared error recovery for API tools. `api_request METHOD URL [curl args]` retries per error class (429 respects `Retry-After`, 5xx backs off exponentially, network errors retry immediately, max 3 attempts); `with_retry N cmd` wraps arbitrary commands; `stall_detect` guards streaming; `AGENT_DO_PERSISTENT=1` retries 429/5xx indefinitely for CI.
 
-**`bin/health`**: Per-tool dependency and credential checking:
-- Verifies tool exists and `--help` works
-- Checks tool-specific dependencies plus declared credential metadata from `registry.yaml`
-- Reports: OK, WARN (missing dependency), CONF (needs config or credentials), MISS (tool not found)
+**`lib/capture/`**: shared browse/unbrowse capture pipeline: `CaptureSession` (request/response correlation), `filterEntries` (static/CDN noise removal, dedup), `extractAuth` (auth pattern detection), `generateSkill` (skill package writer → `~/.agent-do/skills/`).
 
-**`tools/agent-creds` + `lib/creds-helper.sh`**: Secure credential layer:
-- `agent-do creds store <KEY> --stdin` stores a secret in the OS secure store
-- `agent-do creds check --tool <tool>` verifies declared credentials for a tool
-- `agent-do creds export --tool <tool>` emits resolved export lines for debugging
-- Backends: macOS Keychain, Linux Secret Service, Windows DPAPI-backed per-user store
+**`lib/state.py`**: session state CRUD in `~/.agent-do/state.yaml`: TUI/REPL sessions, iOS/Android simulator state, Docker containers, SSH connections, tail sessions. The intent router includes this state in LLM context so "my python session" resolves.
 
-**`tools/agent-spec`**: Repo-local intended behavior and change artifacts:
-- stores canonical specs plus active changes under `agent-do-spec/`
-- derives status from proposal/design/tasks/delta files instead of hidden mutable state
-- provides `init`, `new`, `list`, `show`, and `status` for a minimal git-visible spec workflow
+**`bin/health`**: verifies each tool exists and `--help` works, checks tool-specific dependencies plus declared credential metadata, and reports OK / WARN (missing dependency) / CONF (needs config or credentials) / MISS (not found).
 
-**`bin/bootstrap`**: Idempotent setup for stateful tools:
-- Detects project-local signals in `CLAUDE.md`, `AGENTS.md`, and the repo root
-- Initializes `context` globally and `zpc` / `manna` locally when the project actually uses them
-- Powers the SessionStart bootstrap detection used by the global Claude/Codex hooks, which can trigger a native macOS bootstrap prompt
+## Tool Concurrency Classification
 
-**`bin/suggest`**: Discovery CLI:
-- `agent-do suggest "<task>"` picks likely tools and concrete commands
-- `agent-do suggest --project` ranks likely tools for the current repo
-- `agent-do find <keyword>` searches the tool surface without an LLM call
-
-**`bin/nudges`**: Local telemetry viewer:
-- `agent-do nudges stats` summarizes prompt and PreToolUse nudges
-- `agent-do nudges recent` shows recent local events from the live hook stack
-- Uses JSONL under `~/.agent-do/telemetry/`
-
-**`bin/notify` + `lib/notify.py`**: Root notification contract:
-- `agent-do notify <recipient> <message>` routes outbound notifications without introducing another registry tool
-- provider adapters currently target `sms`, `email`, `slack`, `messenger`, and local `pipe`
-- recipient aliases, preferred provider order, and default subjects live under `~/.agent-do/notify/recipients.json`
-- event rules, fingerprints, and cooldown-aware delivery state live under `~/.agent-do/notify/rules.json` and `~/.agent-do/notify/state.json`
-- recipient aliases and recipient groups share the same `~/.agent-do/notify/recipients.json` config so rules can target one person or a named group through the same send path
-- `agent-do notify set-rule ...` + `agent-do notify emit ...` let agents declare criteria once and later emit structured events with `key=value` facts
-- `agent-do notify templates`, `show-template`, and `apply-template` provide a small built-in library of common notification patterns without introducing a second rule system
-- `agent-do notify history` reads append-only delivery events from `~/.agent-do/notify/history.jsonl`, with filters for provider, recipient/group, rule, event, and success
-- `agent-do notify reset-state [rule]` and `agent-do notify delete-rule <rule>` provide cleanup so old cooldown state and retired rules do not linger
-- supports first-success fallback routing or `--all` fanout across matching providers
-- `messenger` is intentionally a live provider: it requires `+live(...)` and uses the existing local-machine control substrate instead of pretending to be an API transport
-
-### Tool Concurrency Classification
-
-Every tool in `registry.yaml` declares `concurrency: read|write|mixed`:
-- **read** (22 tools): safe to run in parallel (context, ocr, vision, metrics, dpt, etc.)
-- **write** (16 tools): must run serially (render, vercel, namecheap, manna, docker, etc.)
-- **mixed** (44 tools): per-command (browse snapshot is read, browse click is write)
-
-Orchestrators use this to batch parallel tool calls safely: read-only tools run concurrently, write tools run serially, mixed tools require per-command inspection.
-
-## Bundled Tools
-
-Directory-based tools with complex backends:
-
-| Tool | Tech Stack | Notes |
-|------|-----------|-------|
-| `tools/agent-browse/` | Node.js, Playwright | Headless browser with @ref element selection. `daemon.js` manages browser lifecycle. `login <url>` opens headed browser for SSO/MFA → `login done` transfers auth to headless. `session load` creates new context with saved cookies/localStorage/IndexedDB, and `session import-browser` can import Chromium cookies plus localStorage/sessionStorage and best-effort IndexedDB from a real profile when those stores are available. If `--session` and `AGENT_BROWSER_SESSION` are absent, browse derives a per-agent daemon session from the active agent/thread identity when available so concurrent agents do not stomp the same implicit browser daemon. Writes back to an existing shared saved-session name are forked to an agent-scoped saved-session name by default for non-default daemons unless `--shared` is used. API capture via `capture start/stop`, replay via `api` subcommand. |
-| `tools/agent-auth` | Python | Site-level auth orchestrator over encrypted auth bundles, browser import, and secure credentials. Profiles and encrypted session bundles live under `~/.agent-do/auth/`; provider-aware GitHub and Google adapters sit on top of the generic login path, `provider-refresh` can reuse upstream provider auth for cross-site SSO, provider-backed site profiles can inherit upstream GitHub or Google TOTP and backup-code config when those checkpoints appear, `interactive` can open a real system browser and re-import authenticated state for anti-bot or remote human-visible flows, and `live-browser-control` can keep the agent in that visible browser under explicit `+live(...)` approval instead of handing state back to Playwright. Account-chooser and consent checkpoints are persisted in session metadata, mailbox-driven email or SMS challenges can continue through `agent-email` and `agent-sms`, recovery-code branches can consume the next unused provider backup code from secure storage, passkey/security-key and device-approval checkpoints surface as explicit action-required states, `probe` classifies the live auth branch plus optional macOS dialog state, and `advance` executes one safe checkpoint step before returning the updated state, preferring in-browser alternate auth methods that match available credentials over out-of-band waits when those selectors are visible. |
-| `tools/agent-email` | Bash + Python | Email sending and structured mailbox querying. Apple Mail's local Envelope Index powers scoped `snapshot`, `search`, `latest`, `wait`, `get`, `code`, `link`, and `mailboxes`, with fixture-backed tests, exact message fetch by id, and explicit metadata-only states when message content is unavailable. |
-| `tools/agent-sms` | Bash + Python | SMS sending plus message querying. macOS Messages.app helpers plus query primitives (`snapshot`, `latest`, `wait`, `code`, `link`) for auth and automation flows. |
-| `tools/agent-gh` | Python | GitHub repository, pull request, review, and merge work-state across accessible repos. Uses `gh` as transport, caches repo inventory under `~/.agent-do/gh/`, surfaces actionable PR inbox and broader awaiting-review state, and provides PR detail, diffs, checks, unresolved review threads, deterministic review-risk audits with fix-oriented reply drafts, reviews, merge, ready, and draft commands without replacing local `agent-git` or workflow-level `agent-ci`. |
-| `tools/agent-unbrowse/` | Node.js, Playwright | Standalone API traffic capture. 2 files (`daemon.js`, `protocol.js`). Launches headed browser for manual browsing. Capture pipeline shared via `lib/capture/`. |
-| `tools/agent-manna/` | Rust | Git-backed issue tracking. Session-based claims prevent multi-agent conflicts. |
-| `tools/agent-db/` | Bash + Python | Database client (PostgreSQL, MySQL, SQLite). Connection management, queries, schema inspection. |
-| `tools/agent-excel/` | Bash + Python | Excel workbook automation via openpyxl. Read/write cells, formulas, sheets, export. |
-| `tools/agent-macos/` | Bash + Python | Desktop GUI automation via macOS accessibility APIs. Click, type, UI tree inspection. Write/control actions are now gated through the shared `lib/live/` runtime substrate and require `agent-do +live(...)` or an active live lease. |
-| `tools/agent-appleevents/` | Bash + Python | Scriptable macOS app automation via AppleEvents, AppleScript, and JXA. Inspects SDEF dictionaries, compile-checks scripts without running them, and gates execution and Automation permission probes through `lib/live/`. |
-| `tools/agent-screen/` | Bash + Python | Vision-based screen perception. Multi-display capture, OCR, element detection. Mouse and keyboard actions are now gated through the shared `lib/live/` runtime substrate and require `agent-do +live(...)` or an active live lease. |
-| `tools/agent-vision/` | Bash + Python | Visual perception with YOLO object detection, OCR, face detection. |
-| `tools/agent-coord` | Python | Project-local state-and-interrupt broker. Derives stable identities from thread/tmux context, stores agent state under `.git/agent-do/coord/` when available, tracks focus/claims/needs/publishes, and computes contention/dependency/novelty interrupts instead of relying on a mailbox. |
-| `tools/agent-harness` | Python | Observable harness front door. `inspect` exposes tools, hooks, instruction files, shared libraries, state refs, routing, credentials, concurrency, and linked tests as one JSON graph; `nudges effectiveness` summarizes hook decisions, emitted nudges, followed/ignored/expired outcomes, and tool-call/result telemetry; `evidence build` creates drill-down evidence bundles; `manifest new/verify` turns harness edits into falsifiable contracts. |
-| `tools/agent-cloudflare` | Bash + curl | Cloudflare management: zones, analytics (GraphQL), DNS, Workers, Pages, R2, firewall events. 23 commands. |
-| `tools/agent-clerk` | Bash + curl | Clerk auth platform: users, orgs, sessions, OAuth apps, enterprise SSO, JWT templates, roles. 55 commands. |
-| `tools/agent-okta` | Bash + curl | Okta tenant management: OIDC/SAML apps, SSO config, users, groups, auth servers, system logs. 34 commands. |
-| `tools/agent-namecheap` | Bash + curl | Namecheap domain and DNS management. XML API with safe GET→merge→SET writes, suspicious-value rejection, exact provider read-back verification, and optional public DNS checks. |
-| `tools/agent-resend` | Python | Resend domain management and DNS verification. Exact DKIM/SPF record retrieval, verification triggering, and public DNS comparison without UI truncation. |
-| `tools/agent-context/` | Bash + Python | **Knowledge library.** Fetches external docs (URLs, llms.txt, GitHub repos). SQLite FTS5 index, BM25 + trust-tier ranking, token-budgeted retrieval. Storage: `~/.agent-do/context/` (global). 22 commands. |
-| `tools/agent-zpc/` | Bash + Python | **Experience journal.** Structured lessons, decisions, patterns. Harvest consolidation, git review, swarm checkpoints, promotion (local → team → global). Storage: `.zpc/` (per-project). Complementary to context: context = *what docs say*, zpc = *what we learned*. |
-
-## Integration with AI Harnesses
-
-agent-do works with any AI coding assistant that can execute shell commands:
-
-| Harness | Integration | Config |
-|---------|-------------|--------|
-| Claude Code | CLAUDE.md instructions + hooks | `CLAUDE.md`, `.claude/hooks/` |
-| Cursor | Rules file + shell commands | `.cursorrules` |
-| Aider | Config file + shell access | `.aider.conf.yml` |
-| Continue.dev | Context providers + shell | `.continue/config.json` |
-
-### Integration Pattern
-
-1. **Document the API** in the harness's instruction file (CLAUDE.md, .cursorrules, etc.)
-2. **Enforce with hooks** when available (hard-nudge agent-do when raw commands detected)
-3. **Create subagents/skills** for specialized workflows
-
-### Hook Example (PreToolUse)
-
-Nudge raw commands toward agent-do alternatives:
-
-```python
-AGENT_DO_PATTERNS = {
-    r'\bxcrun\s+simctl\b': ('ios', 'Use agent-do ios instead'),
-    r'\badb\s+(shell|install)': ('android', 'Use agent-do android instead'),
-    r'\bosascript\b': ('appleevents', 'Use agent-do appleevents instead'),
-    r'\bplaywright\b|\bpuppeteer\b': ('browse', 'Use agent-do browse instead'),
-}
-```
-
-Both Claude Code and Codex consume the same PreToolUse hook. Codex supports `hookSpecificOutput.additionalContext` on PreToolUse as of the May 2026 hooks release; the prior `agent-do-pretooluse-codex.py` suppress-stdout wrapper is obsolete. Codex users install a thin runpy pass-through at `~/.codex/hooks/agent-do-pretooluse-check.py` (shipped under `hooks/codex/`) which forwards stdin/stdout to the same repo hook.
+Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the counts in the current registry are 17 read, 17 write, 61 mixed (95 total). The field is a coarse summary validated against the contracts write surface; per-verb truth lives in the contracts blocks, and `harness contracts surface --json` is the machine-readable form orchestrators should consume. Read-only tools parallelize freely; write tools serialize; mixed tools require per-command inspection.
 
 ## Exit Codes
 
 | Code | Meaning | When |
 |------|---------|------|
 | `0` | Success | Command executed successfully |
-| `1` | Error | Tool error, missing dependency, invalid arguments |
-| `2` | Needs clarification | Natural language mode: ambiguous intent |
+| `1` | Error | Tool error, missing dependency, invalid arguments, no matching tool |
+| `2` | Needs clarification | Natural language and offline modes: ambiguous intent, or a destructive/sensitive route without `AGENT_DO_AUTO_DESTRUCTIVE=1` |
 
-Exit code 2 signals the orchestrator to ask a follow-up question and retry with `--context`.
+Exit 2 tells the orchestrator to answer the question and retry with `--context "answer"`. Individual tools may define their own conventions (agent-manna uses 2 for system errors); the 0/1/2 contract above is the dispatcher's natural-language surface.
+
+## Test/CI Surface
+
+`./test.sh` runs the whole gate inventory against an isolated `AGENT_DO_HOME`: dispatcher smoke checks (`--help`, `--list`, `--status`, `--health`, `--raw`, `--offline` routes), the Python suites under `tests/` (routing, models, suggest/prompt-hook AI, contracts gate + drift + audit + routing-contracts, coord v1 + v2, auth family, email/sms, browse isolation and session defaults, harness, hooks non-blocking, nudge telemetry, tool regressions, and the service tools), a live `harness contracts drift` run that must come back empty, the manna Rust unit tests (`cargo test`) and its shell integration suite, `lib/snapshot.sh` encoding checks, and a bootstrap end-to-end flow.
+
+GitHub workflows:
+
+- **ci.yml** (push to main, PRs): bash/python syntax sweep, then the full `./test.sh` suite on macOS 14 with a modern bash shadowed in
+- **contracts-gate.yml** (push to main, PRs): `tests/test_contracts_gate.py` plus the harness inventory test; a tool without contracts cannot merge
+- **nightly-audit.yml** (daily 08:00 UTC, manual dispatch): `harness contracts audit --schema-check` on macOS, network probing off; any `fail` outcome fails the job, schema drift is surfaced but non-fatal, and the report uploads as an artifact
 
 ## Design Principles
 
-1. **Structured > Natural Language for AI.** AI agents should use `agent-do ios tap 200 400`, not `agent-do -n "tap the button"`. Natural language is a human convenience layer.
+1. **Structured > natural language for AI.** Agents call `agent-do ios tap 200 400`, not `agent-do -n "tap the button"`. Natural language is a human convenience layer.
+2. **Snapshot = AI vision.** The `snapshot` verb gives agents structured understanding of current state.
+3. **Session = memory.** Persistent sessions (database connections, browser state, TUI sessions) give agents context across commands.
+4. **Declarations must be checkable.** Contracts are validated in shape (gate), against the help surface (drift), and against live behavior (audit). A safety claim no machine can check is a comment, not a contract.
+5. **Tools are composable.** Each tool is standalone, callable directly or via agent-do, with the same interface for AI and humans.
 
-2. **Snapshot = AI Vision.** The `snapshot` command gives AI agents structured understanding of current state. Without it, agents are blind.
-
-3. **Session = Memory.** Persistent sessions (database connections, browser state, TUI sessions) give agents context across commands.
-
-4. **Tools are Composable.** Each tool is standalone, callable directly or via agent-do, with the same interface for AI and humans.
+Per-tool depth lives in docs/TOOLS.md; harness integration lives in docs/INTEGRATION.md.

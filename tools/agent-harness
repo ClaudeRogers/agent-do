@@ -136,6 +136,204 @@ def load_registry() -> dict[str, Any]:
     return load_agent_registry().get("tools") or {}
 
 
+def load_bundled_registry() -> dict[str, Any]:
+    """Repo-truth registry only — the contracts gate must not see user overrides."""
+    import yaml  # noqa: WPS433
+
+    with open(REPO_ROOT / "registry.yaml") as f:
+        return yaml.safe_load(f) or {}
+
+
+def contracts_validate(strict: bool) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import validate_gate  # noqa: WPS433
+
+    payload = validate_gate(load_bundled_registry(), strict=strict)
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def contracts_propose(tool: str | None = None) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import propose_contracts  # noqa: WPS433
+
+    payload = propose_contracts(load_bundled_registry())
+    if tool:
+        if tool not in payload["proposals"]:
+            raise ValueError(f"unknown tool: {tool}")
+        payload["proposals"] = {tool: payload["proposals"][tool]}
+        payload["exceptions"] = {
+            name: verbs for name, verbs in payload["exceptions"].items() if name == tool
+        }
+    payload["tool"] = "harness"
+    payload["command"] = "contracts propose"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def contracts_surface() -> dict[str, Any]:
+    """Safety buckets over the MERGED registry — orchestrators schedule what
+    is actually installed, unlike the gate, which judges repo truth only."""
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts import propose_contracts, safety_surface  # noqa: WPS433
+
+    payload = safety_surface(propose_contracts({"tools": load_registry()}))
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = "contracts surface"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def contracts_drift(tool: str | None = None) -> dict[str, Any]:
+    """Diff registry command promises against every tool's --help reality."""
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts_drift import drift_registry  # noqa: WPS433
+
+    def help_for(name: str) -> str | None:
+        result = agent_do_cmd(name, "--help", timeout=20)
+        text = (result.stdout or "") + (result.stderr or "")
+        return text if text.strip() else None
+
+    payload = drift_registry(load_bundled_registry().get("tools") or {}, help_for, tool)
+    payload["tool"] = "harness"
+    payload["command"] = "contracts drift"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+AUDIT_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.agent-do.contracts-audit.plist"
+AUDIT_REPORT = agent_do_home() / "audit" / "contracts-audit.md"
+
+
+def contracts_audit(args: Any) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import tempfile  # noqa: WPS433
+    from functools import partial  # noqa: WPS433
+    from contracts_audit import audit_registry, render_report  # noqa: WPS433
+
+    with tempfile.TemporaryDirectory(prefix="contracts-audit-") as scratch:
+        # Probes run in a throwaway cwd: a verb that mistakes a flag for an
+        # output path (the '--json' PNG incident) litters the scratch, not
+        # the caller's directory.
+        payload = audit_registry(
+            load_bundled_registry(),
+            partial(agent_do_cmd, cwd=Path(scratch)),
+            include_network=args.include_network,
+            schema_check=args.schema_check,
+            only_tool=args.tool,
+            timeout=args.timeout,
+        )
+    payload["tool"] = "harness"
+    payload["command"] = "contracts audit"
+    payload["generated_at"] = now_iso()
+    if args.out:
+        out_path = Path(args.out).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(render_report(payload, payload["generated_at"]), encoding="utf-8")
+        payload["out"] = str(out_path)
+    if args.notify and payload["summary"]["fail"] > 0:
+        # Silent when clean — Erik only hears about tools breaking contracts.
+        agent_do_cmd(
+            "notify", "emit", "contracts_audit",
+            "--fact", f"failures={payload['summary']['fail']}",
+            "--fact", f"ok={payload['summary']['ok']}",
+            timeout=30,
+        )
+    return payload
+
+
+def contracts_audit_schedule(install: str | None, uninstall: bool) -> dict[str, Any]:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    from contracts_audit import build_launchd_plist  # noqa: WPS433
+
+    if uninstall:
+        subprocess.run(["launchctl", "unload", str(AUDIT_PLIST)], capture_output=True, check=False)
+        existed = AUDIT_PLIST.exists()
+        AUDIT_PLIST.unlink(missing_ok=True)
+        return {"ok": True, "action": "uninstalled", "existed": existed, "plist": str(AUDIT_PLIST)}
+    plist = build_launchd_plist(str(REPO_ROOT / "agent-do"), str(AUDIT_REPORT), install or "weekly")
+    AUDIT_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    AUDIT_PLIST.write_text(plist, encoding="utf-8")
+    subprocess.run(["launchctl", "unload", str(AUDIT_PLIST)], capture_output=True, check=False)
+    result = subprocess.run(["launchctl", "load", str(AUDIT_PLIST)], capture_output=True, text=True, check=False)
+    return {
+        "ok": result.returncode == 0,
+        "action": "installed",
+        "frequency": install or "weekly",
+        "plist": str(AUDIT_PLIST),
+        "report": str(AUDIT_REPORT),
+        "launchctl": (result.stderr or "loaded").strip(),
+    }
+
+
+def render_contracts_audit(payload: dict[str, Any]) -> None:
+    summary = payload["summary"]
+    print("agent-do harness contracts audit")
+    print(f"  Probed ok: {summary['ok']}  Clean skips: {summary['clean-skip']}  "
+          f"Failures: {summary['fail']}  Policy skips: {summary['skip']}")
+    print(f"  Network probing: {'ON' if payload['include_network'] else 'off (--include-network to enable)'}")
+    if "schema_unstable" in summary:
+        print(f"  Schema-unstable snapshots: {summary['schema_unstable']}")
+        for r in payload["results"]:
+            if r.get("schema_stable") is False:
+                print(f"  SCHEMA-DRIFT {r['tool']} {r['verb']}: top-level JSON keys differ between calls")
+    for r in payload["results"]:
+        if r["outcome"] == "fail":
+            print(f"  FAIL {r['tool']} {r['verb']}: {r['reason']}")
+    if payload.get("out"):
+        print(f"  Report: {payload['out']}")
+
+
+def render_contracts_drift(payload: dict[str, Any]) -> None:
+    print("agent-do harness contracts drift")
+    print(f"  Declared-but-unimplemented (FAILING channel): {payload['declared_only_total']}")
+    for name, report in payload["results"].items():
+        if report.get("declared_only"):
+            print(f"    {name}: {', '.join(report['declared_only'])}")
+        if report.get("error"):
+            print(f"    {name}: ERROR {report['error']}")
+    advisory = sum(len(r.get("help_only") or []) for r in payload["results"].values())
+    print(f"  Undocumented-in-registry (advisory): {advisory} verbs — use --json to list")
+
+
+def render_contracts_validate(payload: dict[str, Any]) -> None:
+    print("agent-do harness contracts validate")
+    print(f"  Tools: {payload['tools']}  Declared: {payload['declared']}  Missing: {payload['missing']}")
+    print(f"  Errors: {payload['errors']}  Warnings: {payload['warnings']}")
+    gate = "PASS" if payload["ok"] else "FAIL"
+    mode = " (strict: full coverage required)" if payload.get("strict") else ""
+    print(f"  Gate: {gate}{mode}")
+    if payload["new_without_contracts"]:
+        print("  Tools missing contracts that are NOT grandfathered (new tools must declare):")
+        for name in payload["new_without_contracts"]:
+            print(f"    - {name}")
+    if payload["stale_baseline"]:
+        print("  Stale baseline entries (tool now declares contracts or was removed — delete from lib/contracts-baseline.yaml):")
+        for name in payload["stale_baseline"]:
+            print(f"    - {name}")
+    for item in payload.get("results") or []:
+        for error in item["errors"]:
+            print(f"  ERROR {item['tool']}: {error['message']}")
+        for warning in item["warnings"]:
+            if warning["code"] != "missing_contracts":
+                print(f"  WARN  {item['tool']}: {warning['message']}")
+
+
+def render_contracts_propose(payload: dict[str, Any]) -> None:
+    stats = payload["stats"]
+    print("agent-do harness contracts propose")
+    print(f"  Tools: {stats['tools']}  Declared: {stats['declared']}  Proposed: {stats['proposed']}")
+    print(f"  Classified verbs: {stats['classified_verbs']}  Unclassified: {stats['unclassified_verbs']}")
+    print(f"  Tools with exceptions: {stats['tools_with_exceptions']}")
+    if payload["exceptions"]:
+        print("  Exceptions (need lexicon rules or overrides):")
+        for name, verbs in sorted(payload["exceptions"].items(), key=lambda kv: -len(kv[1])):
+            print(f"    {name}: {', '.join(verbs)}")
+    print()
+    print("Use --json for full proposals or --out FILE for the markdown inventory.")
+
+
 def git_value(args: list[str], cwd: Path) -> str | None:
     result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=False)
     if result.returncode != 0:
@@ -825,6 +1023,14 @@ Commands:
   evidence build <session-or-run> [--out DIR]       Build a local drill-down evidence bundle
   manifest new <change-id> [opts]                   Create a harness change manifest
   manifest verify <change-id> --before A --after B  Compare eval case flips against manifest predictions
+  contracts validate [--strict] [--json]            Contracts gate: shape errors + full-coverage enforcement
+  contracts propose [--tool X] [--out FILE] [--json]  Lexicon-driven contracts draft + exceptions report
+  contracts surface [--json]                        Machine-readable safety surface (merged registry) for orchestrators
+  contracts drift [--tool X] [--json]               Registry promises vs tool --help reality; fails on phantom verbs
+  contracts audit [--tool X] [--include-network] [--schema-check] [--out FILE] [--notify] [--json]
+                                                    Bounded behavioral probe of the declared read surface (tri-state)
+  contracts audit --install-schedule [weekly|daily] Install launchd agent: audit + notify on failures
+  contracts audit --uninstall-schedule              Remove the scheduled audit
 
 Examples:
   agent-do harness inspect
@@ -832,6 +1038,8 @@ Examples:
   agent-do harness nudges effectiveness --since 7d
   agent-do harness evidence build 2017ab8f
   agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
+  agent-do harness contracts validate --json
+  agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md
 """
     )
 
@@ -878,6 +1086,19 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_verify_parser.add_argument("--before", required=True)
     manifest_verify_parser.add_argument("--after", required=True)
     manifest_verify_parser.add_argument("--json", action="store_true")
+
+    contracts = sub.add_parser("contracts", add_help=False)
+    contracts.add_argument("contracts_command", choices=["validate", "propose", "surface", "drift", "audit"])
+    contracts.add_argument("--strict", action="store_true")
+    contracts.add_argument("--tool")
+    contracts.add_argument("--out")
+    contracts.add_argument("--json", action="store_true")
+    contracts.add_argument("--include-network", action="store_true")
+    contracts.add_argument("--schema-check", action="store_true")
+    contracts.add_argument("--timeout", type=int, default=15)
+    contracts.add_argument("--notify", action="store_true")
+    contracts.add_argument("--install-schedule", nargs="?", const="weekly", choices=["weekly", "daily"])
+    contracts.add_argument("--uninstall-schedule", action="store_true")
     return parser
 
 
@@ -924,6 +1145,53 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(payload, indent=2))
             else:
                 render_manifest_result(payload)
+            return 0
+        if args.command == "contracts" and args.contracts_command == "validate":
+            payload = contracts_validate(strict=args.strict)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_validate(payload)
+            return 0 if payload["ok"] else 1
+        if args.command == "contracts" and args.contracts_command == "surface":
+            print(json.dumps(contracts_surface(), indent=2))
+            return 0
+        if args.command == "contracts" and args.contracts_command == "audit":
+            if args.install_schedule or args.uninstall_schedule:
+                payload = contracts_audit_schedule(args.install_schedule, args.uninstall_schedule)
+                print(json.dumps(payload, indent=2))
+                return 0 if payload["ok"] else 1
+            payload = contracts_audit(args)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_audit(payload)
+            return 0 if payload["ok"] else 1
+        if args.command == "contracts" and args.contracts_command == "drift":
+            payload = contracts_drift(tool=args.tool)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_drift(payload)
+            return 0 if payload["ok"] else 1
+        if args.command == "contracts" and args.contracts_command == "propose":
+            payload = contracts_propose(tool=args.tool)
+            if args.out:
+                sys.path.insert(0, str(REPO_ROOT / "lib"))
+                from contracts import render_markdown  # noqa: WPS433
+
+                out_path = Path(args.out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    render_markdown(payload, payload["generated_at"]), encoding="utf-8"
+                )
+                payload["out"] = str(out_path)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_contracts_propose(payload)
+                if args.out:
+                    print(f"Inventory written to {payload['out']}")
             return 0
     except Exception as exc:
         if "--json" in argv:

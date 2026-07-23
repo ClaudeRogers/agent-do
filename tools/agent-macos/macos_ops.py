@@ -1285,7 +1285,7 @@ def main():
             error(f"App not found: {args[1]}", EXIT_APP_NOT_FOUND)
     
     # Snapshot
-    elif cmd == "snapshot":
+    elif cmd in ("snapshot", "tree"):
         app_name = None
         interactive = "-i" in args or "--interactive" in args
         max_depth = 10

@@ -410,19 +410,66 @@ def require_api_key(profile: dict[str, Any]) -> str:
     return value
 
 
+YAML_PLAIN_SCALAR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _./-]*$")
+YAML_BOOLISH = {"true", "false", "yes", "no", "on", "off", "null", "~"}
+
+
+def yaml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    text = str(value)
+    lower = text.lower()
+    if (
+        text
+        and YAML_PLAIN_SCALAR_RE.match(text)
+        and lower not in YAML_BOOLISH
+        and ": " not in text
+        and " #" not in text
+    ):
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def yaml_lines_for_value(key: str, value: Any, indent: int = 0) -> list[str]:
+    pad = " " * indent
+    if isinstance(value, list):
+        lines = [f"{pad}{key}:"]
+        for item in value:
+            if isinstance(item, dict):
+                lines.append(f"{pad}  -")
+                for child_key, child_value in item.items():
+                    lines.extend(yaml_lines_for_value(str(child_key), child_value, indent + 4))
+            elif isinstance(item, list):
+                lines.append(f"{pad}  - {yaml_scalar(json.dumps(item, ensure_ascii=False))}")
+            else:
+                lines.append(f"{pad}  - {yaml_scalar(item)}")
+        return lines
+    if isinstance(value, dict):
+        lines = [f"{pad}{key}:"]
+        for child_key, child_value in value.items():
+            lines.extend(yaml_lines_for_value(str(child_key), child_value, indent + 2))
+        return lines
+    return [f"{pad}{key}: {yaml_scalar(value)}"]
+
+
 def dump_frontmatter(data: dict[str, Any]) -> str:
     clean = {k: v for k, v in data.items() if v not in (None, "", [], {})}
-    if yaml is not None:
-        return yaml.safe_dump(clean, sort_keys=False, allow_unicode=True).strip()
     lines: list[str] = []
     for key, value in clean.items():
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            for item in value:
-                lines.append(f"  - {item}")
-        else:
-            lines.append(f"{key}: {value}")
+        lines.extend(yaml_lines_for_value(str(key), value))
     return "\n".join(lines)
+
+
+def normalize_loaded_yaml(value: Any) -> Any:
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [normalize_loaded_yaml(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): normalize_loaded_yaml(item) for key, item in value.items()}
+    return value
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -439,7 +486,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         try:
             data = yaml.safe_load(raw) or {}
             if isinstance(data, dict):
-                return data, body
+                return normalize_loaded_yaml(data), body
         except Exception:
             return {}, body
     data: dict[str, Any] = {}
@@ -448,13 +495,13 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         if not line.strip():
             continue
         if line.startswith("  - ") and current_key:
-            data.setdefault(current_key, []).append(line[4:].strip())
+            data.setdefault(current_key, []).append(strip_wrapping_quotes(line[4:].strip()))
             continue
         if ":" in line:
             key, value = line.split(":", 1)
             current_key = key.strip()
             value = value.strip()
-            data[current_key] = [] if value == "" else value.strip('"').strip("'")
+            data[current_key] = [] if value == "" else strip_wrapping_quotes(value)
     return data, body
 
 
@@ -594,20 +641,78 @@ TASK_RE = re.compile(r"^\s*[-*]\s+\[(?P<status>[ xX])\]\s+(?P<text>.+?)\s*$")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def strip_wrapping_quotes(value: Any) -> str:
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1].strip()
+    return text
+
+
+def is_wikilink(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.startswith("[[") and stripped.endswith("]]")
+
+
+def parse_json_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or is_wikilink(stripped):
+        return value
+    if not (stripped[0] in "[{\"" or stripped in ("true", "false", "null")):
+        return value
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+
+
+def parse_block_list(value: str) -> list[str] | None:
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if not lines or not all(line.startswith("- ") for line in lines):
+        return None
+    return [strip_wrapping_quotes(line[2:].strip()) for line in lines]
+
+
+def split_property_list(value: Any, *, split_whitespace: bool) -> list[Any]:
+    parsed = parse_json_value(value)
+    if isinstance(parsed, list):
+        return parsed
+    if not isinstance(parsed, str):
+        return [parsed]
+    stripped = parsed.strip()
+    if stripped.startswith("[") and stripped.endswith("]") and not is_wikilink(stripped):
+        inner = stripped[1:-1].strip()
+        if not inner:
+            return []
+        return [item.strip() for item in inner.split(",")]
+    block = parse_block_list(stripped)
+    if block is not None:
+        return block
+    if "," in stripped:
+        return [item.strip() for item in stripped.split(",")]
+    if split_whitespace:
+        return re.split(r"\s+", stripped)
+    return [stripped]
+
+
+def expand_property_list(value: Any, *, split_whitespace: bool) -> list[Any]:
+    if not isinstance(value, list):
+        return split_property_list(value, split_whitespace=split_whitespace)
+    items: list[Any] = []
+    for item in value:
+        items.extend(split_property_list(item, split_whitespace=split_whitespace))
+    return items
+
+
 def normalize_tags(value: Any) -> list[str]:
     tags: list[str] = []
-    if isinstance(value, list):
-        raw_items = value
-    elif isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            raw_items = [item.strip() for item in stripped[1:-1].split(",")]
-        else:
-            raw_items = re.split(r"[,\s]+", value)
+    if isinstance(value, (list, str)):
+        raw_items = expand_property_list(value, split_whitespace=True)
     else:
         raw_items = []
     for item in raw_items:
-        tag = str(item).strip().strip("[]").strip().lstrip("#")
+        tag = strip_wrapping_quotes(item).lstrip("#").strip("/")
         if tag and tag not in tags:
             tags.append(tag)
     return tags
@@ -1703,12 +1808,18 @@ def folder_from_token(cfg: dict[str, Any], token: str | None) -> str:
     return str(folders.get(token, token)).strip("/")
 
 
-def normalize_related(value: str | None) -> list[str] | str:
+def normalize_related(value: Any) -> list[str] | str:
     if not value:
         return []
-    if value == "auto":
+    if isinstance(value, str) and value == "auto":
         return "auto"
-    return [item.strip().strip("[]") for item in value.split(",") if item.strip()]
+    raw_items = expand_property_list(value, split_whitespace=False)
+    related: list[str] = []
+    for item in raw_items:
+        link = strip_wrapping_quotes(item)
+        if link and link not in related:
+            related.append(link)
+    return related
 
 
 @contextlib.contextmanager
@@ -1830,12 +1941,13 @@ def cmd_save_group(rt: Runtime, args: argparse.Namespace) -> int:
     child_paths = [rt.vault / folder / f"{slugify(name)}.md" for name, _ in children]
     with write_lock(rt, "save-group", [relpath(p, rt.vault) for p in [hub_path, *child_paths]]):
         hub_links = [f"[[{name}]]" for name, _ in children]
-        hub_fm = {"title": hub_title, "created": today(), "scope": args.scope, "related": [name for name, _ in children], "tags": tags}
+        hub_fm = {"title": hub_title, "created": today(), "scope": args.scope, "related": hub_links, "tags": tags}
         write_note_file(hub_path, hub_fm, "\n".join(f"- {link}" for link in hub_links), overwrite=args.overwrite)
         records = [full_note_record(rt, hub_path)]
         for (name, body), path in zip(children, child_paths):
             scope = overrides.get(name, args.scope)
-            fm = {"title": name, "created": today(), "scope": scope, "up": hub_title, "related": [hub_title], "tags": tags}
+            hub_ref = f"[[{hub_title}]]"
+            fm = {"title": name, "created": today(), "scope": scope, "up": hub_ref, "related": [hub_ref], "tags": tags}
             write_note_file(path, fm, body, overwrite=args.overwrite)
             records.append(full_note_record(rt, path))
     emit({"success": True, "count": len(records), "records": records}, rt.json_mode)
@@ -2209,6 +2321,27 @@ def parse_key_values(items: list[str]) -> dict[str, str]:
             raise AgentObsidianError("--set values must be k=v", code=NEEDS_CLARIFICATION, value=item)
         key, value = item.split("=", 1)
         result[key] = value
+    return result
+
+
+def parse_property_value(name: str, value: Any) -> Any:
+    key = name.lower().replace("-", "_")
+    if key == "tags":
+        return normalize_tags(value)
+    if key == "related":
+        return normalize_related(value)
+    if key in {"aliases", "cssclasses"}:
+        return [strip_wrapping_quotes(item) for item in split_property_list(value, split_whitespace=False) if strip_wrapping_quotes(item)]
+    return parse_json_value(value)
+
+
+def parse_property_assignments(items: list[str]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for item in items:
+        if "=" not in item:
+            raise AgentObsidianError("--set values must be k=v", code=NEEDS_CLARIFICATION, value=item)
+        key, value = item.split("=", 1)
+        result[key] = parse_property_value(key, value)
     return result
 
 
@@ -2744,7 +2877,7 @@ def cmd_prop(rt: Runtime, args: argparse.Namespace) -> int:
         return 0
     if args.prop_cmd == "set":
         with write_lock(rt, "prop set", [path]):
-            fm[args.name] = args.value
+            fm[args.name] = parse_property_value(args.name, args.value)
             abs_path.write_text(render_note(fm, body), encoding="utf-8")
             record = full_note_record(rt, abs_path)
         emit({"success": True, "record": record}, rt.json_mode)
@@ -2755,7 +2888,7 @@ def cmd_prop(rt: Runtime, args: argparse.Namespace) -> int:
 
 
 def prop_batch(rt: Runtime, args: argparse.Namespace) -> int:
-    fields = parse_key_values(args.set_values)
+    fields = parse_property_assignments(args.set_values)
     matches = search_notes(rt, args.query, limit=10000)
     changed = []
     with write_lock(rt, "prop batch", [m["path"] for m in matches]):

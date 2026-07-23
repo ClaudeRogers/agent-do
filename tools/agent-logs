@@ -10,6 +10,7 @@ agent-logs - Log viewing and searching
 Commands:
   tail <path>                Tail a log file
   search <pattern> [path]    Search logs for pattern
+  filter <pattern> [path]    Filter logs by pattern (alias of search)
   follow <path>              Follow log file (like tail -f)
   recent [path] [lines]      Show recent log entries
   errors [path]              Show only errors/warnings
@@ -215,7 +216,7 @@ case "${1:-help}" in
         shift
         cmd_tail "$@"
         ;;
-    search|grep|s)
+    search|grep|filter|s)
         shift
         cmd_search "$@"
         ;;
