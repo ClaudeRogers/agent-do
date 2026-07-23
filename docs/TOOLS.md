@@ -1331,14 +1331,18 @@ Concurrency: `mixed`
 
 **Capabilities**
 
-- list and inspect monitors (jobs, heartbeats, checks)
-- view monitor details including schedule and assertions
-- create and delete monitors
-- pause and resume monitors for maintenance windows
-- send telemetry events (run, complete, fail, ok)
-- list and inspect issues (incidents)
-- list notification lists
-- full account snapshot as JSON
+- list, inspect, mute, unmute, create, and delete monitors
+- query monitor alert state summary (alerting/warn/ok breakdown)
+- search logs with service, status, and time range filters
+- query metric timeseries and list available metrics
+- list and post events
+- create, update, resolve, and inspect incidents (JSON:API v2)
+- list and inspect dashboards
+- list SLOs and retrieve error budget history
+- list service catalog definitions
+- observability snapshot combining monitors, events, and SLOs
+- dry-run mode for all write commands (exit 0 with structured JSON preview)
+- automation exit codes: monitor-status and snapshot return 1 when monitors are alerting
 
 **Commands**
 
