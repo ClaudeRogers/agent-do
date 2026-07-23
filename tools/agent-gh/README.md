@@ -157,6 +157,23 @@ agent-do gh release notes <owner/repo> --since <previous-tag> [--target <branch-
 
 ---
 
+### Raw API access
+
+```bash
+agent-do gh api GET /rate_limit [--paginate] [--jq <expr>] [--json]
+agent-do gh api POST /repos/owner/repo/issues --field title="Bug" --field body="..."
+agent-do gh api PATCH /repos/owner/repo/pulls/5 --field title="New title"
+agent-do gh api PUT /repos/owner/repo/topics --raw-field names='["go","api"]'
+agent-do gh api DELETE /repos/owner/repo/releases/123
+
+agent-do gh graphql '<query>' [--field K=V] [--paginate] [--jq <expr>] [--json]
+agent-do gh graphql @query.graphql [--field owner=ovachiever --field repo=agent-do]
+```
+
+`api` and `graphql` pass through to GitHub's raw API surface. Treat them as sensitive passthrough commands: the HTTP method and GraphQL document are runtime inputs, so callers must review the full command before running. Pass `@file` to `graphql` to read the query from a UTF-8 file.
+
+---
+
 ## Dry-run behavior
 
 Commands that write to GitHub accept `--dry-run`:

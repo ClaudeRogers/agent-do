@@ -54,7 +54,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [excel](#excel) | AI-first Excel CLI for workbook automation | mixed | 11 |
 | [figma](#figma) | Control Figma | read | 3 |
 | [gcp](#gcp) | Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation for OAuth credentials | mixed | 19 |
-| [gh](#gh) | GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos | mixed | 26 |
+| [gh](#gh) | GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos | mixed | 28 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
@@ -1644,6 +1644,8 @@ Concurrency: `mixed`
 - `pr create`: Create a pull request
 - `issue`: Manage GitHub issues
 - `release`: Manage GitHub releases
+- `api`: Raw GitHub REST API passthrough
+- `graphql`: Raw GitHub GraphQL passthrough
 - `approve`: Approve a PR
 - `request-changes`: Request changes on a PR
 - `comment`: Comment on a PR
@@ -1693,6 +1695,10 @@ agent-do gh issue close ovachiever/agent-do#42 --reason completed
 agent-do gh release latest ovachiever/agent-do --json
 # create GitHub release notes since the previous tag
 agent-do gh release notes ovachiever/agent-do --since v1.1.0 --json
+# call the GitHub REST API
+agent-do gh api GET /rate_limit --json
+# call the GitHub GraphQL API
+agent-do gh graphql "{ viewer { login } }" --json
 ```
 
 **Safety (from contracts)**
@@ -1700,6 +1706,8 @@ agent-do gh release notes ovachiever/agent-do --since v1.1.0 --json
 - Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `issue list`, `issue snapshot`, `issue triage`, `issue view`, `pr`, `prs`, `release download`, `release latest`, `release list`, `release notes`, `release view`, `repos`, `review`, `threads`, `whoami`
 - Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `issue assign`, `issue close`, `issue comment`, `issue create`, `issue label`, `issue reopen`, `merge`, `pr create`, `ready`, `release create`, `release delete`, `release edit`, `release publish`, `release upload`, `reopen`, `request-changes`, `update-branch`
 - destructive (irreversible data loss; confirm before auto-running): `release delete`
+- sensitive (emits or persists secret material; guard output): `api`, `graphql`
+- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `api`, `graphql`
 
 ### ghidra
 

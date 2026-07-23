@@ -201,6 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ── Phase 1: release ───────────────────────────────────────────────────────
     _build_release_parser(sub)
 
+    # ── Raw API passthrough ────────────────────────────────────────────────────
+    _build_api_parser(sub)
+
     return parser
 
 def _build_issue_parser(sub: Any) -> None:
@@ -384,6 +387,28 @@ def _build_release_parser(sub: Any) -> None:
     rnotes.add_argument("--json", action="store_true")
     rnotes.set_defaults(func=release_group.cmd_release_notes)
 
+def _build_api_parser(sub: Any) -> None:
+    from .groups import api as api_group
+
+    api_p = sub.add_parser("api", help="Raw GitHub REST API passthrough")
+    api_p.add_argument("method", choices=["GET", "POST", "PATCH", "PUT", "DELETE"])
+    api_p.add_argument("path", help="API path, e.g. /rate_limit")
+    api_p.add_argument("--field", action="append", dest="fields", metavar="K=V")
+    api_p.add_argument("--raw-field", action="append", dest="raw_fields", metavar="K=V")
+    api_p.add_argument("--header", action="append", dest="headers", metavar="K:V")
+    api_p.add_argument("--paginate", action="store_true")
+    api_p.add_argument("--jq", metavar="EXPR")
+    api_p.add_argument("--json", action="store_true")
+    api_p.set_defaults(func=api_group.cmd_api)
+
+    gql_p = sub.add_parser("graphql", help="Raw GitHub GraphQL passthrough")
+    gql_p.add_argument("query", help="GraphQL query string or @file path")
+    gql_p.add_argument("--field", action="append", dest="fields", metavar="K=V")
+    gql_p.add_argument("--paginate", action="store_true")
+    gql_p.add_argument("--jq", metavar="EXPR")
+    gql_p.add_argument("--json", action="store_true")
+    gql_p.set_defaults(func=api_group.cmd_graphql)
+
 def _subcommand_help(parser: argparse.ArgumentParser, command: str | None) -> None:
     if not command:
         parser.print_help()
@@ -454,12 +479,18 @@ Release commands (new):
   release latest <owner/repo>    Show latest release
   release create / edit / publish / delete / upload / download / notes
 
+Raw API passthrough:
+  api GET /rate_limit            Raw GitHub REST API call
+  graphql '<query>'              Raw GitHub GraphQL call
+
 Examples:
   agent-do gh inbox
   agent-do gh issue list ovachiever/agent-do --state open
   agent-do gh issue triage ovachiever/agent-do#42
   agent-do gh release latest ovachiever/agent-do --json
   agent-do gh release create ovachiever/agent-do v1.2 --generate-notes
+  agent-do gh api GET /rate_limit --json
+  agent-do gh graphql '{ viewer { login } }' --json
   agent-do gh audit ovachiever/agent-do#3 --reply
 """
     )

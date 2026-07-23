@@ -2841,6 +2841,8 @@ tools:
       pr create: Create a pull request
       issue: Manage GitHub issues
       release: Manage GitHub releases
+      api: Raw GitHub REST API passthrough
+      graphql: Raw GitHub GraphQL passthrough
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -2887,6 +2889,10 @@ tools:
       command: agent-gh release latest ovachiever/agent-do --json
     - intent: create GitHub release notes since the previous tag
       command: agent-gh release notes ovachiever/agent-do --since v1.1.0 --json
+    - intent: call the GitHub REST API
+      command: agent-gh api GET /rate_limit --json
+    - intent: call the GitHub GraphQL API
+      command: 'agent-gh graphql "{ viewer { login } }" --json'
     routing:
       default_command: inbox
       recommended_entrypoints:
@@ -2901,6 +2907,8 @@ tools:
       - agent-do gh issue triage owner/repo#123
       - agent-do gh release latest owner/repo
       - agent-do gh release notes owner/repo --since <prev-tag>
+      - agent-do gh api GET /rate_limit --json
+      - agent-do gh graphql '<query>' --json
       discover_keywords:
       - github pull request
       - github pr
@@ -2915,10 +2923,13 @@ tools:
       - github inbox
       - github issue
       - github release
+      - github api
+      - github graphql
       prompt_patterns:
       - '\b(?:github|gh)\b.*\b(?:pull request|pr|review|merge|approve|checks?)\b'
       - '\b(?:github|gh)\b.*\bissues?\b'
       - '\b(?:github|gh)\b.*\breleases?\b'
+      - '\b(?:github|gh)\b.*\b(?:api|graphql)\b'
       - '\b(?:what|which)\s+prs?\s+(?:need|needs|want|wants)\s+me\b'
       - '\bprs?\b.*\b(?:awaiting|waiting)\b.*\b(?:my|me)\b.*\breview\b'
       - '\bunresolved\s+(?:review\s+)?comments?\b'
@@ -2984,6 +2995,12 @@ tools:
       - issue triage
       - release notes
       attributes:
+        api:
+        - passthrough
+        - sensitive
+        graphql:
+        - passthrough
+        - sensitive
         release delete:
         - destructive
     concurrency: mixed
