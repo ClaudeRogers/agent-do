@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +19,7 @@ def _now() -> str:
 def _home() -> Path:
     return Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
 
-_PROFILE_NAME_RE = __import__("re").compile(r'^[a-zA-Z0-9_\-]+$')
+_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
 
 def _validate_profile_name(name: str) -> None:
     if not _PROFILE_NAME_RE.match(name):
@@ -53,11 +55,42 @@ def _creds_store_profile(profile_name: str, uri: str) -> None:
             pass
         raise
 
+def _profile_env_key(profile_name: str) -> str:
+    return "MONGO_CONNECTION_" + profile_name.upper().replace("-", "_")
+
+def _agent_creds_get(key: str) -> str:
+    creds_tool = Path(__file__).resolve().parents[1] / "agent-creds"
+    if not creds_tool.exists():
+        return ""
+    try:
+        result = subprocess.run(
+            [str(creds_tool), "get", key, "--reveal"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+def _read_uri_from_stdin() -> str:
+    try:
+        return sys.stdin.read().strip()
+    except OSError as exc:
+        _err(f"Failed to read URI from stdin: {exc}")
+        return ""  # unreachable
+
 def _creds_get_profile(profile_name: str) -> str:
-    env_key = "MONGO_CONNECTION_" + profile_name.upper().replace("-", "_")
+    env_key = _profile_env_key(profile_name)
     env_val = os.environ.get(env_key, "")
     if env_val:
         return env_val
+    store_val = _agent_creds_get(env_key)
+    if store_val:
+        return store_val
     creds_file = _creds_dir() / profile_name
     if creds_file.exists():
         return creds_file.read_text(encoding="utf-8").strip()
@@ -181,7 +214,7 @@ def _get_uri(connection: str | None) -> tuple[str, str]:
         uri = _creds_get_profile(connection)
         if not uri:
             _err(f"No URI stored for profile '{connection}'. "
-                 f"Re-add it: agent-do mongo connections add {connection} --uri <uri>")
+                 f"Re-add it: agent-do mongo connections add {connection} --stdin")
         return uri, profile.get("provider", "mongodb")
 
     data = _load_profiles()
@@ -194,13 +227,13 @@ def _get_uri(connection: str | None) -> tuple[str, str]:
         if env_uri:
             return env_uri, "mongodb"
         _err(f"No URI stored for profile '{default}'. "
-             f"Re-add it: agent-do mongo connections add {default} --uri <uri>")
+             f"Re-add it: agent-do mongo connections add {default} --stdin")
 
     if env_uri:
         return env_uri, "mongodb"
 
     _err("No connection specified and no default profile set.\n"
-         "  agent-do mongo connections add <name> --uri <uri> --default\n"
+         "  agent-do mongo connections add <name> --stdin --default\n"
          "  # or set MONGO_CONNECTION_STRING")
     return "", ""  # unreachable
 
@@ -239,7 +272,7 @@ def cmd_connections(argv: list[str]) -> None:
                 _print_json(_envelope("connections", data={"default": default, "profiles": []}))
                 return
             print("No connection profiles saved.")
-            print("  agent-do mongo connections add <name> --uri <uri>")
+            print("  agent-do mongo connections add <name> --stdin")
             return
         profile_rows = []
         for name, p in profiles.items():
@@ -264,34 +297,45 @@ def cmd_connections(argv: list[str]) -> None:
     elif sub == "add":
         name = rest[0] if rest else None
         if not name:
-            _err("Usage: connections add <name> --uri <uri>")
+            _err("Usage: connections add <name> [--stdin] [--provider mongodb|cosmosdb] [--default]")
         _validate_profile_name(name)
         uri = ""
+        uri_from_stdin = False
         provider = "mongodb"
         is_default = False
         i = 1
         while i < len(rest):
-            if rest[i] == "--uri" and i + 1 < len(rest):
-                uri = rest[i + 1]
-                i += 2
-            elif rest[i] == "--provider" and i + 1 < len(rest):
+            if rest[i] == "--stdin":
+                uri_from_stdin = True
+                i += 1
+            elif rest[i] == "--provider":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    _err("Missing value for --provider")
                 provider = rest[i + 1]
                 i += 2
             elif rest[i] == "--default":
                 is_default = True
                 i += 1
             else:
-                i += 1
+                _err(f"Unknown connections add option: {rest[i]}")
         if provider not in ("mongodb", "cosmosdb"):
             _err("--provider must be either mongodb or cosmosdb")
-        uri = uri.strip()
-        if not uri:
-            _err("--uri is required")
+        if uri_from_stdin:
+            uri = _read_uri_from_stdin()
+            uri = uri.strip()
+            if not uri:
+                _err("URI is required; pass --stdin and pipe it in")
+        else:
+            env_key = _profile_env_key(name)
+            if not _creds_get_profile(name):
+                _err(f"URI is required; pipe it with --stdin or store it first:\n"
+                     f"  agent-do creds store {env_key} --stdin")
         data = _load_profiles()
         data["profiles"][name] = {"provider": provider, "added_at": _now()}
         if is_default:
             data["default"] = name
-        _creds_store_profile(name, uri)
+        if uri:
+            _creds_store_profile(name, uri)
         _save_profiles(data)
         default_note = " (default)" if data.get("default") == name else ""
         if json_mode:
@@ -349,20 +393,28 @@ def cmd_connections(argv: list[str]) -> None:
         profile_name = ""
         i = 0
         while i < len(rest):
-            if rest[i] == "--secret" and i + 1 < len(rest):
+            if rest[i] == "--secret":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    _err("Missing value for --secret")
                 secret = rest[i + 1]
                 i += 2
-            elif rest[i] == "--namespace" and i + 1 < len(rest):
+            elif rest[i] == "--namespace":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    _err("Missing value for --namespace")
                 namespace = rest[i + 1]
                 i += 2
-            elif rest[i] == "--key" and i + 1 < len(rest):
+            elif rest[i] == "--key":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    _err("Missing value for --key")
                 key = rest[i + 1]
                 i += 2
-            elif rest[i] == "--profile" and i + 1 < len(rest):
+            elif rest[i] == "--profile":
+                if i + 1 >= len(rest) or rest[i + 1].startswith("--"):
+                    _err("Missing value for --profile")
                 profile_name = rest[i + 1]
                 i += 2
             else:
-                i += 1
+                _err(f"Unknown connections import-from-aks option: {rest[i]}")
         if not secret:
             _err("--secret is required")
         if not profile_name:

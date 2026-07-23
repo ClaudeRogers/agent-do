@@ -5001,29 +5001,29 @@ tools:
     - intent: list mongodb connections
       command: agent-do mongo connections list
     - intent: add a cosmosdb connection
-      command: 'agent-do mongo connections add prism_bcc --uri "$COSMOS_URI" --provider cosmosdb --default'
+      command: printf '%s' "$COSMOS_URI" | agent-do mongo connections add app_cosmos --stdin --provider cosmosdb --default
     - intent: import cosmos connection from aks secret
-      command: agent-do mongo connections import-from-aks --secret cosmos-connection-string --namespace prism --profile prism_bcc
+      command: agent-do mongo connections import-from-aks --secret cosmos-connection-string --namespace app --profile app_cosmos
     - intent: snapshot all mongo databases
       command: agent-do mongo snapshot
-    - intent: infer schema of expectations collection
-      command: agent-do mongo schema prism_bcc expectations
-    - intent: list indexes on expectations
-      command: agent-do mongo indexes prism_bcc expectations
+    - intent: infer schema of events collection
+      command: agent-do mongo schema appdb events
+    - intent: list indexes on events
+      command: agent-do mongo indexes appdb events
     - intent: query expectations where externalId is x001
-      command: agent-do mongo query prism_bcc expectations --where externalId=x001 --json
+      command: agent-do mongo query appdb events --where externalId=x001 --json
     - intent: count pending expectations
-      command: agent-do mongo count prism_bcc expectations --where status=pending
-    - intent: run aggregation pipeline on expectations
-      command: 'agent-do mongo aggregate prism_bcc expectations --pipeline ''[{"$group":{"_id":"$status","count":{"$sum":1}}}]'''
+      command: agent-do mongo count appdb events --where status=pending
+    - intent: run aggregation pipeline on events
+      command: 'agent-do mongo aggregate appdb events --pipeline ''[{"$group":{"_id":"$status","count":{"$sum":1}}}]'''
     - intent: explain query plan for externalId lookup
-      command: agent-do mongo explain prism_bcc expectations --where externalId=x001
+      command: agent-do mongo explain appdb events --where externalId=x001
     - intent: preview inserting a document
-      command: 'agent-do mongo insert prism_bcc expectations --doc ''{"externalId":"y001","status":"pending"}'' --dry-run'
+      command: 'agent-do mongo insert appdb events --doc ''{"externalId":"y001","status":"pending"}'' --dry-run'
     - intent: update status to done for externalId x001
-      command: agent-do mongo update prism_bcc expectations --where externalId=x001 --set status=done --dry-run
+      command: agent-do mongo update appdb events --where externalId=x001 --set status=done --dry-run
     - intent: delete a document by externalId
-      command: agent-do mongo delete prism_bcc expectations --where externalId=x001 --dry-run
+      command: agent-do mongo delete appdb events --where externalId=x001 --dry-run
     routing:
       discover_keywords:
       - mongodb
@@ -5062,6 +5062,41 @@ tools:
     credentials:
       optional:
         - MONGO_CONNECTION_STRING
+      notes:
+        - "Save profile URIs with 'agent-do mongo connections add <name> --stdin' to keep credentials out of argv and shell history; profile URI files are written mode 0600 under AGENT_DO_HOME."
+        - "Profile URI fallback uses MONGO_CONNECTION_<PROFILE> from the environment or agent-do creds store, with the profile uppercased and hyphens converted to underscores."
+    contracts:
+      snapshot:
+      - connections list
+      - snapshot
+      - schema
+      - indexes
+      - query
+      - count
+      - aggregate
+      - explain
+      interact:
+      - connections add
+      - connections remove
+      - connections set-default
+      - connections import-from-aks
+      - aggregate
+      - insert
+      - update
+      - delete
+      attributes:
+        connections add:
+        - own_state
+        connections remove:
+        - own_state
+        connections set-default:
+        - own_state
+        connections import-from-aks:
+        - own_state
+        aggregate:
+        - polymorphic
+        delete:
+        - destructive
     concurrency: mixed
   learn:
     description: Learning and pattern improvement
