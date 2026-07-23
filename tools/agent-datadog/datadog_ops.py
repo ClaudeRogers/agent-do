@@ -135,6 +135,19 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _text(value: Any, default: str = "") -> str:
+    return default if value is None else str(value)
+
+
+def _dry_run(args: argparse.Namespace, command: str, human_msg: str, **extra: Any) -> int:
+    preview: dict[str, Any] = {"tool": "datadog", "command": command, **extra}
+    if args.json:
+        _print_json(preview)
+    else:
+        print(f"[dry-run] {human_msg}")
+    return 0
+
+
 # ── monitors ──────────────────────────────────────────────────────────────────
 
 def cmd_monitors(args: argparse.Namespace) -> int:
@@ -217,18 +230,14 @@ def cmd_monitor_status(args: argparse.Namespace) -> int:
 
 def cmd_monitor_mute(args: argparse.Namespace) -> int:
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "monitor-mute", "monitor_id": args.id}
+        extra: dict[str, Any] = {"monitor_id": args.id}
         if args.end:
-            preview["end"] = args.end
+            extra["end"] = args.end
         if args.scope:
-            preview["scope"] = args.scope
+            extra["scope"] = args.scope
         if args.message:
-            preview["message"] = args.message
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would mute monitor {args.id}")
-        return 0
+            extra["message"] = args.message
+        return _dry_run(args, "monitor-mute", f"Would mute monitor {args.id}", **extra)
 
     body: dict[str, Any] = {}
     if args.end:
@@ -248,12 +257,7 @@ def cmd_monitor_mute(args: argparse.Namespace) -> int:
 
 def cmd_monitor_unmute(args: argparse.Namespace) -> int:
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "monitor-unmute", "monitor_id": args.id}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would unmute monitor {args.id}")
-        return 0
+        return _dry_run(args, "monitor-unmute", f"Would unmute monitor {args.id}", monitor_id=args.id)
 
     data = _request("POST", f"/monitor/{urllib.parse.quote(str(args.id))}/unmute")
     if args.json:
@@ -277,14 +281,12 @@ def cmd_monitor_create(args: argparse.Namespace) -> int:
         body["priority"] = args.priority
 
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "monitor-create", "body": body}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would create monitor: {args.name}")
-            print(f"  type:  {args.monitor_type}")
-            print(f"  query: {args.query}")
-        return 0
+        return _dry_run(
+            args,
+            "monitor-create",
+            f"Would create monitor: {args.name}\n  type:  {args.monitor_type}\n  query: {args.query}",
+            body=body,
+        )
 
     data = _request("POST", "/monitor", body=body)
     if args.json:
@@ -296,12 +298,7 @@ def cmd_monitor_create(args: argparse.Namespace) -> int:
 
 def cmd_monitor_delete(args: argparse.Namespace) -> int:
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "monitor-delete", "monitor_id": args.id}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would delete monitor {args.id}")
-        return 0
+        return _dry_run(args, "monitor-delete", f"Would delete monitor {args.id}", monitor_id=args.id)
 
     _request("DELETE", f"/monitor/{urllib.parse.quote(str(args.id))}")
     if args.json:
@@ -348,10 +345,10 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
     for entry in logs:
         attrs = entry.get("attributes") or {}
-        ts = attrs.get("timestamp", "")
-        svc = attrs.get("service", "")
-        status = attrs.get("status", "")
-        msg = str(attrs.get("message", ""))
+        ts = _text(attrs.get("timestamp"))
+        svc = _text(attrs.get("service"))
+        status = _text(attrs.get("status"))
+        msg = _text(attrs.get("message"))
         print(f"[{ts}] [{status:<5}] {svc}: {msg[:200]}")
     return 0
 
@@ -434,7 +431,9 @@ def cmd_events(args: argparse.Namespace) -> int:
 
     for ev in events:
         ts = _epoch_to_iso(ev.get("date_happened", 0))
-        print(f"[{ts}] [{ev.get('priority', ''):<6}] {ev.get('title', '')}")
+        priority = _text(ev.get("priority"))
+        title = _text(ev.get("title"))
+        print(f"[{ts}] [{priority:<6}] {title}")
         if ev.get("text"):
             print(f"  {str(ev['text'])[:200]}")
     return 0
@@ -450,12 +449,7 @@ def cmd_event_post(args: argparse.Namespace) -> int:
         body["alert_type"] = args.alert_type
 
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "event-post", "body": body}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would post event: {args.title}")
-        return 0
+        return _dry_run(args, "event-post", f"Would post event: {args.title}", body=body)
 
     data = _request("POST", "/events", body=body)
     event = data.get("event") or data
@@ -486,7 +480,10 @@ def cmd_incidents(args: argparse.Namespace) -> int:
 
     for inc in incidents:
         attrs = inc.get("attributes") or {}
-        print(f"{inc.get('id', '')}  [{attrs.get('status', ''):<8}] [{attrs.get('severity', ''):<7}]  {attrs.get('title', '')}")
+        status = _text(attrs.get("status"))
+        severity = _text(attrs.get("severity"))
+        title = _text(attrs.get("title"))
+        print(f"{inc.get('id', '')}  [{status:<8}] [{severity:<7}]  {title}")
     return 0
 
 
@@ -518,12 +515,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"data": {"type": "incidents", "attributes": attrs}}
 
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "incident-create", "attributes": attrs}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would create incident: {args.title}")
-        return 0
+        return _dry_run(args, "incident-create", f"Would create incident: {args.title}", attributes=attrs)
 
     data = _request("POST", "/incidents", body=body, api_version="v2")
     inc = data.get("data") or {}
@@ -551,15 +543,13 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"data": {"type": "incidents", "id": args.id, "attributes": attrs}}
 
     if args.dry_run:
-        preview: dict[str, Any] = {
-            "tool": "datadog", "command": "incident-update",
-            "incident_id": args.id, "attributes": attrs,
-        }
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would update incident {args.id}")
-        return 0
+        return _dry_run(
+            args,
+            "incident-update",
+            f"Would update incident {args.id}",
+            incident_id=args.id,
+            attributes=attrs,
+        )
 
     data = _request("PATCH", f"/incidents/{urllib.parse.quote(str(args.id))}", body=body, api_version="v2")
     if args.json:
@@ -577,12 +567,7 @@ def cmd_incident_resolve(args: argparse.Namespace) -> int:
     }
 
     if args.dry_run:
-        preview: dict[str, Any] = {"tool": "datadog", "command": "incident-resolve", "incident_id": args.id}
-        if args.json:
-            _print_json(preview)
-        else:
-            print(f"[dry-run] Would resolve incident {args.id}")
-        return 0
+        return _dry_run(args, "incident-resolve", f"Would resolve incident {args.id}", incident_id=args.id)
 
     data = _request("PATCH", f"/incidents/{urllib.parse.quote(str(args.id))}", body=body, api_version="v2")
     if args.json:
@@ -706,8 +691,11 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     events: list[dict[str, Any]] = []
     slos: list[dict[str, Any]] = []
     errors: list[str] = []
+    fetch_count = 0
 
     def _fetch(label: str, fn: Any) -> Any:
+        nonlocal fetch_count
+        fetch_count += 1
         try:
             return fn()
         except SystemExit as exc:
@@ -727,7 +715,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     if result is not None:
         slos = (result.get("data") or []) if isinstance(result, dict) else []
 
-    if errors and not monitors and not events and not slos:
+    if len(errors) == fetch_count:
         # All sections failed — surface the error rather than showing empty data
         _err(f"Snapshot failed — all API requests errored. Check DD_API_KEY / DD_APP_KEY. "
              f"Sections: {'; '.join(errors)}")
