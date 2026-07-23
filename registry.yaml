@@ -5821,6 +5821,10 @@ tools:
         replacement: agent-do cronitor
         example: agent-do cronitor snapshot
         reason: agent-do cronitor provides structured monitor, issue, and telemetry access
+      - pattern: \bcurl\b.*\bcronitor\.link\b
+        replacement: agent-do cronitor
+        example: agent-do cronitor ping my-job --state complete
+        reason: agent-do cronitor wraps Cronitor telemetry pings without ad hoc cronitor.link curls
       project_signals:
       - cronitor
       - cron monitoring
