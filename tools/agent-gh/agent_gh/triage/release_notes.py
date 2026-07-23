@@ -6,7 +6,7 @@ from typing import Any
 from ..refs import parse_repo
 from ..snapshot import envelope
 from ..snapshot import parse_github_time
-from ..transport import gh_json
+from ..transport import GhError, gh_json
 
 _SECTION_LABELS: list[tuple[str, list[str]]] = [
     ("Features", ["enhancement", "feature", "feat"]),
@@ -70,18 +70,27 @@ def notes_between(repo: str, since_tag: str, *, target: str | None = None) -> di
         # (repo too new for a tag, auth scope, network); we intentionally continue.
         logging.getLogger(__name__).debug("generate-notes endpoint failed, using fallback: %s", exc)
 
+    default_branch = target
+    if default_branch is None:
+        repo_payload = gh_json(["api", f"/repos/{r.slug}"]) or {}
+        default_branch = repo_payload.get("default_branch") or "main"
+
     # Fallback: list merged PRs since the tag and group by label
     prs = gh_json([
         "search", "prs", "--repo", r.slug,
         "--state", "merged",
-        "--base", target or "main",
+        "--base", default_branch,
         "--json", "number,title,labels,mergedAt,url",
         "--limit", "100",
     ]) or []
 
     tag_date = _tag_date(r.slug, since_tag)
-    if tag_date:
-        prs = [pr for pr in prs if _merged_after(pr.get("mergedAt"), tag_date)]
+    if tag_date is None:
+        raise GhError(
+            f"could not resolve a date for tag {since_tag!r} in {r.slug}; "
+            "refusing to return unbounded release notes"
+        )
+    prs = [pr for pr in prs if _merged_after(pr.get("mergedAt"), tag_date)]
 
     sections: dict[str, list[str]] = {name: [] for name, _ in _SECTION_LABELS}
     uncategorized: list[str] = []

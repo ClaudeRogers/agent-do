@@ -157,8 +157,8 @@ def probe_deployment_env(detail: dict[str, Any], env_vars: list[str], *, target_
         result["notes"].append("agent-do not found; provider env probe skipped")
     return result
 
-def audit_pr(ref: PrRef, *, probe_deploys: bool = False) -> dict[str, Any]:
-    detail = pr_detail(ref)
+def audit_pr(ref: PrRef, *, detail: dict[str, Any] | None = None, probe_deploys: bool = False) -> dict[str, Any]:
+    detail = detail or pr_detail(ref)
     checks = pr_checks(ref)
     threads = pr_threads(ref)
     diff = pr_diff_text(ref)
@@ -267,37 +267,39 @@ def format_audit_reply(audit: dict[str, Any]) -> str:
     findings = audit.get("findings") or []
     blockers = [f for f in findings if f.get("severity") in {"high", "medium"}]
     notes = [f for f in findings if f.get("severity") not in {"high", "medium"}]
-    if blockers:
-        lines = ["Do not merge as-is.", "", "Required fixes:", ""]
-        for f in blockers:
-            lines.append(f"- {f.get('title')}. {f.get('evidence')}.")
-            lines.append(f"  How to address: {f.get('fix')}")
-        if notes:
-            lines.extend(["", "Lower-priority notes:", ""])
-            for f in notes:
-                lines.append(f"- {f.get('title')}. {f.get('evidence')}.")
-                lines.append(f"  How to address: {f.get('fix')}")
-        lines.extend([
-            "", "Current verified signals:",
+    def render_findings(items: list[dict[str, Any]]) -> list[str]:
+        lines: list[str] = []
+        for finding in items:
+            lines.append(f"- {finding.get('title')}. {finding.get('evidence')}.")
+            lines.append(f"  How to address: {finding.get('fix')}")
+        return lines
+
+    def render_signals() -> list[str]:
+        return [
+            "Current verified signals:",
             f"- Checks inspected: {(audit.get('checks') or {}).get('count', 0)}",
             f"- Unresolved review threads: {(audit.get('unresolved_threads') or {}).get('count', 0)}",
             f"- Files changed: {pr.get('changed_files')}  +{pr.get('additions')} -{pr.get('deletions')}",
-            "", "Requesting changes.",
-        ])
+        ]
+
+    if blockers:
+        lines = ["Do not merge as-is.", "", "Required fixes:", ""]
+        lines.extend(render_findings(blockers))
+        if notes:
+            lines.extend(["", "Lower-priority notes:", ""])
+            lines.extend(render_findings(notes))
+        lines.extend(["", *render_signals(), "", "Requesting changes."])
         return "\n".join(lines)
 
     lines = ["No blocking issues found from the automated review audit."]
     if notes:
         lines.extend(["", "Lower-priority notes:", ""])
-        for f in notes:
-            lines.append(f"- {f.get('title')}. {f.get('evidence')}.")
-            lines.append(f"  How to address: {f.get('fix')}")
+        lines.extend(render_findings(notes))
     lines.extend([
-        "", "Current verified signals:",
-        f"- Checks inspected: {(audit.get('checks') or {}).get('count', 0)}",
-        f"- Unresolved review threads: {(audit.get('unresolved_threads') or {}).get('count', 0)}",
-        f"- Files changed: {pr.get('changed_files')}  +{pr.get('additions')} -{pr.get('deletions')}",
-        "", "This is not a substitute for reading the code diff, but there are no automated blockers from the audited signals.",
+        "",
+        *render_signals(),
+        "",
+        "This is not a substitute for reading the code diff, but there are no automated blockers from the audited signals.",
     ])
     return "\n".join(lines)
 

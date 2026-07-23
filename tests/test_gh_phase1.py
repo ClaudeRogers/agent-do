@@ -22,7 +22,7 @@ def make_exec(path: Path, contents: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 def run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, check=False)
+    return subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, check=False, timeout=30)
 
 ISSUE_LIST = (FIXTURES / "issue_list.json").read_text()
 ISSUE_VIEW = (FIXTURES / "issue_view.json").read_text()
@@ -143,9 +143,13 @@ else:
         require(iv["command"] == "issue view", f"bad command: {iv}")
         require(iv["ref"] == "ovachiever/agent-do#42", f"bad ref: {iv}")
         require(iv["data"]["title"] == "Crash on empty input to parse_ref", f"bad title: {iv}")
-        require("bug" in [l["name"] for l in iv["data"]["labels"]], f"missing bug label: {iv}")
+        require("bug" in [label["name"] for label in iv["data"]["labels"]], f"missing bug label: {iv}")
+
+        def call_count() -> int:
+            return len(log_path.read_text().splitlines()) if log_path.exists() else 0
 
         # ── issue create --dry-run ─────────────────────────────────────────────
+        before = call_count()
         ic_dry = run(
             [str(AGENT_DO), "gh", "issue", "create", "ovachiever/agent-do",
              "--title", "Test issue", "--dry-run"],
@@ -153,6 +157,7 @@ else:
         )
         require(ic_dry.returncode == 0, f"issue create --dry-run failed: {ic_dry.stderr}")
         require("[dry-run]" in ic_dry.stdout, f"expected dry-run output: {ic_dry.stdout}")
+        require(call_count() == before, "issue create --dry-run should not invoke gh")
 
         # ── issue create (real) ────────────────────────────────────────────────
         ic_r = run(
@@ -166,12 +171,14 @@ else:
         require("issues/44" in (ic["data"].get("url") or ""), f"bad url: {ic}")
 
         # ── issue close --dry-run ──────────────────────────────────────────────
+        before = call_count()
         icl_dry = run(
             [str(AGENT_DO), "gh", "issue", "close", "ovachiever/agent-do#42", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(icl_dry.returncode == 0, f"issue close --dry-run failed: {icl_dry.stderr}")
         require("[dry-run]" in icl_dry.stdout, f"expected dry-run output: {icl_dry.stdout}")
+        require(call_count() == before, "issue close --dry-run should not invoke gh")
 
         # ── issue close (real) ─────────────────────────────────────────────────
         icl_r = run(
@@ -185,19 +192,42 @@ else:
         require(icl["data"]["reason"] == "completed", f"expected reason=completed: {icl}")
 
         # ── issue reopen --dry-run ─────────────────────────────────────────────
+        before = call_count()
         iro_dry = run(
             [str(AGENT_DO), "gh", "issue", "reopen", "ovachiever/agent-do#42", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(iro_dry.returncode == 0, f"issue reopen --dry-run failed: {iro_dry.stderr}")
+        require(call_count() == before, "issue reopen --dry-run should not invoke gh")
+
+        # ── issue reopen (real) ────────────────────────────────────────────────
+        iro_r = run(
+            [str(AGENT_DO), "gh", "issue", "reopen", "ovachiever/agent-do#42", "--json"],
+            cwd=ROOT, env=env,
+        )
+        require(iro_r.returncode == 0, f"issue reopen failed: {iro_r.stderr}")
+        iro = json.loads(iro_r.stdout)
+        require(iro["data"]["reopened"] is True, f"expected reopened=true: {iro}")
 
         # ── issue label --dry-run ──────────────────────────────────────────────
+        before = call_count()
         ilb_dry = run(
             [str(AGENT_DO), "gh", "issue", "label", "ovachiever/agent-do#42",
              "--add", "confirmed", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(ilb_dry.returncode == 0, f"issue label --dry-run failed: {ilb_dry.stderr}")
+        require(call_count() == before, "issue label --dry-run should not invoke gh")
+
+        # ── issue label (real) ─────────────────────────────────────────────────
+        ilb_r = run(
+            [str(AGENT_DO), "gh", "issue", "label", "ovachiever/agent-do#42",
+             "--add", "confirmed", "--json"],
+            cwd=ROOT, env=env,
+        )
+        require(ilb_r.returncode == 0, f"issue label failed: {ilb_r.stderr}")
+        ilb = json.loads(ilb_r.stdout)
+        require(ilb["data"]["add"] == ["confirmed"], f"expected label add: {ilb}")
 
         # ── issue triage ───────────────────────────────────────────────────────
         triage_r = run(
@@ -255,12 +285,14 @@ else:
         require(rlat["data"]["tagName"] == "v1.2.0", f"bad tagName: {rlat}")
 
         # ── release create --dry-run ───────────────────────────────────────────
+        before = call_count()
         rc_dry = run(
             [str(AGENT_DO), "gh", "release", "create", "ovachiever/agent-do", "v1.3.0", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(rc_dry.returncode == 0, f"release create --dry-run failed: {rc_dry.stderr}")
         require("[dry-run]" in rc_dry.stdout, f"expected dry-run output: {rc_dry.stdout}")
+        require(call_count() == before, "release create --dry-run should not invoke gh")
 
         # ── release create (real) ──────────────────────────────────────────────
         rc_r = run(
@@ -288,12 +320,14 @@ else:
         )
         require(rdel_no_confirm.returncode != 0, f"release delete should require --confirm: {rdel_no_confirm.stdout}")
 
+        before = call_count()
         rdel_dry = run(
             [str(AGENT_DO), "gh", "release", "delete", "ovachiever/agent-do", "v1.3.0", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(rdel_dry.returncode == 0, f"release delete --dry-run failed: {rdel_dry.stderr}")
         require("[dry-run]" in rdel_dry.stdout, f"expected dry-run output: {rdel_dry.stdout}")
+        require(call_count() == before, "release delete --dry-run should not invoke gh")
 
         rdel_r = run(
             [str(AGENT_DO), "gh", "release", "delete", "ovachiever/agent-do", "v1.3.0",
@@ -305,11 +339,23 @@ else:
         require(rdel["data"]["deleted"] is True, f"expected deleted=true: {rdel}")
 
         # ── release publish --dry-run ──────────────────────────────────────────
+        before = call_count()
         rpub_dry = run(
             [str(AGENT_DO), "gh", "release", "publish", "ovachiever/agent-do", "v1.3.0", "--dry-run"],
             cwd=ROOT, env=env,
         )
         require(rpub_dry.returncode == 0, f"release publish --dry-run failed: {rpub_dry.stderr}")
+        require(call_count() == before, "release publish --dry-run should not invoke gh")
+
+        # ── release publish (real) ─────────────────────────────────────────────
+        rpub_r = run(
+            [str(AGENT_DO), "gh", "release", "publish", "ovachiever/agent-do", "v1.3.0", "--json"],
+            cwd=ROOT, env=env,
+        )
+        require(rpub_r.returncode == 0, f"release publish failed: {rpub_r.stderr}")
+        rpub = json.loads(rpub_r.stdout)
+        require(rpub["command"] == "release edit", f"publish should use release edit envelope: {rpub}")
+        require(rpub["data"]["tag"] == "v1.3.0", f"bad publish tag: {rpub}")
 
     print("gh phase1 tests passed")
     return 0

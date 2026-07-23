@@ -147,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     close.add_argument("--comment")
     close.add_argument("--comment-file")
     close.add_argument("--dry-run", action="store_true")
+    close.add_argument("--json", action="store_true")
     close.set_defaults(func=pr_group.cmd_close)
 
     reopen = sub.add_parser("reopen", help="Reopen a pull request")
@@ -154,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     reopen.add_argument("--comment")
     reopen.add_argument("--comment-file")
     reopen.add_argument("--dry-run", action="store_true")
+    reopen.add_argument("--json", action="store_true")
     reopen.set_defaults(func=pr_group.cmd_reopen)
 
     checkout = sub.add_parser("checkout", aliases=["co"], help="Check out a pull request locally")
@@ -163,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     checkout.add_argument("--force", action="store_true")
     checkout.add_argument("--recurse-submodules", action="store_true")
     checkout.add_argument("--dry-run", action="store_true")
+    checkout.add_argument("--json", action="store_true")
     checkout.set_defaults(func=pr_group.cmd_checkout)
 
     edit = sub.add_parser("edit", help="Edit pull request metadata")
@@ -182,12 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--add-project", action="append")
     edit.add_argument("--remove-project", action="append")
     edit.add_argument("--dry-run", action="store_true")
+    edit.add_argument("--json", action="store_true")
     edit.set_defaults(func=pr_group.cmd_edit)
 
     update_branch = sub.add_parser("update-branch", help="Update a PR branch from its base branch")
     update_branch.add_argument("pr")
     update_branch.add_argument("--rebase", action="store_true")
     update_branch.add_argument("--dry-run", action="store_true")
+    update_branch.add_argument("--json", action="store_true")
     update_branch.set_defaults(func=pr_group.cmd_update_branch)
 
     # ── Phase 1: issue ─────────────────────────────────────────────────────────

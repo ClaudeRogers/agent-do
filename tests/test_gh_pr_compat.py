@@ -16,8 +16,8 @@ def make_exec(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-def run(cmd: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, env=env, text=True, capture_output=True, check=False)
+def run(cmd: list[str], *, env: dict[str, str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, env=env, text=True, capture_output=True, check=False, timeout=timeout)
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,6 +172,30 @@ sys.exit(0)
             check(f"gh {cmd_name} --dry-run exits 0", r.returncode == 0, r.stderr)
             check(f"gh {cmd_name} --dry-run: no gh call made", not log_path.exists() or not log_path.read_text().strip())
             check(f"gh {cmd_name} --dry-run: prints [dry-run]", "[dry-run]" in r.stdout)
+
+        # ── --json tests: legacy actions expose structured envelopes ───────────
+        print("\n--- --json tests ---")
+
+        for cmd_name, pr_ref, extra_args in [
+            ("close", "ovachiever/agent-do#3", []),
+            ("reopen", "ovachiever/agent-do#3", []),
+            ("checkout", "ovachiever/agent-do#5", ["--branch", "review/pr-5"]),
+            ("edit", "ovachiever/agent-do#5", ["--add-label", "review-needed"]),
+            ("update-branch", "ovachiever/agent-do#3", ["--rebase"]),
+        ]:
+            clear_log()
+            r = run(
+                [str(AGENT_DO), "gh", cmd_name, pr_ref, "--json", *extra_args],
+                env=base_env,
+            )
+            check(f"gh {cmd_name} --json exits 0", r.returncode == 0, r.stderr)
+            try:
+                payload = json.loads(r.stdout)
+            except json.JSONDecodeError as exc:
+                check(f"gh {cmd_name} --json parses", False, f"{exc}: {r.stdout}")
+                continue
+            check(f"gh {cmd_name} --json command", payload.get("command") == cmd_name, str(payload))
+            check(f"gh {cmd_name} --json ref", payload.get("ref") == pr_ref, str(payload))
 
         # ── multi-value --add-label: all values forwarded ─────────────────────
         print("\n--- multi-value flag tests ---")

@@ -2922,6 +2922,14 @@ tools:
       - '\b(?:what|which)\s+prs?\s+(?:need|needs|want|wants)\s+me\b'
       - '\bprs?\b.*\b(?:awaiting|waiting)\b.*\b(?:my|me)\b.*\breview\b'
       - '\bunresolved\s+(?:review\s+)?comments?\b'
+      project_signals:
+      - github
+      - .github
+      - pull request
+      readiness:
+        check: agent-do gh whoami
+        fix: gh auth login
+        note: Requires the gh CLI authenticated via `gh auth login`
       raw_cli_equivalents:
       - pattern: '^\s*gh\s+(?:search\s+prs|pr\s+(?:view|diff|checks|review|merge|ready))\b'
         replacement: agent-do gh

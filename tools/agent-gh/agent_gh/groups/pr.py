@@ -9,7 +9,7 @@ from typing import Any
 from ..cache import current_user, ensure_state_dir, fetch_repos, read_repos_cache, write_repos_cache
 from ..refs import PrRef, parse_pr_ref, pr_gh_args
 from ..render import output, print_json, print_table
-from ..snapshot import now_iso, parse_github_time
+from ..snapshot import envelope, now_iso, parse_github_time
 from ..transport import GhError, gh_json, run_gh
 
 PR_VIEW_FIELDS = ",".join(
@@ -531,7 +531,7 @@ def cmd_awaiting(args: argparse.Namespace) -> None:
         audited_items = []
         for item in payload.get("items", []):
             ref = PrRef(repo=item.get("repo"), number=str(item.get("number")), original=item.get("ref") or "")
-            audit = audit_group.audit_pr(ref, probe_deploys=args.probe_deploys)
+            audit = audit_group.audit_pr(ref, detail=item, probe_deploys=args.probe_deploys)
             if args.replies:
                 audit["reply"] = audit_group.format_audit_reply(audit)
             audited_items.append({**item, "audit": audit})
@@ -705,6 +705,31 @@ def read_comment(args: argparse.Namespace) -> str | None:
         return args.comment
     return None
 
+def _pr_ref_text(ref: PrRef) -> str:
+    return f"{ref.repo}#{ref.number}"
+
+def _emit_pr_action(
+    args: argparse.Namespace,
+    *,
+    ref: PrRef,
+    command: str,
+    gh_args: list[str],
+    human: str,
+    data: dict[str, Any],
+) -> None:
+    if args.dry_run:
+        if args.json:
+            print_json(envelope(command, ref=_pr_ref_text(ref), data={**data, "dry_run": True, "gh_args": ["gh", *gh_args]}))
+        else:
+            print(f"[dry-run] would run: gh {' '.join(gh_args)}")
+        return
+
+    run_gh(gh_args)
+    if args.json:
+        print_json(envelope(command, ref=_pr_ref_text(ref), data=data))
+    else:
+        print(human)
+
 def cmd_close(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
     gh_args = ["pr", "close", *pr_gh_args(ref)]
@@ -713,11 +738,14 @@ def cmd_close(args: argparse.Namespace) -> None:
     comment = read_comment(args)
     if comment:
         gh_args.extend(["--comment", comment])
-    if args.dry_run:
-        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
-        return
-    run_gh(gh_args)
-    print(f"Closed {ref.repo}#{ref.number}")
+    _emit_pr_action(
+        args,
+        ref=ref,
+        command="close",
+        gh_args=gh_args,
+        human=f"Closed {ref.repo}#{ref.number}",
+        data={"closed": True, "delete_branch": bool(args.delete_branch), "commented": bool(comment)},
+    )
 
 def cmd_reopen(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
@@ -725,11 +753,14 @@ def cmd_reopen(args: argparse.Namespace) -> None:
     comment = read_comment(args)
     if comment:
         gh_args.extend(["--comment", comment])
-    if args.dry_run:
-        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
-        return
-    run_gh(gh_args)
-    print(f"Reopened {ref.repo}#{ref.number}")
+    _emit_pr_action(
+        args,
+        ref=ref,
+        command="reopen",
+        gh_args=gh_args,
+        human=f"Reopened {ref.repo}#{ref.number}",
+        data={"reopened": True, "commented": bool(comment)},
+    )
 
 def cmd_checkout(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
@@ -742,11 +773,20 @@ def cmd_checkout(args: argparse.Namespace) -> None:
         gh_args.append("--force")
     if args.recurse_submodules:
         gh_args.append("--recurse-submodules")
-    if args.dry_run:
-        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
-        return
-    run_gh(gh_args)
-    print(f"Checked out {ref.repo}#{ref.number}")
+    _emit_pr_action(
+        args,
+        ref=ref,
+        command="checkout",
+        gh_args=gh_args,
+        human=f"Checked out {ref.repo}#{ref.number}",
+        data={
+            "checked_out": True,
+            "branch": args.branch,
+            "detach": bool(args.detach),
+            "force": bool(args.force),
+            "recurse_submodules": bool(args.recurse_submodules),
+        },
+    )
 
 def append_repeated_flag(gh_args: list[str], flag: str, values: list[str] | None) -> None:
     for value in values or []:
@@ -812,19 +852,25 @@ def cmd_edit(args: argparse.Namespace) -> None:
     append_repeated_flag(gh_args, "--remove-reviewer", args.remove_reviewer)
     append_repeated_flag(gh_args, "--add-project", args.add_project)
     append_repeated_flag(gh_args, "--remove-project", args.remove_project)
-    if args.dry_run:
-        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
-        return
-    run_gh(gh_args)
-    print(f"Edited {ref.repo}#{ref.number}")
+    _emit_pr_action(
+        args,
+        ref=ref,
+        command="edit",
+        gh_args=gh_args,
+        human=f"Edited {ref.repo}#{ref.number}",
+        data={"edited": True},
+    )
 
 def cmd_update_branch(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
     gh_args = ["pr", "update-branch", *pr_gh_args(ref)]
     if args.rebase:
         gh_args.append("--rebase")
-    if args.dry_run:
-        print(f"[dry-run] would run: gh {' '.join(gh_args)}")
-        return
-    run_gh(gh_args)
-    print(f"Updated branch for {ref.repo}#{ref.number}")
+    _emit_pr_action(
+        args,
+        ref=ref,
+        command="update-branch",
+        gh_args=gh_args,
+        human=f"Updated branch for {ref.repo}#{ref.number}",
+        data={"updated": True, "rebase": bool(args.rebase)},
+    )

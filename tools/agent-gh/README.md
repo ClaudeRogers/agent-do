@@ -165,7 +165,7 @@ Commands that write to GitHub accept `--dry-run`:
 - Exits with code `0` after showing the preview
 - Nothing is sent to GitHub
 
-Supported on: `close`, `reopen`, `checkout`, `edit`, `update-branch`, `issue create`, `issue comment`, `issue close`, `issue reopen`, `issue label`, `issue assign`, `release create`, `release edit`, `release publish`, `release delete`, `release upload`, `release download`.
+Supported on: `approve`, `request-changes`, `comment`, `merge`, `ready`, `draft`, `close`, `reopen`, `checkout`, `edit`, `update-branch`, `pr create`, `issue create`, `issue comment`, `issue close`, `issue reopen`, `issue label`, `issue assign`, `release create`, `release edit`, `release publish`, `release delete`, `release upload`, `release download`.
 
 ---
 
