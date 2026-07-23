@@ -174,6 +174,27 @@ agent-do gh graphql @query.graphql [--field owner=ovachiever --field repo=agent-
 
 ---
 
+### Review items and branch sync
+
+```bash
+agent-do gh cr [owner/repo#N] [--json]
+agent-do gh cr <owner/repo#N> --address [--dry-run]
+agent-do gh cr --author <login> --address [--dry-run]
+
+agent-do gh sync [--author <login>] [--rebase] [--dry-run] [--limit N] [--json]
+```
+
+`cr --address` and non-dry-run `sync` require an explicit live approval:
+
+```bash
+agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:cr:address) gh cr owner/repo#123 --address
+agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:sync) gh sync --author @me
+```
+
+Both commands refuse fork PR heads for mutation paths, and nested Claude calls run with constrained tools for read/edit/git add/git commit only. `--dry-run` previews without live approval, cloning, Claude, pushes, or comments.
+
+---
+
 ## Dry-run behavior
 
 Commands that write to GitHub accept `--dry-run`:
@@ -182,7 +203,7 @@ Commands that write to GitHub accept `--dry-run`:
 - Exits with code `0` after showing the preview
 - Nothing is sent to GitHub
 
-Supported on: `approve`, `request-changes`, `comment`, `merge`, `ready`, `draft`, `close`, `reopen`, `checkout`, `edit`, `update-branch`, `pr create`, `issue create`, `issue comment`, `issue close`, `issue reopen`, `issue label`, `issue assign`, `release create`, `release edit`, `release publish`, `release delete`, `release upload`, `release download`.
+Supported on: `approve`, `request-changes`, `comment`, `merge`, `ready`, `draft`, `close`, `reopen`, `checkout`, `edit`, `update-branch`, `pr create`, `issue create`, `issue comment`, `issue close`, `issue reopen`, `issue label`, `issue assign`, `release create`, `release edit`, `release publish`, `release delete`, `release upload`, `release download`, `cr --address`, `sync`.
 
 ---
 

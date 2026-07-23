@@ -195,6 +195,27 @@ def build_parser() -> argparse.ArgumentParser:
     update_branch.add_argument("--json", action="store_true")
     update_branch.set_defaults(func=pr_group.cmd_update_branch)
 
+    from .groups import cr as cr_group  # noqa: PLC0415
+    cr = sub.add_parser("cr", help="Show or live-gated address unresolved PR review items")
+    cr.add_argument("pr", nargs="?")
+    cr.add_argument("--author", help="GitHub login for sweep mode (default: authenticated user)")
+    cr.add_argument("--address", action="store_true", help="Address review items via live-gated Claude, push, and comment")
+    cr.add_argument("--dry-run", action="store_true", help="Preview address work without cloning, Claude, push, or comments")
+    cr.add_argument("--limit", type=int, default=50, help="Max PRs to sweep (default: 50)")
+    cr.add_argument("--verbose", action="store_true")
+    cr.add_argument("--json", action="store_true")
+    cr.set_defaults(func=cr_group.cmd_cr)
+
+    from .groups import sync as sync_group  # noqa: PLC0415
+    sync = sub.add_parser("sync", help="Live-gated update of open PR branches with their base branch")
+    sync.add_argument("--author", help="GitHub login (default: authenticated user)")
+    sync.add_argument("--rebase", action="store_true", help="Use rebase instead of merge")
+    sync.add_argument("--dry-run", action="store_true", help="Preview branch updates without touching GitHub")
+    sync.add_argument("--limit", type=int, default=50, help="Max PRs to process (default: 50)")
+    sync.add_argument("--verbose", action="store_true")
+    sync.add_argument("--json", action="store_true")
+    sync.set_defaults(func=sync_group.cmd_sync)
+
     # ── Phase 1: issue ─────────────────────────────────────────────────────────
     _build_issue_parser(sub)
 
@@ -461,6 +482,9 @@ PR commands (existing):
   checkout <pr>                  Check out a pull request locally
   edit <pr>                      Edit pull request metadata
   update-branch <pr>             Update a PR branch from its base branch
+  cr [pr]                        Show unresolved review items
+  cr <pr> --address              +live-gated: invoke Claude, push, and comment
+  sync                           +live-gated: update your open PR branches
 
 Issue commands (new):
   issue list <owner/repo>        List issues

@@ -2843,6 +2843,9 @@ tools:
       release: Manage GitHub releases
       api: Raw GitHub REST API passthrough
       graphql: Raw GitHub GraphQL passthrough
+      cr: Show unresolved review items
+      cr --address: Live-gated address of unresolved review items
+      sync: Live-gated update of open PR branches with their base branch
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -2893,6 +2896,12 @@ tools:
       command: agent-gh api GET /rate_limit --json
     - intent: call the GitHub GraphQL API
       command: 'agent-gh graphql "{ viewer { login } }" --json'
+    - intent: show unresolved review items on a GitHub PR
+      command: agent-gh cr ovachiever/agent-do#3
+    - intent: address unresolved review items on a GitHub PR
+      command: agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:cr:address) gh cr ovachiever/agent-do#3 --address
+    - intent: update my GitHub PR branches
+      command: agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:sync) gh sync --author @me
     routing:
       default_command: inbox
       recommended_entrypoints:
@@ -2909,6 +2918,9 @@ tools:
       - agent-do gh release notes owner/repo --since <prev-tag>
       - agent-do gh api GET /rate_limit --json
       - agent-do gh graphql '<query>' --json
+      - agent-do gh cr owner/repo#123
+      - agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:cr:address) gh cr owner/repo#123 --address
+      - agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:sync) gh sync --author @me
       discover_keywords:
       - github pull request
       - github pr
@@ -2925,11 +2937,15 @@ tools:
       - github release
       - github api
       - github graphql
+      - github code review comments
+      - github sync branches
       prompt_patterns:
       - '\b(?:github|gh)\b.*\b(?:pull request|pr|review|merge|approve|checks?)\b'
       - '\b(?:github|gh)\b.*\bissues?\b'
       - '\b(?:github|gh)\b.*\breleases?\b'
       - '\b(?:github|gh)\b.*\b(?:api|graphql)\b'
+      - '\b(?:github|gh)\b.*\b(?:code\s+review|review\s+items?|review\s+comments?)\b'
+      - '\b(?:github|gh)\b.*\b(?:sync|update)\b.*\bbranches?\b'
       - '\b(?:what|which)\s+prs?\s+(?:need|needs|want|wants)\s+me\b'
       - '\bprs?\b.*\b(?:awaiting|waiting)\b.*\b(?:my|me)\b.*\breview\b'
       - '\bunresolved\s+(?:review\s+)?comments?\b'
@@ -2966,6 +2982,7 @@ tools:
       - release view
       - release latest
       - release download
+      - cr
       interact:
       - pr create
       - issue create
@@ -2979,6 +2996,8 @@ tools:
       - release publish
       - release delete
       - release upload
+      - cr --address
+      - sync
       - approve
       - request-changes
       - comment
@@ -3000,6 +3019,12 @@ tools:
         - sensitive
         graphql:
         - passthrough
+        - sensitive
+        cr --address:
+        - long_running
+        - sensitive
+        sync:
+        - long_running
         - sensitive
         release delete:
         - destructive

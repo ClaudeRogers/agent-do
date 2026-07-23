@@ -26,6 +26,8 @@ PR_VIEW_FIELDS = ",".join(
         "files",
         "headRefName",
         "headRefOid",
+        "headRepository",
+        "headRepositoryOwner",
         "isDraft",
         "labels",
         "latestReviews",
@@ -120,6 +122,9 @@ def normalize_pr_detail(ref: PrRef, payload: dict[str, Any]) -> dict[str, Any]:
     latest_reviews = payload.get("latestReviews") or []
     files = payload.get("files") or []
     status_rollup = payload.get("statusCheckRollup") or []
+    head_owner = (payload.get("headRepositoryOwner") or {}).get("login")
+    head_repo = (payload.get("headRepository") or {}).get("name")
+    head_repo_slug = f"{head_owner}/{head_repo}" if head_owner and head_repo else None
     return {
         "ref": f"{ref.repo}#{payload.get('number') or ref.number}",
         "repo": ref.repo,
@@ -130,6 +135,7 @@ def normalize_pr_detail(ref: PrRef, payload: dict[str, Any]) -> dict[str, Any]:
         "author": (payload.get("author") or {}).get("login"),
         "base": payload.get("baseRefName"),
         "head": payload.get("headRefName"),
+        "head_repo": head_repo_slug,
         "head_sha": payload.get("headRefOid"),
         "mergeable": payload.get("mergeable"),
         "merge_state": payload.get("mergeStateStatus"),

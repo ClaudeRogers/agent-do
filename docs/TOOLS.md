@@ -54,7 +54,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [excel](#excel) | AI-first Excel CLI for workbook automation | mixed | 11 |
 | [figma](#figma) | Control Figma | read | 3 |
 | [gcp](#gcp) | Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation for OAuth credentials | mixed | 19 |
-| [gh](#gh) | GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos | mixed | 28 |
+| [gh](#gh) | GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos | mixed | 31 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
@@ -1646,6 +1646,9 @@ Concurrency: `mixed`
 - `release`: Manage GitHub releases
 - `api`: Raw GitHub REST API passthrough
 - `graphql`: Raw GitHub GraphQL passthrough
+- `cr`: Show unresolved review items
+- `cr --address`: Live-gated address of unresolved review items
+- `sync`: Live-gated update of open PR branches with their base branch
 - `approve`: Approve a PR
 - `request-changes`: Request changes on a PR
 - `comment`: Comment on a PR
@@ -1699,15 +1702,22 @@ agent-do gh release notes ovachiever/agent-do --since v1.1.0 --json
 agent-do gh api GET /rate_limit --json
 # call the GitHub GraphQL API
 agent-do gh graphql "{ viewer { login } }" --json
+# show unresolved review items on a GitHub PR
+agent-do gh cr ovachiever/agent-do#3
+# address unresolved review items on a GitHub PR
+agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:cr:address) gh cr ovachiever/agent-do#3 --address
+# update my GitHub PR branches
+agent-do +live(scope=any,app=GitHub,ttl=15m,reason=gh:sync) gh sync --author @me
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `issue list`, `issue snapshot`, `issue triage`, `issue view`, `pr`, `prs`, `release download`, `release latest`, `release list`, `release notes`, `release view`, `repos`, `review`, `threads`, `whoami`
-- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `issue assign`, `issue close`, `issue comment`, `issue create`, `issue label`, `issue reopen`, `merge`, `pr create`, `ready`, `release create`, `release delete`, `release edit`, `release publish`, `release upload`, `reopen`, `request-changes`, `update-branch`
+- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `cr`, `diff`, `doctrine`, `inbox`, `issue list`, `issue snapshot`, `issue triage`, `issue view`, `pr`, `prs`, `release download`, `release latest`, `release list`, `release notes`, `release view`, `repos`, `review`, `threads`, `whoami`
+- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `cr --address`, `draft`, `edit`, `issue assign`, `issue close`, `issue comment`, `issue create`, `issue label`, `issue reopen`, `merge`, `pr create`, `ready`, `release create`, `release delete`, `release edit`, `release publish`, `release upload`, `reopen`, `request-changes`, `sync`, `update-branch`
 - destructive (irreversible data loss; confirm before auto-running): `release delete`
-- sensitive (emits or persists secret material; guard output): `api`, `graphql`
+- sensitive (emits or persists secret material; guard output): `api`, `cr --address`, `graphql`, `sync`
 - passthrough (arbitrary-payload escape hatch; beat decided by the argument): `api`, `graphql`
+- long_running (daemon/stream/session; may never return): `cr --address`, `sync`
 
 ### ghidra
 
