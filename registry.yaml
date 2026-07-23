@@ -4595,7 +4595,7 @@ tools:
     - list SLOs and retrieve error budget history
     - list service catalog definitions
     - observability snapshot combining monitors, events, and SLOs
-    - dry-run mode for all write commands (exit 0 with structured JSON preview)
+    - dry-run mode for all write commands (exit 0; text preview by default, structured JSON preview with --json)
     - 'automation exit codes: monitor-status and snapshot return 1 when monitors are alerting'
     commands:
       monitors: 'List monitors: monitors [--tag env:prod] [--name CPU] [--state Alert]'
@@ -4683,8 +4683,8 @@ tools:
       - slo
       readiness:
         check: agent-do datadog monitors
-        fix: agent-do creds store DD_API_KEY --stdin
-        note: Requires DD_API_KEY and DD_APP_KEY; optional DD_SITE for non-US1 regions
+        fix: agent-do creds check --tool datadog
+        note: Requires DD_API_KEY and DD_APP_KEY; store both with agent-do creds store <KEY> --stdin. Optional DD_SITE for non-US1 regions
     contracts:
       snapshot:
       - monitors

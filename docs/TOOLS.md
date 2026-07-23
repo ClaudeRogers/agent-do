@@ -1146,7 +1146,7 @@ Concurrency: `mixed`
 - list SLOs and retrieve error budget history
 - list service catalog definitions
 - observability snapshot combining monitors, events, and SLOs
-- dry-run mode for all write commands (exit 0 with structured JSON preview)
+- dry-run mode for all write commands (exit 0; text preview by default, structured JSON preview with --json)
 - automation exit codes: monitor-status and snapshot return 1 when monitors are alerting
 
 **Commands**
