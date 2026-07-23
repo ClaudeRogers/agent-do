@@ -220,13 +220,33 @@ cmd_scan() {
 }
 
 cmd_score() {
-    local url="" quiet=false viewport=""
+    local url="" quiet=false viewport="" json_out=false
     while [[ $# -gt 0 ]]; do
-        case "$1" in --current|-c) shift ;; --quiet|-q) quiet=true; shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
+        case "$1" in --current|-c) shift ;; --quiet|-q) quiet=true; shift ;; --json|-j) json_out=true; shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
     done
     set_viewport_if_requested "$viewport"
     navigate_if_url "$url"
     inject_engine || exit 1
+
+    if [[ "$json_out" == true ]]; then
+        python3 - "$DPT_RESULT_FILE" << 'SCORE_JSON_PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+syn = data.get("synthesis", {})
+meta = data.get("meta", {})
+out = {
+    "overall_score": syn.get("overall_score"),
+    "overall_grade": syn.get("overall_grade"),
+    "dimensions": syn.get("dimensions", {}),
+    "critical_failures": syn.get("critical_failures", []),
+    "top_strengths": syn.get("top_strengths", []),
+    "meta": meta,
+}
+print(json.dumps(out))
+SCORE_JSON_PY
+        return
+    fi
 
     local qflag="false"; [[ "$quiet" == true ]] && qflag="true"
     python3 - "$DPT_RESULT_FILE" "$qflag" << 'SCORE_PY'
@@ -261,29 +281,35 @@ SCORE_PY
 }
 
 cmd_report() {
-    local url="" viewport=""
+    local url="" viewport="" json_out=false
     while [[ $# -gt 0 ]]; do
-        case "$1" in --current|-c) shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
+        case "$1" in --current|-c) shift ;; --json|-j) json_out=true; shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
     done
     set_viewport_if_requested "$viewport"
     navigate_if_url "$url"
     inject_engine || exit 1
-    python3 "$DPT_REPORT" "$DPT_RESULT_FILE"
+    if [[ "$json_out" == true ]]; then
+        python3 "$DPT_REPORT" --json "$DPT_RESULT_FILE"
+    else
+        python3 "$DPT_REPORT" "$DPT_RESULT_FILE"
+    fi
 }
 
 cmd_violations() {
-    local url="" viewport=""
+    local url="" viewport="" json_out=false
     while [[ $# -gt 0 ]]; do
-        case "$1" in --current|-c) shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
+        case "$1" in --current|-c) shift ;; --json|-j) json_out=true; shift ;; --viewport) viewport="$2"; shift 2 ;; --*) shift ;; *) url="$1"; shift ;; esac
     done
     set_viewport_if_requested "$viewport"
     navigate_if_url "$url"
     inject_engine || exit 1
 
-    python3 - "$DPT_RESULT_FILE" << 'VIOL_PY'
+    local jflag="false"; [[ "$json_out" == true ]] && jflag="true"
+    python3 - "$DPT_RESULT_FILE" "$jflag" << 'VIOL_PY'
 import json, sys
 with open(sys.argv[1]) as f:
     data = json.load(f)
+json_out = sys.argv[2] == "true"
 syn = data.get("synthesis", {})
 crit = syn.get("critical_failures", [])
 violations = []
@@ -298,6 +324,10 @@ for lk, pfx in [("chromatic_field","CF"),("typographic_skeleton","TS"),("spatial
             if key in cd: v[key] = cd[key]
         if "total_interactive" in cd: v["total"] = cd["total_interactive"]
         violations.append(v)
+
+if json_out:
+    print(json.dumps({"critical_failures": crit, "count": len(violations), "violations": violations}))
+    sys.exit(0)
 
 print(f"\n  VIOLATIONS ({len(violations)} checks failing)\n")
 if crit:

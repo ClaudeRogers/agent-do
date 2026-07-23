@@ -215,6 +215,39 @@ cmd_tunnel() {
 }
 
 cmd_list() {
+    local json_mode=""
+    for arg in "$@"; do
+        case "$arg" in
+            --json) json_mode=1 ;;
+        esac
+    done
+
+    if [[ -n "$json_mode" ]]; then
+        local config="${SSH_CONFIG:-$HOME/.ssh/config}"
+        SSH_CONFIG="$config" python3 -c "
+import json, os
+
+config_path = os.environ.get('SSH_CONFIG', os.path.expanduser('~/.ssh/config'))
+hosts = []
+if os.path.isfile(config_path):
+    with open(config_path) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.lower().startswith('host ') and '*' not in stripped:
+                parts = stripped.split()
+                for name in parts[1:]:
+                    if '*' not in name:
+                        hosts.append(name)
+
+print(json.dumps({
+    'config': config_path,
+    'count': len(hosts),
+    'hosts': hosts,
+}, indent=2))
+"
+        return
+    fi
+
     echo "SSH Hosts (from ~/.ssh/config):"
     echo
     list_hosts | while read -r host; do
@@ -336,7 +369,8 @@ case "${1:-help}" in
         cmd_tunnel "$@"
         ;;
     list|ls)
-        cmd_list
+        shift
+        cmd_list "$@"
         ;;
     test|check)
         shift

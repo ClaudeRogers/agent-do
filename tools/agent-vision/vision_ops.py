@@ -15,9 +15,53 @@ from pathlib import Path
 from typing import Any, Optional, List, Dict, Tuple
 import tempfile
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+LIB_DIR = ROOT_DIR / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from ai_router import llm_call
+
 import cv2
 import numpy as np
 from PIL import Image
+
+# Bounded-capture ceiling. macOS ships no timeout(1) and a stalled camera,
+# blocked screen-recording permission, or an unresponsive osascript/agent-ios
+# subprocess can block a frame grab forever. Every capture path is bounded so a
+# stalled source fails fast with a structured error instead of hanging callers.
+CAPTURE_TIMEOUT = float(os.environ.get('AGENT_VISION_CAPTURE_TIMEOUT', '12'))
+
+
+class CaptureTimeout(Exception):
+    """Raised when a capture path exceeds CAPTURE_TIMEOUT seconds."""
+
+
+def _run_bounded(fn, timeout: float = CAPTURE_TIMEOUT):
+    """Run fn() in a worker thread, bounded by timeout.
+
+    cv2.VideoCapture()/read() have no native timeout and can block on a stalled
+    device. Running them in a daemon thread and joining with a deadline lets the
+    verb return promptly; the thread is abandoned (daemon) on timeout so the
+    process can still exit.
+    """
+    box = {}
+
+    def worker():
+        try:
+            box['value'] = fn()
+        except BaseException as exc:  # noqa: BLE001 - surface any capture error
+            box['error'] = exc
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise CaptureTimeout(f"capture exceeded {timeout:g}s")
+    if 'error' in box:
+        raise box['error']
+    return box.get('value')
+
 
 # Optional imports - loaded on demand
 def get_yolo():
@@ -123,22 +167,27 @@ class VisionSession:
             return None
         
         elif self.source_type == 'screen':
-            return self._capture_screen()
-        
+            return _run_bounded(self._capture_screen)
+
         elif self.source_type == 'window':
-            return self._capture_window(self.source_path)
-        
+            return _run_bounded(lambda: self._capture_window(self.source_path))
+
         elif self.source_type == 'ios':
-            return self._capture_ios()
+            return _run_bounded(self._capture_ios)
         
         else:
-            cap = self._get_capture()
-            if cap is None:
-                return None
-            ret, frame = cap.read()
-            if not ret:
-                return None
-            return frame
+            # webcam/file/rtsp: VideoCapture() and read() have no native
+            # timeout and can block on a stalled device or stream. Bound the
+            # whole open+read so a dead camera fails fast instead of hanging.
+            def _grab():
+                cap = self._get_capture()
+                if cap is None:
+                    return None
+                ret, frame = cap.read()
+                if not ret:
+                    return None
+                return frame
+            return _run_bounded(_grab)
     
     def _capture_screen(self, display: int = 0) -> Optional[np.ndarray]:
         """Capture screen on macOS."""
@@ -150,13 +199,16 @@ class VisionSession:
         tmp_file.close()
         
         try:
-            # Try without -D flag first (works better)
-            result = subprocess.run(['screencapture', '-x', tmp_path], 
-                         capture_output=True)
+            # Try without -D flag first (works better). Bound it: a blocked
+            # screen-recording permission prompt can leave screencapture hung.
+            result = subprocess.run(['screencapture', '-x', tmp_path],
+                         capture_output=True, timeout=CAPTURE_TIMEOUT)
             if result.returncode != 0:
                 return None
             frame = cv2.imread(tmp_path)
             return frame
+        except subprocess.TimeoutExpired:
+            raise CaptureTimeout(f"screencapture exceeded {CAPTURE_TIMEOUT:g}s")
         except Exception:
             return None
         finally:
@@ -177,21 +229,26 @@ class VisionSession:
         '''
         
         try:
-            result = subprocess.run(['osascript', '-e', script], 
-                                  capture_output=True, text=True)
+            # Bound both subprocesses: osascript can block on a stuck System
+            # Events query and screencapture on a blocked permission prompt.
+            result = subprocess.run(['osascript', '-e', script],
+                                  capture_output=True, text=True,
+                                  timeout=CAPTURE_TIMEOUT)
             if result.returncode != 0:
                 return None
-            
+
             window_id = result.stdout.strip()
-            
+
             tmp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
             tmp_path = tmp_file.name
             tmp_file.close()
-            
+
             subprocess.run(['screencapture', '-x', '-l', window_id, tmp_path],
-                         capture_output=True, check=True)
+                         capture_output=True, check=True, timeout=CAPTURE_TIMEOUT)
             frame = cv2.imread(tmp_path)
             return frame
+        except subprocess.TimeoutExpired:
+            raise CaptureTimeout(f"window capture exceeded {CAPTURE_TIMEOUT:g}s")
         except:
             return None
         finally:
@@ -209,12 +266,15 @@ class VisionSession:
                 return None
             
             result = subprocess.run([str(agent_ios), 'screenshot', tmp_path],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True,
+                                  timeout=CAPTURE_TIMEOUT)
             if result.returncode != 0:
                 return None
-            
+
             frame = cv2.imread(tmp_path)
             return frame
+        except subprocess.TimeoutExpired:
+            raise CaptureTimeout(f"iOS capture exceeded {CAPTURE_TIMEOUT:g}s")
         except:
             return None
     
@@ -1087,88 +1147,33 @@ class VisionSession:
         tmp_path = '/tmp/vision_frame.png'
         cv2.imwrite(tmp_path, frame)
         
-        # Try OpenAI
-        if os.environ.get('OPENAI_API_KEY'):
-            return self._describe_openai(tmp_path, detail, focus)
-        
-        # Try Anthropic
-        if os.environ.get('ANTHROPIC_API_KEY'):
-            return self._describe_anthropic(tmp_path, detail, focus)
-        
-        return None
-    
-    def _describe_openai(self, image_path: str, detail: str, focus: str) -> Optional[str]:
-        """Describe image using OpenAI GPT-4V."""
+        return self._describe_llm(tmp_path, detail, focus)
+
+    def _describe_llm(
+        self,
+        image_path: str,
+        detail: str,
+        focus: str,
+        question: str = None,
+    ) -> Optional[str]:
+        """Describe or query an image through the configured vision role."""
         try:
-            import openai
-            import base64
-            
-            with open(image_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            prompt = "Describe what you see in this image."
-            if focus:
+            prompt = question or "Describe what you see in this image."
+            if focus and not question:
                 prompt = f"Describe what you see in this image, focusing on {focus}."
             if detail == 'high':
                 prompt += " Be very detailed."
             elif detail == 'low':
                 prompt += " Be brief."
-            
-            client = openai.OpenAI()
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/png;base64,{image_data}"
-                        }}
-                    ]
-                }],
-                max_tokens=500
-            )
-            
-            return response.choices[0].message.content
-        except Exception as e:
-            return None
-    
-    def _describe_anthropic(self, image_path: str, detail: str, focus: str) -> Optional[str]:
-        """Describe image using Anthropic Claude."""
-        try:
-            import anthropic
-            import base64
-            
-            with open(image_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            prompt = "Describe what you see in this image."
-            if focus:
-                prompt = f"Describe what you see in this image, focusing on {focus}."
-            if detail == 'high':
-                prompt += " Be very detailed."
-            elif detail == 'low':
-                prompt += " Be brief."
-            
-            client = anthropic.Anthropic()
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+
+            response = llm_call(
+                "vision",
+                [{"role": "user", "content": prompt}],
+                images=[image_path],
                 max_tokens=500,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": image_data
-                        }},
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
             )
-            
-            return response.content[0].text
-        except Exception as e:
+            return response.text
+        except Exception:
             return None
     
     def _ask_about_frame(self, frame: np.ndarray, question: str) -> Optional[str]:
@@ -1176,13 +1181,7 @@ class VisionSession:
         tmp_path = '/tmp/vision_frame.png'
         cv2.imwrite(tmp_path, frame)
         
-        if os.environ.get('OPENAI_API_KEY'):
-            return self._describe_openai(tmp_path, 'medium', None)
-        
-        if os.environ.get('ANTHROPIC_API_KEY'):
-            return self._describe_anthropic(tmp_path, 'medium', None)
-        
-        return None
+        return self._describe_llm(tmp_path, 'medium', None, question=question)
 
 
 def main():
@@ -1268,11 +1267,48 @@ def main():
     p.add_argument('--until', help='Record until object detected')
     p.add_argument('--fps', type=int, default=30, help='Frames per second')
     
-    args = parser.parse_args()
-    
-    session = VisionSession()
+    # --json is accepted as a recognized flag everywhere; output is already a
+    # single JSON document, so stripping it here keeps plain-mode output
+    # byte-identical while letting `vision <verb> --json` exit cleanly instead
+    # of failing argparse with empty stdout.
+    argv = [a for a in sys.argv[1:] if a != '--json']
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+
+    try:
+        session = VisionSession()
+    except CaptureTimeout as exc:
+        print(json.dumps({
+            "ok": False,
+            "error": f"Capture stalled: {exc}",
+            "exit_code": 3
+        }, indent=2))
+        sys.exit(3)
     result = {"ok": False, "error": "Unknown command"}
-    
+
+    try:
+        result = _dispatch(session, args)
+    except CaptureTimeout as exc:
+        result = {
+            "ok": False,
+            "error": f"Capture stalled: {exc}",
+            "suggestion": "Source is configured but the device/permission stalled. "
+                          "Re-check the source or run 'agent-vision disconnect'.",
+            "exit_code": 3
+        }
+
+    print(json.dumps(result, indent=2, default=str))
+    sys.exit(result.get('exit_code', 0) if not result.get('ok') else 0)
+
+
+def _dispatch(session, args):
+    """Route a parsed command to its session handler. Raises CaptureTimeout if
+    a configured source stalls; main() converts that to a structured error."""
+    result = {"ok": False, "error": "Unknown command"}
+
     if args.command == 'source':
         result = session.cmd_source(args.type, args.path)
     elif args.command == 'status':
@@ -1330,12 +1366,8 @@ def main():
             until=args.until,
             fps=args.fps
         )
-    elif args.command is None:
-        parser.print_help()
-        sys.exit(0)
-    
-    print(json.dumps(result, indent=2, default=str))
-    sys.exit(result.get('exit_code', 0) if not result.get('ok') else 0)
+
+    return result
 
 
 if __name__ == '__main__':

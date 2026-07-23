@@ -1,298 +1,85 @@
 #!/usr/bin/env bash
-# agent-notion - Notion integration
+# agent-notion - Notion team operating layer for agents.
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 show_help() {
-    cat << 'EOF'
-agent-notion - Notion integration
+    cat <<'EOF'
+agent-notion - Notion team operating layer
 
-Commands:
-  search <query>             Search pages and databases
-  page <id>                  Get page content
-  create <title>             Create new page
-  append <id> <text>         Append text to page
-  databases                  List databases
-  snapshot                   Workspace state as JSON (databases, recent pages)
+CONNECT & SNAPSHOT
+  doctor [--json]                         Credential, API, cache, and capability readiness
+  snapshot [--json]                       Workspace/cache summary for agents
+  auth status [--json]                    Token identity and source
+  workspace [--json]                      Bot, users, data sources, and schema mapping
 
-Environment:
-  NOTION_TOKEN               Integration token (secret_xxx)
-  NOTION_DATABASE_ID         Default database ID
+READ
+  users [--json]                          List accessible workspace users
+  search <query> [--json]                 Search pages/data sources/databases
+  read <page-or-url> [--json]             Read page metadata, blocks, and comments
+  blocks <page-or-url> [--json]           Recursive block tree
+  data-sources list [--json]              List accessible data sources
+  data-sources schema <id|name|url>       Inspect a data source schema
+  data-sources query <id|name|url>        Query a data source
 
-Examples:
-  agent-notion search "meeting notes"
-  agent-notion create "New Page"
-  agent-notion append abc123 "Added content"
+WRITE & VERIFY
+  save --title T --content T              Create a team page or data-source row
+  save-group --title T --child n:body     Create a linked hub plus child pages
+  task add --title T [--owner ID]         Create a task record using schema mapping
+  decision record --title T --content T   Create a decision record
+  handoff create --title T --content T    Create an agent handoff record
+  comment add <page> --text T             Add a page/block comment
+  verify <page-or-url> [--json]           Read back page existence and metadata
+
+CACHE & FRESHNESS
+  sync [--limit N] [--json]               Poll Notion and refresh local cache
+  cache search <query> [--json]           FTS search over the local cache
+  cache status [--json]                   Cache counts and last sync
+  webhooks doctor [--json]                Webhook receiver/store readiness
+  webhooks ingest --body-file PATH        Validate/store webhook event payload
+
+TEAM SCHEMA
+  bootstrap-team [--json]                 Inspect/adopt existing team data sources
+  schema show [--json]                    Show adopted role -> data source mapping
+
+SEMANTIC
+  embed status [--json]                   Semantic cache status
+  embed refresh [--limit N] [--json]      Embed cached pages/blocks when keys exist
+
+COMMON OPTIONS
+  --json                                  Structured JSON output
+  --limit N                               Result limit
+  --data-source ID|name|url               Target data source
+  --parent-page ID|url                    Target parent page
+  --type task|decision|handoff|note        Team content type
+  --scope local|team|project-public|public Metadata scope for saved content
+
+ENVIRONMENT
+  NOTION_TOKEN                            Required Notion internal integration token
+  NOTION_DATA_SOURCE_ID                   Default data source for saves
+  NOTION_PARENT_PAGE_ID                   Default parent page for page saves
+  NOTION_WEBHOOK_VERIFICATION_TOKEN       Optional webhook HMAC token
+  AGENT_NOTION_WORKSPACE_ID               Local cache namespace override
+  AGENT_NOTION_MOCK_FILE                  Test-only mock response map
+
+API KEYS
+  agent-do creds required notion          Show setup and feature-specific keys
+  agent-do creds store NOTION_TOKEN --stdin
+
+NOTES
+  Uses Notion-Version 2025-09-03 and the databases/data-sources model.
+  Polling sync is the baseline. Webhooks are an incremental freshness upgrade
+  and still require Notion-side subscription setup to a public HTTPS endpoint.
 EOF
 }
 
-NOTION_API="https://api.notion.com/v1"
-
-notion_request() {
-    local method="$1"
-    local endpoint="$2"
-    local data="${3:-}"
-    local token="${NOTION_TOKEN:-}"
-
-    if [[ -z "$token" ]]; then
-        echo "Error: NOTION_TOKEN not set"
-        return 1
-    fi
-
-    local args=(-s -X "$method")
-    args+=(-H "Authorization: Bearer $token")
-    args+=(-H "Content-Type: application/json")
-    args+=(-H "Notion-Version: 2022-06-28")
-
-    [[ -n "$data" ]] && args+=(-d "$data")
-
-    curl "${args[@]}" "${NOTION_API}${endpoint}"
-}
-
-cmd_search() {
-    local query="$*"
-
-    if [[ -z "$query" ]]; then
-        echo "Error: Search query required"
-        return 1
-    fi
-
-    notion_request POST "/search" "{\"query\": \"$query\"}" | \
-        python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-if 'results' in r:
-    for item in r['results'][:10]:
-        title = ''
-        if item['object'] == 'page':
-            props = item.get('properties', {})
-            for key, val in props.items():
-                if val.get('type') == 'title':
-                    titles = val.get('title', [])
-                    if titles:
-                        title = titles[0].get('plain_text', '')
-                    break
-        elif item['object'] == 'database':
-            titles = item.get('title', [])
-            if titles:
-                title = titles[0].get('plain_text', '')
-        print(f\"{item['object']}: {title} ({item['id']})\")
-else:
-    print(f'Error: {r}')
-"
-}
-
-cmd_page() {
-    local page_id="${1:-}"
-
-    if [[ -z "$page_id" ]]; then
-        echo "Error: Page ID required"
-        return 1
-    fi
-
-    # Get page blocks
-    notion_request GET "/blocks/${page_id}/children" | \
-        python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-if 'results' in r:
-    for block in r['results']:
-        btype = block.get('type', '')
-        content = block.get(btype, {})
-        if 'rich_text' in content:
-            for rt in content['rich_text']:
-                print(rt.get('plain_text', ''), end='')
-            print()
-        elif 'text' in content:
-            print(content['text'])
-else:
-    print(f'Error: {r}')
-"
-}
-
-cmd_create() {
-    local title="$*"
-    local database_id="${NOTION_DATABASE_ID:-}"
-
-    if [[ -z "$title" ]]; then
-        echo "Error: Title required"
-        return 1
-    fi
-
-    local data
-    if [[ -n "$database_id" ]]; then
-        data="{
-            \"parent\": {\"database_id\": \"$database_id\"},
-            \"properties\": {
-                \"Name\": {\"title\": [{\"text\": {\"content\": \"$title\"}}]}
-            }
-        }"
-    else
-        # Create as top-level page (needs workspace parent)
-        echo "Error: NOTION_DATABASE_ID required for creating pages"
-        return 1
-    fi
-
-    notion_request POST "/pages" "$data" | \
-        python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-if 'id' in r:
-    print(f\"Created page: {r['id']}\")
-else:
-    print(f'Error: {r}')
-"
-}
-
-cmd_append() {
-    local page_id="${1:-}"
-    shift || true
-    local text="$*"
-
-    if [[ -z "$page_id" ]] || [[ -z "$text" ]]; then
-        echo "Error: Page ID and text required"
-        return 1
-    fi
-
-    local data="{
-        \"children\": [{
-            \"object\": \"block\",
-            \"type\": \"paragraph\",
-            \"paragraph\": {
-                \"rich_text\": [{\"type\": \"text\", \"text\": {\"content\": \"$text\"}}]
-            }
-        }]
-    }"
-
-    notion_request PATCH "/blocks/${page_id}/children" "$data" | \
-        python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-if 'results' in r:
-    print('Appended text to page')
-else:
-    print(f'Error: {r}')
-"
-}
-
-cmd_databases() {
-    notion_request POST "/search" '{"filter": {"property": "object", "value": "database"}}' | \
-        python3 -c "
-import sys, json
-r = json.load(sys.stdin)
-if 'results' in r:
-    for db in r['results']:
-        titles = db.get('title', [])
-        title = titles[0].get('plain_text', 'Untitled') if titles else 'Untitled'
-        print(f\"{title}: {db['id']}\")
-else:
-    print(f'Error: {r}')
-"
-}
-
-cmd_snapshot() {
-    local token="${NOTION_TOKEN:-}"
-    if [[ -z "$token" ]]; then
-        echo '{"error": "NOTION_TOKEN not set"}'
-        return 1
-    fi
-
-    python3 -c "
-import urllib.request, json, os
-
-token = os.environ.get('NOTION_TOKEN', '')
-headers = {
-    'Authorization': f'Bearer {token}',
-    'Content-Type': 'application/json',
-    'Notion-Version': '2022-06-28',
-}
-
-def notion_post(endpoint, data=None):
-    url = f'https://api.notion.com/v1{endpoint}'
-    body = json.dumps(data).encode() if data else b'{}'
-    req = urllib.request.Request(url, data=body, headers=headers, method='POST')
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except Exception as e:
-        return {'error': str(e)}
-
-# Get databases
-db_resp = notion_post('/search', {'filter': {'property': 'object', 'value': 'database'}})
-databases = []
-if db_resp.get('results'):
-    for db in db_resp['results'][:20]:
-        titles = db.get('title', [])
-        title = titles[0].get('plain_text', 'Untitled') if titles else 'Untitled'
-        databases.append({
-            'id': db['id'],
-            'title': title,
-            'url': db.get('url', ''),
-        })
-
-# Get recent pages
-page_resp = notion_post('/search', {
-    'filter': {'property': 'object', 'value': 'page'},
-    'sort': {'direction': 'descending', 'timestamp': 'last_edited_time'},
-    'page_size': 15,
-})
-pages = []
-if page_resp.get('results'):
-    for page in page_resp['results']:
-        title = 'Untitled'
-        props = page.get('properties', {})
-        for key, val in props.items():
-            if val.get('type') == 'title':
-                titles = val.get('title', [])
-                if titles:
-                    title = titles[0].get('plain_text', 'Untitled')
-                break
-        pages.append({
-            'id': page['id'],
-            'title': title,
-            'last_edited': page.get('last_edited_time', ''),
-            'url': page.get('url', ''),
-        })
-
-snapshot = {
-    'token_valid': not db_resp.get('error') and not page_resp.get('error'),
-    'databases': {'count': len(databases), 'items': databases},
-    'recent_pages': {'count': len(pages), 'items': pages},
-}
-print(json.dumps(snapshot, indent=2))
-"
-}
-
-# Main
 case "${1:-help}" in
-    search|find)
-        shift
-        cmd_search "$@"
-        ;;
-    page|get|read)
-        shift
-        cmd_page "$@"
-        ;;
-    create|new)
-        shift
-        cmd_create "$@"
-        ;;
-    append|add)
-        shift
-        cmd_append "$@"
-        ;;
-    databases|dbs)
-        cmd_databases
-        ;;
-    snapshot|snap)
-        cmd_snapshot
-        ;;
     help|--help|-h)
         show_help
         ;;
     *)
-        echo "Unknown command: $1"
-        echo "Try: agent-notion help"
-        exit 1
+        exec python3 "$SCRIPT_DIR/notion_lib/engine.py" "$@"
         ;;
 esac

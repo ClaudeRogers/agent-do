@@ -630,6 +630,20 @@ def should_send_rule(
     }
 
 
+def _looks_raw_target(name: str) -> bool:
+    """Phone number, email, URL, or path — a deliverable target, not an alias."""
+    if "@" in name or "/" in name or name.startswith(("+", "http")):
+        return True
+    return sum(ch.isdigit() for ch in name) >= 7
+
+
+def _provider_timeout() -> int:
+    try:
+        return int(os.environ.get("AGENT_DO_NOTIFY_TIMEOUT", "90"))
+    except ValueError:
+        return 90
+
+
 def resolve_attempts(
     config: dict[str, Any],
     recipient_name: str,
@@ -653,8 +667,12 @@ def resolve_attempts(
                 attempts.append({"provider": provider, "target": target, "recipient": recipient_name})
         return attempts
 
+    # The defaults fallback exists for RAW targets (phone numbers, emails,
+    # URLs) riding the default providers. A bare word that is not a
+    # configured alias must error — otherwise 'me' becomes an SMS
+    # destination and the send stalls in Messages.app (2026-06-29 incident).
     order = via or config.get("defaults", {}).get("via", [])
-    if not order:
+    if not order or (not via and not _looks_raw_target(recipient_name)):
         raise ValueError(
             f"Recipient '{recipient_name}' is not configured. "
             "Use agent-do notify set-recipient <alias> ... or pass --via <provider>."
@@ -812,15 +830,27 @@ def execute_provider(
         env["AGENT_DO_NOTIFY_PROVIDER"] = provider
         env["AGENT_DO_NOTIFY_RECIPIENT"] = recipient_name
         env["AGENT_DO_NOTIFY_SUBJECT"] = subject
-        completed = subprocess.run(
-            target,
-            shell=True,
-            text=True,
-            input=message,
-            capture_output=True,
-            check=False,
-            env=env,
-        )
+        try:
+            completed = subprocess.run(
+                target,
+                shell=True,
+                text=True,
+                input=message,
+                capture_output=True,
+                check=False,
+                env=env,
+                timeout=_provider_timeout(),
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "provider": provider,
+                "target": target,
+                "command": target,
+                "exit_code": 124,
+                "success": False,
+                "stdout": "",
+                "stderr": f"provider timed out after {_provider_timeout()}s",
+            }
         return {
             "provider": provider,
             "target": target,
@@ -851,12 +881,24 @@ def execute_provider(
     else:
         raise ValueError(f"Unsupported notify provider: {provider}")
 
-    completed = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=_provider_timeout(),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "provider": provider,
+            "target": target,
+            "command": command,
+            "exit_code": 124,
+            "success": False,
+            "stdout": "",
+            "stderr": f"provider timed out after {_provider_timeout()}s",
+        }
     return {
         "provider": provider,
         "target": target,
@@ -936,15 +978,18 @@ def send_notification(
         result["recipient"] = recipient_name
         result["subject"] = subject
         results.append(result)
-        history_entries.append(
-            make_history_entry(
-                recipient=recipient_name,
-                provider_result=result,
-                message=message,
-                subject=subject,
-                history_meta=history_meta,
-            )
+        # Append immediately: if a later attempt stalls and the whole process
+        # is killed, the evidence of THIS attempt survives (2026-06-29: a
+        # batched write meant a killed emit left zero history).
+        entry = make_history_entry(
+            recipient=recipient_name,
+            provider_result=result,
+            message=message,
+            subject=subject,
+            history_meta=history_meta,
         )
+        history_entries.append(entry)
+        append_history([entry])
 
         if result["success"]:
             overall_success = True
@@ -953,8 +998,6 @@ def send_notification(
 
     if dry_run:
         overall_success = True
-    else:
-        append_history(history_entries)
 
     return {
         "success": overall_success,

@@ -778,6 +778,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-datadog",
         description="Datadog observability: monitors, logs, metrics, incidents, dashboards, SLOs",
+        epilog=(
+            "Exit codes: write-command --dry-run previews exit 2 without sending HTTP; "
+            "monitor-status and snapshot exit 1 when monitors are alerting."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     sub = parser.add_subparsers(dest="command", required=True)

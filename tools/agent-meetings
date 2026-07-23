@@ -109,6 +109,37 @@ provider_running() {
     esac
 }
 
+# Bounded osascript: macOS ships no timeout(1), and probing browser/meeting
+# apps can stall forever on TCC prompts or a launching app. Run the script
+# through a python3 subprocess timeout so a frozen probe reports "unavailable"
+# instead of hanging the whole command. Prints stdout on success; nonzero +
+# empty on timeout, missing osascript, or any error.
+run_osascript_bounded() {
+    local secs="$1"
+    local script="$2"
+    OSASCRIPT_BODY="$script" python3 - "$secs" <<'PY'
+import os
+import subprocess
+import sys
+
+secs = float(sys.argv[1])
+script = os.environ.get("OSASCRIPT_BODY", "")
+try:
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=secs,
+    )
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+sys.stdout.write(result.stdout)
+sys.exit(result.returncode)
+PY
+}
+
 frontmost_browser_url() {
     if [[ -n "${AGENT_DO_MEETINGS_FRONTMOST_URL:-}" ]]; then
         printf '%s\n' "$AGENT_DO_MEETINGS_FRONTMOST_URL"
@@ -119,8 +150,8 @@ frontmost_browser_url() {
         return 1
     fi
 
-    osascript <<'EOF' 2>/dev/null
-tell application "System Events"
+    local script
+    script='tell application "System Events"
     set frontApp to name of first application process whose frontmost is true
 end tell
 
@@ -136,8 +167,9 @@ else if frontApp is "Safari" then
             return URL of current tab of front window
         end if
     end tell
-end if
-EOF
+end if'
+
+    run_osascript_bounded "${AGENT_DO_MEETINGS_PROBE_TIMEOUT:-10}" "$script" 2>/dev/null
 }
 
 detect_active_provider() {
@@ -147,8 +179,15 @@ detect_active_provider() {
         return 0
     fi
 
+    # Reuse a pre-fetched frontmost URL when the caller supplies one ($1) so a
+    # single bounded osascript probe serves both detection and reporting —
+    # avoids stacking two probe timeouts in one command.
     local url
-    url="$(frontmost_browser_url 2>/dev/null || true)"
+    if [[ $# -gt 0 ]]; then
+        url="$1"
+    else
+        url="$(frontmost_browser_url 2>/dev/null || true)"
+    fi
     if [[ "$url" == *"meet.google.com"* ]]; then
         echo "meet"
         return 0
@@ -274,8 +313,8 @@ parse_provider_flag() {
 
 cmd_snapshot() {
     local active url
-    active="$(detect_active_provider 2>/dev/null || true)"
     url="$(frontmost_browser_url 2>/dev/null || true)"
+    active="$(detect_active_provider "$url" 2>/dev/null || true)"
 
     python3 - "$SCRIPT_DIR" "$active" "$url" <<'PY'
 import json
@@ -293,6 +332,23 @@ leaf_dir = Path(os.environ.get("AGENT_DO_MEETINGS_TOOL_DIR", str(script_dir)))
 
 def provider_exec(provider: str) -> Path:
     return leaf_dir / f"agent-{provider}"
+
+
+PROBE_TIMEOUT = float(os.environ.get("AGENT_DO_MEETINGS_PROBE_TIMEOUT", "10"))
+
+
+def _pgrep(name: str) -> bool:
+    # Bound the process probe: a wedged proc table or unkillable lookup
+    # must report "not running" rather than hang the snapshot.
+    try:
+        return subprocess.run(
+            ["pgrep", "-x", name],
+            capture_output=True,
+            check=False,
+            timeout=PROBE_TIMEOUT,
+        ).returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def running(provider: str) -> bool:
@@ -313,9 +369,9 @@ def running(provider: str) -> bool:
         return "meet.google.com" in (os.environ.get("AGENT_DO_MEETINGS_FRONTMOST_URL", frontmost_url or ""))
     if platform.system() == "Darwin":
         if provider == "zoom":
-            return subprocess.run(["pgrep", "-x", "zoom.us"], capture_output=True, check=False).returncode == 0
+            return _pgrep("zoom.us")
         if provider == "teams":
-            return subprocess.run(["pgrep", "-x", "Microsoft Teams"], capture_output=True, check=False).returncode == 0 or subprocess.run(["pgrep", "-x", "Teams"], capture_output=True, check=False).returncode == 0
+            return _pgrep("Microsoft Teams") or _pgrep("Teams")
     return False
 
 
@@ -337,14 +393,24 @@ providers = {
     },
 }
 
+def _utc_timestamp() -> str:
+    try:
+        return subprocess.run(
+            ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=PROBE_TIMEOUT,
+        ).stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        import datetime
+
+        return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 payload = {
     "tool": "meetings",
-    "timestamp": subprocess.run(
-        ["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"],
-        text=True,
-        capture_output=True,
-        check=False,
-    ).stdout.strip(),
+    "timestamp": _utc_timestamp(),
     "platform": platform.system(),
     "active_provider": active,
     "frontmost_url": frontmost_url,

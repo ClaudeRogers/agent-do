@@ -106,8 +106,31 @@ cmd_spawn() {
 }
 
 cmd_list() {
+    local json=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            *) die "unexpected argument: $1" ;;
+        esac
+    done
+
     local sessions
     sessions=$(list_sessions)
+
+    if $json; then
+        local names=""
+        if [[ -n "$sessions" ]]; then
+            names=$(echo "$sessions" | sed "s/^${PREFIX}//")
+        fi
+        python3 -c "
+import json, sys
+raw = sys.stdin.read()
+names = [n for n in raw.split('\n') if n]
+print(json.dumps({'sessions': names, 'count': len(names)}, indent=2))
+" <<< "$names"
+        return
+    fi
+
     if [[ -z "$sessions" ]]; then
         echo "No agent-tui sessions."
         return
@@ -364,7 +387,7 @@ agent-tui - TUI automation via tmux
 
 Commands:
   spawn <command> [--session <name>] [--size WxH]
-  list
+  list [--json]
   kill [--session <name>]
   attach [--session <name>]
   snapshot [--session <name>] [--json] [--lines]

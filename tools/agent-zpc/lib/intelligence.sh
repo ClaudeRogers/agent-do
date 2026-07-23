@@ -209,7 +209,7 @@ PYTHON
 cmd_query() {
     ensure_zpc
 
-    local tag="" since="" text="" qtype="all" limit=20
+    local tag="" since="" text="" qtype="all" limit=20 include_global=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -218,8 +218,9 @@ cmd_query() {
             --text) text="$2"; shift 2 ;;
             --type) qtype="$2"; shift 2 ;;
             --limit|-n) limit="$2"; shift 2 ;;
+            --global) include_global=true; shift ;;
             --help|-h)
-                echo "Usage: agent-zpc query [--tag X] [--since DATE] [--text \"...\"] [--type lessons|decisions|all]"
+                echo "Usage: agent-zpc query [--global] [--tag X] [--since DATE] [--text \"...\"] [--type lessons|decisions|all]"
                 return 0
                 ;;
             *) shift ;;
@@ -228,13 +229,15 @@ cmd_query() {
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
+    local global_lessons_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
 
     local result
-    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$tag" "$since" "$text" "$qtype" "$limit"
+    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$global_lessons_file" "$tag" "$since" "$text" "$qtype" "$limit" "$include_global"
 import json, sys, os
 
-lessons_file, decisions_file = sys.argv[1], sys.argv[2]
-tag, since, text, qtype, limit = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], int(sys.argv[7])
+lessons_file, decisions_file, global_lessons_file = sys.argv[1], sys.argv[2], sys.argv[3]
+tag, since, text, qtype, limit = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7], int(sys.argv[8])
+include_global = sys.argv[9] == "true"
 
 def matches(obj, tag, since, text):
     if tag and tag not in obj.get("tags", []):
@@ -259,6 +262,7 @@ if qtype in ("all", "lessons") and os.path.exists(lessons_file):
             try:
                 obj = json.loads(line)
                 obj["_type"] = "lesson"
+                obj["_scope"] = "project"
                 if matches(obj, tag, since, text):
                     results.append(obj)
             except:
@@ -273,6 +277,22 @@ if qtype in ("all", "decisions") and os.path.exists(decisions_file):
             try:
                 obj = json.loads(line)
                 obj["_type"] = "decision"
+                obj["_scope"] = "project"
+                if matches(obj, tag, since, text):
+                    results.append(obj)
+            except:
+                pass
+
+if include_global and qtype in ("all", "lessons") and os.path.exists(global_lessons_file):
+    with open(global_lessons_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                obj["_type"] = "lesson"
+                obj["_scope"] = "global"
                 if matches(obj, tag, since, text):
                     results.append(obj)
             except:
@@ -298,14 +318,16 @@ else:
     print(f"Found {data['count']} entries:\n")
     for r in data["results"]:
         t = r.pop("_type", "unknown")
+        scope = r.pop("_scope", "project")
+        scope_label = "[global] " if scope == "global" else ""
         date = r.get("date", "?")
         if t == "lesson":
-            print(f"[{date}] LESSON: {r.get('takeaway', '?')}")
+            print(f"{scope_label}[{date}] LESSON: {r.get('takeaway', '?')}")
             print(f"  Context: {r.get('context', '')}")
             print(f"  Problem: {r.get('problem', '')}")
             print(f"  Tags: {', '.join(r.get('tags', []))}")
         elif t == "decision":
-            print(f"[{date}] DECISION: {r.get('chosen', '?')}")
+            print(f"{scope_label}[{date}] DECISION: {r.get('chosen', '?')}")
             print(f"  Problem: {r.get('decision', '')}")
             print(f"  Rationale: {r.get('rationale', '')}")
             print(f"  Confidence: {r.get('confidence', '?')}")

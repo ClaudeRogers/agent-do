@@ -176,6 +176,38 @@ cmd_preview() {
 }
 
 cmd_template() {
+    local json_output=false
+    local args=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            json_output=true
+        else
+            args+=("$arg")
+        fi
+    done
+    set -- "${args[@]}"
+
+    local type="${1:-article}"
+
+    local content
+    content="$(_template_body "$type")" || {
+        if $json_output; then
+            python3 -c "import json,sys; print(json.dumps({'success': False, 'error': 'Unknown template: ' + sys.argv[1], 'available': ['article','report','beamer','letter','cv']}, indent=2))" "$type"
+        else
+            echo "Unknown template: $type"
+            echo "Available: article, report, beamer, letter, cv"
+        fi
+        return 1
+    }
+
+    if $json_output; then
+        python3 -c "import json,sys; print(json.dumps({'success': True, 'type': sys.argv[1], 'template': sys.argv[2]}, indent=2))" "$type" "$content"
+    else
+        printf '%s\n' "$content"
+    fi
+}
+
+_template_body() {
     local type="${1:-article}"
 
     case "$type" in
@@ -366,8 +398,6 @@ email@example.com | (123) 456-7890 | City, State\\
 LATEX
             ;;
         *)
-            echo "Unknown template: $type"
-            echo "Available: article, report, beamer, letter, cv"
             return 1
             ;;
     esac

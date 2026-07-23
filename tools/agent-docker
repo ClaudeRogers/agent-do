@@ -37,11 +37,81 @@ check_docker() {
     fi
 }
 
+# docker_bound <seconds> <docker-args...> — run docker with a hard time bound.
+# The Docker CLI blocks forever when the daemon socket is dead; macOS ships no
+# timeout(1), so bound the call through python3 (mirrors bin/health probe()).
+# Captured stdout is forwarded; exit 124 marks a timeout so callers can emit a
+# structured "installed but not responding" error instead of hanging.
+docker_bound() {
+    local secs="$1"
+    shift
+    python3 - "$secs" docker "$@" <<'PY'
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(sys.argv[2:], capture_output=True, text=True,
+                            timeout=float(sys.argv[1]))
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+except FileNotFoundError:
+    sys.exit(127)
+PY
+}
+
 cmd_ps() {
     check_docker
     local all_flag=""
-    [[ "${1:-}" == "-a" ]] && all_flag="-a"
-    docker ps $all_flag --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+    local json_flag=""
+    for arg in "$@"; do
+        case "$arg" in
+            -a) all_flag="-a" ;;
+            --json) json_flag="1" ;;
+        esac
+    done
+
+    if [[ -n "$json_flag" ]]; then
+        local raw rc=0
+        raw="$(docker_bound 10 ps $all_flag --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}')" || rc=$?
+        if [[ $rc -eq 124 ]]; then
+            echo '{"error": "Docker installed but not responding (daemon socket timed out)"}'
+            return 1
+        fi
+        if [[ $rc -ne 0 ]]; then
+            echo '{"error": "Docker not available or daemon not running"}'
+            return 1
+        fi
+        printf '%s' "$raw" | python3 -c "
+import sys, json
+containers = []
+for line in sys.stdin.read().split('\n'):
+    if not line.strip():
+        continue
+    parts = line.split('\t')
+    if len(parts) >= 5:
+        containers.append({
+            'name': parts[0], 'image': parts[1], 'status': parts[2],
+            'ports': parts[3], 'state': parts[4],
+        })
+print(json.dumps({'count': len(containers), 'containers': containers}, indent=2))
+"
+        return 0
+    fi
+
+    local out rc=0
+    out="$(docker_bound 10 ps $all_flag --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}')" || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "Error: Docker installed but not responding (daemon socket timed out)"
+        return 1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        echo "Error: Docker not available or daemon not running"
+        return 1
+    fi
+    printf '%s\n' "$out"
 }
 
 cmd_logs() {
@@ -121,7 +191,17 @@ cmd_restart() {
 
 cmd_images() {
     check_docker
-    docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+    local out rc=0
+    out="$(docker_bound 10 images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}')" || rc=$?
+    if [[ $rc -eq 124 ]]; then
+        echo "Error: Docker installed but not responding (daemon socket timed out)"
+        return 1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        echo "Error: Docker not available or daemon not running"
+        return 1
+    fi
+    printf '%s\n' "$out"
 }
 
 cmd_compose() {
@@ -151,10 +231,14 @@ cmd_compose() {
 cmd_snapshot() {
     check_docker
     python3 -c "
-import subprocess, json
+import subprocess, json, sys
 
 def run(cmd):
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        print(json.dumps({'error': 'Docker installed but not responding (daemon socket timed out)'}))
+        sys.exit(1)
     return r.stdout.strip()
 
 # Containers

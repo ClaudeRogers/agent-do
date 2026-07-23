@@ -3,6 +3,15 @@ import { parseCommand } from './protocol.js';
 // Helper to create command JSON string
 const cmd = (obj) => JSON.stringify(obj);
 describe('parseCommand', () => {
+    describe('daemon control', () => {
+        it('should parse a page-independent ping command', () => {
+            const result = parseCommand(cmd({ id: 'probe', action: 'ping' }));
+            expect(result.success).toBe(true);
+            if (result.success) {
+                expect(result.command.action).toBe('ping');
+            }
+        });
+    });
     describe('navigation', () => {
         it('should parse navigate command', () => {
             const result = parseCommand(cmd({ id: '1', action: 'navigate', url: 'https://example.com' }));

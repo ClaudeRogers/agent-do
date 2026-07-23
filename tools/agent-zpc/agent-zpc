@@ -28,7 +28,7 @@ Commands:
   decide <problem> --options "a,b" --chosen a ...       Log a decision
   decide-batch [--file F] [--tags "t1,t2"]             Batch-log decisions (stdin)
   harvest [--auto] [--dry-run]                          Consolidation scan
-  query [--tag X] [--since DATE] [--text "..."]         Search memory
+  query [--global] [--tag X] [--since DATE] [--text "..."] Search project and optional global memory
   patterns [--score]                                    View/score patterns
   review [--since DATE] [--auto] [--dry-run]             Post-sprint lesson extraction
   promote <source> --to team|global                     Promote lessons

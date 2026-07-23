@@ -41,6 +41,11 @@ ACCOUNT:
   whoami                         Account balance and info
   snapshot                       Full account state as JSON
 
+OUTPUT:
+  --json                         Emit machine-readable JSON. Supported on read
+                                 commands: domains, domain, dns, nameservers,
+                                 domain-check, ssl-list (snapshot is always JSON)
+
 Domains are specified as full names (e.g., example.com).
 DNS record types: A, AAAA, CNAME, MX, MXE, TXT, URL, URL301, FRAME
 
@@ -74,7 +79,7 @@ get_client_ip() {
         return
     fi
     # Auto-detect public IP
-    curl -s https://api.ipify.org 2>/dev/null || curl -s https://ifconfig.me 2>/dev/null || echo "127.0.0.1"
+    curl -s --max-time 10 https://api.ipify.org 2>/dev/null || curl -s --max-time 10 https://ifconfig.me 2>/dev/null || echo "127.0.0.1"
 }
 
 nc_request() {
@@ -107,7 +112,7 @@ nc_request() {
         full_url="${full_url}&${extra_params}"
     fi
 
-    curl -s "$full_url"
+    curl -s --max-time 30 --connect-timeout 10 "$full_url"
 }
 
 # POST version for large payloads (setHosts with many records)
@@ -133,7 +138,7 @@ nc_post() {
         base_data="${base_data}&${post_data}"
     fi
 
-    curl -s -X POST "$url" -d "$base_data"
+    curl -s --max-time 30 --connect-timeout 10 -X POST "$url" -d "$base_data"
 }
 
 # Parse XML response, check for errors, extract data
@@ -415,9 +420,11 @@ PY
 
 cmd_domains() {
     local list_type="ALL"
+    local json_out=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --expiring) list_type="EXPIRING"; shift ;;
+            --json) json_out=1; shift ;;
             *) shift ;;
         esac
     done
@@ -427,8 +434,8 @@ cmd_domains() {
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
@@ -436,6 +443,19 @@ domains = root.findall('.//nc:DomainGetListResult/nc:Domain', ns)
 if not domains:
     # Try without namespace
     domains = root.findall('.//Domain')
+if os.environ.get('NC_JSON') == '1':
+    out = []
+    for d in domains:
+        out.append({
+            'name': d.get('Name', ''),
+            'expires': d.get('Expires', ''),
+            'autoRenew': d.get('AutoRenew', '').lower() == 'true',
+            'isLocked': d.get('IsLocked', '').lower() == 'true',
+            'isOurDNS': d.get('IsOurDNS', '').lower() == 'true',
+            'isExpired': d.get('IsExpired', '').lower() == 'true',
+        })
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
 if not domains:
     print('No domains found')
     sys.exit(0)
@@ -452,7 +472,13 @@ for d in domains:
 }
 
 cmd_domain() {
-    local domain="${1:-}"
+    local domain="" json_out=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_out=1; shift ;;
+            *) [[ -z "$domain" ]] && domain="$1"; shift ;;
+        esac
+    done
     [[ -z "$domain" ]] && { echo "Usage: agent-namecheap domain <domain.com>" >&2; return 1; }
 
     local result
@@ -460,8 +486,8 @@ cmd_domain() {
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
@@ -469,6 +495,42 @@ ns = {'nc': 'http://api.namecheap.com/xml.response'}
 info = root.find('.//nc:DomainGetInfoResult', ns)
 if info is None:
     info = root.find('.//DomainGetInfoResult')
+if os.environ.get('NC_JSON') == '1':
+    if info is None:
+        print(json.dumps({'error': 'Domain info not found'}))
+        sys.exit(1)
+    def _txt(tag):
+        el = info.find('.//nc:' + tag, ns)
+        if el is None:
+            el = info.find('.//' + tag)
+        return el.text if el is not None else ''
+    dns_details = info.find('.//nc:DnsDetails', ns)
+    if dns_details is None:
+        dns_details = info.find('.//DnsDetails')
+    provider = ''
+    nameservers = []
+    if dns_details is not None:
+        provider = dns_details.get('ProviderType', '')
+        ns_nodes = dns_details.findall('nc:Nameserver', ns) or dns_details.findall('Nameserver')
+        nameservers = [n.text for n in ns_nodes if n.text]
+    lock = info.find('.//nc:Modificationrights', ns)
+    if lock is None:
+        lock = info.find('.//Modificationrights')
+    wg = info.find('.//nc:Whoisguard', ns)
+    if wg is None:
+        wg = info.find('.//Whoisguard')
+    print(json.dumps({
+        'domain': info.get('DomainName', ''),
+        'status': info.get('Status', ''),
+        'id': info.get('ID', ''),
+        'created': _txt('CreatedDate'),
+        'expires': _txt('ExpiredDate'),
+        'dns': provider,
+        'nameservers': nameservers,
+        'locked': lock.get('All', '') if lock is not None else '',
+        'whoisGuard': wg.get('Enabled', '') if wg is not None else '',
+    }, indent=2))
+    sys.exit(0)
 if info is None:
     print('Domain info not found')
     sys.exit(1)
@@ -501,24 +563,43 @@ if wg is not None:
 }
 
 cmd_domain_check() {
-    [[ $# -eq 0 ]] && { echo "Usage: agent-namecheap domain-check <domain> [domain2...]" >&2; return 1; }
+    local json_out=0
+    local -a names=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_out=1; shift ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+    [[ ${#names[@]} -eq 0 ]] && { echo "Usage: agent-namecheap domain-check <domain> [domain2...]" >&2; return 1; }
 
     local domains
-    domains=$(IFS=,; echo "$*")
+    domains=$(IFS=,; echo "${names[*]}")
 
     local result
     result=$(nc_request "namecheap.domains.check" "DomainList=$domains")
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
 checks = root.findall('.//nc:DomainCheckResult', ns)
 if not checks:
     checks = root.findall('.//DomainCheckResult')
+if os.environ.get('NC_JSON') == '1':
+    out = []
+    for c in checks:
+        out.append({
+            'domain': c.get('Domain', ''),
+            'available': c.get('Available', 'false').lower() == 'true',
+            'premium': c.get('IsPremiumName', 'false').lower() == 'true',
+            'premiumPrice': c.get('PremiumRegistrationPrice', ''),
+        })
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
 for c in checks:
     domain = c.get('Domain', '')
     available = c.get('Available', 'false').lower() == 'true'
@@ -571,7 +652,13 @@ else:
 # --- DNS Commands ---
 
 cmd_dns() {
-    local domain="${1:-}"
+    local domain="" json_out=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_out=1; shift ;;
+            *) [[ -z "$domain" ]] && domain="$1"; shift ;;
+        esac
+    done
     [[ -z "$domain" ]] && { echo "Usage: agent-namecheap dns <domain.com>" >&2; return 1; }
 
     local sld_tld
@@ -584,14 +671,26 @@ cmd_dns() {
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
 hosts = root.findall('.//nc:DomainDNSGetHostsResult/nc:host', ns)
 if not hosts:
     hosts = root.findall('.//host')
+if os.environ.get('NC_JSON') == '1':
+    out = []
+    for h in hosts:
+        out.append({
+            'type': h.get('Type', ''),
+            'host': h.get('Name', ''),
+            'address': h.get('Address', ''),
+            'ttl': h.get('TTL', ''),
+            'mxPref': h.get('MXPref', ''),
+        })
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
 if not hosts:
     print('No DNS records found')
     sys.exit(0)
@@ -957,7 +1056,13 @@ else:
 # --- Nameserver Commands ---
 
 cmd_nameservers() {
-    local domain="${1:-}"
+    local domain="" json_out=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_out=1; shift ;;
+            *) [[ -z "$domain" ]] && domain="$1"; shift ;;
+        esac
+    done
     [[ -z "$domain" ]] && { echo "Usage: agent-namecheap nameservers <domain>" >&2; return 1; }
 
     local sld_tld
@@ -970,14 +1075,24 @@ cmd_nameservers() {
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
 res = root.find('.//nc:DomainDNSGetListResult', ns)
 if res is None:
     res = root.find('.//DomainDNSGetListResult')
+if os.environ.get('NC_JSON') == '1':
+    if res is None:
+        print(json.dumps({'error': 'No nameserver info'}))
+        sys.exit(1)
+    ns_nodes = res.findall('nc:Nameserver', ns) or res.findall('Nameserver')
+    print(json.dumps({
+        'usingOurDNS': res.get('IsUsingOurDNS', '').lower() == 'true',
+        'nameservers': [n.text for n in ns_nodes if n.text],
+    }, indent=2))
+    sys.exit(0)
 if res is None:
     print('No nameserver info')
     sys.exit(1)
@@ -1054,19 +1169,39 @@ else:
 # --- SSL Commands ---
 
 cmd_ssl_list() {
+    local json_out=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_out=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
     local result
     result=$(nc_request "namecheap.ssl.getList" "PageSize=100")
 
     local checked
     checked=$(echo "$result" | nc_check_error) || return 1
-    echo "$checked" | python3 -c "
-import sys, xml.etree.ElementTree as ET
+    echo "$checked" | NC_JSON="$json_out" python3 -c "
+import sys, os, json, xml.etree.ElementTree as ET
 raw = sys.stdin.read()
 root = ET.fromstring(raw)
 ns = {'nc': 'http://api.namecheap.com/xml.response'}
 certs = root.findall('.//nc:SSLListResult/nc:SSL', ns)
 if not certs:
     certs = root.findall('.//SSL')
+if os.environ.get('NC_JSON') == '1':
+    out = []
+    for c in certs:
+        out.append({
+            'id': c.get('CertificateID', ''),
+            'host': c.get('HostName', ''),
+            'type': c.get('SSLType', ''),
+            'status': c.get('Status', ''),
+            'expires': c.get('ExpireDate', ''),
+        })
+    print(json.dumps(out, indent=2))
+    sys.exit(0)
 if not certs:
     print('No SSL certificates')
     sys.exit(0)

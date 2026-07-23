@@ -1370,7 +1370,10 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
 
 
 def cmd_doctrine(args: argparse.Namespace) -> None:
-    print(REVIEW_DOCTRINE)
+    if getattr(args, "json", False):
+        print_json({"doctrine": REVIEW_DOCTRINE})
+    else:
+        print(REVIEW_DOCTRINE)
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
@@ -1683,6 +1686,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.set_defaults(func=cmd_merge)
 
     doctrine = sub.add_parser("doctrine", help="Print the PR review doctrine")
+    doctrine.add_argument("--json", action="store_true")
     doctrine.set_defaults(func=cmd_doctrine)
 
     close = sub.add_parser("close", help="Close a pull request")
@@ -1742,7 +1746,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def show_help() -> None:
     print(
-        """agent-gh - GitHub PR and review work-state
+        """GitHub PR/review operations. For local repository work use: agent-do git
 
 Commands:
   whoami                         Show authenticated GitHub user

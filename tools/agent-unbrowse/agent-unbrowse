@@ -225,7 +225,24 @@ except Exception:
 main() {
     local output_format="text"
 
-    # Parse global options
+    # --json may appear anywhere (including after the command). Strip every
+    # occurrence up front so it works as both a global and a trailing flag,
+    # leaving positional args otherwise untouched. Stop stripping once we
+    # reach replay's pass-through args so a replayed function can receive its
+    # own literal --json without us swallowing it.
+    local args=()
+    local a passthrough="false"
+    for a in "$@"; do
+        if [[ "$passthrough" == "false" && "$a" == "--json" ]]; then
+            output_format="json"
+        else
+            args+=("$a")
+            [[ "$a" == "replay" ]] && passthrough="true"
+        fi
+    done
+    set -- ${args[@]+"${args[@]}"}
+
+    # Parse remaining global options
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --help|-h)
@@ -237,10 +254,6 @@ main() {
                 SOCKET_PATH="${TMPDIR_ACTUAL}/agent-unbrowse-${SESSION}.sock"
                 PID_FILE="${TMPDIR_ACTUAL}/agent-unbrowse-${SESSION}.pid"
                 shift 2
-                ;;
-            --json)
-                output_format="json"
-                shift
                 ;;
             *)
                 break
@@ -301,6 +314,43 @@ main() {
         # === FILESYSTEM COMMANDS (no daemon) ===
 
         list)
+            if [[ "$output_format" == "json" ]]; then
+                SKILLS_DIR="$SKILLS_DIR" python3 -c '
+import json, os, re, sys
+skills_dir = os.environ["SKILLS_DIR"]
+skills = []
+if os.path.isdir(skills_dir):
+    for name in sorted(os.listdir(skills_dir)):
+        md = os.path.join(skills_dir, name, "SKILL.md")
+        if not os.path.isfile(md):
+            continue
+        count = None
+        auth_type = None
+        try:
+            with open(md, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = re.match(r"\s*endpoint_count:\s*(\S+)", line)
+                    if m and count is None:
+                        count = m.group(1)
+                    m = re.match(r"\s*auth_type:\s*(\S+)", line)
+                    if m and auth_type is None:
+                        auth_type = m.group(1)
+                    if count is not None and auth_type is not None:
+                        break
+        except OSError:
+            pass
+        ec = None
+        if count is not None:
+            try:
+                ec = int(count)
+            except ValueError:
+                ec = count
+        skills.append({"name": name, "endpoint_count": ec, "auth_type": auth_type})
+json.dump({"success": True, "skills": skills, "count": len(skills)}, sys.stdout)
+print()
+'
+                exit 0
+            fi
             if [[ ! -d "$SKILLS_DIR" ]]; then
                 echo "(no skills yet)"
                 exit 0

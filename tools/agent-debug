@@ -14,6 +14,7 @@ Commands:
   gdb <binary>               Debug binary with gdb
 
   attach <pid>               Attach to running process
+  backtrace <pid>            Show call stack of a running process
   core <binary> <core>       Debug core dump
 
   snapshot                   Debug environment as JSON (debuggable processes, tools available)
@@ -175,6 +176,60 @@ cmd_core() {
     fi
 }
 
+cmd_backtrace() {
+    local pid="${1:-}"
+    if [[ -z "$pid" ]]; then
+        echo "Usage: agent-debug backtrace <pid>"
+        return 1
+    fi
+    if [[ "$(uname)" == "Darwin" ]] && command -v lldb >/dev/null; then
+        lldb --batch -p "$pid" -o "bt all" -o detach 2>&1 | grep -v "^(lldb)"
+    elif command -v gdb >/dev/null; then
+        gdb -p "$pid" -batch -ex "thread apply all bt" 2>/dev/null
+    else
+        echo "Error: lldb or gdb required for backtrace"
+        return 1
+    fi
+}
+
+cmd_print() {
+    local expr="${1:-}"
+    local json=0
+    local args=()
+    for a in "$@"; do
+        if [[ "$a" == "--json" ]]; then
+            json=1
+        else
+            args+=("$a")
+        fi
+    done
+    expr="${args[0]:-}"
+
+    if [[ -z "$expr" ]]; then
+        if [[ $json -eq 1 ]]; then
+            printf '{"error": "expression required", "usage": "agent-debug print <expr> (inside an attached pdb/lldb session)"}\n'
+        else
+            echo "Error: expression required"
+            echo "Usage: agent-debug print <expr>"
+            echo "Note: 'print' is a pdb/lldb command issued inside an attached debug session."
+            echo "      Start one with: agent-debug attach <pid>  or  agent-debug python <script>"
+        fi
+        return 1
+    fi
+
+    # Outside an interactive debugger there is no frame to evaluate against.
+    if [[ $json -eq 1 ]]; then
+        printf '{"error": "no active debug session", "expr": %s, "hint": "attach a process first: agent-debug attach <pid>"}\n' \
+            "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$expr")"
+    else
+        echo "Error: no active debug session to evaluate: $expr"
+        echo "Usage: agent-debug print <expr>"
+        echo "Note: 'print' must be issued inside an attached pdb/lldb session."
+        echo "      Start one with: agent-debug attach <pid>  or  agent-debug python <script>"
+    fi
+    return 1
+}
+
 cmd_strace() {
     local pid="${1:-}"
 
@@ -299,6 +354,14 @@ case "${1:-help}" in
     node|js)
         shift
         cmd_node "$@"
+        ;;
+    backtrace|bt)
+        shift
+        cmd_backtrace "$@"
+        ;;
+    print|p)
+        shift
+        cmd_print "$@"
         ;;
     lldb)
         shift

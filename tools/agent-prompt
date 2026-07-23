@@ -33,7 +33,37 @@ Examples:
 EOF
 }
 
+cmd_list_json() {
+    python3 - "$PROMPT_DIR" << 'PYTHON'
+import glob
+import json
+import os
+import sys
+
+prompt_dir = sys.argv[1]
+prompts = []
+for f in sorted(glob.glob(os.path.join(prompt_dir, "*.txt"))):
+    if not os.path.isfile(f):
+        continue
+    name = os.path.splitext(os.path.basename(f))[0]
+    preview = ""
+    try:
+        with open(f) as fh:
+            preview = fh.readline().rstrip("\n")[:60]
+    except OSError:
+        preview = ""
+    prompts.append({"name": name, "preview": preview})
+
+print(json.dumps({"prompts": prompts, "count": len(prompts)}, indent=2))
+PYTHON
+}
+
 cmd_list() {
+    if [[ "${1:-}" == "--json" ]]; then
+        cmd_list_json
+        return 0
+    fi
+
     if [[ ! -d "$PROMPT_DIR" ]] || [[ -z "$(ls -A "$PROMPT_DIR" 2>/dev/null)" ]]; then
         echo "No saved prompts."
         echo "Save one with: echo 'prompt text' | agent-prompt save <name>"
@@ -288,7 +318,8 @@ cmd_copy() {
 # Main
 case "${1:-help}" in
     list|ls)
-        cmd_list
+        shift
+        cmd_list "$@"
         ;;
     save|add|create)
         shift

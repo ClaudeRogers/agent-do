@@ -4,6 +4,9 @@ const baseCommandSchema = z.object({
     id: z.string(),
     action: z.string(),
 });
+const pingSchema = baseCommandSchema.extend({
+    action: z.literal('ping'),
+});
 // Individual action schemas
 const launchSchema = baseCommandSchema.extend({
     action: z.literal('launch'),
@@ -780,6 +783,7 @@ const loginCancelSchema = baseCommandSchema.extend({
 });
 // Union schema for all commands
 const commandSchema = z.discriminatedUnion('action', [
+    pingSchema,
     launchSchema,
     navigateSchema,
     clickSchema,

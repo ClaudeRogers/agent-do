@@ -33,6 +33,7 @@ SNAPSHOT (core pattern - get @refs)
   snapshot <app>             Snapshot specific app
   snapshot -i                Interactive elements only
   snapshot -d <depth>        Limit tree depth
+  tree [app]                 Full UI hierarchy (alias of snapshot)
 
 ELEMENT INTERACTION (use @refs from snapshot)
   click <@ref>               Click element
