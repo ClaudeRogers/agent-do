@@ -196,11 +196,32 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
             self._send_err("Forbidden: invalid API or application key", status=403)
             return
 
+        scenario = ""
+        for prefix in ("/partial-empty", "/all-fail"):
+            if path.startswith(prefix + "/"):
+                scenario = prefix[1:]
+                path = path[len(prefix):]
+                break
+
         # Strip /api/v1 or /api/v2 prefix
         for prefix in ("/api/v2/", "/api/v1/"):
             if path.startswith(prefix):
                 path = "/" + path[len(prefix):]
                 break
+
+        if scenario == "all-fail" and path in ("/monitor", "/events", "/slo"):
+            self._send_err("fixture forced failure", status=500)
+            return
+        if scenario == "partial-empty":
+            if path == "/monitor":
+                self._send_err("fixture monitor failure", status=500)
+                return
+            if path == "/events":
+                self._send({"events": []})
+                return
+            if path == "/slo":
+                self._send({"data": []})
+                return
 
         # ── monitors ──────────────────────────────────────────────────────
         if method == "GET" and path == "/monitor":
@@ -281,6 +302,13 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
             query = (body.get("filter") or {}).get("query", "*")
             limit = (body.get("page") or {}).get("limit", 25)
             logs = list(_LOGS)
+            if "nullable" in query:
+                logs = [{"id": "log-null", "type": "log", "attributes": {
+                    "timestamp": "2026-05-21T10:02:00.000Z",
+                    "service": None,
+                    "status": None,
+                    "message": None,
+                }}]
             if "service:worker" in query:
                 logs = [l for l in logs if l["attributes"]["service"] == "worker"]
             if "status:error" in query:
@@ -317,7 +345,11 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
         # ── events ────────────────────────────────────────────────────────
         elif method == "GET" and path == "/events":
             priority = qs.get("priority", [""])[0]
+            tag_filter = qs.get("tags", [""])[0]
             events = list(_EVENTS)
+            if tag_filter == "nullable":
+                events = [{"id": 9003, "title": None, "text": None,
+                           "date_happened": 1716290200, "priority": None, "tags": ["nullable"]}]
             if priority:
                 events = [e for e in events if e["priority"] == priority]
             # simulate empty when requesting "low" priority (none match)
@@ -339,6 +371,9 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
         elif method == "GET" and path == "/incidents":
             state_filter = qs.get("filter[state]", [""])[0]
             incs = list(_INCIDENTS)
+            incs.append({"id": "inc-null", "type": "incidents", "attributes": {
+                "title": None, "status": None, "severity": None, "created": "2026-05-21T13:00:00Z",
+            }})
             if state_filter:
                 incs = [i for i in incs if i["attributes"]["status"] == state_filter]
             self._send({"data": incs})
@@ -1576,6 +1611,18 @@ def main() -> int:
         check("events text output has priority field", "normal" in r.stdout)
         check("events text output has event title", "Deploy" in r.stdout)
 
+        r = run(["logs", "nullable"], env=env)
+        check("logs text output tolerates nullable fixed-width fields", r.returncode == 0, r.stderr)
+        check("logs nullable output omits literal None", "None" not in r.stdout)
+
+        r = run(["events", "--tags", "nullable"], env=env)
+        check("events text output tolerates nullable priority/title", r.returncode == 0, r.stderr)
+        check("events nullable output omits literal None", "None" not in r.stdout)
+
+        r = run(["incidents"], env=env)
+        check("incidents text output tolerates nullable status/severity", r.returncode == 0, r.stderr)
+        check("incidents nullable output omits literal None", "None" not in r.stdout)
+
         # metrics text shows scope
         r = run(["metrics", "avg:system.cpu.user{host:web-01}"], env=env)
         check("metrics text shows Scope: host:web-01", "host:web-01" in r.stdout)
@@ -1652,6 +1699,20 @@ def main() -> int:
         check("snapshot text mode shows 1 warning", "1 warning" in r.stdout)
         check("snapshot text mode events=2", "Events (1h): 2" in r.stdout)
         check("snapshot text mode slos=2", "SLOs:        2" in r.stdout)
+
+        partial_env = _env(base + "/partial-empty")
+        r = run(["snapshot"], env=partial_env)
+        check("snapshot partial failure with empty successes does not report total failure",
+              "Snapshot failed" not in r.stderr)
+        check("snapshot partial failure warns about failed section", "Warning: monitors" in r.stderr)
+        check("snapshot partial failure exits 0 when no alerting monitors returned", r.returncode == 0, r.stderr)
+        check("snapshot partial failure shows empty successful sections",
+              "Events (1h): 0" in r.stdout and "SLOs:        0" in r.stdout)
+
+        all_fail_env = _env(base + "/all-fail")
+        r = run(["snapshot"], env=all_fail_env)
+        check("snapshot all failed exits non-zero", r.returncode != 0)
+        check("snapshot all failed reports total failure", "Snapshot failed" in r.stderr)
 
         # ══════════════════════════════════════════════════════════════════
         # --json AFTER SUBCOMMAND (flag must work in either position)
