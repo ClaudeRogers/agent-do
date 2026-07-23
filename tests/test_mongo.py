@@ -174,7 +174,7 @@ class MongoClient:
 
     def list_database_names(self):
         # admin/local/config should be filtered by agent-mongo
-        return ["prism_bcc", "admin", "local", "config"]
+        return ["appdb", "admin", "local", "config"]
 
     def close(self):
         pass
@@ -234,25 +234,25 @@ def main() -> int:
 
         # add first profile as default
         r = run(
-            [str(AGENT_DO), "mongo", "connections", "add", "prism_bcc",
-             "--uri", "mongodb://user:s3cr3t@cosmosdb.example.com:10255/?ssl=true",
-             "--provider", "cosmosdb", "--default"],
+            [str(AGENT_DO), "mongo", "connections", "add", "appdb",
+             "--stdin", "--provider", "cosmosdb", "--default"],
             env=base_env,
+            input_text="mongodb://user:s3cr3t@cosmosdb.example.com:10255/?ssl=true\n",
         )
         check("connections add exit 0", r.returncode == 0, r.stderr)
-        check("connections add shows name+provider", "prism_bcc" in r.stdout and "cosmosdb" in r.stdout)
+        check("connections add shows name+provider", "appdb" in r.stdout and "cosmosdb" in r.stdout)
         # URI must be in creds file, not in connections.json
         conn_json = json.loads((fake_home / "mongo" / "connections.json").read_text())
         check("connections add: URI not in connections.json",
-              "uri" not in conn_json["profiles"].get("prism_bcc", {}))
+              "uri" not in conn_json["profiles"].get("appdb", {}))
         check("connections add: creds file exists",
-              (fake_home / "mongo" / ".creds" / "prism_bcc").exists())
+              (fake_home / "mongo" / ".creds" / "appdb").exists())
         check("connections add: creds file mode is 0o600",
-              stat.S_IMODE((fake_home / "mongo" / ".creds" / "prism_bcc").stat().st_mode) == 0o600)
+              stat.S_IMODE((fake_home / "mongo" / ".creds" / "appdb").stat().st_mode) == 0o600)
 
         # list shows profile metadata; URI is never printed (stored in separate creds file)
         r = run([str(AGENT_DO), "mongo", "connections", "list"], env=base_env)
-        check("connections list has profile", "prism_bcc" in r.stdout)
+        check("connections list has profile", "appdb" in r.stdout)
         check("connections list does not expose URI", "s3cr3t" not in r.stdout and "cosmosdb.example.com" not in r.stdout)
         check("connections list shows secure-store note", "stored securely" in r.stdout)
         check("connections list default marker", "*" in r.stdout)
@@ -282,14 +282,14 @@ def main() -> int:
         creds_local = fake_home / "mongo" / ".creds" / "dev_local"
         creds_local.unlink(missing_ok=True)
 
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations", "--limit", "1", "--json"], env=base_env)
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations", "--limit", "1", "--json"], env=base_env)
         check("missing default creds falls back to MONGO_CONNECTION_STRING", r.returncode == 0, r.stderr)
 
         r = run([str(AGENT_DO), "mongo", "connections", "remove", "dev_local"], env=base_env)
         check("connections remove exit 0", r.returncode == 0, r.stderr)
 
         r = run([str(AGENT_DO), "mongo", "connections", "list"], env=base_env)
-        check("connections remove rolls back default", "prism_bcc" in r.stdout)
+        check("connections remove rolls back default", "appdb" in r.stdout)
 
         # import-from-aks with a fake kubectl that returns -o json format.
         # mongo_ops.py now uses kubectl -o json + Python json.loads to handle
@@ -331,7 +331,7 @@ def main() -> int:
         check("snapshot tool=mongo", out["tool"] == "mongo")
         check("snapshot command=snapshot", out["command"] == "snapshot")
         dbs = out["data"]["databases"]
-        check("snapshot has prism_bcc", any(d["database"] == "prism_bcc" for d in dbs))
+        check("snapshot has appdb", any(d["database"] == "appdb" for d in dbs))
         check("snapshot filters admin/local/config",
               all(d["database"] not in ("admin", "local", "config") for d in dbs))
         colls = [c["name"] for d in dbs for c in d["collections"]]
@@ -340,17 +340,17 @@ def main() -> int:
         # snapshot human-readable
         r = run([str(AGENT_DO), "mongo", "snapshot"], env=base_env)
         check("snapshot human exit 0", r.returncode == 0, r.stderr)
-        check("snapshot human output", "prism_bcc" in r.stdout)
+        check("snapshot human output", "appdb" in r.stdout)
 
         # schema --json
         r = run(
-            [str(AGENT_DO), "mongo", "schema", "prism_bcc", "expectations", "--json"],
+            [str(AGENT_DO), "mongo", "schema", "appdb", "expectations", "--json"],
             env=base_env,
         )
         check("schema exit 0", r.returncode == 0, r.stderr)
         out = json.loads(r.stdout)
         check("schema command", out["command"] == "schema")
-        check("schema ref", out["ref"] == "prism_bcc.expectations")
+        check("schema ref", out["ref"] == "appdb.expectations")
         check("schema has fields", len(out["data"]["fields"]) > 0)
         field_names = [f["field"] for f in out["data"]["fields"]]
         check("schema includes externalId", "externalId" in field_names)
@@ -362,7 +362,7 @@ def main() -> int:
 
         # indexes --json
         r = run(
-            [str(AGENT_DO), "mongo", "indexes", "prism_bcc", "expectations", "--json"],
+            [str(AGENT_DO), "mongo", "indexes", "appdb", "expectations", "--json"],
             env=base_env,
         )
         check("indexes exit 0", r.returncode == 0, r.stderr)
@@ -377,7 +377,7 @@ def main() -> int:
 
         # query with key=value shorthand
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--where", "externalId=x001", "--json"],
             env=base_env,
         )
@@ -396,7 +396,7 @@ def main() -> int:
 
         # query with JSON filter and --limit
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--where", '{"status":"pending"}', "--limit", "5", "--json"],
             env=base_env,
         )
@@ -406,7 +406,7 @@ def main() -> int:
         check("query limit stored", out["data"]["limit"] == 5)
 
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--where", "status=active",
              "--projection", '{"externalId": 1}',
              "--sort", '{"externalId": 1}',
@@ -422,7 +422,7 @@ def main() -> int:
             check("query metadata includes skip", out["data"]["skip"] == 1)
 
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--sort", '"name"'],
             env=base_env,
         )
@@ -431,7 +431,7 @@ def main() -> int:
 
         # query with integer coercion
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--where", "retries=3", "--json"],
             env=base_env,
         )
@@ -441,7 +441,7 @@ def main() -> int:
 
         # count with filter
         r = run(
-            [str(AGENT_DO), "mongo", "count", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "count", "appdb", "expectations",
              "--where", "status=pending", "--json"],
             env=base_env,
         )
@@ -452,14 +452,14 @@ def main() -> int:
 
         # count without filter
         r = run(
-            [str(AGENT_DO), "mongo", "count", "prism_bcc", "expectations", "--json"],
+            [str(AGENT_DO), "mongo", "count", "appdb", "expectations", "--json"],
             env=base_env,
         )
         check("count (no filter) exit 0", r.returncode == 0, r.stderr)
 
         # aggregate with inline pipeline
         r = run(
-            [str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
              "--pipeline", '[{"$count":"total"}]', "--json"],
             env=base_env,
         )
@@ -471,7 +471,7 @@ def main() -> int:
         # aggregate with @file pipeline
         pipeline_file = FIXTURES_DIR / "pipeline_status_counts.json"
         r = run(
-            [str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
              "--pipeline", f"@{pipeline_file}", "--json"],
             env=base_env,
         )
@@ -481,7 +481,7 @@ def main() -> int:
 
         # explain --json
         r = run(
-            [str(AGENT_DO), "mongo", "explain", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "explain", "appdb", "expectations",
              "--where", "externalId=x001", "--json"],
             env=base_env,
         )
@@ -492,7 +492,7 @@ def main() -> int:
 
         # explain human-readable (no --json)
         r = run(
-            [str(AGENT_DO), "mongo", "explain", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "explain", "appdb", "expectations",
              "--where", "externalId=x001"],
             env=base_env,
         )
@@ -504,7 +504,7 @@ def main() -> int:
 
         # insert --dry-run
         r = run(
-            [str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
              "--doc", '{"externalId":"y001","status":"pending"}', "--dry-run"],
             env=base_env,
         )
@@ -513,7 +513,7 @@ def main() -> int:
 
         # insert real (no dry-run)
         r = run(
-            [str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
              "--doc", '{"externalId":"y001","status":"pending"}', "--json"],
             env=base_env,
         )
@@ -524,17 +524,17 @@ def main() -> int:
 
         # update --dry-run
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "externalId=x001", "--set", "status=done", "--dry-run"],
             env=base_env,
         )
         check("update dry-run exit 2", r.returncode == 2)
         check("update dry-run shows [dry-run]", "[dry-run]" in r.stdout)
-        check("update dry-run shows collection", "prism_bcc.expectations" in r.stdout)
+        check("update dry-run shows collection", "appdb.expectations" in r.stdout)
 
         # update real (no dry-run)
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "externalId=x001", "--set", "status=done", "--json"],
             env=base_env,
         )
@@ -545,7 +545,7 @@ def main() -> int:
 
         # update --multi dry-run
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "status=pending", "--set", "retries=0", "--multi", "--dry-run"],
             env=base_env,
         )
@@ -554,7 +554,7 @@ def main() -> int:
 
         # delete --dry-run
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
              "--where", "externalId=x001", "--dry-run"],
             env=base_env,
         )
@@ -563,7 +563,7 @@ def main() -> int:
 
         # delete with --confirm
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
              "--where", "externalId=x001", "--confirm", "--json"],
             env=base_env,
         )
@@ -577,7 +577,7 @@ def main() -> int:
 
         # delete without --confirm and without --dry-run must fail
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
              "--where", "externalId=x001"],
             env=base_env,
         )
@@ -586,14 +586,14 @@ def main() -> int:
 
         # delete without --where must fail
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations", "--confirm"],
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations", "--confirm"],
             env=base_env,
         )
         check("delete no-where fails", r.returncode != 0)
 
         # update without --where must fail
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--set", "status=done"],
             env=base_env,
         )
@@ -602,7 +602,7 @@ def main() -> int:
         # empty filter '{}' is rejected for update and delete — even with --dry-run —
         # because '{}' matches every document and is too dangerous for an agent-facing tool.
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "{}", "--set", "status=done"],
             env=base_env,
         )
@@ -610,14 +610,14 @@ def main() -> int:
         check("update empty-filter error mentions document", "every document" in r.stderr)
 
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "{}", "--set", "status=done", "--dry-run"],
             env=base_env,
         )
         check("update empty-filter dry-run also fails", r.returncode != 0)
 
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
              "--where", "{}", "--confirm"],
             env=base_env,
         )
@@ -625,7 +625,7 @@ def main() -> int:
         check("delete empty-filter error mentions document", "every document" in r.stderr)
 
         r = run(
-            [str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
              "--where", "{}", "--dry-run"],
             env=base_env,
         )
@@ -643,7 +643,7 @@ def main() -> int:
 
         # invalid JSON filter
         r = run(
-            [str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "query", "appdb", "expectations",
              "--where", '{"broken":json}'],
             env=base_env,
         )
@@ -657,22 +657,22 @@ def main() -> int:
         print("\n--- filter edge cases ---")
 
         # bare string (no = no {) → error
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "juststring"], env=base_env)
         check("filter bare string errors", r.returncode != 0)
 
         # whitespace-only --where → treated as no filter (same as omitting it)
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "   ", "--json"], env=base_env)
         check("filter whitespace-only → no filter for reads", r.returncode == 0, r.stderr)
 
         # whitespace --where blocked for writes (resolves to empty filter)
-        r = run([str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "update", "appdb", "expectations",
                  "--where", "   ", "--set", "x=y", "--dry-run"], env=base_env)
         check("filter whitespace blocked for writes", r.returncode != 0)
 
         # key=null → None (not string "null")
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "deletedAt=null", "--json"], env=base_env)
         check("filter key=null exits 0", r.returncode == 0, r.stderr)
         if r.returncode == 0:
@@ -681,7 +681,7 @@ def main() -> int:
                   out["data"]["filter"].get("deletedAt") is None)
 
         # key=NULL (case-insensitive)
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "deletedAt=NULL", "--json"], env=base_env)
         check("filter key=NULL exits 0", r.returncode == 0, r.stderr)
         if r.returncode == 0:
@@ -690,20 +690,20 @@ def main() -> int:
                   out["data"]["filter"].get("deletedAt") is None)
 
         # falsy filter values must pass write guard (dict is non-empty)
-        r = run([str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "update", "appdb", "expectations",
                  "--where", "count=0", "--set", "x=y", "--dry-run"], env=base_env)
         check("filter count=0 allowed for writes", r.returncode == 2, r.stderr)
 
-        r = run([str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
                  "--where", "active=false", "--dry-run"], env=base_env)
         check("filter active=false allowed for writes", r.returncode == 2, r.stderr)
 
         # {} filter allowed for reads
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "{}", "--json"], env=base_env)
         check("query {} filter allowed for reads", r.returncode == 0, r.stderr)
 
-        r = run([str(AGENT_DO), "mongo", "count", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "count", "appdb", "expectations",
                  "--where", "{}", "--json"], env=base_env)
         check("count {} filter allowed for reads", r.returncode == 0, r.stderr)
 
@@ -711,55 +711,55 @@ def main() -> int:
         print("\n--- numeric arg validation ---")
 
         # non-numeric --limit → clean error (not raw Python ValueError)
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--limit", "abc"], env=base_env)
         check("--limit non-numeric fails", r.returncode != 0)
         check("--limit non-numeric gives clear error", "--limit" in r.stderr, r.stderr.strip())
 
         # non-numeric --skip
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--skip", "abc"], env=base_env)
         check("--skip non-numeric fails", r.returncode != 0)
         check("--skip non-numeric gives clear error", "--skip" in r.stderr, r.stderr.strip())
 
         # non-numeric --sample
-        r = run([str(AGENT_DO), "mongo", "schema", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "schema", "appdb", "expectations",
                  "--sample", "abc"], env=base_env)
         check("--sample non-numeric fails", r.returncode != 0)
         check("--sample non-numeric gives clear error", "--sample" in r.stderr, r.stderr.strip())
 
         # negative --limit
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--limit", "-1"], env=base_env)
         check("--limit -1 rejected", r.returncode != 0)
 
         # negative --skip
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--skip", "-1"], env=base_env)
         check("--skip -1 rejected", r.returncode != 0)
 
         # --sample 0 rejected (MongoDB $sample requires size >= 1)
-        r = run([str(AGENT_DO), "mongo", "schema", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "schema", "appdb", "expectations",
                  "--sample", "0"], env=base_env)
         check("--sample 0 rejected", r.returncode != 0)
 
         # --sample negative rejected
-        r = run([str(AGENT_DO), "mongo", "schema", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "schema", "appdb", "expectations",
                  "--sample", "-5"], env=base_env)
         check("--sample negative rejected", r.returncode != 0)
 
         # ── projection / sort validation ───────────────────────────────────────
         print("\n--- projection / sort ---")
 
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--projection", "notjson"], env=base_env)
         check("--projection invalid JSON fails", r.returncode != 0)
 
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--sort", "notjson"], env=base_env)
         check("--sort invalid JSON fails", r.returncode != 0)
 
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--projection", '{"_id":0,"externalId":1}',
                  "--sort", '{"createdAt":-1}', "--json"], env=base_env)
         check("valid projection+sort exits 0", r.returncode == 0, r.stderr)
@@ -774,31 +774,31 @@ def main() -> int:
         # ── aggregate edge cases ───────────────────────────────────────────────
         print("\n--- aggregate edge cases ---")
 
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", "[]", "--json"], env=base_env)
         check("aggregate empty pipeline [] exits 0", r.returncode == 0, r.stderr)
 
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", "{}"], env=base_env)
         check("aggregate pipeline {} (not array) fails", r.returncode != 0)
 
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", "@/nonexistent/path.json"], env=base_env)
         check("aggregate @nonexistent file fails", r.returncode != 0)
 
         # ── insert edge cases ──────────────────────────────────────────────────
         print("\n--- insert edge cases ---")
 
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", "[]"], env=base_env)
         check("insert --doc array fails", r.returncode != 0)
 
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", "null"], env=base_env)
         check("insert --doc null fails", r.returncode != 0)
 
         # empty doc {} is valid MongoDB — allowed
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", "{}", "--json"], env=base_env)
         check("insert empty doc {} allowed", r.returncode == 0, r.stderr)
 
@@ -807,7 +807,7 @@ def main() -> int:
 
         # Shell metacharacters in --where value: passed as a single Python string,
         # never interpreted by a shell. The semicolon, backtick, and $() are literals.
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", "status=done; echo INJECTED", "--json"], env=base_env)
         check("shell metacharacters (semicolon) in key=value: parsed as literal string",
               r.returncode == 0, r.stderr)
@@ -816,12 +816,12 @@ def main() -> int:
             check("shell metacharacters: filter value is literal (not executed)",
                   out["data"]["filter"].get("status") == "done; echo INJECTED")
 
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", '{"cmd": "$(rm -rf /)"}', "--dry-run"], env=base_env)
         check("$() in --doc JSON value treated as literal (dry-run)", r.returncode == 2)
         check("$() in --doc not executed (dry-run output present)", "[dry-run]" in r.stdout)
 
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", 'externalId=`id`', "--json"], env=base_env)
         check("backtick in key=value: parsed as literal string", r.returncode == 0, r.stderr)
         if r.returncode == 0:
@@ -833,7 +833,7 @@ def main() -> int:
         # agent-mongo does NOT execute JavaScript locally — it passes the filter as a BSON
         # dict to pymongo which sends it to the MongoDB server. JS execution on the server
         # depends on the server's security settings (noScripting option).
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--where", '{"$where": "function() { return true; }"}', "--json"],
                 env=base_env)
         check("$where JS operator passes through to pymongo (not executed locally)",
@@ -847,7 +847,7 @@ def main() -> int:
         # These pass the empty-filter guard (the dict is non-empty) — this is EXPECTED.
         # The guard catches accidental {} only. Explicit operators require the caller to
         # use --dry-run to verify scope first, and --confirm for delete.
-        r = run([str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "update", "appdb", "expectations",
                  "--where", '{"_id": {"$exists": true}}', "--set", "status=reviewed",
                  "--multi", "--dry-run"], env=base_env)
         check("universal-match op ($exists:true) passes filter guard, dry-run shows scope",
@@ -855,56 +855,56 @@ def main() -> int:
         check("dry-run output contains filter",
               "$exists" in r.stdout or "reviewed" in r.stdout)
 
-        r = run([str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
                  "--where", '{"status": {"$ne": null}}', "--dry-run"], env=base_env)
         check("$ne:null on delete shows dry-run scope (--confirm still required to execute)",
               r.returncode == 2)
 
         # $out stage in aggregate: BLOCKED without --confirm (fixed gap).
         # Previously, aggregate had no confirmation requirement even for destructive stages.
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$out": "archive"}]'], env=base_env)
         check("aggregate $out blocked without --confirm", r.returncode != 0)
         check("aggregate $out error mentions --confirm or destructive", "confirm" in r.stderr.lower())
 
         # $out with an object argument (cross-database write)
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$out": {"db": "other", "coll": "victims"}}]'],
                 env=base_env)
         check("aggregate $out (object form) blocked without --confirm", r.returncode != 0)
 
         # $merge stage: also destructive
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$group": {"_id": "$status"}}, {"$merge": {"into": "summaries"}}]'],
                 env=base_env)
         check("aggregate $merge stage blocked without --confirm", r.returncode != 0)
         check("aggregate $merge error mentions --confirm or destructive", "confirm" in r.stderr.lower())
 
         # $out allowed with --confirm
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$out": "archive"}]', "--confirm", "--json"],
                 env=base_env)
         check("aggregate $out allowed with --confirm", r.returncode == 0, r.stderr)
 
         # $out allowed with --dry-run (previews without executing)
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$out": "archive"}]', "--dry-run"], env=base_env)
         check("aggregate $out dry-run exits 2", r.returncode == 2)
         check("aggregate $out dry-run shows [dry-run]", "[dry-run]" in r.stdout)
         check("aggregate $out dry-run shows stage name", "$out" in r.stdout)
 
         # Normal aggregate (no destructive stages) still works without --confirm
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$count": "total"}]', "--json"], env=base_env)
         check("aggregate without destructive stages needs no --confirm", r.returncode == 0, r.stderr)
 
         # @file path traversal: reading non-JSON system files fails cleanly.
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", "@/etc/passwd"], env=base_env)
         check("@/etc/passwd as --pipeline fails cleanly (not valid JSON array)", r.returncode != 0)
 
         # /dev/null is empty — _parse_json_arg errors on empty JSON
-        r = run([str(AGENT_DO), "mongo", "query", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "query", "appdb", "expectations",
                  "--projection", "@/dev/null"], env=base_env)
         check("@/dev/null as --projection fails gracefully", r.returncode != 0)
 
@@ -912,7 +912,7 @@ def main() -> int:
         # the array type check (connections.json is an object, not an array).
         conn_file = fake_home / "mongo" / "connections.json"
         if conn_file.exists():
-            r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+            r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                      "--pipeline", f"@{conn_file}"], env=base_env)
             check("@connections.json as --pipeline blocked (object, not array)", r.returncode != 0)
 
@@ -945,7 +945,7 @@ def main() -> int:
         set_file = tmp / "update_payload.json"
         set_file.write_text(json.dumps({"status": "archived", "score": 99}))
         r = run(
-            [str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+            [str(AGENT_DO), "mongo", "update", "appdb", "expectations",
              "--where", "status=active",
              "--set", f"@{set_file}",
              "--dry-run"],
@@ -955,12 +955,12 @@ def main() -> int:
         check("update --set @file dry-run shows field", "archived" in r.stdout or "archived" in r.stderr)
 
         # --set '{}' (empty object) must be rejected — it would be a silent no-op
-        r = run([str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "update", "appdb", "expectations",
                  "--where", "status=active", "--set", "{}"], env=base_env)
         check("update --set '{}' empty object rejected", r.returncode != 0)
         check("update --set '{}' error is clear", "field" in r.stderr.lower() or "empty" in r.stderr.lower())
 
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", '{"x": 1}', "--dry-runx"], env=base_env)
         check("insert mistyped flag is rejected", r.returncode != 0)
         check("insert mistyped flag error is clear", "Unknown argument" in r.stderr)
@@ -995,21 +995,21 @@ def main() -> int:
         # ── dry-run --json output is valid JSON, not plain text ───────────────
         print("\n--- dry-run --json output ---")
 
-        r = run([str(AGENT_DO), "mongo", "insert", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "insert", "appdb", "expectations",
                  "--doc", '{"x":1}', "--dry-run", "--json"], env=base_env)
         check("insert dry-run --json exits 2", r.returncode == 2)
         drj = json.loads(r.stdout) if r.stdout.strip().startswith("{") else None
         check("insert dry-run --json is valid JSON", drj is not None, r.stdout[:200])
         check("insert dry-run --json has dry_run=true", (drj or {}).get("dry_run") is True)
 
-        r = run([str(AGENT_DO), "mongo", "update", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "update", "appdb", "expectations",
                  "--where", "x=1", "--set", "y=2", "--dry-run", "--json"], env=base_env)
         check("update dry-run --json exits 2", r.returncode == 2)
         drj = json.loads(r.stdout) if r.stdout.strip().startswith("{") else None
         check("update dry-run --json is valid JSON", drj is not None, r.stdout[:200])
         check("update dry-run --json has dry_run=true", (drj or {}).get("dry_run") is True)
 
-        r = run([str(AGENT_DO), "mongo", "delete", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "delete", "appdb", "expectations",
                  "--where", "x=1", "--dry-run", "--json"], env=base_env)
         check("delete dry-run --json exits 2", r.returncode == 2)
         drj = json.loads(r.stdout) if r.stdout.strip().startswith("{") else None
@@ -1017,13 +1017,13 @@ def main() -> int:
         check("delete dry-run --json has dry_run=true", (drj or {}).get("dry_run") is True)
 
         # aggregate --dry-run for non-destructive pipeline: must preview and exit 2
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$count":"total"}]', "--dry-run"], env=base_env)
         check("aggregate non-destructive --dry-run exits 2", r.returncode == 2)
         check("aggregate non-destructive --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
 
         # aggregate --dry-run --json for non-destructive pipeline
-        r = run([str(AGENT_DO), "mongo", "aggregate", "prism_bcc", "expectations",
+        r = run([str(AGENT_DO), "mongo", "aggregate", "appdb", "expectations",
                  "--pipeline", '[{"$count":"total"}]', "--dry-run", "--json"], env=base_env)
         check("aggregate non-destructive --dry-run --json exits 2", r.returncode == 2)
         drj = json.loads(r.stdout) if r.stdout.strip().startswith("{") else None
