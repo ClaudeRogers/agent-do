@@ -228,7 +228,7 @@ def cmd_monitor_mute(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would mute monitor {args.id}")
-        return 2
+        return 0
 
     body: dict[str, Any] = {}
     if args.end:
@@ -253,7 +253,7 @@ def cmd_monitor_unmute(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would unmute monitor {args.id}")
-        return 2
+        return 0
 
     data = _request("POST", f"/monitor/{urllib.parse.quote(str(args.id))}/unmute")
     if args.json:
@@ -284,7 +284,7 @@ def cmd_monitor_create(args: argparse.Namespace) -> int:
             print(f"[dry-run] Would create monitor: {args.name}")
             print(f"  type:  {args.monitor_type}")
             print(f"  query: {args.query}")
-        return 2
+        return 0
 
     data = _request("POST", "/monitor", body=body)
     if args.json:
@@ -301,7 +301,7 @@ def cmd_monitor_delete(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would delete monitor {args.id}")
-        return 2
+        return 0
 
     _request("DELETE", f"/monitor/{urllib.parse.quote(str(args.id))}")
     if args.json:
@@ -455,7 +455,7 @@ def cmd_event_post(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would post event: {args.title}")
-        return 2
+        return 0
 
     data = _request("POST", "/events", body=body)
     event = data.get("event") or data
@@ -523,7 +523,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would create incident: {args.title}")
-        return 2
+        return 0
 
     data = _request("POST", "/incidents", body=body, api_version="v2")
     inc = data.get("data") or {}
@@ -559,7 +559,7 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would update incident {args.id}")
-        return 2
+        return 0
 
     data = _request("PATCH", f"/incidents/{urllib.parse.quote(str(args.id))}", body=body, api_version="v2")
     if args.json:
@@ -582,7 +582,7 @@ def cmd_incident_resolve(args: argparse.Namespace) -> int:
             _print_json(preview)
         else:
             print(f"[dry-run] Would resolve incident {args.id}")
-        return 2
+        return 0
 
     data = _request("PATCH", f"/incidents/{urllib.parse.quote(str(args.id))}", body=body, api_version="v2")
     if args.json:
@@ -779,7 +779,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="agent-datadog",
         description="Datadog observability: monitors, logs, metrics, incidents, dashboards, SLOs",
         epilog=(
-            "Exit codes: write-command --dry-run previews exit 2 without sending HTTP; "
+            "Exit codes: write-command --dry-run previews exit 0 without sending HTTP; "
             "monitor-status and snapshot exit 1 when monitors are alerting."
         ),
     )
