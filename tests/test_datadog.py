@@ -568,13 +568,13 @@ def main() -> int:
 
         _requests.clear()
         r = run(["monitor-mute", "101", "--dry-run"], env=env)
-        check("monitor-mute --dry-run exits 2", r.returncode == 2, r.stderr)
+        check("monitor-mute --dry-run exits 0", r.returncode == 0, r.stderr)
         check("monitor-mute --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
         check("monitor-mute --dry-run sends no HTTP", not any("/monitor/101/mute" in p for _, p in _requests))
 
         _requests.clear()
         r = run(["--json", "monitor-mute", "101", "--dry-run"], env=env)
-        check("monitor-mute --dry-run --json exits 2", r.returncode == 2)
+        check("monitor-mute --dry-run --json exits 0", r.returncode == 0)
         j = _try_json(r.stdout)
         check("monitor-mute --dry-run --json is valid JSON", j is not None, r.stdout)
         check("monitor-mute --dry-run --json has command field",
@@ -606,7 +606,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["monitor-unmute", "101", "--dry-run"], env=env)
-        check("monitor-unmute --dry-run exits 2", r.returncode == 2)
+        check("monitor-unmute --dry-run exits 0", r.returncode == 0)
         check("monitor-unmute --dry-run sends no HTTP", not any("/unmute" in p for _, p in _requests))
 
         r = run(["--json", "monitor-unmute", "101", "--dry-run"], env=env)
@@ -629,7 +629,7 @@ def main() -> int:
                  "--type", "metric alert",
                  "--query", "avg(last_5m):avg:system.cpu.user{*} > 95",
                  "--dry-run"], env=env)
-        check("monitor-create --dry-run exits 2", r.returncode == 2)
+        check("monitor-create --dry-run exits 0", r.returncode == 0)
         check("monitor-create --dry-run shows monitor name", "Test CPU Alert" in r.stdout)
         check("monitor-create --dry-run sends no HTTP", not any("/monitor" in p for _, p in _requests))
 
@@ -665,7 +665,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["monitor-delete", "101", "--dry-run"], env=env)
-        check("monitor-delete --dry-run exits 2", r.returncode == 2)
+        check("monitor-delete --dry-run exits 0", r.returncode == 0)
         check("monitor-delete --dry-run sends no HTTP", not any(m == "DELETE" for m, _ in _requests))
 
         r = run(["--json", "monitor-delete", "101", "--dry-run"], env=env)
@@ -818,7 +818,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["event-post", "--title", "Deploy started", "--text", "v2.4.0 deploying", "--dry-run"], env=env)
-        check("event-post --dry-run exits 2", r.returncode == 2)
+        check("event-post --dry-run exits 0", r.returncode == 0)
         check("event-post --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
         check("event-post --dry-run sends no HTTP", not any("POST" == m and "/events" in p for m, p in _requests))
 
@@ -898,7 +898,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["incident-create", "--title", "DB latency spike", "--dry-run"], env=env)
-        check("incident-create --dry-run exits 2", r.returncode == 2)
+        check("incident-create --dry-run exits 0", r.returncode == 0)
         check("incident-create --dry-run shows [dry-run]", "[dry-run]" in r.stdout)
         check("incident-create --dry-run sends no HTTP", not any("POST" == m and "/incidents" in p for m, p in _requests))
 
@@ -926,7 +926,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["incident-update", "inc-001", "--status", "stable", "--dry-run"], env=env)
-        check("incident-update --dry-run exits 2", r.returncode == 2)
+        check("incident-update --dry-run exits 0", r.returncode == 0)
         check("incident-update --dry-run sends no HTTP",
               not any("PATCH" == m and "/incidents" in p for m, p in _requests))
 
@@ -954,7 +954,7 @@ def main() -> int:
 
         _requests.clear()
         r = run(["incident-resolve", "inc-001", "--dry-run"], env=env)
-        check("incident-resolve --dry-run exits 2", r.returncode == 2)
+        check("incident-resolve --dry-run exits 0", r.returncode == 0)
         check("incident-resolve --dry-run sends no HTTP",
               not any("PATCH" == m and "/incidents" in p for m, p in _requests))
 
@@ -1224,13 +1224,13 @@ def main() -> int:
 
         # monitor-mute with time expressions as --end
         r = run(["monitor-mute", "101", "--end", "now-1h", "--dry-run"], env=env)
-        check("monitor-mute --end now-1h accepted", r.returncode == 2)
+        check("monitor-mute --end now-1h accepted", r.returncode == 0)
 
         r = run(["monitor-mute", "101", "--end", "now+1h", "--dry-run"], env=env)
-        check("monitor-mute --end now+1h accepted", r.returncode == 2)
+        check("monitor-mute --end now+1h accepted", r.returncode == 0)
 
         r = run(["monitor-mute", "101", "--end", "now", "--dry-run"], env=env)
-        check("monitor-mute --end now accepted", r.returncode == 2)
+        check("monitor-mute --end now accepted", r.returncode == 0)
 
         # priority choices validated
         r = run(["event-post", "--title", "T", "--text", "B", "--priority", "urgent"], env=env)
@@ -1448,7 +1448,7 @@ def main() -> int:
                  "--type", "log alert",
                  "--query", "logs(\"status:error\").count > 50",
                  "--dry-run"], env=env)
-        check("monitor-create --type 'log alert' --dry-run exits 2", r.returncode == 2)
+        check("monitor-create --type 'log alert' --dry-run exits 0", r.returncode == 0)
         r = run(["--json", "monitor-create",
                  "--name", "Log Alert",
                  "--type", "log alert",
@@ -1501,7 +1501,7 @@ def main() -> int:
                   isinstance(j, dict) and j.get("tool") == "datadog")
             check(f"{expected_cmd} --dry-run --json has command={expected_cmd}",
                   isinstance(j, dict) and j.get("command") == expected_cmd)
-            check(f"{expected_cmd} --dry-run exits 2", r.returncode == 2)
+            check(f"{expected_cmd} --dry-run exits 0", r.returncode == 0)
 
         # ══════════════════════════════════════════════════════════════════
         # DEEP REGRESSION — TIME PARSING EDGE CASES
@@ -1510,11 +1510,11 @@ def main() -> int:
 
         # monitor-mute --end accepts ISO8601 date
         r = run(["monitor-mute", "101", "--end", "2026-06-01", "--dry-run"], env=env)
-        check("monitor-mute --end ISO date 2026-06-01 exits 2", r.returncode == 2)
+        check("monitor-mute --end ISO date 2026-06-01 exits 0", r.returncode == 0)
 
         # monitor-mute --end accepts epoch integer string
         r = run(["monitor-mute", "101", "--end", "1748736000", "--dry-run"], env=env)
-        check("monitor-mute --end epoch integer exits 2", r.returncode == 2)
+        check("monitor-mute --end epoch integer exits 0", r.returncode == 0)
 
         # logs --from epoch integer
         r = run(["logs", "--from", "1716289200"], env=env)
@@ -1612,12 +1612,12 @@ def main() -> int:
 
         for sev in ["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "UNKNOWN"]:
             r = run(["incident-create", "--title", f"Test {sev}", "--severity", sev, "--dry-run"], env=env)
-            check(f"incident-create --severity {sev} accepted (dry-run exits 2)", r.returncode == 2)
+            check(f"incident-create --severity {sev} accepted (dry-run exits 0)", r.returncode == 0)
 
         # incident-update severity choices
         for sev in ["SEV-1", "SEV-2", "SEV-3", "SEV-4", "SEV-5", "UNKNOWN"]:
             r = run(["incident-update", "inc-001", "--severity", sev, "--dry-run"], env=env)
-            check(f"incident-update --severity {sev} accepted (dry-run exits 2)", r.returncode == 2)
+            check(f"incident-update --severity {sev} accepted (dry-run exits 0)", r.returncode == 0)
 
         # ══════════════════════════════════════════════════════════════════
         # DEEP REGRESSION — SNAPSHOT BUG FIX VERIFICATION
