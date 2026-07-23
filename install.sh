@@ -7,6 +7,7 @@
 #   3. Generates the installed discovery index from registry.yaml
 #   4. Copies Claude Code hooks to ~/.claude/hooks/
 #   5. Optional: Codex hooks to ~/.codex/hooks/ (--codex or auto-detected)
+#   5b. Optional: Cursor adapters to ~/.cursor/hooks/ (--cursor or auto-detected)
 #   6. Installs Python dependencies
 #   7. Optional: npm install for browse/unbrowse
 #   8. Optional: cargo build for manna
@@ -21,7 +22,9 @@
 #   ./install.sh --print-only     # Never modify settings.json; just print the snippet
 #   ./install.sh --codex          # Force Codex install even without ~/.codex/
 #   ./install.sh --no-codex       # Skip Codex install even when ~/.codex/ exists
-#   ./install.sh --uninstall      # Remove symlink + hooks + settings.json entries
+#   ./install.sh --cursor         # Force Cursor install even without ~/.cursor/
+#   ./install.sh --no-cursor      # Skip Cursor install even when ~/.cursor/ exists
+#   ./install.sh --uninstall      # Remove symlink + hooks + settings.json entries (Claude, Codex, and Cursor)
 
 set -euo pipefail
 
@@ -36,16 +39,21 @@ FACTORY_DIR="${FACTORY_DIR:-$HOME/.factory}"
 FACTORY_INDEX_PATH="$FACTORY_DIR/agent-do-index.yaml"
 HOOKS_DIR="$REPO_DIR/hooks"
 CODEX_HOOKS_SRC="$HOOKS_DIR/codex"
+CURSOR_HOOKS_DIR="$HOME/.cursor/hooks"
+CURSOR_HOOKS_SRC="$HOOKS_DIR/cursor"
 
 # Decide whether to install Codex hooks. Default: auto (yes if ~/.codex/ exists).
 INSTALL_CODEX="auto"
 # Decide whether to register hooks in settings.json. Default: ask (print-only if
 # stdin is not a terminal, so piped installs never modify settings unasked).
 REGISTER_HOOKS="ask"
+INSTALL_CURSOR="auto"
 for arg in "$@"; do
     case "$arg" in
         --codex)          INSTALL_CODEX="yes" ;;
         --no-codex)       INSTALL_CODEX="no"  ;;
+        --cursor)         INSTALL_CURSOR="yes" ;;
+        --no-cursor)      INSTALL_CURSOR="no"  ;;
         --register-hooks) REGISTER_HOOKS="yes" ;;
         --print-only)     REGISTER_HOOKS="no"  ;;
     esac
@@ -344,6 +352,20 @@ uninstall() {
         fi
     done
 
+    # Remove Cursor adapters that agent-do installs (only those, not personal hooks)
+    local cursor_hooks=(
+        "agent-do-session-start.py"
+        "agent-do-prompt-router.py"
+        "agent-do-pretooluse-check.py"
+        "cursor_compat.py"
+    )
+    for hook in "${cursor_hooks[@]}"; do
+        if [ -f "$CURSOR_HOOKS_DIR/$hook" ]; then
+            rm "$CURSOR_HOOKS_DIR/$hook"
+            info "Removed Cursor adapter $CURSOR_HOOKS_DIR/$hook"
+        fi
+    done
+
     # Unregister from settings.json. Removing the wrappers without removing the
     # entries would leave Claude Code invoking commands that no longer exist,
     # so the sweep is part of uninstalling, not a reminder to the user. Only
@@ -358,8 +380,8 @@ uninstall() {
     fi
 
     echo ""
-    warn "Codex is not swept automatically: remove the agent-do hooks from"
-    warn "~/.codex/hooks.json by hand. Search for 'agent-do' in the hooks sections."
+    warn "Codex and Cursor are not swept automatically: remove the agent-do hooks"
+    warn "from ~/.codex/hooks.json and ~/.cursor/hooks.json by hand. Search for 'agent-do'."
     echo ""
     info "Uninstall complete. Repo at $REPO_DIR is untouched."
     exit 0
@@ -592,6 +614,44 @@ else
     info "Skipped Codex install (use --codex to force, or install ~/.codex/ first)"
 fi
 
+# 3c. Optional: Cursor adapters. Unlike the wrapper-generated Claude/Codex
+# hooks, these are self-contained adapter files that resolve the repo via
+# AGENT_DO_REPO or ~/.agent-do/install-path and subprocess the canonical
+# Claude hooks — plain copy, no wrapper generation.
+should_install_cursor="no"
+case "$INSTALL_CURSOR" in
+    yes)  should_install_cursor="yes" ;;
+    auto) [ -d "$HOME/.cursor" ] && should_install_cursor="yes" ;;
+esac
+
+if [ "$should_install_cursor" = "yes" ]; then
+    step "Installing Cursor adapters (delegate to canonical Claude hooks)"
+    mkdir -p "$CURSOR_HOOKS_DIR"
+
+    CURSOR_HOOK_FILES=(
+        "agent-do-session-start.py"
+        "agent-do-prompt-router.py"
+        "agent-do-pretooluse-check.py"
+        "cursor_compat.py"
+    )
+    for name in "${CURSOR_HOOK_FILES[@]}"; do
+        src="$CURSOR_HOOKS_SRC/$name"
+        dst="$CURSOR_HOOKS_DIR/$name"
+        if [ ! -f "$src" ]; then
+            err "Cursor adapter source not found: $src"
+            continue
+        fi
+        cp "$src" "$dst"
+        chmod +x "$dst"
+        info "Installed Cursor adapter: $name"
+    done
+
+    info "Cursor registration template: $CURSOR_HOOKS_SRC/hooks.json.example"
+    info "Merge into ~/.cursor/hooks.json (see snippet at the end of this run)"
+else
+    info "Skipped Cursor install (use --cursor to force, or install ~/.cursor/ first)"
+fi
+
 # 5. Python dependencies
 step "Installing Python dependencies"
 if command -v pip3 &>/dev/null; then
@@ -695,6 +755,22 @@ if [ "$should_install_codex" = "yes" ]; then
     echo "$CODEX_HOOKS_SRC/hooks.json.example):"
     echo ""
     cat "$CODEX_HOOKS_SRC/hooks.json.example"
+    echo ""
+fi
+
+# 9c. Print Cursor hooks.json snippet if Cursor install ran
+if [ "$should_install_cursor" = "yes" ]; then
+    step "Cursor hooks.json configuration"
+    echo ""
+    echo "Register the agent-do adapters in ~/.cursor/hooks.json ONLY — do not"
+    echo "also register agent-do hooks for Cursor via ~/.claude/settings.json."
+    echo "Cursor reads ~/.claude/settings.json as Claude user config, so hooks"
+    echo "registered in both places fire twice per event."
+    echo ""
+    echo "Merge the following into ~/.cursor/hooks.json (full template is at"
+    echo "$CURSOR_HOOKS_SRC/hooks.json.example):"
+    echo ""
+    cat "$CURSOR_HOOKS_SRC/hooks.json.example"
     echo ""
 fi
 
