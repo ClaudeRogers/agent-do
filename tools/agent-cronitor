@@ -260,13 +260,20 @@ print(f'Created monitor \"{name}\" (key: {key}, type: {mtype})')
 }
 
 cmd_delete() {
-    local monitor_key="${1:?Usage: agent-cronitor delete <key>}"
+    _pop_json_flag "$@"
+    local monitor_key="${_JSON_ARGS[0]:?Usage: agent-cronitor delete <key>}"
 
     local http_code
     http_code=$(cr_delete "${CRONITOR_API}/monitors/${monitor_key}") || return 1
 
     if [[ "$http_code" == "204" ]]; then
-        echo "Deleted monitor: ${monitor_key}"
+        if $_json_mode; then
+            DELETE_KEY="$monitor_key" python3 -c '
+import json, os
+print(json.dumps({"ok": True, "monitor": os.environ["DELETE_KEY"], "action": "delete"}))'
+        else
+            echo "Deleted monitor: ${monitor_key}"
+        fi
     elif [[ "$http_code" == "404" ]]; then
         echo "Error: Monitor '${monitor_key}' not found" >&2
         return 1
@@ -316,7 +323,8 @@ print(json.dumps({"ok": True, "monitor": os.environ["PAUSE_KEY"], "action": "pau
 }
 
 cmd_resume() {
-    local monitor_key="${1:?Usage: agent-cronitor resume <key>}"
+    _pop_json_flag "$@"
+    local monitor_key="${_JSON_ARGS[0]:?Usage: agent-cronitor resume <key>}"
 
     local key
     key=$(cr_api_key) || return 1
@@ -326,7 +334,13 @@ cmd_resume() {
         "${CRONITOR_API}/monitors/${monitor_key}/pause/0")
 
     if [[ "$http_code" == "200" ]]; then
-        echo "Monitor \"${monitor_key}\": resumed"
+        if $_json_mode; then
+            RESUME_KEY="$monitor_key" python3 -c '
+import json, os
+print(json.dumps({"ok": True, "monitor": os.environ["RESUME_KEY"], "action": "resume"}))'
+        else
+            echo "Monitor \"${monitor_key}\": resumed"
+        fi
     elif [[ "$http_code" == "404" ]]; then
         echo "Error: Monitor '${monitor_key}' not found" >&2
         return 1
@@ -415,6 +429,8 @@ print(json.dumps({
 }
 
 cmd_ping() {
+    _pop_json_flag "$@"
+    set -- "${_JSON_ARGS[@]}"
     local monitor_key="${1:?Usage: agent-cronitor ping <key> [--state STATE]}"
     shift
 
@@ -471,7 +487,15 @@ cmd_ping() {
     http_code=$(curl -sS --connect-timeout 10 --max-time 60 -o /dev/null -w "%{http_code}" "$url")
 
     if [[ "$http_code" == "200" ]]; then
-        echo "Ping sent: ${monitor_key}${state:+ state=${state}}${message:+ message=${message}}"
+        if $_json_mode; then
+            PING_KEY="$monitor_key" PING_STATE="$state" PING_MSG="$message" python3 -c '
+import json, os
+print(json.dumps({"ok": True, "monitor": os.environ["PING_KEY"], "action": "ping",
+                  "state": os.environ.get("PING_STATE") or None,
+                  "message": os.environ.get("PING_MSG") or None}))'
+        else
+            echo "Ping sent: ${monitor_key}${state:+ state=${state}}${message:+ message=${message}}"
+        fi
     else
         echo "Error: Unexpected response code ${http_code}" >&2
         return 1
