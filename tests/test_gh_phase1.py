@@ -95,14 +95,6 @@ elif args[:2] == ["release", "create"]:
 elif args[:2] in [["release", "edit"], ["release", "delete"], ["release", "upload"], ["release", "download"]]:
     sys.exit(0)
 
-# api raw REST (non-graphql)
-elif args[:2] == ["api", "--method"] or (args[:1] == ["api"] and "--method" in args):
-    print(json.dumps({{"resources": {{"core": {{"limit": 60, "remaining": 59}}}}}}))
-
-# graphql escape hatch — reuse existing pattern
-elif args[:3] == ["api", "graphql", "-f"]:
-    print(json.dumps({{"data": {{"viewer": {{"login": "ovachiever"}}}}}}))
-
 # issue search (used by triage for related issues)
 elif args[:2] == ["search", "issues"]:
     print(json.dumps([]))
@@ -318,34 +310,6 @@ else:
             cwd=ROOT, env=env,
         )
         require(rpub_dry.returncode == 0, f"release publish --dry-run failed: {rpub_dry.stderr}")
-
-        # ── api GET ────────────────────────────────────────────────────────────
-        api_r = run(
-            [str(AGENT_DO), "gh", "api", "GET", "/rate_limit", "--json"],
-            cwd=ROOT, env=env,
-        )
-        require(api_r.returncode == 0, f"api GET failed: {api_r.stderr}")
-        ap = json.loads(api_r.stdout)
-        require("data" in ap, f"missing data key in api response: {ap}")
-        require("resources" in ap["data"], f"missing resources in api response: {ap}")
-
-        # verify --method GET was passed to gh
-        calls_api = [json.loads(line) for line in log_path.read_text().splitlines()]
-        require(
-            any("--method" in c and "GET" in c and "/rate_limit" in c
-                for c in calls_api if isinstance(c, list)),
-            f"gh api --method GET not found in calls: {calls_api}",
-        )
-
-        # ── graphql ────────────────────────────────────────────────────────────
-        gql_r = run(
-            [str(AGENT_DO), "gh", "graphql", "{ viewer { login } }", "--json"],
-            cwd=ROOT, env=env,
-        )
-        require(gql_r.returncode == 0, f"graphql failed: {gql_r.stderr}")
-        gql = json.loads(gql_r.stdout)
-        require("data" in gql, f"missing data key in graphql response: {gql}")
-        require(gql["data"]["data"]["viewer"]["login"] == "ovachiever", f"bad graphql data: {gql}")
 
     print("gh phase1 tests passed")
     return 0

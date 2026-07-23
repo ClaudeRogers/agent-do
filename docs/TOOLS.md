@@ -54,7 +54,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [excel](#excel) | AI-first Excel CLI for workbook automation | mixed | 11 |
 | [figma](#figma) | Control Figma | read | 3 |
 | [gcp](#gcp) | Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation for OAuth credentials | mixed | 19 |
-| [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 23 |
+| [gh](#gh) | GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos | mixed | 26 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
@@ -1609,7 +1609,7 @@ agent-do gcp snapshot
 
 ### gh
 
-GitHub repository, pull request, review, and merge work-state across accessible repos
+GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos
 
 Concurrency: `mixed`
 
@@ -1618,6 +1618,9 @@ Concurrency: `mixed`
 - discover accessible GitHub repositories
 - list actionable pull requests across repos
 - inspect pull request details, diffs, checks, and unresolved review threads
+- create pull requests from the current branch
+- list, view, create, comment on, close, reopen, label, assign, snapshot, and triage issues
+- list, view, create, edit, publish, delete, upload, download, and draft release notes
 - classify changed files by review-risk tier (critical/elevated/standard)
 - audit PR review risks and generate fix-oriented engineering review replies
 - surface the built-in review doctrine on every review
@@ -1638,6 +1641,9 @@ Concurrency: `mixed`
 - `review`: Summarize a PR for review — state, checks, risk tier, and the review doctrine
 - `audit`: Audit a PR for review risks and generate request-changes-ready reply text
 - `doctrine`: Print the PR review doctrine
+- `pr create`: Create a pull request
+- `issue`: Manage GitHub issues
+- `release`: Manage GitHub releases
 - `approve`: Approve a PR
 - `request-changes`: Request changes on a PR
 - `comment`: Comment on a PR
@@ -1675,12 +1681,25 @@ agent-do gh close ovachiever/agent-do#4 --delete-branch --comment "Closing accid
 agent-do gh checkout ovachiever/agent-do#5 --branch review/pr-5
 # add reviewer and label to pull request
 agent-do gh edit ovachiever/agent-do#5 --add-reviewer @me --add-label review-needed
+# create a pull request
+agent-do gh pr create --title "Add issue triage"
+# list GitHub issues
+agent-do gh issue list ovachiever/agent-do --state open --json
+# triage a GitHub issue and suggest labels
+agent-do gh issue triage ovachiever/agent-do#42 --json
+# close a GitHub issue as completed
+agent-do gh issue close ovachiever/agent-do#42 --reason completed
+# show the latest GitHub release
+agent-do gh release latest ovachiever/agent-do --json
+# create GitHub release notes since the previous tag
+agent-do gh release notes ovachiever/agent-do --since v1.1.0 --json
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `pr`, `prs`, `repos`, `review`, `threads`, `whoami`
-- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `merge`, `ready`, `reopen`, `request-changes`, `update-branch`
+- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `issue list`, `issue snapshot`, `issue triage`, `issue view`, `pr`, `prs`, `release download`, `release latest`, `release list`, `release notes`, `release view`, `repos`, `review`, `threads`, `whoami`
+- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `issue assign`, `issue close`, `issue comment`, `issue create`, `issue label`, `issue reopen`, `merge`, `pr create`, `ready`, `release create`, `release delete`, `release edit`, `release publish`, `release upload`, `reopen`, `request-changes`, `update-branch`
+- destructive (irreversible data loss; confirm before auto-running): `release delete`
 
 ### ghidra
 

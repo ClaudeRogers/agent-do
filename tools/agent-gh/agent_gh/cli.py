@@ -196,9 +196,6 @@ def build_parser() -> argparse.ArgumentParser:
     # ── Phase 1: release ───────────────────────────────────────────────────────
     _build_release_parser(sub)
 
-    # ── Phase 1: api / graphql ─────────────────────────────────────────────────
-    _build_api_parser(sub)
-
     return parser
 
 def _build_issue_parser(sub: Any) -> None:
@@ -382,28 +379,6 @@ def _build_release_parser(sub: Any) -> None:
     rnotes.add_argument("--json", action="store_true")
     rnotes.set_defaults(func=release_group.cmd_release_notes)
 
-def _build_api_parser(sub: Any) -> None:
-    from .groups import api as api_group
-
-    api_p = sub.add_parser("api", help="Raw GitHub REST API call")
-    api_p.add_argument("method", choices=["GET", "POST", "PATCH", "PUT", "DELETE"])
-    api_p.add_argument("path", help="API path, e.g. /rate_limit")
-    api_p.add_argument("--field", action="append", dest="fields", metavar="K=V")
-    api_p.add_argument("--raw-field", action="append", dest="raw_fields", metavar="K=V")
-    api_p.add_argument("--header", action="append", dest="headers", metavar="K:V")
-    api_p.add_argument("--paginate", action="store_true")
-    api_p.add_argument("--jq", metavar="EXPR")
-    api_p.add_argument("--json", action="store_true")
-    api_p.set_defaults(func=api_group.cmd_api)
-
-    gql_p = sub.add_parser("graphql", help="Raw GitHub GraphQL call")
-    gql_p.add_argument("query", help="GraphQL query string or @file path")
-    gql_p.add_argument("--field", action="append", dest="fields", metavar="K=V")
-    gql_p.add_argument("--paginate", action="store_true")
-    gql_p.add_argument("--jq", metavar="EXPR")
-    gql_p.add_argument("--json", action="store_true")
-    gql_p.set_defaults(func=api_group.cmd_graphql)
-
 def _subcommand_help(parser: argparse.ArgumentParser, command: str | None) -> None:
     if not command:
         parser.print_help()
@@ -443,8 +418,19 @@ PR commands (existing):
   checks <pr>                    Show PR checks
   review <pr>                    Summarize a PR for review
   audit <pr> [--reply]           Audit a PR and generate fix-oriented review text
+  doctrine                       Print the PR review doctrine
   pr create                      Create a pull request
-  approve / request-changes / comment / merge / ready / draft
+  approve <pr>                   Approve a pull request
+  request-changes <pr>           Request changes on a pull request
+  comment <pr>                   Comment on a pull request
+  merge <pr>                     Merge a pull request
+  ready <pr>                     Mark a pull request ready for review
+  draft <pr>                     Convert a pull request to draft
+  close <pr>                     Close a pull request
+  reopen <pr>                    Reopen a pull request
+  checkout <pr>                  Check out a pull request locally
+  edit <pr>                      Edit pull request metadata
+  update-branch <pr>             Update a PR branch from its base branch
 
 Issue commands (new):
   issue list <owner/repo>        List issues
@@ -452,7 +438,8 @@ Issue commands (new):
   issue create <owner/repo>      Create an issue
   issue comment <owner/repo>#N   Comment on an issue
   issue close / reopen           Close or reopen an issue
-  issue label / assign           Manage labels and assignees
+  issue label <owner/repo>#N     Manage labels
+  issue assign <owner/repo>#N    Manage assignees
   issue snapshot <owner/repo>    Bulk structured snapshot
   issue triage <owner/repo>#N    Deterministic triage with suggested labels
 
@@ -462,17 +449,12 @@ Release commands (new):
   release latest <owner/repo>    Show latest release
   release create / edit / publish / delete / upload / download / notes
 
-API escape hatch (new):
-  api GET /rate_limit            Raw REST API call
-  graphql '<query>'              Raw GraphQL call
-
 Examples:
   agent-do gh inbox
   agent-do gh issue list ovachiever/agent-do --state open
   agent-do gh issue triage ovachiever/agent-do#42
   agent-do gh release latest ovachiever/agent-do --json
   agent-do gh release create ovachiever/agent-do v1.2 --generate-notes
-  agent-do gh api GET /rate_limit
   agent-do gh audit ovachiever/agent-do#3 --reply
 """
     )

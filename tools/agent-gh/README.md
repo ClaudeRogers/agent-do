@@ -95,7 +95,7 @@ agent-do gh edit <ref> [--title <text>] [--body <text>] [--body-file <path>] [--
 agent-do gh update-branch <ref> [--rebase] [--dry-run]
 ```
 
-All five lifecycle commands support `--dry-run`: prints the `gh` command that would be run and exits with code `2` without touching GitHub.
+All five lifecycle commands support `--dry-run`: prints the `gh` command that would be run and exits with code `0` without touching GitHub.
 
 ---
 
@@ -153,24 +153,7 @@ agent-do gh release notes <owner/repo> --since <previous-tag> [--target <branch-
 
 `release notes` generates categorized release notes (features, fixes, chores, uncategorized) for all PRs merged since `--since`. Uses the GitHub API to resolve tag timestamps — supports both annotated and lightweight tags — so the fallback PR list is correctly bounded even when `--generate-notes` isn't available.
 
-`release delete` requires `--confirm` to execute; `--dry-run` prints the would-be command and exits 2.
-
----
-
-### Raw API access
-
-```bash
-agent-do gh api GET /rate_limit [--paginate] [--jq <expr>] [--json]
-agent-do gh api POST /repos/owner/repo/issues --field title="Bug" --field body="..."
-agent-do gh api PATCH /repos/owner/repo/pulls/5 --field title="New title"
-agent-do gh api PUT /repos/owner/repo/topics --raw-field names='["go","api"]'
-agent-do gh api DELETE /repos/owner/repo/releases/123
-
-agent-do gh graphql '<query>' [--field K=V] [--paginate] [--jq <expr>] [--json]
-agent-do gh graphql @query.graphql [--field owner=ovachiever --field repo=agent-do]
-```
-
-Pass `@file` to `graphql` to read the query from a file. `--paginate` follows GitHub's cursor-based pagination automatically.
+`release delete` requires `--confirm` to execute; `--dry-run` prints the would-be command and exits 0.
 
 ---
 
@@ -179,7 +162,7 @@ Pass `@file` to `graphql` to read the query from a file. `--paginate` follows Gi
 Commands that write to GitHub accept `--dry-run`:
 
 - Prints the `gh` command that would be executed
-- Exits with code `2` (the agent-do "needs clarification" exit — orchestrators treat this as "preview shown, awaiting confirmation")
+- Exits with code `0` after showing the preview
 - Nothing is sent to GitHub
 
 Supported on: `close`, `reopen`, `checkout`, `edit`, `update-branch`, `issue create`, `issue comment`, `issue close`, `issue reopen`, `issue label`, `issue assign`, `release create`, `release edit`, `release publish`, `release delete`, `release upload`, `release download`.

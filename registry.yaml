@@ -2812,11 +2812,14 @@ tools:
       - trigger
     concurrency: write
   gh:
-    description: GitHub repository, pull request, review, and merge work-state across accessible repos
+    description: GitHub repository, pull request, issue, release, review, and merge work-state across accessible repos
     capabilities:
     - discover accessible GitHub repositories
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
+    - create pull requests from the current branch
+    - list, view, create, comment on, close, reopen, label, assign, snapshot, and triage issues
+    - list, view, create, edit, publish, delete, upload, download, and draft release notes
     - classify changed files by review-risk tier (critical/elevated/standard)
     - audit PR review risks and generate fix-oriented engineering review replies
     - surface the built-in review doctrine on every review
@@ -2835,6 +2838,9 @@ tools:
       review: Summarize a PR for review — state, checks, risk tier, and the review doctrine
       audit: Audit a PR for review risks and generate request-changes-ready reply text
       doctrine: Print the PR review doctrine
+      pr create: Create a pull request
+      issue: Manage GitHub issues
+      release: Manage GitHub releases
       approve: Approve a PR
       request-changes: Request changes on a PR
       comment: Comment on a PR
@@ -2869,6 +2875,18 @@ tools:
       command: agent-gh checkout ovachiever/agent-do#5 --branch review/pr-5
     - intent: add reviewer and label to pull request
       command: agent-gh edit ovachiever/agent-do#5 --add-reviewer @me --add-label review-needed
+    - intent: create a pull request
+      command: agent-gh pr create --title "Add issue triage"
+    - intent: list GitHub issues
+      command: agent-gh issue list ovachiever/agent-do --state open --json
+    - intent: triage a GitHub issue and suggest labels
+      command: 'agent-gh issue triage ovachiever/agent-do#42 --json'
+    - intent: close a GitHub issue as completed
+      command: 'agent-gh issue close ovachiever/agent-do#42 --reason completed'
+    - intent: show the latest GitHub release
+      command: agent-gh release latest ovachiever/agent-do --json
+    - intent: create GitHub release notes since the previous tag
+      command: agent-gh release notes ovachiever/agent-do --since v1.1.0 --json
     routing:
       default_command: inbox
       recommended_entrypoints:
@@ -2878,6 +2896,11 @@ tools:
       - agent-do gh prs --state open
       - agent-do gh audit owner/repo#123 --reply --probe-deploys
       - agent-do gh review owner/repo#123 --summary
+      - agent-do gh pr create --title <title>
+      - agent-do gh issue list owner/repo --state open
+      - agent-do gh issue triage owner/repo#123
+      - agent-do gh release latest owner/repo
+      - agent-do gh release notes owner/repo --since <prev-tag>
       discover_keywords:
       - github pull request
       - github pr
@@ -2890,8 +2913,12 @@ tools:
       - approve pr
       - merge pr
       - github inbox
+      - github issue
+      - github release
       prompt_patterns:
       - '\b(?:github|gh)\b.*\b(?:pull request|pr|review|merge|approve|checks?)\b'
+      - '\b(?:github|gh)\b.*\bissues?\b'
+      - '\b(?:github|gh)\b.*\breleases?\b'
       - '\b(?:what|which)\s+prs?\s+(?:need|needs|want|wants)\s+me\b'
       - '\bprs?\b.*\b(?:awaiting|waiting)\b.*\b(?:my|me)\b.*\breview\b'
       - '\bunresolved\s+(?:review\s+)?comments?\b'
@@ -2913,7 +2940,26 @@ tools:
       - checks
       - review
       - doctrine
+      - issue list
+      - issue view
+      - issue snapshot
+      - release list
+      - release view
+      - release latest
+      - release download
       interact:
+      - pr create
+      - issue create
+      - issue comment
+      - issue close
+      - issue reopen
+      - issue label
+      - issue assign
+      - release create
+      - release edit
+      - release publish
+      - release delete
+      - release upload
       - approve
       - request-changes
       - comment
@@ -2927,6 +2973,11 @@ tools:
       - draft
       verify:
       - audit
+      - issue triage
+      - release notes
+      attributes:
+        release delete:
+        - destructive
     concurrency: mixed
   logs:
     description: Control log aggregation
