@@ -21,6 +21,8 @@ def main() -> None:
         raw = json.load(sys.stdin)
     except json.JSONDecodeError:
         sys.exit(0)
+    if not isinstance(raw, dict):
+        sys.exit(0)
 
     tool_name = raw.get("tool_name")
     if tool_name not in {"Shell", "Bash"}:

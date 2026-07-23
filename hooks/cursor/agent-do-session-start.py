@@ -23,6 +23,8 @@ def main() -> None:
         raw = json.load(sys.stdin)
     except json.JSONDecodeError:
         sys.exit(0)
+    if not isinstance(raw, dict):
+        sys.exit(0)
 
     repo = resolve_repo()
     if repo is None:

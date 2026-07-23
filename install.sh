@@ -361,8 +361,14 @@ uninstall() {
     )
     for hook in "${cursor_hooks[@]}"; do
         if [ -f "$CURSOR_HOOKS_DIR/$hook" ]; then
-            rm "$CURSOR_HOOKS_DIR/$hook"
-            info "Removed Cursor adapter $CURSOR_HOOKS_DIR/$hook"
+            # Only remove files that are actually ours (all four carry the
+            # agent-do marker); never delete a user's same-named hook.
+            if grep -q 'agent-do' "$CURSOR_HOOKS_DIR/$hook" 2>/dev/null; then
+                rm "$CURSOR_HOOKS_DIR/$hook"
+                info "Removed Cursor adapter $CURSOR_HOOKS_DIR/$hook"
+            else
+                warn "Skipped $CURSOR_HOOKS_DIR/$hook (no agent-do marker; not ours)"
+            fi
         fi
     done
 
@@ -634,17 +640,25 @@ if [ "$should_install_cursor" = "yes" ]; then
         "agent-do-pretooluse-check.py"
         "cursor_compat.py"
     )
+    cursor_copy_failed="no"
     for name in "${CURSOR_HOOK_FILES[@]}"; do
         src="$CURSOR_HOOKS_SRC/$name"
         dst="$CURSOR_HOOKS_DIR/$name"
-        if [ ! -f "$src" ]; then
-            err "Cursor adapter source not found: $src"
-            continue
+        if [ ! -f "$src" ] || ! cp "$src" "$dst" || ! chmod +x "$dst"; then
+            err "Cursor adapter install failed: $name"
+            cursor_copy_failed="yes"
+            break
         fi
-        cp "$src" "$dst"
-        chmod +x "$dst"
         info "Installed Cursor adapter: $name"
     done
+    if [ "$cursor_copy_failed" = "yes" ]; then
+        # Fail closed: never leave a partial adapter set behind.
+        for name in "${CURSOR_HOOK_FILES[@]}"; do
+            rm -f "$CURSOR_HOOKS_DIR/$name"
+        done
+        err "Cursor adapter install rolled back (incomplete set removed)"
+        exit 1
+    fi
 
     info "Cursor registration template: $CURSOR_HOOKS_SRC/hooks.json.example"
     info "Merge into ~/.cursor/hooks.json (see snippet at the end of this run)"

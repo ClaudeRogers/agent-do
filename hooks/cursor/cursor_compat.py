@@ -102,9 +102,10 @@ def run_canonical_hook(repo: Path, hook_rel: str, stdin_payload: dict[str, Any])
         return {}
 
     try:
-        return json.loads(proc.stdout)
+        parsed = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def resolve_agent_do_dir() -> str | None:

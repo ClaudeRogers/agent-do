@@ -18,7 +18,10 @@ Or manually:
 mkdir -p ~/.cursor/hooks
 cp hooks/cursor/*.py ~/.cursor/hooks/
 chmod +x ~/.cursor/hooks/*.py
-cp hooks/cursor/hooks.json.example ~/.cursor/hooks.json   # merge if one exists
+# If ~/.cursor/hooks.json does not exist yet:
+cp -n hooks/cursor/hooks.json.example ~/.cursor/hooks.json
+# If it exists, do NOT copy over it — merge the three agent-do entries from
+# hooks.json.example into your existing file by hand.
 ```
 
 Restart Cursor after installing. Open **Settings → Hooks** to confirm the
@@ -60,8 +63,9 @@ Cursor loads **two** hook sources:
 1. **User config** — `~/.cursor/hooks.json` (Cursor adapters)
 2. **Claude user config** — `~/.claude/settings.json` (same file Claude Code uses)
 
-If both register agent-do, hooks run twice. The Claude wrappers no-op for Cursor
-payloads, but still execute.
+If both register agent-do, every event fires twice — and the Claude-side
+wrappers receive Cursor-schema payloads the canonical Claude hooks were never
+written for. Register agent-do for Cursor in `~/.cursor/hooks.json` only.
 
 ## `sessionStart` and `~/.claude/settings.json`
 

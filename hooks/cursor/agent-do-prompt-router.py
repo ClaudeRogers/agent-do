@@ -21,6 +21,8 @@ def main() -> None:
         raw = json.load(sys.stdin)
     except json.JSONDecodeError:
         sys.exit(0)
+    if not isinstance(raw, dict):
+        sys.exit(0)
 
     prompt = raw.get("prompt") or raw.get("message") or ""
     if not isinstance(prompt, str) or not prompt.strip():
