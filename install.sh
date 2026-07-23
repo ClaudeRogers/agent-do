@@ -640,28 +640,71 @@ if [ "$should_install_cursor" = "yes" ]; then
         "agent-do-pretooluse-check.py"
         "cursor_compat.py"
     )
-    cursor_copy_failed="no"
+
+    cursor_abort() {
+        # Forced --cursor must not soft-skip; auto-detect may.
+        if [ "$INSTALL_CURSOR" = "yes" ]; then
+            err "$1"
+            exit 1
+        fi
+        err "$1"
+        should_install_cursor="no"
+    }
+
+    # Validate the full source set up front — adapters import cursor_compat.py.
     for name in "${CURSOR_HOOK_FILES[@]}"; do
-        src="$CURSOR_HOOKS_SRC/$name"
-        dst="$CURSOR_HOOKS_DIR/$name"
-        if [ ! -f "$src" ] || ! cp "$src" "$dst" || ! chmod +x "$dst"; then
-            err "Cursor adapter install failed: $name"
-            cursor_copy_failed="yes"
+        if [ ! -f "$CURSOR_HOOKS_SRC/$name" ]; then
+            cursor_abort "Cursor adapter source missing: $CURSOR_HOOKS_SRC/$name"
             break
         fi
-        info "Installed Cursor adapter: $name"
     done
-    if [ "$cursor_copy_failed" = "yes" ]; then
-        # Fail closed: never leave a partial adapter set behind.
+
+    # Refuse to clobber a same-named file that is not ours (matches uninstall).
+    if [ "$should_install_cursor" = "yes" ]; then
         for name in "${CURSOR_HOOK_FILES[@]}"; do
-            rm -f "$CURSOR_HOOKS_DIR/$name"
+            dst="$CURSOR_HOOKS_DIR/$name"
+            if [ -f "$dst" ] && ! grep -q 'agent-do' "$dst" 2>/dev/null; then
+                cursor_abort "Refusing to overwrite $dst (no agent-do marker; not ours)"
+                break
+            fi
         done
-        err "Cursor adapter install rolled back (incomplete set removed)"
-        exit 1
     fi
 
-    info "Cursor registration template: $CURSOR_HOOKS_SRC/hooks.json.example"
-    info "Merge into ~/.cursor/hooks.json (see snippet at the end of this run)"
+    if [ "$should_install_cursor" = "yes" ]; then
+        # Stage into a same-filesystem temp dir, then mv into place. On any
+        # failure only the stage is removed — a prior complete install stays
+        # intact (unlike rolling back by deleting destination files mid-upgrade).
+        cursor_stage_dir="$CURSOR_HOOKS_DIR/.agent-do-staging.$$"
+        rm -rf "$cursor_stage_dir"
+        mkdir -p "$cursor_stage_dir"
+        cursor_copy_failed="no"
+        for name in "${CURSOR_HOOK_FILES[@]}"; do
+            if ! cp "$CURSOR_HOOKS_SRC/$name" "$cursor_stage_dir/$name" \
+                || ! chmod +x "$cursor_stage_dir/$name"; then
+                err "Cursor adapter install failed: $name"
+                cursor_copy_failed="yes"
+                break
+            fi
+        done
+        if [ "$cursor_copy_failed" = "yes" ]; then
+            rm -rf "$cursor_stage_dir"
+            err "Cursor adapter install aborted (prior adapters left intact)"
+            exit 1
+        fi
+        for name in "${CURSOR_HOOK_FILES[@]}"; do
+            if ! mv -f "$cursor_stage_dir/$name" "$CURSOR_HOOKS_DIR/$name"; then
+                err "Cursor adapter commit failed: $name"
+                rm -rf "$cursor_stage_dir"
+                err "Cursor adapter install aborted mid-commit; re-run ./install.sh --cursor"
+                exit 1
+            fi
+            info "Installed Cursor adapter: $name"
+        done
+        rm -rf "$cursor_stage_dir"
+
+        info "Cursor registration template: $CURSOR_HOOKS_SRC/hooks.json.example"
+        info "Merge into ~/.cursor/hooks.json (see snippet at the end of this run)"
+    fi
 else
     info "Skipped Cursor install (use --cursor to force, or install ~/.cursor/ first)"
 fi
@@ -821,7 +864,14 @@ else
     echo "  1. Merge the settings.json snippet above into $SETTINGS_DISPLAY"
     echo "     (or re-run: ./install.sh --register-hooks)"
 fi
+if [ "$should_install_cursor" = "yes" ]; then
+    echo "  1b. Merge the Cursor hooks.json snippet into ~/.cursor/hooks.json"
+    echo "     (Cursor-only — do not also register agent-do via settings.json)"
+fi
+if [ "$should_install_codex" = "yes" ]; then
+    echo "  1c. Merge the Codex hooks.json snippet into ~/.codex/hooks.json"
+fi
 echo "  2. Optionally add the CLAUDE.md snippet to your project"
-echo "  3. Restart Claude Code to pick up the new hooks"
+echo "  3. Restart the harness (Claude Code / Cursor / Codex) to pick up the new hooks"
 echo ""
 echo "Verify: agent-do --list"

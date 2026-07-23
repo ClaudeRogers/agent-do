@@ -5,6 +5,9 @@
 - `gh inbox` now derives waiting-on-us from maintainer role, not just review-request ceremony: it sweeps open third-party PRs across admin/maintain/push repos (REST-only), classifies each by the viewer's latest review against the head sha (`maintainer_unreviewed` / `maintainer_review_stale` / `maintainer_approved_unmerged`), counts changes-requested-at-head as waiting-on-author, reports every unswept repo and every hit `--limit` cap loudly, and keeps the old four-search view behind `--ceremony-only`. A declared portfolio (`gh portfolio add/remove/list`, exact `owner/repo` or `owner/*` patterns in `~/.agent-do/gh/portfolio.yaml`) sweeps repos whose authority is organizational rather than permission-encoded, tagging reasons `portfolio_*`; role wins on dedupe, and portfolio repos the viewer cannot read report as unswept (no access).
 - Cursor adapter hooks (`hooks/cursor/`): translate Cursor's hook JSON (sessionStart, beforeSubmitPrompt, preToolUse) into the canonical Claude hooks and translate responses back. `install.sh --cursor` (auto-detected when `~/.cursor/` exists) copies the self-contained adapters; registration is Cursor-side only (`~/.cursor/hooks.json`) — the generated Claude wrappers are untouched, and the installer warns about the double-fire trap when hooks are also registered via `~/.claude/settings.json`.
 
+### Fixed
+- Cursor adapter install stages into a same-filesystem temp dir and only commits with `mv` after the full set is ready, so a mid-upgrade copy failure leaves a prior working install intact instead of deleting destination adapters. Overwrite of same-named files without an agent-do marker is refused (matches uninstall ownership).
+
 ## v1.4 (2026-07-22)
 
 ### TL;DR
