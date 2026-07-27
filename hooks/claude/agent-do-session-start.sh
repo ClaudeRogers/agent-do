@@ -411,6 +411,77 @@ $drift_block
 Reconcile the board against reality before claiming new work, then remove \`.manna/drift.yaml\` once resolved."
 }
 
+# At least one recorded line under .zpc/memory/. An initialized-but-empty store
+# has nothing worth embedding, so it keeps the advisory.
+zpc_has_records() {
+    local file
+    for file in "$1"/.zpc/memory/*.jsonl; do
+        [ -f "$file" ] || continue
+        grep -q '[^[:space:]]' "$file" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+append_zpc_memory() {
+    local inject_out inject_rc
+
+    [ -n "$CWD" ] || return 0
+    [ -d "$CWD/.zpc" ] || return 0
+
+    # The advisory below only *asks* the agent to go read the store, and asking
+    # is not a mechanism. When there are records to show, put the memory itself
+    # in context. Every failure mode (kill-switch, empty store, missing
+    # dispatcher, nonzero exit, timeout) falls through to the advisory, so the
+    # section degrades instead of disappearing.
+    if [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] &&
+       [ -n "$AGENT_DO_DIR" ] &&
+       [ -x "$AGENT_DO_DIR/agent-do" ] &&
+       zpc_has_records "$CWD"; then
+        # cwd must be inside the project: inject resolves the store from there.
+        # AGENT_DO_ZPC_SOURCE tags the access log; the export dies with the
+        # subshell so it never leaks into the rest of the hook.
+        inject_out=$(cd "$CWD" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
+        inject_rc=$?
+
+        if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
+            if [ ${#inject_out} -gt 6000 ]; then
+                inject_out="${inject_out:0:6000}"
+                # Back up to the last complete line: a cut landing mid-character
+                # would hand jq -Rs invalid UTF-8 and cost the whole envelope.
+                inject_out="${inject_out%$'\n'*}"
+                inject_out="$inject_out
+[zpc inject truncated]"
+            fi
+
+            CONTEXT="$CONTEXT
+
+---
+
+## ZPC Project Memory
+
+This project's recorded memory, loaded below. Read it before coding; it is already in context, so do not re-run \`agent-do zpc inject\`.
+
+$inject_out
+
+Keep the loop closed: \`agent-do zpc learn\` and \`agent-do zpc decide\` as you work, \`agent-do zpc harvest\` after significant work."
+            return 0
+        fi
+    fi
+
+    CONTEXT="$CONTEXT
+
+---
+
+## ZPC Memory Available
+
+This project has ZPC memory at \`.zpc/\`. At session start:
+\`\`\`
+agent-do zpc status      # Memory health + counts
+agent-do zpc patterns    # Established conventions — read before coding
+\`\`\`
+Log lessons and decisions as you work. Run \`agent-do zpc harvest\` after significant work."
+}
+
 # --- Inject tooling reminder ---
 CONTEXT="## TOOLING REMINDER - agent-do
 
@@ -517,21 +588,8 @@ agent-do dpt score /tmp/after.png            # 0-100 with per-layer breakdown
 Screenshots for evaluation. Snapshots for inventory. Both, in that order."
 fi
 
-# --- Detect ZPC project → mention memory ---
-if [ -n "$CWD" ] && [ -d "$CWD/.zpc" ]; then
-    CONTEXT="$CONTEXT
-
----
-
-## ZPC Memory Available
-
-This project has ZPC memory at \`.zpc/\`. At session start:
-\`\`\`
-agent-do zpc status      # Memory health + counts
-agent-do zpc patterns    # Established conventions — read before coding
-\`\`\`
-Log lessons and decisions as you work. Run \`agent-do zpc harvest\` after significant work."
-fi
+# --- Detect ZPC project → embed memory (advisory fallback) ---
+append_zpc_memory
 
 append_project_tooling
 append_bootstrap_prompt
