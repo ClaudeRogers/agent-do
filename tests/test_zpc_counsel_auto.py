@@ -39,11 +39,17 @@ STUB_SLEEP_SECONDS = 3
 # Mirrors ZPC_AUTOCOUNSEL_DEBOUNCE_MIN in lib/position.sh.
 ZPC_DEBOUNCE_MINUTES = 10
 
+STUB_FAILURE_TEXT = "stub refused to answer, and said why at length"
+
 STUB = """#!/usr/bin/env bash
 # Stands in for the `claude` CLI: records how it was called, then answers.
 printf '%s\\n' "$@" > "$ZPC_STUB_ARGS"
 cat > "$ZPC_STUB_STDIN"
 [[ -n "${ZPC_STUB_SLEEP:-}" ]] && sleep "$ZPC_STUB_SLEEP"
+if [[ -n "${ZPC_STUB_FAIL:-}" ]]; then
+    printf '%s\\n' "$ZPC_STUB_FAIL" >&2
+    exit 1
+fi
 printf '%s\\n' "$ZPC_STUB_VERDICT"
 """
 
@@ -209,6 +215,45 @@ def main() -> None:
         require("[receipt truncated]" in log_block, "an overflowing log must be marked as cut")
         require("LAST-LOG-LINE-MARKER" in log_block, "a log is cut from the front: the failure is at the end")
 
+        # ---- collectors with nothing to say say so ------------------------
+
+        # Outside a repository, `git diff` falls back to --no-index and prints
+        # its own usage screen. Fenced as a diff, that is a hundred lines of
+        # fabricated evidence handed to the one reader who cannot check it.
+        bare = tmp / "bare"
+        bare.mkdir()
+        bare_project = bare.resolve()
+        checked(bare_project, env, "init", "--platform", "generic")
+        checked(bare_project, env, "counsel", "--auto-brief")
+        bare_brief = sorted((bare_project / ".zpc" / ".state" / "counsel").glob("brief-*.md"))[-1]
+        bare_text = bare_brief.read_text()
+
+        require("unavailable: no git repository" in bare_text, f"the collectors must say why: {bare_text}")
+        require(bare_text.count("unavailable: no git repository") == 2, "both git receipts must degrade")
+        require("usage: git" not in bare_text, f"usage text is not evidence: {bare_text[:600]}")
+        require("--find-renames" not in bare_text, "no option listings may reach the brief")
+        require("```diff" not in bare_text, "an unavailable diff must not be fenced as one")
+        require(len(bare_text.splitlines()) < 30, f"a brief with nothing in it must be short: {len(bare_text.splitlines())}")
+
+        # A clean tree is a finding, not a failure, and must not read as one.
+        clean = tmp / "clean"
+        clean.mkdir()
+        clean_project = clean.resolve()
+        checked(clean_project, env, "init", "--platform", "generic")
+        git(clean_project, "init", "-q")
+        git(clean_project, "config", "user.email", "test@example.invalid")
+        git(clean_project, "config", "user.name", "test")
+        (clean_project / ".gitignore").write_text(".zpc/\n")
+        (clean_project / "settled.py").write_text("done\n")
+        git(clean_project, "add", "-A")
+        git(clean_project, "commit", "-qm", "settled")
+
+        checked(clean_project, env, "counsel", "--auto-brief")
+        clean_brief = sorted((clean_project / ".zpc" / ".state" / "counsel").glob("brief-*.md"))[-1]
+        clean_text = clean_brief.read_text()
+        require("nothing to report:" in clean_text, f"an empty result is reported as one: {clean_text}")
+        require("unavailable:" not in clean_text, f"a clean tree is not an unavailable one: {clean_text}")
+
         # ---- the ledger never rides along in its own evidence -------------
 
         checked(
@@ -265,7 +310,12 @@ def main() -> None:
         require(FALSIFIER not in auto_sent, "auto-counsel must not send the falsifier either")
 
         leftovers = [p.name for p in counsel_dir(project).iterdir() if p.suffix in {".partial", ".err"}]
-        require(not leftovers, f"the writer must clean up after itself: {leftovers}")
+        require(not leftovers, f"a successful run leaves only its verdict: {leftovers}")
+        require(
+            {p.name for p in counsel_dir(project).iterdir()}
+            == {spawned[0].name} | {p.name for p in counsel_dir(project).glob("brief-*.md")},
+            f"the workspace holds the verdict and its brief, nothing else: {list(counsel_dir(project).iterdir())}",
+        )
 
         # ---- debounce: minutes, not keystrokes ----------------------------
 
@@ -309,6 +359,25 @@ def main() -> None:
         fresh = artifacts(project, position_id)
         require(len(fresh) == 2, f"past the window, a refusal spawns again: {fresh}")
         settle(fresh[-1])
+
+        # ---- a failed run keeps its diagnostics, and only those ------------
+
+        for artifact in artifacts(project, position_id):
+            os.utime(artifact, (old, old))
+        failing = env.copy()
+        failing["ZPC_STUB_FAIL"] = STUB_FAILURE_TEXT
+        broken = run(project, failing, "position", "flip", position_id)
+        require(broken.returncode == 2, "a refusal does not depend on counsel succeeding")
+
+        failed_artifact = artifacts(project, position_id)[-1]
+        failed_text = settle(failed_artifact)
+        require("status: failed" in failed_text, f"the artifact must record the failure: {failed_text[:300]}")
+        require(STUB_FAILURE_TEXT in failed_text, f"the diagnostics must be readable: {failed_text[:300]}")
+
+        kept = Path(f"{failed_artifact}.err")
+        require(kept.exists() and kept.stat().st_size > 0, "a failed run keeps its stderr for reading")
+        require(f"{kept}" in failed_text, "the artifact must say where the full stderr is")
+        require(not Path(f"{failed_artifact}.partial").exists(), "the .partial is scaffolding and always goes")
 
         # ---- inject --compact ---------------------------------------------
 

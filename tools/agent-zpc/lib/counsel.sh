@@ -126,6 +126,63 @@ _counsel_receipt_block() {
     printf '\n```\n\n'
 }
 
+# A receipt that has nothing to report says so in one line. The judge cannot
+# cross-check anything it is handed, so a collector's complaint about the world
+# must never be dressed as an observation of it: `git diff` outside a repo
+# prints its own usage screen, and fenced as a diff that is a hundred lines of
+# fabricated evidence.
+_counsel_unavailable() {
+    printf -- '--- RECEIPT: %s ---\n' "$1"
+    printf 'unavailable: %s\n\n' "$2"
+}
+
+# The collector ran and the answer was nothing. That is a finding, not a
+# failure, and the judge should be able to tell the two apart: "the tree is
+# clean" and "I could not look at the tree" support opposite conclusions.
+_counsel_nothing() {
+    printf -- '--- RECEIPT: %s ---\n' "$1"
+    printf 'nothing to report: %s\n\n' "$2"
+}
+
+# What the git collectors can honestly say about this root, decided up front.
+# Asking the world its state beats parsing the tool's objection to it.
+_counsel_git_state() {
+    local root="$1"
+    ( cd "$root" && git rev-parse --is-inside-work-tree ) >/dev/null 2>&1 || { printf 'none'; return 0; }
+    ( cd "$root" && git rev-parse --verify HEAD ) >/dev/null 2>&1 || { printf 'unborn'; return 0; }
+    printf 'ready'
+}
+
+# Run one collector and emit exactly one of three things: its bounded output as
+# a fenced receipt, an honest line saying it produced nothing, or an honest line
+# saying it failed. Never its diagnostics as evidence.
+# Usage: _counsel_collect <label> <fence> <limit> <keep> <root> <empty-note> <cmd...>
+_counsel_collect() {
+    local label="$1" fence="$2" limit="$3" keep="$4" root="$5" empty_note="$6"
+    shift 6
+
+    local out_file err_file status=0
+    out_file="$(mktemp)" || { _counsel_unavailable "$label" "no scratch file available"; return 0; }
+    err_file="$(mktemp)" || { rm -f "$out_file"; _counsel_unavailable "$label" "no scratch file available"; return 0; }
+
+    ( cd "$root" && "$@" ) > "$out_file" 2> "$err_file" || status=$?
+
+    if [[ "$status" -ne 0 ]]; then
+        # One line of the tool's own words, preferring the line that names the
+        # cause over the first line it happened to print.
+        local reason=""
+        reason="$(grep -m1 -E '^(fatal|error):' "$err_file" 2>/dev/null || true)"
+        [[ -n "$reason" ]] || reason="$(grep -m1 -v '^[[:space:]]*$' "$err_file" 2>/dev/null || true)"
+        _counsel_unavailable "$label" "${reason:-command failed (exit $status)}"
+    elif [[ ! -s "$out_file" ]]; then
+        _counsel_nothing "$label" "$empty_note"
+    else
+        _counsel_bound "$limit" "$keep" < "$out_file" | _counsel_receipt_block "$label" "$fence"
+    fi
+
+    rm -f "$out_file" "$err_file" 2>/dev/null || true
+}
+
 # Assemble a brief from what the machine can see without asking anyone what
 # matters. Mechanical selection is the whole point: no curation step exists
 # here to smuggle the framing back in.
@@ -150,19 +207,36 @@ _counsel_auto_brief() {
         # standing verdict to the judge inside the diff — the exact prior
         # opinion counsel exists to have never seen. Not curation of the
         # evidence: removal of the ledger from its own trial.
-        { ( cd "$root" && git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE" 2>&1 ) || true; } \
-            | _counsel_bound "$ZPC_COUNSEL_RECEIPT_MAX" head \
-            | _counsel_receipt_block "git status --porcelain (excluding .zpc)" ""
+        local status_label="git status --porcelain (excluding .zpc)"
+        local diff_label="git diff HEAD (excluding .zpc)"
 
-        { ( cd "$root" && git diff HEAD -- . "$ZPC_COUNSEL_EXCLUDE" 2>&1 ) || true; } \
-            | _counsel_bound "$ZPC_COUNSEL_DIFF_MAX" head \
-            | _counsel_receipt_block "git diff HEAD (excluding .zpc)" "diff"
+        case "$(_counsel_git_state "$root")" in
+            none)
+                _counsel_unavailable "$status_label" "no git repository at $root"
+                _counsel_unavailable "$diff_label" "no git repository at $root"
+                ;;
+            unborn)
+                _counsel_collect "$status_label" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+                    "nothing modified and nothing untracked" \
+                    git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE"
+                _counsel_unavailable "$diff_label" \
+                    "the repository at $root has no commits yet: there is no HEAD to diff against"
+                ;;
+            *)
+                _counsel_collect "$status_label" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+                    "nothing modified and nothing untracked" \
+                    git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE"
+                _counsel_collect "$diff_label" "diff" "$ZPC_COUNSEL_DIFF_MAX" head "$root" \
+                    "no tracked file differs from HEAD" \
+                    git diff HEAD -- . "$ZPC_COUNSEL_EXCLUDE"
+                ;;
+        esac
 
         local log_path=""
         if log_path="$(_counsel_latest_log "$root")"; then
-            { tail -c $((ZPC_COUNSEL_LOG_MAX * 4)) "$log_path" 2>/dev/null || true; } \
-                | _counsel_bound "$ZPC_COUNSEL_LOG_MAX" tail \
-                | _counsel_receipt_block "$log_path" ""
+            _counsel_collect "$log_path" "" "$ZPC_COUNSEL_LOG_MAX" tail "$root" \
+                "the log exists but is empty" \
+                tail -c $((ZPC_COUNSEL_LOG_MAX * 4)) "$log_path"
         else
             # Name where we looked. "None found" and "looked in the wrong
             # place" are different facts, and a brief that conflates them
@@ -176,9 +250,9 @@ _counsel_auto_brief() {
 
         local receipt
         for receipt in "${receipts[@]+"${receipts[@]}"}"; do
-            { cat "$receipt" 2>&1 || true; } \
-                | _counsel_bound "$ZPC_COUNSEL_RECEIPT_MAX" head \
-                | _counsel_receipt_block "$receipt" ""
+            _counsel_collect "$receipt" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+                "the file is empty" \
+                cat "$receipt"
         done
     } > "$out"
 }
