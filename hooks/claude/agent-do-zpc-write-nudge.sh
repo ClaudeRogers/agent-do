@@ -16,20 +16,32 @@
 #   next model request in which to read a reminder, so model-visible and
 #   turn-ending are mutually exclusive here.
 #   `systemMessage` is the one Stop output that is visible and truly changes
-#   nothing: the user sees it, the turn ends. That is the default.
+#   nothing: the user sees it, the turn ends. It is available here as the
+#   opt-out, not the default.
+#
+#   The default spends the continuation. That cost is accepted deliberately:
+#   a reminder the model never reads does not close the write side, it only
+#   moves the obligation to the human. The guards below bound the cost to at
+#   most one extra turn per session.
 #
 # AGENT_DO_ZPC_WRITE_NUDGE:
-#   0          off entirely
-#   unset | 1  systemMessage — user sees the nudge, the turn ends (default)
-#   continue   hookSpecificOutput.additionalContext — the model sees it and
-#              spends one continuation writing the record. Opt-in, because it
-#              costs a turn. Guarded by stop_hook_active and the once-per-
-#              session marker, so it can extend a session by at most one turn.
+#   unset | continue | 1   hookSpecificOutput.additionalContext — the model
+#                          sees the nudge and spends its one guarded
+#                          continuation writing the record (default). `1` and
+#                          `continue` are kept as aliases so settings written
+#                          against the earlier semantics keep working.
+#   user                   systemMessage — the user sees the nudge, the turn
+#                          ends, nothing is gated. The opt-out for anyone who
+#                          wants the signal without the continuation.
+#   0                      off entirely
+#
+#   Any unrecognized value falls through to the default rather than going
+#   silent: a typo should not quietly disable the write side.
 #
 # Never blocks, never emits decision:"block", never exits nonzero. Every
 # failure path is a silent exit 0.
 
-MODE="${AGENT_DO_ZPC_WRITE_NUDGE:-1}"
+MODE="${AGENT_DO_ZPC_WRITE_NUDGE:-continue}"
 [ "$MODE" = "0" ] && exit 0
 
 command -v jq >/dev/null 2>&1 || exit 0
@@ -147,11 +159,11 @@ READ_MSG="This session changed tracked files (${CHANGED_SAMPLE}) and appended no
   agent-do zpc position add \"<claim>\" --verdict \"<v>\" --confidence low|med|high --falsifier \"<what would change it>\"
 A session with nothing worth recording is a real outcome. This fires once per session; AGENT_DO_ZPC_WRITE_NUDGE=0 turns it off."
 
-if [ "$MODE" = "continue" ]; then
+if [ "$MODE" = "user" ]; then
+    jq -nc --arg m "zpc: $READ_MSG" '{systemMessage: $m}' 2>/dev/null
+else
     jq -nc --arg m "$READ_MSG" \
         '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}' 2>/dev/null
-else
-    jq -nc --arg m "zpc: $READ_MSG" '{systemMessage: $m}' 2>/dev/null
 fi
 
 exit 0
