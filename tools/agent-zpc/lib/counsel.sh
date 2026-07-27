@@ -5,16 +5,32 @@
 
 ZPC_COUNSEL_TIMEOUT_DEFAULT=300
 
+# Receipt bounds. A brief that overflows the model's window is not a brief, and
+# a silent overflow is worse than a marked cut: every cut says so, in these
+# exact words, so the reader can tell "all of it" from "the start of it".
+ZPC_COUNSEL_DIFF_MAX=12000
+ZPC_COUNSEL_LOG_MAX=6000
+ZPC_COUNSEL_RECEIPT_MAX=6000
+ZPC_COUNSEL_TRUNCATED='[receipt truncated]'
+
+# Keeps the memory store out of the receipts it supplies. See _counsel_auto_brief.
+ZPC_COUNSEL_EXCLUDE=':(exclude).zpc'
+
 _counsel_help() {
     cat << 'EOF'
 Usage: agent-zpc counsel --brief <file> [--question "<q>"] [--position <id>]
+       agent-zpc counsel --auto-brief [--receipt <file>]... [--question "<q>"]
 
 Spawns a fresh model whose entire input is your brief plus your question.
 It sees no conversation, no .zpc memory, no repository, and no prior verdict:
 an agent that has been arguing a position for an hour cannot un-see that hour,
 so this instantiates a judge who never saw it.
 
-  --brief <file>       Required. Receipts only, by convention (see below).
+  --brief <file>       Receipts only, by convention (see below).
+  --auto-brief         Assemble the brief mechanically instead: git status,
+                       the full `git diff HEAD`, and the newest agent-tail log.
+                       Nothing is chosen, which is the point (see below).
+  --receipt <file>     Add a file to the auto-brief verbatim. Repeatable.
   --question "<q>"     What you want ruled on. Defaults to a plain verdict.
   --position <id>      Print your stored position beside the fresh verdict.
   --timeout <seconds>  Give up on the subprocess (default 300).
@@ -23,6 +39,13 @@ BRIEF FORMAT (convention, not enforced): fenced blocks of raw evidence —
 command output, file quotes with paths, error text, diffs. No summaries of
 what you think it means, no "obviously", no naming who believes what. A
 characterization in the brief is the framing you were trying to escape.
+
+WHY --auto-brief: the residual risk below is that you pick the receipts. A
+mechanical brief takes that hand off the scale — the whole diff and the whole
+log go in, including the parts that weaken your case, because nothing is
+selecting for your case. It is the weaker brief and the more honest sample.
+It is written to .zpc/.state/counsel/brief-<epoch>.md so you can read exactly
+what the judge read.
 
 RESIDUAL RISK, unsolved and worth stating: this cleans the *context*, not the
 *sample*. Which receipts you paste is itself a judgment, and a brief built
@@ -39,7 +62,125 @@ Examples:
   agent-zpc counsel --brief .dev/proxy-receipts.md \
       --question "Does the payload survive the hop unchanged?"
   agent-zpc counsel --brief /tmp/brief.md --position pos-1a2b3c
+  agent-zpc counsel --auto-brief --receipt /tmp/curl-trace.txt \
+      --question "Does the working tree do what the commit message claims?"
 EOF
+}
+
+# Where assembled briefs and auto-counsel verdicts live. Own state, per project.
+_counsel_state_dir() {
+    printf '%s' "$ZPC_STATE_DIR/counsel"
+}
+
+# Cut a receipt to its bound, marking the cut in place so a truncated receipt
+# can never be mistaken for a complete one. `tail` keeps the end (a log fails
+# at the bottom); `head` keeps the start (a diff names its files at the top).
+_counsel_bound() {
+    local limit="$1" keep="${2:-head}"
+    python3 -c '
+import sys
+
+limit, keep, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+text = sys.stdin.read()
+if len(text) <= limit:
+    sys.stdout.write(text)
+elif keep == "tail":
+    sys.stdout.write(marker + "\n" + text[-limit:])
+else:
+    sys.stdout.write(text[:limit] + "\n" + marker)
+' "$limit" "$keep" "$ZPC_COUNSEL_TRUNCATED"
+}
+
+# The newest agent-tail log, read through that tool's own convention
+# (tmp/logs/latest -> session dir). Absent or unreadable is not an error: the
+# brief simply says so, rather than inventing a receipt.
+_counsel_latest_log() {
+    local base
+    for base in "$PWD/tmp/logs" "$1/tmp/logs"; do
+        [[ -L "$base/latest" ]] || continue
+        local target session
+        target="$(readlink "$base/latest")" || continue
+        [[ "$target" == /* ]] && session="$target" || session="$base/$target"
+        [[ -d "$session" ]] || continue
+        if [[ -f "$session/combined.log" && -s "$session/combined.log" ]]; then
+            printf '%s' "$session/combined.log"
+            return 0
+        fi
+        local newest=""
+        newest="$(ls -t "$session"/*.log 2>/dev/null | head -1)" || true
+        if [[ -n "$newest" ]]; then
+            printf '%s' "$newest"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# One fenced receipt block. The heading names the exact source so a reader can
+# re-run it; the fence keeps the model from reading structure as instruction.
+_counsel_receipt_block() {
+    local label="$1" fence="$2"
+    printf -- '--- RECEIPT: %s ---\n' "$label"
+    printf '```%s\n' "$fence"
+    cat
+    printf '\n```\n\n'
+}
+
+# Assemble a brief from what the machine can see without asking anyone what
+# matters. Mechanical selection is the whole point: no curation step exists
+# here to smuggle the framing back in.
+_counsel_auto_brief() {
+    local out="$1"
+    shift
+    local receipts=("$@")
+
+    local root
+    root="$(dirname "$ZPC_DIR")"
+
+    mkdir -p "$(dirname "$out")" || die "Could not create $(dirname "$out")"
+
+    {
+        printf '# Auto-assembled brief\n'
+        printf 'assembled: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'root: %s\n' "$root"
+        printf 'selection: mechanical (nothing here was chosen for its content)\n\n'
+
+        # .zpc is excluded from both, and it is the one exclusion here. A
+        # project that tracks its memory store would otherwise ship the
+        # standing verdict to the judge inside the diff — the exact prior
+        # opinion counsel exists to have never seen. Not curation of the
+        # evidence: removal of the ledger from its own trial.
+        { ( cd "$root" && git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE" 2>&1 ) || true; } \
+            | _counsel_bound "$ZPC_COUNSEL_RECEIPT_MAX" head \
+            | _counsel_receipt_block "git status --porcelain (excluding .zpc)" ""
+
+        { ( cd "$root" && git diff HEAD -- . "$ZPC_COUNSEL_EXCLUDE" 2>&1 ) || true; } \
+            | _counsel_bound "$ZPC_COUNSEL_DIFF_MAX" head \
+            | _counsel_receipt_block "git diff HEAD (excluding .zpc)" "diff"
+
+        local log_path=""
+        if log_path="$(_counsel_latest_log "$root")"; then
+            { tail -c $((ZPC_COUNSEL_LOG_MAX * 4)) "$log_path" 2>/dev/null || true; } \
+                | _counsel_bound "$ZPC_COUNSEL_LOG_MAX" tail \
+                | _counsel_receipt_block "$log_path" ""
+        else
+            # Name where we looked. "None found" and "looked in the wrong
+            # place" are different facts, and a brief that conflates them
+            # hands the judge a false negative dressed as a receipt.
+            printf -- '--- RECEIPT: latest run log ---\n'
+            printf 'No log found. Searched (agent-tail convention, latest symlink):\n'
+            printf '  %s/tmp/logs/latest\n' "$PWD"
+            [[ "$root" == "$PWD" ]] || printf '  %s/tmp/logs/latest\n' "$root"
+            printf '\n'
+        fi
+
+        local receipt
+        for receipt in "${receipts[@]+"${receipts[@]}"}"; do
+            { cat "$receipt" 2>&1 || true; } \
+                | _counsel_bound "$ZPC_COUNSEL_RECEIPT_MAX" head \
+                | _counsel_receipt_block "$receipt" ""
+        done
+    } > "$out"
 }
 
 _counsel_system_prompt() {
@@ -64,10 +205,14 @@ EOF
 
 cmd_counsel() {
     local brief="" question="" position_id="" timeout="$ZPC_COUNSEL_TIMEOUT_DEFAULT"
+    local auto_brief=false
+    local receipts=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --brief|-b) brief="${2:-}"; shift 2 ;;
+            --auto-brief) auto_brief=true; shift ;;
+            --receipt) receipts+=("${2:-}"); shift 2 ;;
             --question|-q) question="${2:-}"; shift 2 ;;
             --position|-p) position_id="${2:-}"; shift 2 ;;
             --timeout) timeout="${2:-}"; shift 2 ;;
@@ -77,6 +222,22 @@ cmd_counsel() {
     done
 
     ensure_zpc
+
+    if [[ "$auto_brief" == true ]]; then
+        [[ -z "$brief" ]] || die "--auto-brief assembles the brief and --brief supplies one; counsel reads exactly one. Pass extra files with --receipt."
+        local receipt
+        for receipt in "${receipts[@]+"${receipts[@]}"}"; do
+            [[ -f "$receipt" ]] || die "Receipt not found: $receipt"
+        done
+        brief="$(_counsel_state_dir)/brief-$(date +%s).md"
+        _counsel_auto_brief "$brief" "${receipts[@]+"${receipts[@]}"}"
+        # On stderr, and before the model call: the path is worth having even
+        # if the run below times out, and it must not enter the artifact the
+        # detached caller captures from stdout.
+        echo "Brief assembled (mechanical): $brief" >&2
+    elif [[ ${#receipts[@]} -gt 0 ]]; then
+        die "--receipt adds files to an assembled brief. Pass --auto-brief with it, or put them in your own --brief."
+    fi
 
     [[ -n "$brief" ]] || die "Usage: agent-zpc counsel --brief <file> [--question \"...\"] [--position <id>]"
     [[ -f "$brief" ]] || die "Brief not found: $brief"

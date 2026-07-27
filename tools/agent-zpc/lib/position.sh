@@ -7,6 +7,18 @@
 # so a caller can tell "you asked wrong" from "you were refused".
 ZPC_POSITION_REFUSED=2
 
+# A refused flip is the moment a second opinion is worth most: an agent wants
+# to move a verdict and has no evidence to move it with. Firing counsel there
+# is the difference between a tool that is available and a tool that is used.
+# Minutes, not seconds: the receipts do not change that fast, and a second
+# opinion per keystroke is a bill, not a judgment.
+ZPC_AUTOCOUNSEL_DEBOUNCE_MIN=10
+
+# Deliberately names nothing from the position. The judge is told what the
+# receipts are, never what anyone concluded from them — putting the standing
+# verdict in the question is exactly the framing counsel exists to escape.
+ZPC_AUTOCOUNSEL_QUESTION="What do the receipts above support, and what evidence would falsify that?"
+
 _position_help() {
     cat << 'EOF'
 Usage: agent-zpc position <add|flip|list|show> [args]
@@ -23,7 +35,10 @@ refuses both.
   position flip <id> --evidence "<what changed, and where it came from>" \
       [--verdict "<new verdict>" --falsifier "<its falsifier>"]
       Records the reversal with its reason. Without --evidence this exits 2,
-      quotes the falsifier you wrote, and writes nothing.
+      quotes the falsifier you wrote, and writes nothing. That refusal also
+      fires a detached second opinion on the working tree's receipts, landing
+      at .zpc/.state/counsel/<id>-<epoch>.md and surfaced by `position show`.
+      It never delays the refusal. Disable: AGENT_DO_ZPC_AUTOCOUNSEL=0.
       Omit --verdict and the position is withdrawn: the evidence broke the
       old verdict and no replacement was offered. Supply --verdict and you
       must supply the new verdict's --falsifier with it.
@@ -79,6 +94,98 @@ with open(path) as handle:
             sys.exit(0)
 sys.exit(1)
 PYTHON
+}
+
+# The newest second-opinion artifact for a position, or nothing. Names sort
+# lexically because the epoch is fixed width, so the last match is the newest.
+_position_counsel_latest() {
+    local id="$1"
+    local dir="$ZPC_STATE_DIR/counsel"
+    [[ -d "$dir" ]] || return 1
+
+    local matches=("$dir/$id"-*.md)
+    [[ -e "${matches[0]}" ]] || return 1
+    printf '%s' "${matches[${#matches[@]} - 1]}"
+}
+
+_position_counsel_header() {
+    local id="$1" requested="$2" state="$3"
+    printf '# Second opinion — %s\n' "$id"
+    printf 'trigger: flip refused for want of named evidence\n'
+    printf 'requested: %s\n' "$requested"
+    printf 'status: %s\n\n' "$state"
+}
+
+# Runs detached. Everything expensive lives here, past the point where the
+# refusal has already returned.
+_position_counsel_run() {
+    local id="$1" out="$2" requested="$3"
+    local tmp="${out}.partial" err="${out}.err"
+    local status=0
+
+    # A subshell so counsel's own `die` exits the run and not the writer: a
+    # failed second opinion must still leave a readable artifact behind, or the
+    # pending stub becomes a lie that never resolves.
+    ( OUTPUT_FORMAT=text cmd_counsel --auto-brief --position "$id" \
+        --question "$ZPC_AUTOCOUNSEL_QUESTION" ) > "$tmp" 2> "$err" || status=$?
+
+    {
+        if [[ "$status" -eq 0 && -s "$tmp" ]]; then
+            _position_counsel_header "$id" "$requested" "complete"
+            cat "$tmp"
+        else
+            _position_counsel_header "$id" "$requested" "failed (exit $status)"
+            printf 'No second opinion was produced. The refusal stands on its own;\n'
+            printf 'nothing here weakens or strengthens it.\n\n'
+            printf '```\n'
+            tail -c 2000 "$err" 2>/dev/null || true
+            printf '\n```\n'
+        fi
+    } > "${out}.new" 2>/dev/null && mv "${out}.new" "$out"
+
+    rm -f "$tmp" "$err" "${out}.new" 2>/dev/null || true
+}
+
+# Spawn the second opinion the refusal implies, without making the refusal wait
+# for it. Same detach shape as _maybe_auto_harvest: own process group, every
+# descriptor closed, so exit 2 is as fast as it was before this existed.
+# Prints "spawned <path>" or "recent <path>"; prints nothing when it declines.
+_position_autocounsel() {
+    local id="$1"
+
+    [[ "${AGENT_DO_ZPC_AUTOCOUNSEL:-1}" != "0" ]] || return 1
+    command -v claude >/dev/null 2>&1 || return 1
+
+    local dir="$ZPC_STATE_DIR/counsel"
+    mkdir -p "$dir" 2>/dev/null || return 1
+
+    # The stub below is written before the model runs, so a run still in flight
+    # debounces the next refusal too, not only a finished one.
+    local existing=""
+    if existing="$(_position_counsel_latest "$id")"; then
+        if [[ -n "$(find "$existing" -maxdepth 0 -mmin "-$ZPC_AUTOCOUNSEL_DEBOUNCE_MIN" 2>/dev/null)" ]]; then
+            printf 'recent %s' "$existing"
+            return 0
+        fi
+    fi
+
+    local epoch requested out
+    epoch="$(date +%s)"
+    requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    out="$dir/${id}-${epoch}.md"
+
+    {
+        _position_counsel_header "$id" "$requested" "pending"
+        printf 'The judge is reading the receipts now. Re-read this file, or run\n'
+        printf '`agent-zpc position show %s`, once it settles.\n' "$id"
+    } > "$out" 2>/dev/null || return 1
+
+    (
+        set -m
+        { _position_counsel_run "$id" "$out" "$requested"; } >/dev/null 2>&1 &
+    ) >/dev/null 2>&1 || true
+
+    printf 'spawned %s' "$out"
 }
 
 _position_add() {
@@ -204,6 +311,20 @@ print(
 )
 PYTHON
         )
+
+        # Detached, so this line costs the refusal a `date` call and nothing
+        # else. Disable with AGENT_DO_ZPC_AUTOCOUNSEL=0.
+        local dispatch="" state="" artifact=""
+        dispatch="$(_position_autocounsel "$id")" || dispatch=""
+        if [[ -n "$dispatch" ]]; then
+            state="${dispatch%% *}"
+            artifact="${dispatch#* }"
+            case "$state" in
+                spawned) refusal+=$'\n\n'"Second opinion incoming (it sees the receipts, never your verdict): $artifact" ;;
+                recent) refusal+=$'\n\n'"Second opinion from the last few minutes: $artifact" ;;
+            esac
+        fi
+
         if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
             json_error "$refusal" "$ZPC_POSITION_REFUSED" || true
         else
@@ -352,8 +473,31 @@ _position_show() {
     file="$(_position_file)"
     row=$(_position_lookup "$file" "$id") || die "No position with id '$id'. Run 'agent-zpc position list'."
 
+    local artifact=""
+    artifact="$(_position_counsel_latest "$id")" || artifact=""
+
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_result "$row"
+        # Additive: the stored row keeps its shape, and the pointer sits beside
+        # it. The verdict text stays in the file rather than swelling the row.
+        local merged
+        merged=$(python3 << 'PYTHON' - "$row" "$artifact"
+import json, os, re, sys
+
+row = json.loads(sys.argv[1])
+path = sys.argv[2]
+if path and os.path.exists(path):
+    state = ""
+    with open(path) as handle:
+        for line in handle:
+            match = re.match(r"^status: (.+)$", line.strip())
+            if match:
+                state = match.group(1)
+                break
+    row["counsel"] = {"path": path, "status": state}
+print(json.dumps(row, ensure_ascii=False))
+PYTHON
+        ) || merged="$row"
+        json_result "$merged"
         return 0
     fi
 
@@ -373,6 +517,18 @@ for flip in flips:
     print(f"    {flip.get('ts', '')}  ->  {flip.get('new_verdict', '')}")
     print(f"      evidence: {flip.get('evidence', '')}")
 PYTHON
+
+    # A verdict nobody reads is a verdict nobody got. If a second opinion was
+    # fired for this position, it surfaces here rather than waiting to be
+    # remembered.
+    if [[ -n "$artifact" ]]; then
+        echo
+        echo "  second opinion: $artifact"
+        local line
+        while IFS= read -r line; do
+            printf '    %s\n' "$line"
+        done < <(head -n 16 "$artifact" 2>/dev/null || true)
+    fi
 }
 
 cmd_position() {

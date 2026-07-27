@@ -4507,14 +4507,14 @@ Concurrency: `mixed`
 - `learn`: Capture a structured lesson
 - `decide`: Log a decision with rationale
 - `decide-batch`: Batch-log decisions from planning phase
-- `position`: Record a verdict with its falsifier; flip it only with named evidence
-- `counsel`: Clean-context second opinion on a receipts-only brief
+- `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
+- `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
 - `harvest`: Post-build consolidation scan
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
 - `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob
+- `inject`: Emit agent context blob; --compact bounds it for pasting into a subagent's prompt
 - `init`: Initialize .zpc/ in a project
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check
@@ -4547,6 +4547,10 @@ agent-do zpc init
 agent-do zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence med --falsifier 'byte-identical body across the hop'
 # get a second opinion that has not seen the argument
 agent-do zpc counsel --brief .dev/receipts.md --question 'Did the payload survive the hop?'
+# second opinion without hand-picking the receipts
+agent-do zpc counsel --auto-brief --question 'Does the working tree do what the commit message claims?'
+# memory blob small enough to paste into a subagent prompt
+agent-do zpc inject --compact
 ```
 
 **Safety (from contracts)**

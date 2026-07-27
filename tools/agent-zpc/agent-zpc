@@ -30,13 +30,13 @@ Commands:
   decide <problem> --options "a,b" --chosen a ...       Log a decision
   decide-batch [--file F] [--tags "t1,t2"]             Batch-log decisions (stdin)
   position add|flip|list|show                           Verdict + falsifier ledger
-  counsel --brief <file> [--question "q"]               Clean-context second opinion
+  counsel --brief <file> | --auto-brief                 Clean-context second opinion
   harvest [--auto] [--dry-run]                          Consolidation scan
   query [--global] [--tag X] [--since DATE] [--text "..."] Search project and optional global memory
   patterns [--score]                                    View/score patterns
   review [--since DATE] [--auto] [--dry-run]             Post-sprint lesson extraction
   promote <source> --to team|global                     Promote lessons
-  inject                                                Emit agent context blob
+  inject [--compact]                                    Emit agent context blob
   init [--platform claude|cursor|codex|generic]         Initialize .zpc/
   status                                                Memory snapshot
   checkpoint [--phase "name"] [--agents "a1,a2"]        Swarm phase boundary
@@ -57,8 +57,10 @@ Examples:
   agent-zpc harvest
   agent-zpc query --tag testing --since 2025-01-01
   agent-zpc inject
+  agent-zpc inject --compact                            # bounded blob for a subagent's prompt
   agent-zpc position add "the proxy corrupts the payload" --verdict "double content-encoding" --confidence med --falsifier "byte-identical body across the hop"
   agent-zpc counsel --brief .dev/receipts.md --question "Did the payload survive the hop?"
+  agent-zpc counsel --auto-brief                        # receipts assembled by machine, not chosen
 EOF
 }
 
