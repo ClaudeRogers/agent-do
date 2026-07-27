@@ -4494,6 +4494,7 @@ Concurrency: `mixed`
 - log architectural decisions with options, rationale, confidence
 - hold positions with a falsifier and refuse evidence-free flips
 - name every claim with a content-derived id (les-/dec-) and retract it with evidence
+- inject memory as dated claims that live observation outranks, never as standing law
 - clean-context second opinion on a receipts-only brief
 - consolidate lessons into patterns via harvest
 - inject memory context into AI agents
@@ -4516,7 +4517,7 @@ Concurrency: `mixed`
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
 - `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob; --compact bounds it for pasting into a subagent's prompt
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); --compact bounds it for pasting into a subagent's prompt
 - `init`: Initialize .zpc/ in a project
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check

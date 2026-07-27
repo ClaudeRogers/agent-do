@@ -202,6 +202,80 @@ def tags_of(row: dict):
     return [tag for tag in tags if isinstance(tag, str) and tag]
 
 
+def last_checked(relit_log: str) -> dict:
+    """id -> the day it was last tried against current reality, if ever.
+
+    Written by re-litigation, read by delivery. A claim's own date says when it
+    was believed; this says when it was last put in front of the code again,
+    and the gap between them is the honest measure of how much it has earned.
+    An unreadable or absent log means "never checked", never an error.
+    """
+    checked = {}
+    try:
+        with open(relit_log) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                target, stamp = row.get("lesson"), row.get("ts", "")
+                if not target or not stamp:
+                    continue
+                day = stamp[:10]
+                if day > checked.get(target, ""):
+                    checked[target] = day
+    except OSError:
+        pass
+    return checked
+
+
+def render_patterns(patterns_path: str, lessons_path: str) -> str:
+    """Patterns as dated claims rather than standing orders.
+
+    A consolidated section summarizes lessons that each happened on a day, so
+    the heading carries that span wherever the tags make it derivable and says
+    nothing where they do not. Harvest's machine marker is stripped: it is
+    bookkeeping for the rebuild, not context for a reader.
+    """
+    spans = {}
+    for record in analyze(lessons_path, "les-")["claims"]:
+        if record["retraction"] is not None:
+            continue
+        date = record["row"].get("date", "")
+        for tag in tags_of(record["row"]):
+            first, last, count = spans.get(tag, ("", "", 0))
+            spans[tag] = (
+                min(first, date) if first else date,
+                max(last, date) if last else date,
+                count + 1,
+            )
+
+    try:
+        with open(patterns_path) as handle:
+            lines = handle.read().rstrip("\n").split("\n")
+    except OSError:
+        return ""
+
+    out = []
+    for line in lines:
+        if line.strip() == "<!-- zpc:auto -->":
+            continue
+        heading = re.match(r"^## (.+)$", line.strip())
+        if heading:
+            tag = heading.group(1).strip()
+            span = spans.get(tag)
+            if span and span[2]:
+                first, last, count = span
+                window = first if first == last else f"{first}..{last}"
+                out.append(f"## {tag}  [{count} claim(s), {window}]")
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def terms_of(text: str):
     """Salient words: long enough to mean something, common enough to match."""
     return {

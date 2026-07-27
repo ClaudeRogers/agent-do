@@ -109,6 +109,13 @@ _maybe_auto_harvest() {
     return 0
 }
 
+# The tie-breaker, verbatim in every blob that carries memory. Delivery is the
+# whole fight: a claim rendered as law gets obeyed, and an agent that obeys a
+# stale lesson while the code says otherwise has been anchored by its own birth
+# context. Rendering the same claim with its date and its escape hatch turns the
+# contradiction from a dissonance to rationalize into a finding to file.
+ZPC_INJECT_TIEBREAKER='These are recorded claims, each true as of its date. Live observation outranks memory: when the code in front of you contradicts a lesson, the code wins, and filing the contradiction (zpc retract --candidate <id> --evidence "<receipt>") is worth more than complying with the lesson.'
+
 # How many claims the full blob carries, and how long a correction stays news.
 # A retraction is worth reading while the belief it corrects may still be in
 # someone's head; after a month it is history, and history lives in the file.
@@ -116,12 +123,14 @@ ZPC_INJECT_LESSON_WINDOW=20
 ZPC_INJECT_CORRECTION_DAYS=30
 
 # The rendered claims section: retracted claims are gone, challenged claims are
-# marked, and every line carries the id you would need to argue with it. Raw
-# JSON rows used to go here — unreadable, and unaddressable, which is worse.
+# marked, and every line carries its date, its kind, and the id you would need to
+# argue with it. Raw JSON rows used to go here — unreadable, undated, and
+# unaddressable, which is how a lesson comes to read like a rule.
 _inject_lessons() {
     local lessons_file="$1"
 
-    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$lessons_file" "$ZPC_INJECT_LESSON_WINDOW" "$ZPC_INJECT_CORRECTION_DAYS"
+    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$lessons_file" "$ZPC_INJECT_LESSON_WINDOW" \
+        "$ZPC_INJECT_CORRECTION_DAYS" "$ZPC_STATE_DIR/relitigation-log.jsonl"
 import json, os, sys
 from datetime import datetime, timezone
 
@@ -130,9 +139,15 @@ import epistemics
 
 lessons_path = sys.argv[2]
 window, correction_days = int(sys.argv[3]), int(sys.argv[4])
+relit_log = sys.argv[5]
 
 state = epistemics.analyze(lessons_path, "les-")
 claims = state["claims"]
+
+# When a claim was last tried against current reality, if it ever was. A claim
+# checked yesterday and a claim last examined the day it was written are not
+# equally trustworthy, and only one of them says so on its own line.
+checked = epistemics.last_checked(relit_log)
 
 live = [record for record in claims if record["retraction"] is None]
 lines = []
@@ -142,8 +157,12 @@ for record in live[-window:]:
     suffix = f"  [tags: {','.join(tags)}]" if tags else ""
     if record["challenges"]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
+    when = checked.get(record["id"])
+    if when:
+        suffix += f"  [checked: {when}]"
     text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    lines.append(f"[{row.get('date', '?')}] {record['id']} {text}{suffix}")
+    kind = epistemics.kind_of(row)
+    lines.append(f"[{row.get('date', '?')}] {record['id']} ({kind}) {text}{suffix}")
 
 print("\n".join(lines) if lines else "(none)")
 
@@ -178,6 +197,21 @@ if corrections:
 PYTHON
 }
 
+# Patterns rendered as dated claims. The work is in epistemics.render_patterns
+# so the compact blob below renders them the same way.
+_inject_patterns() {
+    local patterns_file="$1" lessons_file="$2"
+
+    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$patterns_file" "$lessons_file"
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import epistemics
+
+print(epistemics.render_patterns(sys.argv[2], sys.argv[3]))
+PYTHON
+}
+
 # The compact blob's ceiling, and the literal marker that admits the cut.
 # 2000 chars is a paste, not a payload: it goes in a lane prompt beside the
 # lane's own instructions, where an unbounded memory dump would crowd out the
@@ -196,7 +230,7 @@ _inject_compact() {
 
     python3 << 'PYTHON' - "$patterns_file" "$lessons_file" "$ZPC_INJECT_COMPACT_MAX" \
         "$ZPC_INJECT_TRUNCATED" "$ZPC_INJECT_COMPACT_PATTERNS_SHARE" "${OUTPUT_FORMAT:-text}" \
-        "$ZPC_LIB_DIR"
+        "$ZPC_LIB_DIR" "$ZPC_INJECT_TIEBREAKER"
 import json, os, sys
 
 patterns_path, lessons_path = sys.argv[1], sys.argv[2]
@@ -205,17 +239,14 @@ limit, marker, share, fmt = int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), sys
 sys.path.insert(0, sys.argv[7])
 import epistemics
 
+# The tie-breaker costs a sixth of the budget and buys the frame the rest is
+# read in. A subagent handed this blob has no other context: it is the surface
+# where memory is most likely to be mistaken for instruction, so it is the last
+# place the law should be trimmed to make room for more claims.
+TIEBREAKER = sys.argv[8]
 HEADER = "--- ZPC compact (this project's memory) ---"
-PATTERNS_LABEL = "Established patterns (follow these):"
+PATTERNS_LABEL = "Recorded patterns (claims, dated):"
 LESSONS_LABEL = "Recent lessons (newest first):"
-
-
-def read_text(path):
-    try:
-        with open(path) as handle:
-            return handle.read().strip()
-    except OSError:
-        return ""
 
 
 def cut(text, budget):
@@ -228,7 +259,7 @@ def cut(text, budget):
     return text[:keep].rstrip() + "\n" + marker
 
 
-patterns = read_text(patterns_path) or "(none yet)"
+patterns = epistemics.render_patterns(patterns_path, lessons_path).strip() or "(none yet)"
 
 # Retracted claims are absent from every rendering, this one included: a bounded
 # blob is exactly where a withdrawn claim would be least likely to be questioned.
@@ -254,16 +285,21 @@ for record in reversed(records):
     suffix = f"  [{','.join(tags)}]" if tags else ""
     if record["challenges"]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
-    rendered.append(f"- {takeaway}{suffix}")
+    # Dated and kinded here too: the compact blob is shorter, not softer.
+    rendered.append(
+        f"- [{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {takeaway}{suffix}"
+    )
 lessons_text = "\n".join(rendered) or "(none yet)"
 
-scaffold = len(HEADER) + len(PATTERNS_LABEL) + len(LESSONS_LABEL) + 6
+scaffold = len(HEADER) + len(TIEBREAKER) + len(PATTERNS_LABEL) + len(LESSONS_LABEL) + 8
 budget = max(0, limit - scaffold)
 
 patterns_text = cut(patterns, budget * share // 100)
 lessons_text = cut(lessons_text, budget - len(patterns_text))
 
-blob = "\n".join([HEADER, "", PATTERNS_LABEL, patterns_text, "", LESSONS_LABEL, lessons_text])
+blob = "\n".join(
+    [HEADER, TIEBREAKER, "", PATTERNS_LABEL, patterns_text, "", LESSONS_LABEL, lessons_text]
+)
 if len(blob) > limit:
     blob = cut(blob, limit)
 
@@ -308,7 +344,8 @@ cmd_inject() {
 
     # Section 1: Protocol
     context+="--- ZPC Agent Protocol (MANDATORY) ---\n"
-    context+="BEFORE writing code: check Established Patterns below. Note which apply.\n"
+    context+="${ZPC_INJECT_TIEBREAKER}\n"
+    context+="BEFORE writing code: read the Recorded Patterns below and note which the code still supports.\n"
     context+="DURING work: use 'agent-do zpc learn' to capture lessons.\n"
     context+="  EXACT format is handled by the tool. Usage:\n"
     context+="  agent-do zpc learn \"context\" \"problem\" \"solution\" \"takeaway\" --tags \"tag1,tag2\"\n"
@@ -325,8 +362,8 @@ cmd_inject() {
 
     # Section 3: Patterns
     if [[ -f "$patterns_file" && -s "$patterns_file" ]]; then
-        context+="--- Established Patterns (follow these) ---\n"
-        context+="$(cat "$patterns_file")\n\n"
+        context+="--- Recorded Patterns (claims, dated) ---\n"
+        context+="$(_inject_patterns "$patterns_file" "$lessons_file")\n\n"
     fi
 
     # Section 4: Machine-wide lessons (bounded; omit the section when empty)
@@ -345,25 +382,23 @@ cmd_inject() {
     context+="\n"
 
     # Section 6: Decisions
-    context+="--- Settled Decisions (do not re-derive) ---\n"
+    context+="--- Settled Decisions (do not re-derive; retract with evidence to re-open) ---\n"
     if [[ -f "$decisions_file" && -s "$decisions_file" ]]; then
-        context+="$(python3 << 'PYTHON' - "$decisions_file"
+        context+="$(python3 << 'PYTHON' - "$decisions_file" "$ZPC_LIB_DIR"
 import json, sys, os
-decisions_file = sys.argv[1]
-if os.path.exists(decisions_file):
-    with open(decisions_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                date = obj.get("date", "?")
-                chosen = obj.get("chosen", "?")
-                rationale = obj.get("rationale", "")
-                print(f"[{date}] {chosen}: {rationale}")
-            except:
-                pass
+
+sys.path.insert(0, sys.argv[2])
+import epistemics
+
+# A decision binds until someone re-opens it, which is the difference between a
+# decision and a lesson — but it binds under its own id, so re-opening it is a
+# command and not an argument.
+for record in epistemics.analyze(sys.argv[1], "dec-")["claims"]:
+    if record["retraction"] is not None:
+        continue
+    row = record["row"]
+    marker = f"  [challenged: {len(record['challenges'])}]" if record["challenges"] else ""
+    print(f"[{row.get('date', '?')}] {record['id']} {row.get('chosen', '?')}: {row.get('rationale', '')}{marker}")
 PYTHON
 )\n"
     else
