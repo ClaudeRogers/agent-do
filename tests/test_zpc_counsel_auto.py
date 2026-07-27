@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_DO = ROOT / "agent-do"
 
+LOG_CANARY = "CANARY-OUTSIDE-THE-PROJECT-ROOT-abc123"
 CANARY_CLAIM = "CANARY-CLAIM-THE-JUDGE-MUST-NEVER-SEE"
 CANARY_VERDICT = "CANARY-VERDICT-THE-JUDGE-MUST-NEVER-SEE"
 FALSIFIER = "a byte-identical body on both sides of the hop"
@@ -253,6 +254,58 @@ def main() -> None:
         clean_text = clean_brief.read_text()
         require("nothing to report:" in clean_text, f"an empty result is reported as one: {clean_text}")
         require("unavailable:" not in clean_text, f"a clean tree is not an unavailable one: {clean_text}")
+
+        # ---- the log collector cannot be pointed out of the project --------
+
+        # tmp/logs/latest is a file a repository can commit, and the brief it
+        # feeds is both written to disk and sent to a model. Following it out
+        # of the project would make "clone a repo, open a session" enough to
+        # read an arbitrary local file: the session-start hook runs inject,
+        # inject fires the relitigation pass, and that pass assembles a brief
+        # through this collector. No user action is required anywhere in it.
+        secret_dir = tmp / "outside"
+        secret_dir.mkdir()
+        (secret_dir / "combined.log").write_text(f"{LOG_CANARY}\napi_token=hunter2\n")
+
+        hostile = tmp / "hostile"
+        hostile.mkdir()
+        hostile_project = hostile.resolve()
+        checked(hostile_project, env, "init", "--platform", "generic")
+        hostile_logs = hostile_project / "tmp" / "logs"
+        hostile_logs.mkdir(parents=True)
+
+        def brief_pointing_at(target) -> str:
+            latest = hostile_logs / "latest"
+            if latest.is_symlink() or latest.exists():
+                latest.unlink()
+            latest.symlink_to(target)
+            checked(hostile_project, env, "counsel", "--auto-brief")
+            written = sorted((hostile_project / ".zpc" / ".state" / "counsel").glob("brief-*.md"))
+            return written[-1].read_text()
+
+        absolute_escape = brief_pointing_at(secret_dir)
+        require(LOG_CANARY not in absolute_escape, f"an absolute symlink must not be followed out: {absolute_escape}")
+        require("resolves outside" in absolute_escape, f"the refusal must be stated, not silent: {absolute_escape}")
+
+        relative_escape = brief_pointing_at(Path(os.path.relpath(secret_dir, hostile_logs)))
+        require(LOG_CANARY not in relative_escape, f"a ..-relative symlink must not be followed out: {relative_escape}")
+        require("resolves outside" in relative_escape, "the relative escape must be stated too")
+
+        # A session directory inside the root can still hold a log that points
+        # out of it, so the file is confined on its own and not by its parent.
+        session_dir = hostile_logs / "session"
+        session_dir.mkdir()
+        (session_dir / "combined.log").symlink_to(secret_dir / "combined.log")
+        inner_escape = brief_pointing_at("session")
+        require(LOG_CANARY not in inner_escape, f"a confined directory does not confine its files: {inner_escape}")
+        require("resolves outside" in inner_escape, "the inner escape must be stated too")
+
+        # And confinement must not be achieved by breaking log collection.
+        (session_dir / "combined.log").unlink()
+        (session_dir / "combined.log").write_text("legit line\nLEGIT-TAIL-MARKER\n")
+        legitimate = brief_pointing_at("session")
+        require("LEGIT-TAIL-MARKER" in legitimate, f"an in-root log must still be collected: {legitimate}")
+        require(LOG_CANARY not in legitimate, "nothing outside the root ever appears")
 
         # ---- the ledger never rides along in its own evidence -------------
 

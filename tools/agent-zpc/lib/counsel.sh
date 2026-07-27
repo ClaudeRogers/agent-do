@@ -91,28 +91,67 @@ else:
 ' "$limit" "$keep" "$ZPC_COUNSEL_TRUNCATED"
 }
 
+# Resolve a path through every symlink, or fail if it does not exist. macOS
+# ships BSD realpath, which has no -e, so this uses python3 — already required
+# by every zpc command — and tests existence itself.
+_counsel_realpath() {
+    [[ -e "$1" ]] || return 1
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+}
+
+# True when an already-resolved path sits strictly inside an already-resolved
+# root. Equality is not containment: the root is not a file within itself.
+_counsel_within_root() {
+    [[ "$1" == "$2"/* ]]
+}
+
 # The newest agent-tail log, read through that tool's own convention
 # (tmp/logs/latest -> session dir). Absent or unreadable is not an error: the
 # brief simply says so, rather than inventing a receipt.
+#
+# Every hop is resolved and confined to the project root, because this symlink
+# is a file a repository can commit and the brief it feeds is both written to
+# disk and sent to a model. Unconfined, cloning a hostile repo and opening a
+# session would be enough to read an arbitrary local file: the session-start
+# hook runs `zpc inject`, inject fires the relitigation pass, and that pass
+# assembles a brief through this collector. Resolving before reading also
+# closes the swap-the-link race, since what gets read is the real path.
+# Prints "ok <path>" or "refused <path>", and nothing when there is simply no
+# log. A refusal has to travel back to the caller as output, not a global: this
+# runs inside a command substitution, and a subshell's variables die with it.
 _counsel_latest_log() {
+    local root_real refused=""
+    root_real="$(_counsel_realpath "$1")" || return 1
+
     local base
     for base in "$PWD/tmp/logs" "$1/tmp/logs"; do
         [[ -L "$base/latest" ]] || continue
-        local target session
-        target="$(readlink "$base/latest")" || continue
-        [[ "$target" == /* ]] && session="$target" || session="$base/$target"
+
+        local session
+        session="$(_counsel_realpath "$base/latest")" || continue
         [[ -d "$session" ]] || continue
-        if [[ -f "$session/combined.log" && -s "$session/combined.log" ]]; then
-            printf '%s' "$session/combined.log"
-            return 0
+        if ! _counsel_within_root "$session" "$root_real"; then
+            refused="$base/latest"
+            continue
         fi
-        local newest=""
-        newest="$(ls -t "$session"/*.log 2>/dev/null | head -1)" || true
-        if [[ -n "$newest" ]]; then
-            printf '%s' "$newest"
+
+        # The file is checked on its own: a directory inside the root can still
+        # hold a symlink that points out of it.
+        local candidate resolved
+        for candidate in "$session/combined.log" "$(ls -t "$session"/*.log 2>/dev/null | head -1)"; do
+            [[ -n "$candidate" && -f "$candidate" && -s "$candidate" ]] || continue
+            resolved="$(_counsel_realpath "$candidate")" || continue
+            [[ -f "$resolved" ]] || continue
+            if ! _counsel_within_root "$resolved" "$root_real"; then
+                refused="$candidate"
+                continue
+            fi
+            printf 'ok %s' "$resolved"
             return 0
-        fi
+        done
     done
+
+    [[ -z "$refused" ]] || { printf 'refused %s' "$refused"; return 0; }
     return 1
 }
 
@@ -232,11 +271,21 @@ _counsel_auto_brief() {
                 ;;
         esac
 
-        local log_path=""
-        if log_path="$(_counsel_latest_log "$root")"; then
+        local log_find="" log_state="" log_path=""
+        if log_find="$(_counsel_latest_log "$root")"; then
+            log_state="${log_find%% *}"
+            log_path="${log_find#* }"
+        fi
+
+        if [[ "$log_state" == "ok" ]]; then
             _counsel_collect "$log_path" "" "$ZPC_COUNSEL_LOG_MAX" tail "$root" \
                 "the log exists but is empty" \
                 tail -c $((ZPC_COUNSEL_LOG_MAX * 4)) "$log_path"
+        elif [[ "$log_state" == "refused" ]]; then
+            # A refusal is not an absence. Saying "no log" here would hide the
+            # fact that something pointed out of the project and was stopped.
+            _counsel_unavailable "latest run log" \
+                "$log_path resolves outside $root and was not read"
         else
             # Name where we looked. "None found" and "looked in the wrong
             # place" are different facts, and a brief that conflates them
