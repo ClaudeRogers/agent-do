@@ -6,9 +6,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+ZPC_INJECT_TIMEOUT = 3
+ZPC_INJECT_MAX_CHARS = 6000
+ZPC_INJECT_TRUNCATION_MARKER = "[zpc inject truncated]"
 
 
 def read_payload() -> dict:
@@ -307,14 +313,102 @@ def coord(agent_do: str, cwd: str | None) -> str:
     return ""
 
 
-def zpc(cwd: str | None) -> str:
-    if cwd and (Path(cwd) / ".zpc").exists():
-        return (
-            "## ZPC Memory Available\n\n"
-            "This project has `.zpc/` memory. Start with `agent-do zpc status` and "
-            "`agent-do zpc patterns` before coding.\n"
-        )
-    return ""
+def zpc_has_records(cwd: str) -> bool:
+    """At least one recorded line under .zpc/memory/. An initialized-but-empty
+    store has nothing worth embedding, so it keeps the advisory."""
+    for path in (Path(cwd) / ".zpc" / "memory").glob("*.jsonl"):
+        try:
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.strip():
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def run_zpc_inject(agent_do: str, cwd: str) -> str:
+    """Inject stdout, or "" on any failure.
+
+    Output lands in a temp file rather than a pipe: inject detaches a harvest,
+    and any background writer holding the read end open would outlast the
+    timeout that exists to bound this call. start_new_session isolates the
+    process group so a timeout kill takes the whole spawn without reaching the
+    deliberately detached harvest, which carries its own group.
+    """
+    # AGENT_DO_ZPC_SOURCE tags the access log; the copy keeps it out of the
+    # rest of the hook's environment.
+    env = dict(os.environ)
+    env["AGENT_DO_ZPC_SOURCE"] = "hook"
+    try:
+        with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as out:
+            # cwd must be inside the project: inject resolves the store from there.
+            proc = subprocess.Popen(
+                [agent_do, "zpc", "inject"],
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                code = proc.wait(timeout=ZPC_INJECT_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                proc.wait()
+                return ""
+            if code != 0:
+                return ""
+            out.seek(0)
+            return out.read()
+    except Exception:
+        return ""
+
+
+def bound_zpc_inject(text: str) -> str:
+    if len(text) <= ZPC_INJECT_MAX_CHARS:
+        return text
+    clipped = text[:ZPC_INJECT_MAX_CHARS]
+    head, newline, _ = clipped.rpartition("\n")
+    if newline:
+        clipped = head
+    return f"{clipped}\n{ZPC_INJECT_TRUNCATION_MARKER}"
+
+
+def zpc(agent_do: str | None, cwd: str | None) -> str:
+    if not cwd or not (Path(cwd) / ".zpc").exists():
+        return ""
+
+    # The advisory below only *asks* the agent to go read the store, and asking
+    # is not a mechanism. When there are records to show, put the memory itself
+    # in context. Every failure mode (kill-switch, empty store, missing
+    # dispatcher, nonzero exit, timeout) falls through to the advisory, so the
+    # section degrades instead of disappearing.
+    if (
+        agent_do
+        and os.environ.get("AGENT_DO_ZPC_INJECT", "1") != "0"
+        and zpc_has_records(cwd)
+    ):
+        memory = run_zpc_inject(agent_do, cwd).rstrip("\n")
+        if memory.strip():
+            return (
+                "## ZPC Project Memory\n\n"
+                "This project's recorded memory, loaded below. Read it before coding; "
+                "it is already in context, so do not re-run `agent-do zpc inject`.\n\n"
+                f"{bound_zpc_inject(memory)}\n\n"
+                "Keep the loop closed: `agent-do zpc learn` and `agent-do zpc decide` as "
+                "you work, `agent-do zpc harvest` after significant work.\n"
+            )
+
+    return (
+        "## ZPC Memory Available\n\n"
+        "This project has `.zpc/` memory. Start with `agent-do zpc status` and "
+        "`agent-do zpc patterns` before coding.\n"
+    )
 
 
 def frontend_context(cwd: str | None) -> str:
@@ -353,7 +447,7 @@ def main() -> None:
             )
             if part
         )
-    sections.extend(part for part in (frontend_context(cwd), zpc(cwd)) if part)
+    sections.extend(part for part in (frontend_context(cwd), zpc(agent_do, cwd)) if part)
 
     context = "\n---\n\n".join(sections)
     json.dump(
