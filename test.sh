@@ -78,6 +78,7 @@ check_cmd "zpc position ledger tests" python3 "$SCRIPT_DIR/tests/test_zpc_positi
 check_cmd "zpc auto-counsel tests" python3 "$SCRIPT_DIR/tests/test_zpc_counsel_auto.py"
 check_cmd "zpc epistemics tests" python3 "$SCRIPT_DIR/tests/test_zpc_epistemics.py"
 check_cmd "zpc delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_delivery.py"
+check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitigate.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"

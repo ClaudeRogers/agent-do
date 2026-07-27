@@ -311,11 +311,12 @@ PYTHON
 }
 
 cmd_inject() {
-    local compact=false
+    local compact=false relitigate=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --compact) compact=true; shift ;;
+            --relitigate) relitigate=true; shift ;;
             *) shift ;;
         esac
     done
@@ -323,6 +324,12 @@ cmd_inject() {
     ensure_zpc
     log_access "inject"
     _maybe_auto_harvest
+
+    # Both of these are detached and both are allowed to fail: what inject owes
+    # its caller is the blob, on time. Re-litigation rides here because inject is
+    # the moment exposure is measurable — these are the claims about to be
+    # repeated into somebody's context again.
+    _maybe_relitigate "$relitigate" 2>/dev/null || true
 
     if [[ "$compact" == true ]]; then
         _inject_compact

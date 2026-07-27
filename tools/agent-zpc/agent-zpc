@@ -15,6 +15,7 @@ source "$LIB_DIR/epistemics.sh" 2>/dev/null || true
 source "$LIB_DIR/memory.sh" 2>/dev/null || true
 source "$LIB_DIR/position.sh" 2>/dev/null || true
 source "$LIB_DIR/counsel.sh" 2>/dev/null || true
+source "$LIB_DIR/relitigate.sh" 2>/dev/null || true
 source "$LIB_DIR/intelligence.sh" 2>/dev/null || true
 source "$LIB_DIR/integration.sh" 2>/dev/null || true
 
@@ -39,7 +40,7 @@ Commands:
   patterns [--score]                                    View/score patterns
   review [--since DATE] [--auto] [--dry-run]             Post-sprint lesson extraction
   promote <source> --to team|global                     Promote lessons
-  inject [--compact]                                    Emit agent context blob
+  inject [--compact] [--relitigate]                     Emit agent context blob
   init [--platform claude|cursor|codex|generic]         Initialize .zpc/
   status                                                Memory snapshot
   checkpoint [--phase "name"] [--agents "a1,a2"]        Swarm phase boundary
@@ -61,6 +62,7 @@ Examples:
   agent-zpc query --tag testing --since 2025-01-01
   agent-zpc inject
   agent-zpc inject --compact                            # bounded blob for a subagent's prompt
+  agent-zpc inject --relitigate                         # also re-try the most-injected claims now (detached)
   agent-zpc retract les-1a2b3c --evidence "src/api.ts:44 sets Retry-After on every 429"
   agent-zpc retract --candidate les-1a2b3c --evidence "no such handler in src/ as of today"
   agent-zpc position add "the proxy corrupts the payload" --verdict "double content-encoding" --confidence med --falsifier "byte-identical body across the hop"

@@ -436,8 +436,121 @@ def cmd_live_takeaways(argv) -> int:
     return 0
 
 
+def cmd_terms(argv) -> int:
+    """The salient words of a claim, most distinctive first.
+
+    Mechanical, so a re-litigation brief cannot be steered by which words
+    somebody thought were important.
+    """
+    text, limit = argv[0], int(argv[1]) if len(argv) > 1 else 3
+    ranked = sorted(terms_of(text), key=lambda word: (-len(word), word))
+    print(json.dumps(ranked[:limit]))
+    return 0
+
+
+def cmd_relit_rank(argv) -> int:
+    """The claims most worth re-trying, and why they rank where they do.
+
+    Exposure first: a claim outside the injected window is not being repeated
+    into anyone's context, so re-litigating it buys nothing. Then age, because
+    world-state rots and technique mostly does not, and then challenges,
+    because someone already looked at this one and doubted it. A claim checked
+    within the cooling window is skipped unless it was challenged since.
+    """
+    lessons_path, prefix = argv[0], argv[1]
+    window, top = int(argv[2]), int(argv[3])
+    relit_log = argv[4] if len(argv) > 4 else ""
+    cool_days = int(argv[5]) if len(argv) > 5 else 14
+
+    checked = last_checked(relit_log) if relit_log else {}
+    today = datetime.now(timezone.utc)
+
+    live = [
+        record
+        for record in analyze(lessons_path, prefix)["claims"]
+        if record["retraction"] is None
+    ]
+
+    candidates = []
+    for record in live[-window:]:
+        row = record["row"]
+        kind = kind_of(row)
+        if kind != "world-state":
+            continue
+
+        try:
+            recorded = datetime.strptime(str(row.get("date", ""))[:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        age = max(1, (today - recorded.replace(tzinfo=timezone.utc)).days)
+
+        challenges = len(record["challenges"])
+        last = checked.get(record["id"], "")
+        if last and challenges == 0:
+            try:
+                since = (today - datetime.strptime(last, "%Y-%m-%d").replace(tzinfo=timezone.utc)).days
+            except ValueError:
+                since = cool_days
+            if since < cool_days:
+                continue
+
+        candidates.append({
+            "id": record["id"],
+            "claim": claim_text(row),
+            "date": row.get("date", ""),
+            "kind": kind,
+            "age_days": age,
+            "challenges": challenges,
+            "last_checked": last,
+            "score": age * (1 + challenges),
+        })
+
+    candidates.sort(key=lambda item: (-item["score"], item["id"]))
+    print(json.dumps(candidates[:top], ensure_ascii=False))
+    return 0
+
+
+def cmd_relit_classify(argv) -> int:
+    """Read a fresh verdict as one of three words, and nothing more.
+
+    Only a contradiction files anything. Silence in the receipts is not
+    divergence: a claim no receipt speaks to has not been shown wrong, and
+    challenging it would fill the store with the noise of what was not looked at.
+    """
+    path = argv[0]
+    try:
+        with open(path) as handle:
+            text = handle.read()
+    except OSError:
+        text = ""
+
+    hits = []
+    for word in ("SUPPORTED", "CONTRADICTED", "UNSUPPORTED"):
+        match = re.search(rf"\b{word}\b", text)
+        if match:
+            hits.append((match.start(), word))
+    hits.sort()
+
+    outcome = hits[0][1].lower() if hits else "unreadable"
+    first = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(word in stripped for word in ("SUPPORTED", "CONTRADICTED", "UNSUPPORTED")):
+            first = stripped
+            break
+    print(json.dumps({
+        "outcome": outcome,
+        "divergent": outcome == "contradicted",
+        "line": first[:400],
+    }, ensure_ascii=False))
+    return 0
+
+
 COMMANDS = {
     "backfill": cmd_backfill,
+    "terms": cmd_terms,
+    "relit-rank": cmd_relit_rank,
+    "relit-classify": cmd_relit_classify,
     "count": cmd_count,
     "resolve": cmd_resolve,
     "correction": cmd_correction,
