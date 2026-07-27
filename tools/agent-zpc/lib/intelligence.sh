@@ -21,6 +21,8 @@ cmd_harvest() {
         esac
     done
 
+    log_access "harvest"
+
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
@@ -227,6 +229,8 @@ cmd_query() {
         esac
     done
 
+    log_access "query"
+
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
     local global_lessons_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
@@ -351,6 +355,8 @@ cmd_patterns() {
             *) shift ;;
         esac
     done
+
+    log_access "patterns"
 
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
 

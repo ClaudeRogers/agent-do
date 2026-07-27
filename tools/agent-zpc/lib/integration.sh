@@ -4,6 +4,7 @@
 
 cmd_inject() {
     ensure_zpc
+    log_access "inject"
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"

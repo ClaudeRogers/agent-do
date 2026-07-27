@@ -71,6 +71,39 @@ read_jsonl() {
     [[ -f "$file" && -s "$file" ]] && tail -n "$count" "$file" || true
 }
 
+_json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# Leave a receipt for a read command in .zpc/.state/access-log.jsonl.
+# Append-only and silent: a log that cannot be written is never a reason for
+# the command it describes to fail.
+log_access() {
+    local cmd="$1"
+    [[ -n "${ZPC_DIR:-}" && -n "${ZPC_STATE_DIR:-}" ]] || return 0
+
+    local ts source project line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
+    source="${AGENT_DO_ZPC_SOURCE:-cli}"
+    project="$(dirname "$ZPC_DIR")"
+
+    printf -v line '{"ts":"%s","cmd":"%s","source":"%s","project":"%s"}' \
+        "$(_json_escape "$ts")" \
+        "$(_json_escape "$cmd")" \
+        "$(_json_escape "$source")" \
+        "$(_json_escape "$project")"
+
+    {
+        mkdir -p "$ZPC_STATE_DIR" &&
+        printf '%s\n' "$line" >> "$ZPC_STATE_DIR/access-log.jsonl"
+    } 2>/dev/null || true
+
+    return 0
+}
+
 die() {
     local msg="$1"
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
