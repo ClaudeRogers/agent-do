@@ -422,6 +422,48 @@ zpc_has_records() {
     return 1
 }
 
+# Mark where this session started, for the Stop-event write nudge
+# (agent-do-zpc-write-nudge.sh) to measure against. Two facts plus one clock:
+# HEAD at the mark, recorded rows at the mark, and the file's own mtime, which
+# is what lets the nudge tell this session's edits from dirt that was already
+# in the tree. Written here rather than lazily at the first Stop so that work
+# done in the opening turn still counts.
+zpc_write_session_baseline() {
+    local state_dir baseline total n f
+    [ -n "$CWD" ] || return 0
+    [ -d "$CWD/.zpc" ] || return 0
+    [ -n "$SESSION_ID" ] || return 0
+
+    state_dir="$CWD/.zpc/.state"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+
+    # One marker pair per session accumulates forever otherwise. Session-start
+    # is the once-per-session place to sweep it.
+    find "$state_dir" -maxdepth 1 -type f \
+        \( -name 'session-*.baseline' -o -name 'write-nudge-*.done' \) \
+        -mtime +7 -delete 2>/dev/null
+
+    baseline="$state_dir/session-$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64).baseline"
+    # SessionStart fires again on resume and compact with the same session_id.
+    # Keeping the first mark keeps the clock honest.
+    [ -f "$baseline" ] && return 0
+
+    total=0
+    for f in "$CWD"/.zpc/memory/*.jsonl; do
+        [ -f "$f" ] || continue
+        n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+        case "$n" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        total=$((total + n))
+    done
+
+    {
+        printf 'head=%s\n' "$(cd "$CWD" && git rev-parse HEAD 2>/dev/null || printf '')"
+        printf 'zpc_lines=%s\n' "$total"
+    } > "$baseline" 2>/dev/null || return 0
+}
+
 append_zpc_memory() {
     local inject_out inject_rc
 
@@ -589,6 +631,7 @@ Screenshots for evaluation. Snapshots for inventory. Both, in that order."
 fi
 
 # --- Detect ZPC project → embed memory (advisory fallback) ---
+zpc_write_session_baseline
 append_zpc_memory
 
 append_project_tooling
