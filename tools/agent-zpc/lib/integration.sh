@@ -99,10 +99,121 @@ _maybe_auto_harvest() {
     return 0
 }
 
+# The compact blob's ceiling, and the literal marker that admits the cut.
+# 2000 chars is a paste, not a payload: it goes in a lane prompt beside the
+# lane's own instructions, where an unbounded memory dump would crowd out the
+# work it is supposed to inform.
+ZPC_INJECT_COMPACT_MAX=2000
+ZPC_INJECT_TRUNCATED='[zpc inject truncated]'
+
+# Patterns are consolidated truth and lessons are raw, so patterns get first
+# call on the budget — but a fixed share, never all of it, so a long
+# patterns.md can never starve the lessons section out of existence.
+ZPC_INJECT_COMPACT_PATTERNS_SHARE=60
+
+_inject_compact() {
+    local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
+    local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
+
+    python3 << 'PYTHON' - "$patterns_file" "$lessons_file" "$ZPC_INJECT_COMPACT_MAX" \
+        "$ZPC_INJECT_TRUNCATED" "$ZPC_INJECT_COMPACT_PATTERNS_SHARE" "${OUTPUT_FORMAT:-text}"
+import json, os, sys
+
+patterns_path, lessons_path = sys.argv[1], sys.argv[2]
+limit, marker, share, fmt = int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), sys.argv[6]
+
+HEADER = "--- ZPC compact (this project's memory) ---"
+PATTERNS_LABEL = "Established patterns (follow these):"
+LESSONS_LABEL = "Recent lessons (newest first):"
+
+
+def read_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def cut(text, budget):
+    """Trim to budget, spending part of it on the admission that we trimmed."""
+    if budget <= 0:
+        return marker
+    if len(text) <= budget:
+        return text
+    keep = max(0, budget - len(marker) - 1)
+    return text[:keep].rstrip() + "\n" + marker
+
+
+patterns = read_text(patterns_path) or "(none yet)"
+
+lessons = []
+try:
+    with open(lessons_path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                lessons.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+except OSError:
+    pass
+
+# Newest first, so the cut always takes the oldest — the one worth losing.
+# Identical takeaways collapse to their newest instance: auto-captured lessons
+# repeat verbatim, and five copies of one line spend a budget that five
+# different lines were the point of.
+rendered = []
+seen = set()
+for row in reversed(lessons):
+    takeaway = (row.get("takeaway") or row.get("solution") or "").strip()
+    if not takeaway or takeaway in seen:
+        continue
+    seen.add(takeaway)
+    tags = row.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tag for tag in tags.split(",") if tag]
+    suffix = f"  [{','.join(tags)}]" if tags else ""
+    rendered.append(f"- {takeaway}{suffix}")
+lessons_text = "\n".join(rendered) or "(none yet)"
+
+scaffold = len(HEADER) + len(PATTERNS_LABEL) + len(LESSONS_LABEL) + 6
+budget = max(0, limit - scaffold)
+
+patterns_text = cut(patterns, budget * share // 100)
+lessons_text = cut(lessons_text, budget - len(patterns_text))
+
+blob = "\n".join([HEADER, "", PATTERNS_LABEL, patterns_text, "", LESSONS_LABEL, lessons_text])
+if len(blob) > limit:
+    blob = cut(blob, limit)
+
+if fmt == "json":
+    print(json.dumps({"additionalContext": blob}))
+else:
+    print(blob)
+PYTHON
+}
+
 cmd_inject() {
+    local compact=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --compact) compact=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
     ensure_zpc
     log_access "inject"
     _maybe_auto_harvest
+
+    if [[ "$compact" == true ]]; then
+        _inject_compact
+        return 0
+    fi
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
