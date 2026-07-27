@@ -11,15 +11,17 @@
 #   7. Optional: npm install for browse/unbrowse
 #   8. Optional: cargo build for manna
 #   9. Runs agent-do --health
-#  10. Prints Claude settings.json snippet (doesn't auto-modify)
+#  10. Registers the hooks in Claude settings.json (or prints the snippet)
 #  11. Prints Codex hooks.json snippet if Codex install ran
 #  12. Prints CLAUDE.md snippet for projects
 #
 # Usage:
-#   ./install.sh              # Install (auto-installs Codex hooks if ~/.codex/ exists)
-#   ./install.sh --codex      # Force Codex install even without ~/.codex/
-#   ./install.sh --no-codex   # Skip Codex install even when ~/.codex/ exists
-#   ./install.sh --uninstall  # Remove symlink + hooks (both Claude and Codex)
+#   ./install.sh                  # Install (asks before touching settings.json)
+#   ./install.sh --register-hooks # Install and register hooks without asking
+#   ./install.sh --print-only     # Never modify settings.json; just print the snippet
+#   ./install.sh --codex          # Force Codex install even without ~/.codex/
+#   ./install.sh --no-codex       # Skip Codex install even when ~/.codex/ exists
+#   ./install.sh --uninstall      # Remove symlink + hooks + settings.json entries
 
 set -euo pipefail
 
@@ -28,6 +30,7 @@ SYMLINK_DIR="$HOME/.local/bin"
 SYMLINK_PATH="$SYMLINK_DIR/agent-do"
 AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"
 CLAUDE_HOOKS_DIR="$HOME/.claude/hooks"
+CLAUDE_SETTINGS_PATH="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
 CODEX_HOOKS_DIR="$HOME/.codex/hooks"
 FACTORY_DIR="${FACTORY_DIR:-$HOME/.factory}"
 FACTORY_INDEX_PATH="$FACTORY_DIR/agent-do-index.yaml"
@@ -36,10 +39,15 @@ CODEX_HOOKS_SRC="$HOOKS_DIR/codex"
 
 # Decide whether to install Codex hooks. Default: auto (yes if ~/.codex/ exists).
 INSTALL_CODEX="auto"
+# Decide whether to register hooks in settings.json. Default: ask (print-only if
+# stdin is not a terminal, so piped installs never modify settings unasked).
+REGISTER_HOOKS="ask"
 for arg in "$@"; do
     case "$arg" in
-        --codex)    INSTALL_CODEX="yes" ;;
-        --no-codex) INSTALL_CODEX="no"  ;;
+        --codex)          INSTALL_CODEX="yes" ;;
+        --no-codex)       INSTALL_CODEX="no"  ;;
+        --register-hooks) REGISTER_HOOKS="yes" ;;
+        --print-only)     REGISTER_HOOKS="no"  ;;
     esac
 done
 
@@ -59,6 +67,224 @@ info()  { echo -e "${GREEN}✓${NC} $*"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
 err()   { echo -e "${RED}✗${NC} $*"; }
 step()  { echo -e "\n${BOLD}${BLUE}→${NC} ${BOLD}$*${NC}"; }
+
+# Print a path the way a person writes it: ~/x for anything under $HOME.
+display_path() { case "$1" in "$HOME"/*) echo "~${1#"$HOME"}" ;; *) echo "$1" ;; esac; }
+
+# ─── The registered hook set ─────────────────────────────────────────────────
+#
+# One source of truth for what agent-do registers in Claude's settings.json.
+# The merge, the printed snippet, and the uninstall sweep all read this array,
+# so the three can never drift apart.
+#
+# Format: event | matcher | installed-hook-name | timeout-seconds
+# An empty matcher means "every invocation of this event", which is how Claude
+# Code's own settings.json spells it.
+CLAUDE_SETTINGS_SPECS=(
+    "SessionStart||agent-do-session-start.sh|10"
+    "UserPromptSubmit||agent-do-prompt-router.py|5"
+    "PreToolUse|Bash|agent-do-pretooluse-check.py|5"
+    "SessionEnd||agent-do-coord-stop.sh|10"
+    "Stop||agent-do-zpc-write-nudge.sh|5"
+    "PostToolUse|ExitPlanMode|agent-do-zpc-position-nudge.sh|5"
+)
+
+# Emit the spec as event|matcher|command|timeout, with the command spelled the
+# way settings.json wants it: `~/.claude/hooks/x` for a stock install, an
+# absolute path when the hooks directory has been relocated.
+claude_settings_stream() {
+    local spec event matcher name timeout command
+    for spec in "${CLAUDE_SETTINGS_SPECS[@]}"; do
+        IFS='|' read -r event matcher name timeout <<< "$spec"
+        if [ "$CLAUDE_HOOKS_DIR" = "$HOME/.claude/hooks" ]; then
+            command="~/.claude/hooks/$name"
+        else
+            command="$CLAUDE_HOOKS_DIR/$name"
+        fi
+        printf '%s|%s|%s|%s\n' "$event" "$matcher" "$command" "$timeout"
+    done
+}
+
+# Merge modes:
+#   print  — write the settings.json snippet to stdout, touch nothing
+#   apply  — add any missing registration to $CLAUDE_SETTINGS_PATH
+#   remove — strip exactly the registrations this installer owns
+#
+# apply and remove are idempotent by construction: they compute the additions
+# or removals first and return without writing when the set is empty, so a
+# second run leaves the file byte-identical. Every write is preceded by a
+# timestamped backup, and unrelated hooks and settings keys are never touched.
+claude_settings_merge() {
+    local mode="$1"
+    # The spec travels by environment, not by pipe: `python3 -` reads its own
+    # program from stdin, which would swallow anything piped in.
+    AGENT_DO_MERGE_MODE="$mode" \
+    AGENT_DO_SETTINGS_PATH="$CLAUDE_SETTINGS_PATH" \
+    AGENT_DO_MERGE_SPECS="$(claude_settings_stream)" \
+    python3 - <<'PYMERGE'
+import json
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+mode = os.environ.get("AGENT_DO_MERGE_MODE", "print")
+target = Path(os.environ.get("AGENT_DO_SETTINGS_PATH", "")).expanduser()
+
+specs = []
+for line in os.environ.get("AGENT_DO_MERGE_SPECS", "").splitlines():
+    if not line.strip():
+        continue
+    event, matcher, command, timeout = line.split("|", 3)
+    specs.append((event, matcher, command, int(timeout)))
+
+if not specs:
+    sys.stderr.write("no hook specs supplied; refusing to touch settings\n")
+    raise SystemExit(3)
+
+
+def hook_entry(command, timeout):
+    return {"type": "command", "command": command, "timeout": timeout}
+
+
+def fail(message):
+    sys.stderr.write(message + "\n")
+    raise SystemExit(3)
+
+
+if mode == "print":
+    hooks = {}
+    for event, matcher, command, timeout in specs:
+        groups = hooks.setdefault(event, [])
+        for group in groups:
+            if group["matcher"] == matcher:
+                group["hooks"].append(hook_entry(command, timeout))
+                break
+        else:
+            groups.append({"matcher": matcher, "hooks": [hook_entry(command, timeout)]})
+    print(json.dumps({"hooks": hooks}, indent=2))
+    raise SystemExit(0)
+
+if target.is_file():
+    raw = target.read_text()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        fail(f"{target} is not valid JSON ({exc}); refusing to write")
+    if not isinstance(data, dict):
+        fail(f"{target} is not a JSON object; refusing to write")
+elif mode == "remove":
+    print("NOCHANGE|nothing to remove")
+    raise SystemExit(0)
+else:
+    data = {}
+
+hooks = data.get("hooks", {})
+if not isinstance(hooks, dict):
+    fail(f"{target} has a 'hooks' key that is not an object; refusing to write")
+
+changed = []
+
+if mode == "apply":
+    for event, matcher, command, timeout in specs:
+        groups = hooks.get(event, [])
+        if not isinstance(groups, list):
+            fail(f"{target}: hooks.{event} is not a list; refusing to write")
+        # Dedupe on the command across every group of the event, not just the
+        # group we would write into. A command registered under some other
+        # matcher is still registered; adding ours would double-fire it.
+        already = any(
+            isinstance(entry, dict) and entry.get("command") == command
+            for group in groups if isinstance(group, dict)
+            for entry in (group.get("hooks") or [])
+        )
+        if already:
+            print(f"PRESENT|{event}|{command}")
+            continue
+        for group in groups:
+            if isinstance(group, dict) and group.get("matcher", "") == matcher:
+                group.setdefault("hooks", []).append(hook_entry(command, timeout))
+                break
+        else:
+            groups.append({"matcher": matcher, "hooks": [hook_entry(command, timeout)]})
+        hooks[event] = groups
+        data["hooks"] = hooks
+        changed.append(command)
+        print(f"ADDED|{event}|{command}")
+
+elif mode == "remove":
+    owned = {(event, command) for event, _matcher, command, _timeout in specs}
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        surviving_groups = []
+        touched_event = False
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                surviving_groups.append(group)
+                continue
+            entries = group["hooks"]
+            ours = [
+                entry for entry in entries
+                if isinstance(entry, dict) and (event, entry.get("command")) in owned
+            ]
+            if not ours:
+                surviving_groups.append(group)
+                continue
+            touched_event = True
+            for entry in ours:
+                changed.append(entry["command"])
+                print(f"REMOVED|{event}|{entry['command']}")
+            group["hooks"] = [entry for entry in entries if entry not in ours]
+            # A group we emptied is ours to drop; a group that was already
+            # empty belongs to the user and stays.
+            if group["hooks"]:
+                surviving_groups.append(group)
+        if touched_event:
+            if surviving_groups:
+                hooks[event] = surviving_groups
+            else:
+                del hooks[event]
+else:
+    fail(f"unknown merge mode: {mode}")
+
+if not changed:
+    print("NOCHANGE|already in the desired state")
+    raise SystemExit(0)
+
+if target.is_file():
+    stamp = int(time.time())
+    backup = target.with_name(f"{target.name}.bak.{stamp}")
+    collision = 1
+    while backup.exists():
+        backup = target.with_name(f"{target.name}.bak.{stamp}-{collision}")
+        collision += 1
+    shutil.copy2(str(target), str(backup))
+    print(f"BACKUP|{backup}")
+
+target.parent.mkdir(parents=True, exist_ok=True)
+tmp = target.with_name(f"{target.name}.tmp.{os.getpid()}")
+tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+os.replace(str(tmp), str(target))
+print(f"WROTE|{target}")
+PYMERGE
+}
+
+# Turn the merge script's machine-readable lines into installer output.
+report_settings_merge() {
+    local kind field_a field_b
+    while IFS='|' read -r kind field_a field_b; do
+        case "$kind" in
+            ADDED)    info "Registered ${field_a}: ${field_b}" ;;
+            REMOVED)  info "Unregistered ${field_a}: ${field_b}" ;;
+            PRESENT)  info "Already registered ${field_a}: ${field_b}" ;;
+            BACKUP)   info "Backed up settings to ${field_a}" ;;
+            WROTE)    info "Updated ${field_a}" ;;
+            NOCHANGE) info "No settings.json change needed (${field_a})" ;;
+        esac
+    done
+}
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
 
@@ -90,6 +316,9 @@ uninstall() {
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
         "agent-do-pretooluse-check.py"
+        "agent-do-coord-stop.sh"
+        "agent-do-zpc-write-nudge.sh"
+        "agent-do-zpc-position-nudge.sh"
     )
     for hook in "${hooks[@]}"; do
         if [ -f "$CLAUDE_HOOKS_DIR/$hook" ]; then
@@ -113,9 +342,22 @@ uninstall() {
         fi
     done
 
+    # Unregister from settings.json. Removing the wrappers without removing the
+    # entries would leave Claude Code invoking commands that no longer exist,
+    # so the sweep is part of uninstalling, not a reminder to the user. Only
+    # the exact command strings this installer writes are removed.
+    step "Unregistering hooks from Claude settings.json"
+    local merge_output
+    if merge_output=$(claude_settings_merge remove); then
+        printf '%s\n' "$merge_output" | report_settings_merge
+    else
+        warn "Could not edit $CLAUDE_SETTINGS_PATH — remove the agent-do hook"
+        warn "entries by hand. Search for 'agent-do' in the hooks sections."
+    fi
+
     echo ""
-    warn "Remember to remove the agent-do hooks from ~/.claude/settings.json"
-    warn "and ~/.codex/hooks.json. Search for 'agent-do' in the hooks sections."
+    warn "Codex is not swept automatically: remove the agent-do hooks from"
+    warn "~/.codex/hooks.json by hand. Search for 'agent-do' in the hooks sections."
     echo ""
     info "Uninstall complete. Repo at $REPO_DIR is untouched."
     exit 0
@@ -270,25 +512,36 @@ WRAPPER
 step "Installing Claude Code hooks (wrapper-based)"
 mkdir -p "$CLAUDE_HOOKS_DIR"
 
-# Map: installed-name | source-relative-to-repo | wrapper-kind
+# Map: installed-name | source-relative-to-repo | wrapper-kind | requirement
 #
 # Scope: only hooks that nudge agents toward agent-do tools, manage agent-do
 # state, or implement agent-do conventions ship here. Personal productivity
 # hooks (screenshot shorthand, prompt annotation, git auto-commit, generic
 # OS notifications) belong in your dotfiles, not in the agent-do repo.
+#
+# `optional` means the canonical hook may legitimately be absent (a checkout
+# predating it, a lane still landing it). The wrapper installs anyway: it
+# resolves the canonical file at event time and exits 0 when it is missing, so
+# an installed-but-unbacked wrapper is inert rather than broken.
 CLAUDE_HOOK_SPECS=(
-    "agent-do-session-start.sh|hooks/claude/agent-do-session-start.sh|sh"
-    "agent-do-prompt-router.py|hooks/claude/agent-do-prompt-router.py|py"
-    "agent-do-pretooluse-check.py|hooks/claude/agent-do-pretooluse-check.py|py"
-    "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh"
+    "agent-do-session-start.sh|hooks/claude/agent-do-session-start.sh|sh|required"
+    "agent-do-prompt-router.py|hooks/claude/agent-do-prompt-router.py|py|required"
+    "agent-do-pretooluse-check.py|hooks/claude/agent-do-pretooluse-check.py|py|required"
+    "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh|required"
+    "agent-do-zpc-write-nudge.sh|hooks/claude/agent-do-zpc-write-nudge.sh|sh|optional"
+    "agent-do-zpc-position-nudge.sh|hooks/claude/agent-do-zpc-position-nudge.sh|sh|optional"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
-    IFS='|' read -r name rel kind <<< "$spec"
+    IFS='|' read -r name rel kind requirement <<< "$spec"
     src="$REPO_DIR/$rel"
     dst="$CLAUDE_HOOKS_DIR/$name"
     if [ ! -f "$src" ]; then
-        err "Hook source not found: $src"
-        continue
+        if [ "$requirement" = "optional" ]; then
+            warn "Hook source not present yet: $rel (installing inert wrapper)"
+        else
+            err "Hook source not found: $src"
+            continue
+        fi
     fi
     case "$kind" in
         py) install_py_wrapper "$rel" "$dst" ;;
@@ -353,7 +606,9 @@ fi
 # 6. Optional: Node.js tools
 step "Optional: Browser tools (agent-browse, agent-unbrowse)"
 if command -v npm &>/dev/null; then
-    read -rp "Install Node.js deps for browse/unbrowse? [y/N] " answer
+    # `|| answer=""` keeps an unattended run (stdin at /dev/null, CI) from
+    # dying on EOF under `set -e`; an unanswered prompt means "no".
+    read -rp "Install Node.js deps for browse/unbrowse? [y/N] " answer || answer=""
     if [[ "$answer" =~ ^[Yy] ]]; then
         (cd "$REPO_DIR/tools/agent-browse" && npm install --quiet 2>/dev/null) && \
             info "agent-browse deps installed" || warn "agent-browse npm install failed"
@@ -369,7 +624,7 @@ fi
 # 7. Optional: Rust tool
 step "Optional: Issue tracker (agent-manna)"
 if command -v cargo &>/dev/null; then
-    read -rp "Build agent-manna (Rust)? [y/N] " answer
+    read -rp "Build agent-manna (Rust)? [y/N] " answer || answer=""
     if [[ "$answer" =~ ^[Yy] ]]; then
         (cd "$REPO_DIR/tools/agent-manna" && cargo build --release --quiet 2>/dev/null) && \
             info "agent-manna built" || warn "cargo build failed"
@@ -384,60 +639,46 @@ fi
 step "Running health check"
 "$REPO_DIR/agent-do" --health 2>/dev/null || warn "Health check had issues (non-fatal)"
 
-# 9. Print settings.json snippet
+# 9. Register the hooks in settings.json (or print the snippet)
 step "Claude Code settings.json configuration"
-echo ""
-echo "Add the following to ~/.claude/settings.json under the \"hooks\" key:"
-echo "(If you already have hooks entries, merge these into the existing arrays)"
-echo ""
-cat << 'SETTINGS_JSON'
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/agent-do-session-start.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/agent-do-prompt-router.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/agent-do-pretooluse-check.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-  }
+
+SETTINGS_DISPLAY="$(display_path "$CLAUDE_SETTINGS_PATH")"
+
+print_settings_snippet() {
+    echo ""
+    echo "Add the following to $SETTINGS_DISPLAY under the \"hooks\" key:"
+    echo "(If you already have hooks entries, merge these into the existing arrays)"
+    echo ""
+    claude_settings_merge print
+    echo ""
+    echo "Note: agent-do's Stop entry is the zpc write nudge, and nothing else."
+    echo "Auto-commit, DPT scoring, and other turn-end behavior stay yours to"
+    echo "register: add your own scripts alongside it under Stop."
+    echo ""
 }
-SETTINGS_JSON
-echo ""
-echo "Note: agent-do does not register a Stop hook. If you want auto-commit,"
-echo "DPT scoring at turn end, or other Stop-time behavior, register your"
-echo "own scripts in settings.json under Stop. agent-do scopes itself to"
-echo "agent-first tooling nudges and project bootstrap."
-echo ""
+
+do_register="$REGISTER_HOOKS"
+if [ "$do_register" = "ask" ]; then
+    if [ -t 0 ]; then
+        read -rp "Register agent-do hooks in $SETTINGS_DISPLAY? [y/N] " answer || answer=""
+        if [[ "$answer" =~ ^[Yy] ]]; then do_register="yes"; else do_register="no"; fi
+    else
+        do_register="no"
+        info "Non-interactive shell — not touching settings.json (use --register-hooks)"
+    fi
+fi
+
+if [ "$do_register" = "yes" ]; then
+    if merge_output=$(claude_settings_merge apply); then
+        printf '%s\n' "$merge_output" | report_settings_merge
+        info "Hooks registered. Restart Claude Code to pick them up."
+    else
+        err "Could not register hooks automatically — falling back to the snippet"
+        print_settings_snippet
+    fi
+else
+    print_settings_snippet
+fi
 
 # 9b. Print Codex hooks.json snippet if Codex install ran
 if [ "$should_install_codex" = "yes" ]; then
@@ -481,7 +722,12 @@ echo ""
 echo -e "\n${BOLD}${GREEN}Installation complete!${NC}"
 echo ""
 echo "Next steps:"
-echo "  1. Merge the settings.json snippet above into ~/.claude/settings.json"
+if [ "$do_register" = "yes" ]; then
+    echo "  1. Hooks are registered in $SETTINGS_DISPLAY (nothing to merge by hand)"
+else
+    echo "  1. Merge the settings.json snippet above into $SETTINGS_DISPLAY"
+    echo "     (or re-run: ./install.sh --register-hooks)"
+fi
 echo "  2. Optionally add the CLAUDE.md snippet to your project"
 echo "  3. Restart Claude Code to pick up the new hooks"
 echo ""

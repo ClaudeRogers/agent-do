@@ -11,6 +11,22 @@ cd agent-do
 ./test.sh
 ```
 
+`./install.sh` symlinks the CLI, installs the hook wrappers, and asks before
+registering them in Claude's `settings.json`. Two flags decide that last step
+without a prompt:
+
+```bash
+./install.sh --register-hooks   # merge the hook set into settings.json, no questions
+./install.sh --print-only       # never touch settings.json; print the snippet to merge
+```
+
+The merge is idempotent and additive: it backs the file up to
+`settings.json.bak.<epoch>` before writing, adds only registrations that are
+missing, leaves your own hooks and every other settings key untouched, and
+makes no write at all on a second run. `--uninstall` removes exactly the
+entries the installer added. A piped or non-interactive run never modifies
+settings.json unless `--register-hooks` says so.
+
 ## Project Structure
 
 ```
@@ -57,6 +73,30 @@ bash tools/agent-context/test/integration.sh   # Context tool integration tests
 ```
 
 Directory-based tools own their suites; the manna Rust unit and integration suites above also run inside `./test.sh`, while the browse and context suites run standalone. Python tool tests live in `tests/` and are wired into `./test.sh`. Run the relevant suite before submitting changes.
+
+## Working in Lanes (parallel agents)
+
+Large bodies of work run as a swarm of agent sessions, one lane each. Lanes
+split by **file ownership, never by phase**: every lane reads, writes, and
+verifies its own paths to completion. Splitting by phase (one agent researches,
+another implements, a third tests) hands the same files between agents and
+turns every boundary into a chance to lose context.
+
+A lane is staged as a self-contained prompt file at `.dev/session-prompts/NN-SLUG.md`,
+copied from **[`.dev/session-prompts/TEMPLATE.md`](.dev/session-prompts/TEMPLATE.md)**.
+The template carries the required sections and the reasons behind them: the
+claim block, the pasted project-memory blob (`agent-do zpc inject --compact`,
+2000-char bound, pasted verbatim rather than left as a command for the agent to
+run), owned paths with named non-owned neighbors, `file:line` ground truth
+verified during staging, the integration contract pinned character for
+character across every lane that consumes it, numbered verification, and the
+completion block.
+
+Each prompt pairs with a manna issue in both directions: the issue points at
+the prompt (`agent-do manna update <id> --prompt <absolute path>`) and the
+prompt opens with the claim commands for that issue. `agent-do manna reconcile`
+reports either half when it dangles. Agents coordinate through
+`agent-do coord` (focus, claims, publishes), not through chat.
 
 ## Code Conventions
 
