@@ -2,9 +2,83 @@
 # lib/integration.sh — Inject, Init, Status, Profile commands
 # Sourced by agent-zpc. Do not run directly.
 
+ZPC_HARVEST_MAX_AGE_DAYS=7
+ZPC_HARVEST_MIN_NEW_LESSONS=5
+
+# True when consolidation is overdue: no harvest for ZPC_HARVEST_MAX_AGE_DAYS
+# and at least ZPC_HARVEST_MIN_NEW_LESSONS lessons added since the last one.
+# Anything unreadable answers "not stale" — inject never surprises its caller.
+_harvest_is_stale() {
+    local harvest_log="$ZPC_STATE_DIR/harvest-log.jsonl"
+    local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
+
+    [[ -f "$lessons_file" && -s "$lessons_file" ]] || return 1
+
+    local verdict
+    verdict=$(python3 << 'PYTHON' - "$harvest_log" "$lessons_file" "$ZPC_HARVEST_MAX_AGE_DAYS" "$ZPC_HARVEST_MIN_NEW_LESSONS" 2>/dev/null
+import json, os, sys
+from datetime import datetime, timedelta
+
+harvest_log, lessons_file = sys.argv[1], sys.argv[2]
+max_age_days, min_new_lessons = int(sys.argv[3]), int(sys.argv[4])
+
+lesson_count = 0
+with open(lessons_file) as f:
+    for line in f:
+        if line.strip():
+            lesson_count += 1
+
+last = None
+if os.path.exists(harvest_log):
+    with open(harvest_log) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                last = json.loads(line)
+            except json.JSONDecodeError:
+                pass
+
+# Never harvested: every lesson on disk is unconsolidated.
+if last is None:
+    print("stale" if lesson_count >= min_new_lessons else "fresh")
+    sys.exit(0)
+
+stamp = last.get("timestamp") or last.get("date") or ""
+try:
+    when = datetime.fromisoformat(stamp)
+except (TypeError, ValueError):
+    print("fresh")
+    sys.exit(0)
+if when.tzinfo is not None:
+    when = when.astimezone().replace(tzinfo=None)
+
+try:
+    new_lessons = lesson_count - int(last.get("lesson_count", 0))
+except (TypeError, ValueError):
+    new_lessons = lesson_count
+
+aged = datetime.now() - when >= timedelta(days=max_age_days)
+print("stale" if aged and new_lessons >= min_new_lessons else "fresh")
+PYTHON
+    ) || return 1
+
+    [[ "$verdict" == "stale" ]]
+}
+
+# Inject is only as good as the last harvest, so consolidate before emitting.
+# The subshell is the point: nothing harvest does can take inject down with it.
+_maybe_auto_harvest() {
+    _harvest_is_stale || return 0
+    ( cmd_harvest --auto ) >/dev/null 2>&1 || true
+    return 0
+}
+
 cmd_inject() {
     ensure_zpc
     log_access "inject"
+    _maybe_auto_harvest
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
