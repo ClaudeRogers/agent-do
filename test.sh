@@ -74,6 +74,7 @@ check_cmd "prompt hook AI routing tests" python3 "$SCRIPT_DIR/tests/test_prompt_
 check_cmd "model resolution tests" python3 "$SCRIPT_DIR/tests/test_models.py"
 check_cmd "generated discovery index tests" bash "$SCRIPT_DIR/tests/test_index_generation.sh"
 check_cmd "zpc global read-surface tests" python3 "$SCRIPT_DIR/tests/test_zpc_global.py"
+check_cmd "zpc position ledger tests" python3 "$SCRIPT_DIR/tests/test_zpc_position.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"

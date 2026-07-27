@@ -428,6 +428,8 @@ tools:
     capabilities:
     - capture structured lessons (context/problem/solution/takeaway)
     - log architectural decisions with options, rationale, confidence
+    - hold positions with a falsifier and refuse evidence-free flips
+    - clean-context second opinion on a receipts-only brief
     - consolidate lessons into patterns via harvest
     - inject memory context into AI agents
     - search and query memory by tag, date, or text
@@ -439,6 +441,8 @@ tools:
       learn: Capture a structured lesson
       decide: Log a decision with rationale
       decide-batch: Batch-log decisions from planning phase
+      position: Record a verdict with its falsifier; flip it only with named evidence
+      counsel: Clean-context second opinion on a receipts-only brief
       harvest: Post-build consolidation scan
       query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
@@ -470,6 +474,11 @@ tools:
       command: agent-zpc query --tag docker
     - intent: set up zpc in this project
       command: agent-zpc init
+    - intent: record a position I can be wrong about
+      command: agent-zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence
+        med --falsifier 'byte-identical body across the hop'
+    - intent: get a second opinion that has not seen the argument
+      command: agent-zpc counsel --brief .dev/receipts.md --question 'Did the payload survive the hop?'
     routing:
       discover_keywords:
       - zpc
@@ -509,15 +518,18 @@ tools:
       - inject
       - status
       - profile
+      - position
       interact:
       - harvest
       - review
       - promote
       - checkpoint
+      - counsel
       save:
       - learn
       - decide
       - decide-batch
+      - position
       attributes:
         harvest:
         - polymorphic
@@ -525,6 +537,11 @@ tools:
         - polymorphic
         checkpoint:
         - composite
+        position:
+        - polymorphic
+        counsel:
+        - long_running
+        - own_state
     concurrency: mixed
   tui:
     description: Control any terminal/TUI application via tmux

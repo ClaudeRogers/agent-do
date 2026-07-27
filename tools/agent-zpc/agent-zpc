@@ -12,6 +12,8 @@ source "${SCRIPT_DIR}/../../lib/snapshot.sh" 2>/dev/null || true
 # Source ZPC libraries
 source "$LIB_DIR/common.sh"
 source "$LIB_DIR/memory.sh" 2>/dev/null || true
+source "$LIB_DIR/position.sh" 2>/dev/null || true
+source "$LIB_DIR/counsel.sh" 2>/dev/null || true
 source "$LIB_DIR/intelligence.sh" 2>/dev/null || true
 source "$LIB_DIR/integration.sh" 2>/dev/null || true
 
@@ -27,6 +29,8 @@ Commands:
   learn <ctx> <prob> <sol> <takeaway> --tags "t1,t2"   Capture a lesson
   decide <problem> --options "a,b" --chosen a ...       Log a decision
   decide-batch [--file F] [--tags "t1,t2"]             Batch-log decisions (stdin)
+  position add|flip|list|show                           Verdict + falsifier ledger
+  counsel --brief <file> [--question "q"]               Clean-context second opinion
   harvest [--auto] [--dry-run]                          Consolidation scan
   query [--global] [--tag X] [--since DATE] [--text "..."] Search project and optional global memory
   patterns [--score]                                    View/score patterns
@@ -53,6 +57,8 @@ Examples:
   agent-zpc harvest
   agent-zpc query --tag testing --since 2025-01-01
   agent-zpc inject
+  agent-zpc position add "the proxy corrupts the payload" --verdict "double content-encoding" --confidence med --falsifier "byte-identical body across the hop"
+  agent-zpc counsel --brief .dev/receipts.md --question "Did the payload survive the hop?"
 EOF
 }
 
@@ -68,6 +74,12 @@ case "$CMD" in
         ;;
     decide-batch|batch-decide|batch)
         cmd_decide_batch "$@"
+        ;;
+    position)
+        cmd_position "$@"
+        ;;
+    counsel)
+        cmd_counsel "$@"
         ;;
     checkpoint|cp)
         cmd_checkpoint "$@"

@@ -116,7 +116,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [voice](#voice) | Voice synthesis and recognition | write | 4 |
 | [wireshark](#wireshark) | Network packet capture and analysis | read | 4 |
 | [zoom](#zoom) | Zoom meeting control | mixed | 5 |
-| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 13 |
+| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 15 |
 
 ## Tools
 
@@ -4492,6 +4492,8 @@ Concurrency: `mixed`
 
 - capture structured lessons (context/problem/solution/takeaway)
 - log architectural decisions with options, rationale, confidence
+- hold positions with a falsifier and refuse evidence-free flips
+- clean-context second opinion on a receipts-only brief
 - consolidate lessons into patterns via harvest
 - inject memory context into AI agents
 - search and query memory by tag, date, or text
@@ -4505,6 +4507,8 @@ Concurrency: `mixed`
 - `learn`: Capture a structured lesson
 - `decide`: Log a decision with rationale
 - `decide-batch`: Batch-log decisions from planning phase
+- `position`: Record a verdict with its falsifier; flip it only with named evidence
+- `counsel`: Clean-context second opinion on a receipts-only brief
 - `harvest`: Post-build consolidation scan
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
@@ -4539,11 +4543,17 @@ agent-do zpc status
 agent-do zpc query --tag docker
 # set up zpc in this project
 agent-do zpc init
+# record a position I can be wrong about
+agent-do zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence med --falsifier 'byte-identical body across the hop'
+# get a second opinion that has not seen the argument
+agent-do zpc counsel --brief .dev/receipts.md --question 'Did the payload survive the hop?'
 ```
 
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `inject`, `patterns`, `profile`, `query`, `status`
-- Write (connect/interact/save): `checkpoint`, `decide`, `decide-batch`, `harvest`, `init`, `learn`, `promote`, `review`
-- polymorphic (beat decided by payload or flag at call time): `harvest`, `review`
+- Write (connect/interact/save): `checkpoint`, `counsel`, `decide`, `decide-batch`, `harvest`, `init`, `learn`, `position`, `promote`, `review`
+- long_running (daemon/stream/session; may never return): `counsel`
+- polymorphic (beat decided by payload or flag at call time): `harvest`, `position`, `review`
 - composite (one call performs several beats internally): `checkpoint`
+- own_state (writes only its own cache/state; parallel-safe): `counsel`

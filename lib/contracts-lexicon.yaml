@@ -406,6 +406,8 @@ overrides:
     checkpoint: {beats: [interact], attributes: [composite]}
     review: {beats: [snapshot, interact], attributes: [polymorphic]}
     query: {beats: [snapshot]}      # free-text/tag memory search; blind query→polymorphic rule wrong here
+    position: {beats: [snapshot, save], attributes: [polymorphic]}  # list/show read, add/flip persist the ledger
+    counsel: {beats: [interact], attributes: [long_running, own_state]}  # spawns a fresh model; writes only its own access-log row
   coord:
     touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
     interrupts: {beats: [snapshot, interact], attributes: [polymorphic]}  # --mark-seen writes cursor
