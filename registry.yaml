@@ -429,6 +429,7 @@ tools:
     - capture structured lessons (context/problem/solution/takeaway)
     - log architectural decisions with options, rationale, confidence
     - hold positions with a falsifier and refuse evidence-free flips
+    - name every claim with a content-derived id (les-/dec-) and retract it with evidence
     - clean-context second opinion on a receipts-only brief
     - consolidate lessons into patterns via harvest
     - inject memory context into AI agents
@@ -441,6 +442,8 @@ tools:
       learn: Capture a structured lesson
       decide: Log a decision with rationale
       decide-batch: Batch-log decisions from planning phase
+      retract: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate
+        files a challenge instead, --backfill assigns derived ids)
       position: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free
         flip also fires a detached second opinion)
       counsel: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts
@@ -476,6 +479,11 @@ tools:
       command: agent-zpc query --tag docker
     - intent: set up zpc in this project
       command: agent-zpc init
+    - intent: correct a lesson that turned out to be wrong
+      command: agent-zpc retract les-1a2b3c --evidence 'src/api.ts:44 sets Retry-After on every 429' --takeaway
+        'the API does send Retry-After'
+    - intent: file doubt about a lesson without arguing it
+      command: agent-zpc retract --candidate les-1a2b3c --evidence 'no such handler in src/ today'
     - intent: record a position I can be wrong about
       command: agent-zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence
         med --falsifier 'byte-identical body across the hop'
@@ -537,6 +545,7 @@ tools:
       - decide
       - decide-batch
       - position
+      - retract
       attributes:
         harvest:
         - polymorphic

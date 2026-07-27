@@ -116,7 +116,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [voice](#voice) | Voice synthesis and recognition | write | 4 |
 | [wireshark](#wireshark) | Network packet capture and analysis | read | 4 |
 | [zoom](#zoom) | Zoom meeting control | mixed | 5 |
-| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 15 |
+| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 16 |
 
 ## Tools
 
@@ -4493,6 +4493,7 @@ Concurrency: `mixed`
 - capture structured lessons (context/problem/solution/takeaway)
 - log architectural decisions with options, rationale, confidence
 - hold positions with a falsifier and refuse evidence-free flips
+- name every claim with a content-derived id (les-/dec-) and retract it with evidence
 - clean-context second opinion on a receipts-only brief
 - consolidate lessons into patterns via harvest
 - inject memory context into AI agents
@@ -4507,6 +4508,7 @@ Concurrency: `mixed`
 - `learn`: Capture a structured lesson
 - `decide`: Log a decision with rationale
 - `decide-batch`: Batch-log decisions from planning phase
+- `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
 - `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
 - `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
 - `harvest`: Post-build consolidation scan
@@ -4543,6 +4545,10 @@ agent-do zpc status
 agent-do zpc query --tag docker
 # set up zpc in this project
 agent-do zpc init
+# correct a lesson that turned out to be wrong
+agent-do zpc retract les-1a2b3c --evidence 'src/api.ts:44 sets Retry-After on every 429' --takeaway 'the API does send Retry-After'
+# file doubt about a lesson without arguing it
+agent-do zpc retract --candidate les-1a2b3c --evidence 'no such handler in src/ today'
 # record a position I can be wrong about
 agent-do zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence med --falsifier 'byte-identical body across the hop'
 # get a second opinion that has not seen the argument
@@ -4556,7 +4562,7 @@ agent-do zpc inject --compact
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `inject`, `patterns`, `profile`, `query`, `status`
-- Write (connect/interact/save): `checkpoint`, `counsel`, `decide`, `decide-batch`, `harvest`, `init`, `learn`, `position`, `promote`, `review`
+- Write (connect/interact/save): `checkpoint`, `counsel`, `decide`, `decide-batch`, `harvest`, `init`, `learn`, `position`, `promote`, `retract`, `review`
 - long_running (daemon/stream/session; may never return): `counsel`
 - polymorphic (beat decided by payload or flag at call time): `harvest`, `position`, `review`
 - composite (one call performs several beats internally): `checkpoint`

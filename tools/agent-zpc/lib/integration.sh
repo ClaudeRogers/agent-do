@@ -22,11 +22,21 @@ from datetime import datetime, timedelta
 harvest_log, lessons_file = sys.argv[1], sys.argv[2]
 max_age_days, min_new_lessons = int(sys.argv[3]), int(sys.argv[4])
 
+# Corrections share the file with the claims they correct, and a store where
+# five lessons were retracted has not gained five lessons to consolidate.
 lesson_count = 0
 with open(lessons_file) as f:
     for line in f:
-        if line.strip():
-            lesson_count += 1
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "retracts" in row or "challenges" in row:
+            continue
+        lesson_count += 1
 
 last = None
 if os.path.exists(harvest_log):
@@ -99,6 +109,75 @@ _maybe_auto_harvest() {
     return 0
 }
 
+# How many claims the full blob carries, and how long a correction stays news.
+# A retraction is worth reading while the belief it corrects may still be in
+# someone's head; after a month it is history, and history lives in the file.
+ZPC_INJECT_LESSON_WINDOW=20
+ZPC_INJECT_CORRECTION_DAYS=30
+
+# The rendered claims section: retracted claims are gone, challenged claims are
+# marked, and every line carries the id you would need to argue with it. Raw
+# JSON rows used to go here — unreadable, and unaddressable, which is worse.
+_inject_lessons() {
+    local lessons_file="$1"
+
+    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$lessons_file" "$ZPC_INJECT_LESSON_WINDOW" "$ZPC_INJECT_CORRECTION_DAYS"
+import json, os, sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, sys.argv[1])
+import epistemics
+
+lessons_path = sys.argv[2]
+window, correction_days = int(sys.argv[3]), int(sys.argv[4])
+
+state = epistemics.analyze(lessons_path, "les-")
+claims = state["claims"]
+
+live = [record for record in claims if record["retraction"] is None]
+lines = []
+for record in live[-window:]:
+    row = record["row"]
+    tags = epistemics.tags_of(row)
+    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
+    if record["challenges"]:
+        suffix += f"  [challenged: {len(record['challenges'])}]"
+    text = epistemics.claim_text(row) or "(no takeaway recorded)"
+    lines.append(f"[{row.get('date', '?')}] {record['id']} {text}{suffix}")
+
+print("\n".join(lines) if lines else "(none)")
+
+# A retraction with no replacement claim is bookkeeping: the row stops
+# rendering and there is nothing to put in its place. One that names what is
+# true instead is the correction worth carrying into the next session.
+now = datetime.now(timezone.utc)
+corrections = []
+for record in claims:
+    tombstone = record["retraction"]
+    if not tombstone or not tombstone.get("takeaway"):
+        continue
+    stamp = tombstone.get("ts", "")
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        continue
+    if (now - when).days > correction_days:
+        continue
+    # The withdrawn wording is deliberately not quoted here. A correction that
+    # repeats the wrong sentence re-injects it, and a skimmer takes the text and
+    # leaves the frame. The id is the pointer for anyone who needs the original:
+    # agent-do zpc query --text "<id>".
+    corrections.append(
+        f"[{stamp[:10]}] {record['id']} corrected to: {tombstone['takeaway']}"
+    )
+
+if corrections:
+    print()
+    print("## Corrections (recent)")
+    print("\n".join(corrections))
+PYTHON
+}
+
 # The compact blob's ceiling, and the literal marker that admits the cut.
 # 2000 chars is a paste, not a payload: it goes in a lane prompt beside the
 # lane's own instructions, where an unbounded memory dump would crowd out the
@@ -116,11 +195,15 @@ _inject_compact() {
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
 
     python3 << 'PYTHON' - "$patterns_file" "$lessons_file" "$ZPC_INJECT_COMPACT_MAX" \
-        "$ZPC_INJECT_TRUNCATED" "$ZPC_INJECT_COMPACT_PATTERNS_SHARE" "${OUTPUT_FORMAT:-text}"
+        "$ZPC_INJECT_TRUNCATED" "$ZPC_INJECT_COMPACT_PATTERNS_SHARE" "${OUTPUT_FORMAT:-text}" \
+        "$ZPC_LIB_DIR"
 import json, os, sys
 
 patterns_path, lessons_path = sys.argv[1], sys.argv[2]
 limit, marker, share, fmt = int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), sys.argv[6]
+
+sys.path.insert(0, sys.argv[7])
+import epistemics
 
 HEADER = "--- ZPC compact (this project's memory) ---"
 PATTERNS_LABEL = "Established patterns (follow these):"
@@ -147,19 +230,13 @@ def cut(text, budget):
 
 patterns = read_text(patterns_path) or "(none yet)"
 
-lessons = []
-try:
-    with open(lessons_path) as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                lessons.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-except OSError:
-    pass
+# Retracted claims are absent from every rendering, this one included: a bounded
+# blob is exactly where a withdrawn claim would be least likely to be questioned.
+records = [
+    record
+    for record in epistemics.analyze(lessons_path, "les-")["claims"]
+    if record["retraction"] is None
+]
 
 # Newest first, so the cut always takes the oldest — the one worth losing.
 # Identical takeaways collapse to their newest instance: auto-captured lessons
@@ -167,15 +244,16 @@ except OSError:
 # different lines were the point of.
 rendered = []
 seen = set()
-for row in reversed(lessons):
-    takeaway = (row.get("takeaway") or row.get("solution") or "").strip()
+for record in reversed(records):
+    row = record["row"]
+    takeaway = epistemics.claim_text(row)
     if not takeaway or takeaway in seen:
         continue
     seen.add(takeaway)
-    tags = row.get("tags") or []
-    if isinstance(tags, str):
-        tags = [tag for tag in tags.split(",") if tag]
+    tags = epistemics.tags_of(row)
     suffix = f"  [{','.join(tags)}]" if tags else ""
+    if record["challenges"]:
+        suffix += f"  [challenged: {len(record['challenges'])}]"
     rendered.append(f"- {takeaway}{suffix}")
 lessons_text = "\n".join(rendered) or "(none yet)"
 
@@ -221,9 +299,10 @@ cmd_inject() {
     local profile_file="$ZPC_MEMORY_DIR/profile.md"
     local global_lessons_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
 
+    # Claims, not lines: corrections share the file with what they correct.
     local lesson_count decision_count
-    lesson_count=$(count_lines "$lessons_file")
-    decision_count=$(count_lines "$decisions_file")
+    lesson_count=$(_zpc_claim_count "$lessons_file")
+    decision_count=$(_zpc_claim_count "$decisions_file")
 
     local context=""
 
@@ -259,7 +338,7 @@ cmd_inject() {
     # Section 5: Recent project lessons
     context+="--- Recent Lessons (newest last) ---\n"
     if [[ -f "$lessons_file" && -s "$lessons_file" ]]; then
-        context+="$(tail -n 20 "$lessons_file")\n"
+        context+="$(_inject_lessons "$lessons_file")\n"
     else
         context+="(none)\n"
     fi
@@ -501,8 +580,8 @@ cmd_status() {
     local project_path
     project_path="$(dirname "$ZPC_DIR")"
     local lesson_count decision_count pattern_count team_count global_count
-    lesson_count=$(count_lines "$lessons_file")
-    decision_count=$(count_lines "$decisions_file")
+    lesson_count=$(_zpc_claim_count "$lessons_file")
+    decision_count=$(_zpc_claim_count "$decisions_file")
     pattern_count=$(grep -c "^## " "$patterns_file" 2>/dev/null) || pattern_count=0
     team_count=$(count_lines "$team_lessons")
     global_count=$(count_lines "$global_lessons")
@@ -515,6 +594,12 @@ from collections import Counter
 
 lessons_file, patterns_file = sys.argv[1], sys.argv[2]
 
+
+def is_correction(obj):
+    """Retractions and challenges are commentary on rows, not rows to validate."""
+    return "retracts" in obj or "challenges" in obj
+
+
 # Format issues
 issues = 0
 if os.path.exists(lessons_file):
@@ -525,6 +610,8 @@ if os.path.exists(lessons_file):
                 continue
             try:
                 obj = json.loads(line)
+                if is_correction(obj):
+                    continue
                 required = ["date", "context", "problem", "solution", "takeaway", "tags"]
                 if any(k not in obj for k in required) or not isinstance(obj.get("tags"), list):
                     issues += 1
@@ -549,6 +636,8 @@ if os.path.exists(lessons_file):
                 continue
             try:
                 obj = json.loads(line)
+                if is_correction(obj):
+                    continue
                 for tag in obj.get("tags", []):
                     if isinstance(tag, str):
                         tag_counter[tag] += 1
@@ -759,7 +848,15 @@ if os.path.exists(lessons_file):
                 continue
             try:
                 obj = json.loads(line)
-                lessons.append((i, obj))
+                # A retraction or challenge is a claim about a row, not a row:
+                # it is neither an entry an agent failed to log nor one with a
+                # missing field.
+                if "retracts" in obj or "challenges" in obj:
+                    continue
+                # Numbered by claim, not by line: the baseline below is a count
+                # of claims, and comparing it to a line number would read every
+                # correction as a lesson somebody logged.
+                lessons.append((len(lessons) + 1, obj))
                 required = ["date", "context", "problem", "solution", "takeaway", "tags"]
                 missing = [k for k in required if k not in obj]
                 if missing:
@@ -777,7 +874,10 @@ if os.path.exists(decisions_file):
             if not line:
                 continue
             try:
-                decisions.append((i, json.loads(line)))
+                obj = json.loads(line)
+                if "retracts" in obj or "challenges" in obj:
+                    continue
+                decisions.append((len(decisions) + 1, obj))
             except:
                 pass
 

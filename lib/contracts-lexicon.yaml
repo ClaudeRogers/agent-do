@@ -407,6 +407,7 @@ overrides:
     review: {beats: [snapshot, interact], attributes: [polymorphic]}
     query: {beats: [snapshot]}      # free-text/tag memory search; blind query→polymorphic rule wrong here
     position: {beats: [snapshot, save], attributes: [polymorphic]}  # list/show read, add/flip persist the ledger
+    retract: {beats: [save]}        # appends a correction row; never edits or deletes the claim it corrects
     counsel: {beats: [interact], attributes: [long_running, own_state]}  # spawns a fresh model; writes only its own access-log row
   coord:
     touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
