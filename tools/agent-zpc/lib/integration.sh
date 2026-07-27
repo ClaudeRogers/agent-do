@@ -67,11 +67,35 @@ PYTHON
     [[ "$verdict" == "stale" ]]
 }
 
-# Inject is only as good as the last harvest, so consolidate before emitting.
-# The subshell is the point: nothing harvest does can take inject down with it.
+# Fire the overdue harvest without putting it on inject's critical path.
+# The session-start hook runs inject under a 3s process-group SIGKILL, so a
+# harvest running inside inject would be killed mid-write, leave the harvest
+# log un-advanced, and be retried and killed again at every session start.
+# Detached, the harvest outlives that kill and inject's wall time stays flat.
 _maybe_auto_harvest() {
     _harvest_is_stale || return 0
-    ( cmd_harvest --auto ) >/dev/null 2>&1 || true
+
+    local lock="$ZPC_STATE_DIR/harvest.lock"
+
+    # SIGKILL takes no traps, so a killed harvest cannot release its own lock.
+    # Anything this old is abandoned, not running.
+    if [[ -d "$lock" && -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]]; then
+        rmdir "$lock" 2>/dev/null || true
+    fi
+
+    # mkdir is the atomic test-and-set. Parallel session starts in one project
+    # yield to a single harvest instead of racing to append the same patterns.
+    mkdir "$lock" 2>/dev/null || return 0
+
+    # set -m gives the job its own process group, so a kill aimed at inject
+    # does not reach it. The redirections are load-bearing too: an inherited
+    # stdout would hold the caller's command substitution open until harvest
+    # finished, which is the very wait this detachment exists to avoid.
+    (
+        set -m
+        { cmd_harvest --auto; rmdir "$lock"; } >/dev/null 2>&1 &
+    ) >/dev/null 2>&1 || true
+
     return 0
 }
 
