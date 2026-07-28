@@ -318,18 +318,71 @@ def coord(agent_do: str, cwd: str | None) -> str:
     return ""
 
 
-def zpc_store_root(cwd: str) -> Path | None:
-    """Where zpc would resolve a store from here.
+def git_toplevel(cwd: str | None) -> Path | None:
+    """The git worktree containing cwd, or None."""
+    if not cwd:
+        return None
+    code, out, _ = run_capture(
+        ["git", "rev-parse", "--show-toplevel"], cwd=cwd, timeout=ZPC_AUTOINIT_TIMEOUT
+    )
+    out = out.strip()
+    if code != 0 or not out:
+        return None
+    root = Path(out)
+    return root if root.is_dir() else None
 
-    The same upward walk resolve_zpc_dir does (tools/agent-zpc/lib/common.sh),
-    stopping short of /, so the hook's answer and the tool's answer are the same
-    answer. Without this a session opened in a subdirectory reads as storeless
-    while its project's memory sits two levels up.
+
+def zpc_store_root(cwd: str, toplevel: Path | None = None) -> Path | None:
+    """Where zpc would resolve a store from here — the upward walk
+    resolve_zpc_dir does (tools/agent-zpc/lib/common.sh) — but bounded and
+    ownership-checked, because this walk runs unattended at session start and
+    whatever it finds gets read to the agent as trusted memory.
+
+    The ceiling: a git worktree stops at its toplevel; otherwise a cwd under
+    $HOME stops at $HOME; a cwd outside both walks nowhere at all and only ever
+    probes itself. Unbounded, a session opened anywhere under /tmp would find a
+    world-writable store planted above it and inject a stranger's lessons under
+    a heading that tells the agent to trust them.
+
+    The ownership check is the second lock: a store is used only when the
+    current uid owns it. Finding one we do not own ends the walk rather than
+    climbing past it — refusing memory is a cost, but reading someone else's is
+    a compromise.
     """
     probe = Path(cwd)
+    me = os.getuid()
+
+    home = os.environ.get("HOME") or ""
+    home_ceiling: Path | None = None
+    if home:
+        home_path = Path(home)
+        if probe == home_path or home_path in probe.parents:
+            home_ceiling = home_path
+
+    if toplevel is not None:
+        ceiling = toplevel
+    elif home_ceiling is not None:
+        ceiling = home_ceiling
+    else:
+        # No worktree and outside $HOME: probe this directory and stop.
+        ceiling = probe
+
     while str(probe) != "/" and probe.parent != probe:
-        if (probe / ".zpc").is_dir():
+        store = probe / ".zpc"
+        if store.is_dir():
+            try:
+                # stat() follows symlinks, so a .zpc pointing elsewhere is
+                # judged by what it actually resolves to.
+                if store.stat().st_uid != me:
+                    return None
+            except OSError:
+                return None
             return probe
+        if probe == ceiling:
+            break
+        # A worktree rooted above $HOME must still not lift the $HOME ceiling.
+        if home_ceiling is not None and probe == home_ceiling:
+            break
         probe = probe.parent
     return None
 
@@ -348,7 +401,7 @@ def zpc_has_records(cwd: str) -> bool:
     return False
 
 
-def zpc_autoinit(agent_do: str | None, cwd: str | None) -> None:
+def zpc_autoinit(agent_do: str | None, cwd: str | None, toplevel: Path | None) -> None:
     """Give every project a store, without the hook ever writing a tracked file.
 
     Two limits make that true. A git worktree is the unit of "project", so a
@@ -363,15 +416,9 @@ def zpc_autoinit(agent_do: str | None, cwd: str | None) -> None:
     if not agent_do or not cwd:
         return
 
-    code, toplevel, _ = run_capture(
-        ["git", "rev-parse", "--show-toplevel"], cwd=cwd, timeout=ZPC_AUTOINIT_TIMEOUT
-    )
-    toplevel = toplevel.strip()
-    if code != 0 or not toplevel:
+    if toplevel is None:
         return
-    root = Path(toplevel)
-    if not root.is_dir():
-        return
+    root = toplevel
 
     # zpc resolves a store by walking up from cwd, so a store anywhere between
     # cwd and the toplevel means this project already has one.
@@ -480,7 +527,7 @@ def zpc_preferences_section(agent_do: str | None, cwd: str) -> str:
     )
 
 
-def zpc(agent_do: str | None, cwd: str | None) -> str:
+def zpc(agent_do: str | None, cwd: str | None, toplevel: Path | None = None) -> str:
     if not cwd:
         return ""
 
@@ -489,7 +536,7 @@ def zpc(agent_do: str | None, cwd: str | None) -> str:
     # No store anywhere up the tree, and none coming: auto-init already declined
     # this directory (not a git worktree, or it has no store-only mode to use).
     # Preferences are still his, so they still arrive.
-    store_root = zpc_store_root(cwd)
+    store_root = zpc_store_root(cwd, toplevel)
     if store_root is None:
         return zpc_preferences_section(agent_do, cwd) if embedding else ""
     root = str(store_root)
@@ -548,8 +595,10 @@ def main() -> None:
     agent_do = resolve_agent_do()
 
     # Auto-init first: the memory section below reads the store this may have
-    # just created.
-    zpc_autoinit(agent_do, cwd)
+    # just created. The toplevel is resolved once and feeds both auto-init's
+    # placement and the store walk's ceiling.
+    toplevel = git_toplevel(cwd)
+    zpc_autoinit(agent_do, cwd, toplevel)
 
     sections = [
         "## TOOLING REMINDER - agent-do\n\n"
@@ -568,7 +617,9 @@ def main() -> None:
             )
             if part
         )
-    sections.extend(part for part in (frontend_context(cwd), zpc(agent_do, cwd)) if part)
+    sections.extend(
+        part for part in (frontend_context(cwd), zpc(agent_do, cwd, toplevel)) if part
+    )
 
     context = "\n---\n\n".join(sections)
     json.dump(

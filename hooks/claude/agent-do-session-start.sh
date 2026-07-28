@@ -417,6 +417,15 @@ Reconcile the board against reality before claiming new work, then remove \`.man
 # appends to .gitignore and writes (or appends to) the repo's agent instruction
 # file, which is not something a silent session-start hook may do to a repo it
 # does not own. So auto-init rides a store-only mode and stays home without it.
+# The git worktree containing $CWD, resolved once and reused: auto-init needs
+# it to know where a store belongs, and the store walk needs it as a ceiling.
+CWD_TOPLEVEL=""
+zpc_resolve_toplevel() {
+    [ -n "$CWD" ] || return 0
+    CWD_TOPLEVEL=$(cd "$CWD" 2>/dev/null && bounded_run 3 git rev-parse --show-toplevel 2>/dev/null) || CWD_TOPLEVEL=""
+    [ -n "$CWD_TOPLEVEL" ] && [ -d "$CWD_TOPLEVEL" ] || CWD_TOPLEVEL=""
+}
+
 zpc_autoinit() {
     local toplevel dir init_help
 
@@ -425,8 +434,8 @@ zpc_autoinit() {
     [ -n "$AGENT_DO_DIR" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    toplevel=$(cd "$CWD" 2>/dev/null && bounded_run 3 git rev-parse --show-toplevel 2>/dev/null) || return 0
-    [ -n "$toplevel" ] && [ -d "$toplevel" ] || return 0
+    toplevel="$CWD_TOPLEVEL"
+    [ -n "$toplevel" ] || return 0
 
     # zpc resolves a store by walking up from cwd, so a store anywhere between
     # cwd and the toplevel means this project already has one.
@@ -450,15 +459,60 @@ zpc_autoinit() {
     (cd "$toplevel" && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --store-only) >/dev/null 2>&1 || return 0
 }
 
-# Where zpc would resolve a store from here. The same upward walk
-# resolve_zpc_dir does (tools/agent-zpc/lib/common.sh), stopping short of /,
-# so the hook's answer and the tool's answer are the same answer. Without this
-# a session opened in a subdirectory reads as storeless while its project's
-# memory sits two levels up.
+# Owning uid of a path, following symlinks so a .zpc pointing somewhere else is
+# judged by what it actually resolves to. Prints nothing when it cannot tell,
+# and every caller treats "cannot tell" as "do not trust".
+_path_uid() {
+    stat -L -f %u "$1" 2>/dev/null || stat -L -c %u "$1" 2>/dev/null
+}
+
+# Where zpc would resolve a store from here — the upward walk resolve_zpc_dir
+# does (tools/agent-zpc/lib/common.sh) — but bounded and ownership-checked,
+# because this walk runs unattended at session start and whatever it finds gets
+# read to the agent as trusted memory.
+#
+# The ceiling: a git worktree stops at its toplevel; otherwise a cwd under
+# $HOME stops at $HOME; a cwd outside both walks nowhere at all and only ever
+# probes itself. Unbounded, a session opened anywhere under /tmp would find a
+# world-writable store planted above it and inject a stranger's lessons under a
+# heading that tells the agent to trust them.
+#
+# The ownership check is the second lock: a store is used only when the current
+# uid owns it. Finding one we do not own ends the walk rather than climbing past
+# it — refusing memory is a cost, but reading someone else's is a compromise.
 zpc_store_root() {
-    local dir="$1"
+    local dir="$1" ceiling home_ceiling me uid
+
+    [ -n "$dir" ] || return 1
+    me=$(id -u 2>/dev/null) || return 1
+    [ -n "$me" ] || return 1
+
+    home_ceiling=""
+    if [ -n "${HOME:-}" ]; then
+        case "$dir" in
+            "$HOME"|"$HOME"/*) home_ceiling="$HOME" ;;
+        esac
+    fi
+
+    if [ -n "$CWD_TOPLEVEL" ]; then
+        ceiling="$CWD_TOPLEVEL"
+    elif [ -n "$home_ceiling" ]; then
+        ceiling="$home_ceiling"
+    else
+        # No worktree and outside $HOME: probe this directory and stop.
+        ceiling="$dir"
+    fi
+
     while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-        [ -d "$dir/.zpc" ] && { printf '%s' "$dir"; return 0; }
+        if [ -d "$dir/.zpc" ]; then
+            uid=$(_path_uid "$dir/.zpc")
+            [ -n "$uid" ] && [ "$uid" = "$me" ] || return 1
+            printf '%s' "$dir"
+            return 0
+        fi
+        [ "$dir" = "$ceiling" ] && break
+        # A worktree rooted above $HOME must still not lift the $HOME ceiling.
+        [ -n "$home_ceiling" ] && [ "$dir" = "$home_ceiling" ] && break
         dir=$(dirname "$dir")
     done
     return 1
@@ -739,7 +793,9 @@ fi
 
 # --- Detect ZPC project → embed memory (advisory fallback) ---
 # Auto-init first: the baseline and the memory block below both read the store
-# this may have just created.
+# this may have just created. The toplevel is resolved once and feeds both
+# auto-init's placement and the store walk's ceiling.
+zpc_resolve_toplevel
 zpc_autoinit
 zpc_write_session_baseline
 append_zpc_memory
