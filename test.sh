@@ -82,6 +82,7 @@ check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitiga
 check_cmd "zpc correction mining tests" python3 "$SCRIPT_DIR/tests/test_zpc_corrections.py"
 check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_preferences.py"
 check_cmd "zpc store-only init tests" python3 "$SCRIPT_DIR/tests/test_zpc_init_store_only.py"
+check_cmd "hook store resolution tests" python3 "$SCRIPT_DIR/tests/test_hook_store_resolution.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"
