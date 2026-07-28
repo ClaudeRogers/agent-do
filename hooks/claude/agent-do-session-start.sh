@@ -450,6 +450,20 @@ zpc_autoinit() {
     (cd "$toplevel" && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --store-only) >/dev/null 2>&1 || return 0
 }
 
+# Where zpc would resolve a store from here. The same upward walk
+# resolve_zpc_dir does (tools/agent-zpc/lib/common.sh), stopping short of /,
+# so the hook's answer and the tool's answer are the same answer. Without this
+# a session opened in a subdirectory reads as storeless while its project's
+# memory sits two levels up.
+zpc_store_root() {
+    local dir="$1"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+        [ -d "$dir/.zpc" ] && { printf '%s' "$dir"; return 0; }
+        dir=$(dirname "$dir")
+    done
+    return 1
+}
+
 # At least one recorded line under .zpc/memory/. An initialized-but-empty store
 # has nothing worth embedding, so it keeps the advisory.
 zpc_has_records() {
@@ -468,12 +482,12 @@ zpc_has_records() {
 # in the tree. Written here rather than lazily at the first Stop so that work
 # done in the opening turn still counts.
 zpc_write_session_baseline() {
-    local state_dir baseline total n f
+    local state_dir baseline total n f store_root
     [ -n "$CWD" ] || return 0
-    [ -d "$CWD/.zpc" ] || return 0
     [ -n "$SESSION_ID" ] || return 0
+    store_root=$(zpc_store_root "$CWD") || return 0
 
-    state_dir="$CWD/.zpc/.state"
+    state_dir="$store_root/.zpc/.state"
     mkdir -p "$state_dir" 2>/dev/null || return 0
 
     # One marker pair per session accumulates forever otherwise. Session-start
@@ -488,7 +502,7 @@ zpc_write_session_baseline() {
     [ -f "$baseline" ] && return 0
 
     total=0
-    for f in "$CWD"/.zpc/memory/*.jsonl; do
+    for f in "$store_root"/.zpc/memory/*.jsonl; do
         [ -f "$f" ] || continue
         n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
         case "$n" in
@@ -498,7 +512,7 @@ zpc_write_session_baseline() {
     done
 
     {
-        printf 'head=%s\n' "$(cd "$CWD" && git rev-parse HEAD 2>/dev/null || printf '')"
+        printf 'head=%s\n' "$(cd "$store_root" && git rev-parse HEAD 2>/dev/null || printf '')"
         printf 'zpc_lines=%s\n' "$total"
     } > "$baseline" 2>/dev/null || return 0
 }
@@ -543,14 +557,14 @@ Log new ones where they happen: \`agent-do zpc learn\` and \`agent-do zpc decide
 }
 
 append_zpc_memory() {
-    local inject_out inject_rc
+    local inject_out inject_rc store_root
 
     [ -n "$CWD" ] || return 0
 
-    # No store here, and none coming: auto-init already declined this directory
-    # (not a git worktree, or it has no store-only mode to use). Preferences are
-    # still his, so they still arrive.
-    if [ ! -d "$CWD/.zpc" ]; then
+    # No store anywhere up the tree, and none coming: auto-init already declined
+    # this directory (not a git worktree, or it has no store-only mode to use).
+    # Preferences are still his, so they still arrive.
+    if ! store_root=$(zpc_store_root "$CWD"); then
         append_zpc_preferences "$CWD"
         return 0
     fi
@@ -563,11 +577,12 @@ append_zpc_memory() {
     if [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] &&
        [ -n "$AGENT_DO_DIR" ] &&
        [ -x "$AGENT_DO_DIR/agent-do" ]; then
-        if zpc_has_records "$CWD"; then
-            # cwd must be inside the project: inject resolves the store from
-            # there. AGENT_DO_ZPC_SOURCE tags the access log; the export dies
-            # with the subshell so it never leaks into the rest of the hook.
-            inject_out=$(cd "$CWD" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
+        if zpc_has_records "$store_root"; then
+            # Run from the store's own root, which is $CWD for a session opened
+            # at the top and the walked-up answer otherwise. AGENT_DO_ZPC_SOURCE
+            # tags the access log; the export dies with the subshell so it never
+            # leaks into the rest of the hook.
+            inject_out=$(cd "$store_root" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
             inject_rc=$?
 
             if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
@@ -598,7 +613,7 @@ Keep the loop closed: \`agent-do zpc learn\` and \`agent-do zpc decide\` as you 
             # A store with nothing in it yet — every project's first session,
             # now that init runs automatically. Preferences beat an advisory
             # nobody reads.
-            append_zpc_preferences "$CWD" && return 0
+            append_zpc_preferences "$store_root" && return 0
         fi
     fi
 

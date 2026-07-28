@@ -318,6 +318,22 @@ def coord(agent_do: str, cwd: str | None) -> str:
     return ""
 
 
+def zpc_store_root(cwd: str) -> Path | None:
+    """Where zpc would resolve a store from here.
+
+    The same upward walk resolve_zpc_dir does (tools/agent-zpc/lib/common.sh),
+    stopping short of /, so the hook's answer and the tool's answer are the same
+    answer. Without this a session opened in a subdirectory reads as storeless
+    while its project's memory sits two levels up.
+    """
+    probe = Path(cwd)
+    while str(probe) != "/" and probe.parent != probe:
+        if (probe / ".zpc").is_dir():
+            return probe
+        probe = probe.parent
+    return None
+
+
 def zpc_has_records(cwd: str) -> bool:
     """At least one recorded line under .zpc/memory/. An initialized-but-empty
     store has nothing worth embedding, so it keeps the advisory."""
@@ -470,11 +486,13 @@ def zpc(agent_do: str | None, cwd: str | None) -> str:
 
     embedding = bool(agent_do) and os.environ.get("AGENT_DO_ZPC_INJECT", "1") != "0"
 
-    # No store here, and none coming: auto-init already declined this directory
-    # (not a git worktree, or it has no store-only mode to use). Preferences are
-    # still his, so they still arrive.
-    if not (Path(cwd) / ".zpc").exists():
+    # No store anywhere up the tree, and none coming: auto-init already declined
+    # this directory (not a git worktree, or it has no store-only mode to use).
+    # Preferences are still his, so they still arrive.
+    store_root = zpc_store_root(cwd)
+    if store_root is None:
         return zpc_preferences_section(agent_do, cwd) if embedding else ""
+    root = str(store_root)
 
     # The advisory below only *asks* the agent to go read the store, and asking
     # is not a mechanism. When there are records to show, put the memory itself
@@ -482,8 +500,10 @@ def zpc(agent_do: str | None, cwd: str | None) -> str:
     # dispatcher, nonzero exit, timeout) falls through to the advisory, so the
     # section degrades instead of disappearing.
     if embedding:
-        if zpc_has_records(cwd):
-            memory = run_zpc_inject(agent_do, cwd).rstrip("\n")
+        if zpc_has_records(root):
+            # Run from the store's own root, which is cwd for a session opened
+            # at the top and the walked-up answer otherwise.
+            memory = run_zpc_inject(agent_do, root).rstrip("\n")
             if memory.strip():
                 return (
                     "## ZPC Project Memory\n\n"
@@ -497,7 +517,7 @@ def zpc(agent_do: str | None, cwd: str | None) -> str:
             # A store with nothing in it yet — every project's first session,
             # now that init runs automatically. Preferences beat an advisory
             # nobody reads.
-            section = zpc_preferences_section(agent_do, cwd)
+            section = zpc_preferences_section(agent_do, root)
             if section:
                 return section
 
