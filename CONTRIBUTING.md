@@ -83,7 +83,7 @@ another implements, a third tests) hands the same files between agents and
 turns every boundary into a chance to lose context.
 
 A lane is staged as a self-contained prompt file at `.dev/session-prompts/NN-SLUG.md`,
-copied from **[`.dev/session-prompts/TEMPLATE.md`](.dev/session-prompts/TEMPLATE.md)**.
+copied from **[`docs/LANE-PROMPT-TEMPLATE.md`](docs/LANE-PROMPT-TEMPLATE.md)**.
 The template carries the required sections and the reasons behind them: the
 claim block, the pasted project-memory blob (`agent-do zpc inject --compact`,
 2000-char bound, pasted verbatim rather than left as a command for the agent to
