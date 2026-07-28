@@ -640,16 +640,58 @@ PYTHON
     fi
 }
 
+# Keep the store out of git without touching a file the repo would commit.
+# .git/info/exclude is per-checkout and never tracked, which is the property an
+# unattended caller needs: the leak protection survives, and what the repo tells
+# the world to ignore stays the repo's business. Silent throughout — a store
+# that could not be excluded is still a store, and the caller may be a hook.
+_zpc_exclude_store() {
+    local project_dir="$1"
+
+    # Already ignored, by this repo's rules or a parent's, is already done.
+    git -C "$project_dir" check-ignore -q .zpc 2>/dev/null && return 0
+
+    local git_dir exclude
+    git_dir="$(git -C "$project_dir" rev-parse --git-dir 2>/dev/null)" || return 0
+    [[ -n "$git_dir" ]] || return 0
+    case "$git_dir" in
+        /*) ;;
+        *) git_dir="$project_dir/$git_dir" ;;
+    esac
+
+    exclude="$git_dir/info/exclude"
+    grep -qF '.zpc/' "$exclude" 2>/dev/null && return 0
+
+    {
+        mkdir -p "$git_dir/info" &&
+        printf '\n# ZPC memory (local, untracked)\n.zpc/\n!.zpc/team/\n' >> "$exclude"
+    } 2>/dev/null || true
+
+    return 0
+}
+
 cmd_init() {
-    local platform="" force=false
+    local platform="" force=false store_only=false
     local positionals=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --platform|-p) platform="$2"; shift 2 ;;
             --force|-f) force=true; shift ;;
+            --store-only) store_only=true; shift ;;
             --help|-h)
-                echo "Usage: agent-zpc init [--platform claude|cursor|codex|generic] [--force]"
+                cat << 'EOF'
+Usage: agent-zpc init [--platform claude|cursor|codex|generic] [--force]
+       agent-zpc init --store-only
+
+  --platform    Which agent instruction file to write (auto-detected by default)
+  --force       Rewrite profile.md and the instruction file if they exist
+  --store-only  Create .zpc/ and nothing else: no .gitignore append, no agent
+                instruction file, no import line added to one that exists. The
+                store is kept out of git through .git/info/exclude, which is
+                machine-local and untracked. This is the mode an unattended
+                caller runs in a repo it does not own.
+EOF
                 return 0
                 ;;
             *) positionals+=("$1"); shift ;;
@@ -689,17 +731,24 @@ cmd_init() {
         created+=("profile.md")
     fi
 
-    # Add .zpc/ to .gitignore (but NOT .zpc/team/)
-    if [[ -f "$project_dir/.gitignore" ]]; then
-        if ! grep -qF ".zpc/" "$project_dir/.gitignore" 2>/dev/null; then
-            printf '\n# ZPC memory (local, git-ignored)\n.zpc/\n!.zpc/team/\n' >> "$project_dir/.gitignore"
-        fi
+    # A tracked file belongs to the repo, not to us. The store-only path keeps
+    # the one side effect worth keeping — the store stays out of commits — and
+    # drops the two that write files the repo would ship.
+    if [[ "$store_only" == true ]]; then
+        _zpc_exclude_store "$project_dir"
     else
-        printf '# ZPC memory (local, git-ignored)\n.zpc/\n!.zpc/team/\n' > "$project_dir/.gitignore"
+        # Add .zpc/ to .gitignore (but NOT .zpc/team/)
+        if [[ -f "$project_dir/.gitignore" ]]; then
+            if ! grep -qF ".zpc/" "$project_dir/.gitignore" 2>/dev/null; then
+                printf '\n# ZPC memory (local, git-ignored)\n.zpc/\n!.zpc/team/\n' >> "$project_dir/.gitignore"
+            fi
+        else
+            printf '# ZPC memory (local, git-ignored)\n.zpc/\n!.zpc/team/\n' > "$project_dir/.gitignore"
+        fi
     fi
 
     # Auto-detect platform if not specified
-    if [[ -z "$platform" ]]; then
+    if [[ "$store_only" != true && -z "$platform" ]]; then
         if [[ -d "$project_dir/.claude" ]]; then
             platform="claude"
         elif [[ -f "$project_dir/.cursorrules" ]]; then
@@ -722,7 +771,7 @@ cmd_init() {
         generic)  instruction_file="ZPC-INSTRUCTIONS.md"; template_file="$template_dir/generic.md.tmpl" ;;
     esac
 
-    if [[ -n "$template_file" && -f "$template_file" ]]; then
+    if [[ "$store_only" != true && -n "$template_file" && -f "$template_file" ]]; then
         local stack_info
         stack_info=$(_detect_stack "$project_dir")
 
@@ -769,14 +818,29 @@ with open(index_file, "w") as f:
 PYTHON
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        python3 << 'PYTHON' - "${created[*]}"
+        # The platform came in through argv, not through the heredoc: a quoted
+        # heredoc expands nothing, so the old inline "$platform" reached Python
+        # as source text and made every --json init a SyntaxError.
+        python3 << 'PYTHON' - "${created[*]}" "$platform" "$store_only"
 import json, sys
 files = sys.argv[1].split()
-print(json.dumps({"success": True, "result": {"created": files, "platform": "'"$platform"'"}}))
+platform, store_only = sys.argv[2], sys.argv[3] == "true"
+print(json.dumps({
+    "success": True,
+    "result": {
+        "created": files,
+        "platform": platform or None,
+        "store_only": store_only,
+    },
+}))
 PYTHON
     else
         echo "ZPC initialized in $project_dir"
-        echo "  Platform: $platform"
+        if [[ "$store_only" == true ]]; then
+            echo "  Store only: no .gitignore or instruction file written"
+        else
+            echo "  Platform: $platform"
+        fi
         if [[ ${#created[@]} -gt 0 ]]; then
             echo "  Created: ${created[*]}"
         fi
