@@ -417,8 +417,11 @@ Reconcile the board against reality before claiming new work, then remove \`.man
 # appends to .gitignore and writes (or appends to) the repo's agent instruction
 # file, which is not something a silent session-start hook may do to a repo it
 # does not own. So auto-init rides a store-only mode and stays home without it.
-# The git worktree containing $CWD, resolved once and reused: auto-init needs
-# it to know where a store belongs, and the store walk needs it as a ceiling.
+# The git worktree containing $CWD, for auto-init to know where a store
+# belongs. Asked of git rather than walked, because placement wants git's own
+# answer — GIT_DIR, linked worktrees and all. The store walk does not use this:
+# it carries its own ceiling from zpc_worktree_root, matching the rule zpc
+# resolves by, and the two must not be allowed to drift into each other.
 CWD_TOPLEVEL=""
 zpc_resolve_toplevel() {
     [ -n "$CWD" ] || return 0
@@ -502,8 +505,11 @@ zpc_worktree_root() {
 # heading that tells the agent to trust them.
 #
 # The ownership check is the second lock: a store is used only when the current
-# uid owns it. Finding one we do not own ends the walk rather than climbing past
-# it — refusing memory is a cost, but reading someone else's is a compromise.
+# uid owns it. One we do not own is stepped over, not treated as fatal, and the
+# walk carries on above it. Stopping there looks like the careful choice and is
+# not one: the foreign store is refused either way, by this same check, so
+# stopping guards nothing — it only hands anyone who can write a directory on
+# your path a silent way to black out the real store above it.
 zpc_store_root() {
     local dir="${1%/}" home under_home toplevel ceiling uid
 
@@ -534,8 +540,7 @@ zpc_store_root() {
     while :; do
         if [ -d "$dir/.zpc" ]; then
             uid=$(_path_uid "$dir/.zpc")
-            # A store we do not own is skipped rather than fatal: whatever sits
-            # above it faces this same check before it is trusted.
+            # Not ours: fall through and keep climbing.
             if [ -n "$uid" ] && [ "$uid" = "$EUID" ]; then
                 printf '%s' "$dir"
                 return 0

@@ -319,7 +319,12 @@ def coord(agent_do: str, cwd: str | None) -> str:
 
 
 def git_toplevel(cwd: str | None) -> Path | None:
-    """The git worktree containing cwd, or None."""
+    """The git worktree containing cwd, for auto-init to know where a store
+    belongs. Asked of git rather than walked, because placement wants git's own
+    answer — GIT_DIR, linked worktrees and all. The store walk does not use
+    this: it carries its own ceiling from zpc_worktree_root, matching the rule
+    zpc resolves by, and the two must not be allowed to drift into each other.
+    """
     if not cwd:
         return None
     code, out, _ = run_capture(
@@ -362,8 +367,12 @@ def zpc_store_root(cwd: str) -> Path | None:
     a heading that tells the agent to trust them.
 
     The ownership check is the second lock: a store is used only when the
-    current uid owns it. One we do not own is skipped rather than fatal —
-    whatever sits above it faces this same check before it is trusted.
+    current uid owns it. One we do not own is stepped over, not treated as
+    fatal, and the walk carries on above it. Stopping there looks like the
+    careful choice and is not one: the foreign store is refused either way, by
+    this same check, so stopping guards nothing — it only hands anyone who can
+    write a directory on your path a silent way to black out the real store
+    above it.
     """
     probe = Path(str(cwd).rstrip("/") or "/")
     me = os.getuid()
@@ -609,8 +618,8 @@ def main() -> None:
     agent_do = resolve_agent_do()
 
     # Auto-init first: the memory section below reads the store this may have
-    # just created. The toplevel is resolved once and feeds both auto-init's
-    # placement and the store walk's ceiling.
+    # just created. The toplevel here is auto-init's placement question only;
+    # the store walk answers its own.
     toplevel = git_toplevel(cwd)
     zpc_autoinit(agent_do, cwd, toplevel)
 
