@@ -4,13 +4,95 @@
 
 ZPC_GLOBAL_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/zpc"
 
-# Walk up from cwd to find .zpc/ directory
+# The uid owning a path, or nothing if it cannot be read. BSD form first since
+# darwin is the primary target; GNU `stat -f` means --file-system and answers
+# with something that is not a uid, which is why the digits check decides.
+_zpc_owner_uid() {
+    local uid
+    uid="$(stat -f %u "$1" 2>/dev/null)"
+    [[ "$uid" =~ ^[0-9]+$ ]] || uid="$(stat -c %u "$1" 2>/dev/null)"
+    [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$uid"
+}
+
+# Only a store this user owns is a store. Reading memory is also writing it —
+# every zpc command appends, and inject pastes what it finds into an agent's
+# context — so a store planted by somebody else is not memory to be trusted,
+# it is instruction from a stranger.
+_zpc_store_is_ours() {
+    local owner
+    owner="$(_zpc_owner_uid "$1")" || return 1
+    [[ "$owner" == "${EUID:-$(id -u)}" ]]
+}
+
+# Walk up from cwd to find .zpc/, bounded three ways.
+#
+# Unbounded, this walk answers "whose memory is this?" with whatever it meets
+# first on the way to /. A cwd in a scratch directory would adopt a planted
+# /tmp/.zpc, or another account's store, and from then on every zpc command
+# reads and writes memory somebody else controls. The bounds, in the order they
+# bind: a git worktree ends at its toplevel, because a repository's memory is
+# the repository's; $HOME is the floor and the last rung, because above it the
+# directories stop being this user's; and outside $HOME with no worktree in
+# sight only cwd is probed, because there is no project to speak of. Ownership
+# is checked at every rung, which is the bound that holds when the other three
+# do not.
 resolve_zpc_dir() {
-    local dir="$PWD"
-    while [[ "$dir" != "/" ]]; do
-        [[ -d "$dir/.zpc" ]] && echo "$dir/.zpc" && return 0
-        dir="$(dirname "$dir")"
+    local dir="${1:-$PWD}"
+    local home="${HOME:-}"
+    local under_home=false toplevel="" ceiling="" probe
+
+    home="${home%/}"
+    dir="${dir%/}"
+    [[ -n "$dir" ]] || dir="/"
+
+    if [[ -n "$home" && ( "$dir" == "$home" || "$dir" == "$home"/* ) ]]; then
+        under_home=true
+    fi
+
+    # The toplevel is the nearest ancestor holding .git — a file in a submodule
+    # or a linked worktree, a directory otherwise. Found by walking rather than
+    # by asking git: this runs ahead of every zpc command, and a subprocess per
+    # command to learn what a few stat calls already know is a tax on all of it.
+    probe="$dir"
+    while :; do
+        if [[ -e "$probe/.git" ]]; then
+            toplevel="$probe"
+            break
+        fi
+        [[ "$probe" == "/" ]] && break
+        probe="${probe%/*}"
+        [[ -n "$probe" ]] || probe="/"
     done
+
+    if [[ -n "$toplevel" ]]; then
+        ceiling="$toplevel"
+        # A repository that contains $HOME (someone ran git init in / or in
+        # /Users) must not raise the floor: the floor is the reason one user's
+        # cwd cannot reach another user's store.
+        if [[ "$under_home" == true && ${#toplevel} -lt ${#home} ]]; then
+            ceiling="$home"
+        fi
+    elif [[ "$under_home" == true ]]; then
+        ceiling="$home"
+    else
+        ceiling="$dir"
+    fi
+
+    # The ceiling is probed, never skipped: $HOME is the last rung, not a rung
+    # we stop short of. A store that fails the ownership check is passed over
+    # rather than fatal — anything found above it faces the same test.
+    probe="$dir"
+    while :; do
+        if [[ -d "$probe/.zpc" ]] && _zpc_store_is_ours "$probe/.zpc"; then
+            printf '%s\n' "$probe/.zpc"
+            return 0
+        fi
+        [[ "$probe" == "$ceiling" || "$probe" == "/" ]] && break
+        probe="${probe%/*}"
+        [[ -n "$probe" ]] || probe="/"
+    done
+
     return 1
 }
 
