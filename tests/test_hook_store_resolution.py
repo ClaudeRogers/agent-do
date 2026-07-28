@@ -52,34 +52,42 @@ def _extract_bash_func(name: str) -> str:
     return match.group(0)
 
 
-def bash_store_root(
-    cwd: str,
-    toplevel: str = "",
-    home: str | None = None,
-    fake_uid: str | None = None,
-) -> str:
+def bash_store_root(cwd: str, home: str | None = None) -> str:
     """Run the claude hook's own zpc_store_root, extracted by name.
 
     A rename breaks this test rather than silently skipping it, which is the
     intent: the function is the contract.
     """
-    body = _extract_bash_func("zpc_store_root")
-    uid_fn = _extract_bash_func("_path_uid")
-    # Overriding `id` exercises the ownership branch without needing a file
-    # owned by another user, which an unprivileged test cannot create.
-    spoof = f"id() {{ echo {fake_uid}; }}\n" if fake_uid else ""
-    script = f'{uid_fn}\n{body}\n{spoof}CWD_TOPLEVEL="$2"\nzpc_store_root "$1"'
+    parts = [
+        _extract_bash_func("_path_uid"),
+        _extract_bash_func("zpc_worktree_root"),
+        _extract_bash_func("zpc_store_root"),
+    ]
+    parts.append('zpc_store_root "$1"')
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
     if home is not None:
         env["HOME"] = home
     proc = subprocess.run(
-        ["bash", "-c", script, "_", cwd, toplevel],
+        ["bash", "-c", "\n".join(parts), "_", cwd],
         capture_output=True,
         text=True,
         check=False,
         env=env,
     )
     return proc.stdout.strip()
+
+
+def with_home(codex, home: str, fn):
+    """Run fn with $HOME pointed at a fixture, then put it back."""
+    previous = codex.os.environ.get("HOME")
+    codex.os.environ["HOME"] = home
+    try:
+        return fn()
+    finally:
+        if previous is None:
+            codex.os.environ.pop("HOME", None)
+        else:
+            codex.os.environ["HOME"] = previous
 
 
 def zpc_reported_project(cwd: str) -> str:
@@ -124,14 +132,14 @@ def main() -> int:
             f"got {truth!r}, want {str(root)!r}",
         )
 
-        codex_answer = codex.zpc_store_root(str(deep), root)
+        codex_answer = codex.zpc_store_root(str(deep))
         check(
             "codex hook agrees with zpc",
             codex_answer is not None and str(codex_answer) == truth,
             f"hook {str(codex_answer)!r} vs zpc {truth!r}",
         )
 
-        bash_answer = bash_store_root(str(deep), str(root))
+        bash_answer = bash_store_root(str(deep))
         check(
             "claude hook agrees with zpc",
             bash_answer == truth,
@@ -139,7 +147,7 @@ def main() -> int:
         )
 
         print("session opened at the store root:")
-        at_root_codex = codex.zpc_store_root(str(root), root)
+        at_root_codex = codex.zpc_store_root(str(root))
         check(
             "codex hook resolves to itself",
             at_root_codex is not None and str(at_root_codex) == str(root),
@@ -147,7 +155,7 @@ def main() -> int:
         )
         check(
             "claude hook resolves to itself",
-            bash_store_root(str(root), str(root)) == str(root),
+            bash_store_root(str(root)) == str(root),
         )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -175,67 +183,107 @@ def main() -> int:
         print("planted store above a non-git dir outside $HOME:")
         check(
             "codex hook does not discover it",
-            codex.zpc_store_root(str(deep), None) is None,
+            codex.zpc_store_root(str(deep)) is None,
         )
         check(
             "claude hook does not discover it",
-            bash_store_root(str(deep), "", home=str(fake_home)) == "",
+            bash_store_root(str(deep), home=str(fake_home)) == "",
         )
 
-        print("same planted store, but cwd is a git worktree rooted below it:")
-        worktree = planted / "scratch"
+        print("same planted store, cwd inside a worktree rooted below it:")
+        # .git as a FILE, which is what a submodule or linked worktree leaves
+        # behind — the toplevel probe tests existence, not directory-ness.
+        (planted / "scratch" / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
         check(
             "codex hook stops at the toplevel",
-            codex.zpc_store_root(str(deep), worktree) is None,
+            codex.zpc_store_root(str(deep)) is None,
         )
         check(
             "claude hook stops at the toplevel",
-            bash_store_root(str(deep), str(worktree), home=str(fake_home)) == "",
+            bash_store_root(str(deep), home=str(fake_home)) == "",
         )
 
         print("$HOME ceiling: store above $HOME is out of reach:")
         home_dir = planted / "home"
-        (home_dir / "projects" / "thing").mkdir(parents=True)
+        thing = home_dir / "projects" / "thing"
+        thing.mkdir(parents=True)
         check(
             "codex hook stops at $HOME",
-            codex.zpc_store_root(str(home_dir / "projects" / "thing"), None) is None,
+            with_home(codex, str(home_dir), lambda: codex.zpc_store_root(str(thing)))
+            is None,
         )
         check(
             "claude hook stops at $HOME",
-            bash_store_root(
-                str(home_dir / "projects" / "thing"), "", home=str(home_dir)
-            )
-            == "",
+            bash_store_root(str(thing), home=str(home_dir)) == "",
         )
 
-    # --- ownership: a store the current uid does not own is never trusted
+    # --- ownership: a store the current uid does not own is never trusted.
+    # The unowned store is a symlink to a root-owned directory, so these run
+    # against real uids — an unprivileged test cannot chown, and bash's EUID is
+    # readonly, so there is no spoof here to fool itself with.
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp).resolve() / "project"
+        project.mkdir(parents=True)
+        # The worktree marker is what licenses the walk at all out here: this
+        # fixture lives outside $HOME, where a bare directory probes only itself.
+        (project / ".git").mkdir()
+        sub = project / "src"
+        sub.mkdir()
+        (project / ".zpc").symlink_to(Path("/usr"))
+
+        print("the only store in reach is owned by another uid:")
+        check(
+            "the decoy really does resolve to another uid",
+            Path("/usr").stat().st_uid != Path(tmp).stat().st_uid,
+            "test fixture assumption failed",
+        )
+        check(
+            "codex hook refuses it",
+            codex.zpc_store_root(str(sub)) is None,
+            f"got {str(codex.zpc_store_root(str(sub)))!r}",
+        )
+        answer = bash_store_root(str(sub))
+        check("claude hook refuses it", answer == "", f"got {answer!r}")
+
+        print("a store we do own, same shape:")
+        (project / ".zpc").unlink()
+        (project / ".zpc" / "memory").mkdir(parents=True)
+        check(
+            "codex hook accepts it",
+            str(codex.zpc_store_root(str(sub))) == str(project),
+        )
+        check(
+            "claude hook accepts it",
+            bash_store_root(str(sub)) == str(project),
+        )
+
+    # --- an unowned store is stepped over, not fatal, and a symlinked .zpc is
+    # judged by what it resolves to rather than by the link.
     with tempfile.TemporaryDirectory() as tmp:
         owned = Path(tmp).resolve() / "project"
         (owned / ".zpc" / "memory").mkdir(parents=True)
-        sub = owned / "src"
-        sub.mkdir()
+        (owned / ".git").mkdir()
+        shadow = owned / "src"
+        shadow.mkdir()
+        root_owned = Path("/usr")  # exists, is a directory, uid 0, not ours
+        (shadow / ".zpc").symlink_to(root_owned)
 
-        print("store owned by another uid:")
-        real_getuid = codex.os.getuid
-        try:
-            codex.os.getuid = lambda: real_getuid() + 12345
-            check(
-                "codex hook refuses it",
-                codex.zpc_store_root(str(sub), owned) is None,
-            )
-        finally:
-            codex.os.getuid = real_getuid
+        print("store below ours, symlinked to a directory owned by root:")
         check(
-            "claude hook refuses it",
-            bash_store_root(str(sub), str(owned), fake_uid="999999") == "",
+            "the decoy really does resolve to another uid",
+            root_owned.stat().st_uid != Path(tmp).stat().st_uid,
+            "test fixture assumption failed",
         )
         check(
-            "codex hook still accepts a store it does own",
-            str(codex.zpc_store_root(str(sub), owned)) == str(owned),
+            "codex hook steps over it and finds ours above",
+            str(codex.zpc_store_root(str(shadow))) == str(owned),
+            f"got {str(codex.zpc_store_root(str(shadow)))!r}",
         )
+        answer = bash_store_root(str(shadow))
         check(
-            "claude hook still accepts a store it does own",
-            bash_store_root(str(sub), str(owned)) == str(owned),
+            "claude hook steps over it and finds ours above",
+            answer == str(owned),
+            f"got {answer!r}",
         )
 
     if FAILURES:

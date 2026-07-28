@@ -461,9 +461,33 @@ zpc_autoinit() {
 
 # Owning uid of a path, following symlinks so a .zpc pointing somewhere else is
 # judged by what it actually resolves to. Prints nothing when it cannot tell,
-# and every caller treats "cannot tell" as "do not trust".
+# and every caller treats "cannot tell" as "do not trust". GNU stat reads -f as
+# --file-system and answers with something that is not a uid at all, so the
+# answer has to look like one before it counts.
 _path_uid() {
-    stat -L -f %u "$1" 2>/dev/null || stat -L -c %u "$1" 2>/dev/null
+    local uid
+    uid=$(stat -L -f %u "$1" 2>/dev/null) || uid=$(stat -L -c %u "$1" 2>/dev/null) || return 1
+    case "$uid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$uid"
+}
+
+# The worktree holding a directory: nearest ancestor-or-self carrying .git.
+# Tested for existence rather than directory-ness, because a submodule or a
+# linked worktree keeps .git as a file. Walked rather than asked of git: this
+# runs before the store walk on every session, and a subprocess to learn what a
+# few stat calls already know is a tax.
+zpc_worktree_root() {
+    local dir="${1%/}"
+    [ -n "$dir" ] || dir="/"
+    while :; do
+        [ -e "$dir/.git" ] && { printf '%s' "$dir"; return 0; }
+        [ "$dir" = "/" ] && break
+        dir="${dir%/*}"
+        [ -n "$dir" ] || dir="/"
+    done
+    return 1
 }
 
 # Where zpc would resolve a store from here — the upward walk resolve_zpc_dir
@@ -481,39 +505,46 @@ _path_uid() {
 # uid owns it. Finding one we do not own ends the walk rather than climbing past
 # it — refusing memory is a cost, but reading someone else's is a compromise.
 zpc_store_root() {
-    local dir="$1" ceiling home_ceiling me uid
+    local dir="${1%/}" home under_home toplevel ceiling uid
 
     [ -n "$dir" ] || return 1
-    me=$(id -u 2>/dev/null) || return 1
-    [ -n "$me" ] || return 1
+    home="${HOME:-}"
+    home="${home%/}"
 
-    home_ceiling=""
-    if [ -n "${HOME:-}" ]; then
+    under_home=0
+    if [ -n "$home" ]; then
         case "$dir" in
-            "$HOME"|"$HOME"/*) home_ceiling="$HOME" ;;
+            "$home"|"$home"/*) under_home=1 ;;
         esac
     fi
 
-    if [ -n "$CWD_TOPLEVEL" ]; then
-        ceiling="$CWD_TOPLEVEL"
-    elif [ -n "$home_ceiling" ]; then
-        ceiling="$home_ceiling"
+    if toplevel=$(zpc_worktree_root "$dir"); then
+        ceiling="$toplevel"
+        # A repo that contains $HOME must not lift the floor back off.
+        if [ "$under_home" = 1 ] && [ ${#toplevel} -lt ${#home} ]; then
+            ceiling="$home"
+        fi
+    elif [ "$under_home" = 1 ]; then
+        ceiling="$home"
     else
         # No worktree and outside $HOME: probe this directory and stop.
         ceiling="$dir"
     fi
 
-    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+    while :; do
         if [ -d "$dir/.zpc" ]; then
             uid=$(_path_uid "$dir/.zpc")
-            [ -n "$uid" ] && [ "$uid" = "$me" ] || return 1
-            printf '%s' "$dir"
-            return 0
+            # A store we do not own is skipped rather than fatal: whatever sits
+            # above it faces this same check before it is trusted.
+            if [ -n "$uid" ] && [ "$uid" = "$EUID" ]; then
+                printf '%s' "$dir"
+                return 0
+            fi
         fi
         [ "$dir" = "$ceiling" ] && break
-        # A worktree rooted above $HOME must still not lift the $HOME ceiling.
-        [ -n "$home_ceiling" ] && [ "$dir" = "$home_ceiling" ] && break
-        dir=$(dirname "$dir")
+        [ "$dir" = "/" ] && break
+        dir="${dir%/*}"
+        [ -n "$dir" ] || dir="/"
     done
     return 1
 }

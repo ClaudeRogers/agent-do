@@ -332,7 +332,24 @@ def git_toplevel(cwd: str | None) -> Path | None:
     return root if root.is_dir() else None
 
 
-def zpc_store_root(cwd: str, toplevel: Path | None = None) -> Path | None:
+def zpc_worktree_root(cwd: Path) -> Path | None:
+    """The worktree holding a directory: nearest ancestor-or-self carrying .git.
+
+    Tested for existence rather than directory-ness, because a submodule or a
+    linked worktree keeps .git as a file. Walked rather than asked of git: this
+    runs before the store walk on every session, and a subprocess to learn what
+    a few stat calls already know is a tax.
+    """
+    probe = cwd
+    while True:
+        if (probe / ".git").exists():
+            return probe
+        if probe.parent == probe:
+            return None
+        probe = probe.parent
+
+
+def zpc_store_root(cwd: str) -> Path | None:
     """Where zpc would resolve a store from here — the upward walk
     resolve_zpc_dir does (tools/agent-zpc/lib/common.sh) — but bounded and
     ownership-checked, because this walk runs unattended at session start and
@@ -345,43 +362,40 @@ def zpc_store_root(cwd: str, toplevel: Path | None = None) -> Path | None:
     a heading that tells the agent to trust them.
 
     The ownership check is the second lock: a store is used only when the
-    current uid owns it. Finding one we do not own ends the walk rather than
-    climbing past it — refusing memory is a cost, but reading someone else's is
-    a compromise.
+    current uid owns it. One we do not own is skipped rather than fatal —
+    whatever sits above it faces this same check before it is trusted.
     """
-    probe = Path(cwd)
+    probe = Path(str(cwd).rstrip("/") or "/")
     me = os.getuid()
 
-    home = os.environ.get("HOME") or ""
-    home_ceiling: Path | None = None
-    if home:
-        home_path = Path(home)
-        if probe == home_path or home_path in probe.parents:
-            home_ceiling = home_path
+    home = (os.environ.get("HOME") or "").rstrip("/")
+    under_home = bool(home) and (
+        str(probe) == home or str(probe).startswith(home + "/")
+    )
 
+    toplevel = zpc_worktree_root(probe)
     if toplevel is not None:
         ceiling = toplevel
-    elif home_ceiling is not None:
-        ceiling = home_ceiling
+        # A repo that contains $HOME must not lift the floor back off.
+        if under_home and len(str(toplevel)) < len(home):
+            ceiling = Path(home)
+    elif under_home:
+        ceiling = Path(home)
     else:
         # No worktree and outside $HOME: probe this directory and stop.
         ceiling = probe
 
-    while str(probe) != "/" and probe.parent != probe:
+    while True:
         store = probe / ".zpc"
         if store.is_dir():
             try:
                 # stat() follows symlinks, so a .zpc pointing elsewhere is
                 # judged by what it actually resolves to.
-                if store.stat().st_uid != me:
-                    return None
+                if store.stat().st_uid == me:
+                    return probe
             except OSError:
-                return None
-            return probe
-        if probe == ceiling:
-            break
-        # A worktree rooted above $HOME must still not lift the $HOME ceiling.
-        if home_ceiling is not None and probe == home_ceiling:
+                pass
+        if probe == ceiling or probe.parent == probe:
             break
         probe = probe.parent
     return None
@@ -527,7 +541,7 @@ def zpc_preferences_section(agent_do: str | None, cwd: str) -> str:
     )
 
 
-def zpc(agent_do: str | None, cwd: str | None, toplevel: Path | None = None) -> str:
+def zpc(agent_do: str | None, cwd: str | None) -> str:
     if not cwd:
         return ""
 
@@ -536,7 +550,7 @@ def zpc(agent_do: str | None, cwd: str | None, toplevel: Path | None = None) -> 
     # No store anywhere up the tree, and none coming: auto-init already declined
     # this directory (not a git worktree, or it has no store-only mode to use).
     # Preferences are still his, so they still arrive.
-    store_root = zpc_store_root(cwd, toplevel)
+    store_root = zpc_store_root(cwd)
     if store_root is None:
         return zpc_preferences_section(agent_do, cwd) if embedding else ""
     root = str(store_root)
@@ -618,7 +632,7 @@ def main() -> None:
             if part
         )
     sections.extend(
-        part for part in (frontend_context(cwd), zpc(agent_do, cwd, toplevel)) if part
+        part for part in (frontend_context(cwd), zpc(agent_do, cwd)) if part
     )
 
     context = "\n---\n\n".join(sections)
