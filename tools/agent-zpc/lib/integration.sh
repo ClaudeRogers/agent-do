@@ -122,6 +122,10 @@ ZPC_INJECT_TIEBREAKER='These are recorded claims, each true as of its date. Live
 ZPC_INJECT_LESSON_WINDOW=20
 ZPC_INJECT_CORRECTION_DAYS=30
 
+# The machine-wide slice is smaller than the project's: it is context from other
+# projects, and it rides in every blob this machine emits.
+ZPC_INJECT_GLOBAL_WINDOW=10
+
 # The rendered claims section: retracted claims are gone, challenged claims are
 # marked, and every line carries its date, its kind, and the id you would need to
 # argue with it. Raw JSON rows used to go here — unreadable, undated, and
@@ -194,6 +198,42 @@ if corrections:
     print()
     print("## Corrections (recent)")
     print("\n".join(corrections))
+PYTHON
+}
+
+# The machine-wide slice, rendered the same way the project's own claims are.
+# Raw JSON rows used to go here, which had two costs: a reader could not name a
+# row to argue with it, and a retracted row kept rendering forever because a
+# tail knows nothing about corrections. Mined corrections land in this store, so
+# it is exactly the section that most needs an escape hatch.
+_inject_global() {
+    local global_file="$1" limit="$2"
+
+    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$global_file" "$limit"
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import epistemics
+
+limit = int(sys.argv[3])
+
+live = [
+    record
+    for record in epistemics.analyze(sys.argv[2], "les-")["claims"]
+    if record["retraction"] is None
+]
+
+lines = []
+for record in live[-limit:]:
+    row = record["row"]
+    tags = epistemics.tags_of(row)
+    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
+    if record["challenges"]:
+        suffix += f"  [challenged: {len(record['challenges'])}]"
+    text = epistemics.claim_text(row) or "(no takeaway recorded)"
+    lines.append(f"[{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {text}{suffix}")
+
+print("\n".join(lines) if lines else "(none)")
 PYTHON
 }
 
@@ -376,7 +416,7 @@ cmd_inject() {
     # Section 4: Machine-wide lessons (bounded; omit the section when empty)
     if [[ -f "$global_lessons_file" && -s "$global_lessons_file" ]]; then
         context+="--- Global Lessons (machine-wide) ---\n"
-        context+="$(tail -n 10 "$global_lessons_file")\n\n"
+        context+="$(_inject_global "$global_lessons_file" "$ZPC_INJECT_GLOBAL_WINDOW")\n\n"
     fi
 
     # Section 5: Recent project lessons

@@ -450,7 +450,9 @@ tools:
         flip also fires a detached second opinion)
       counsel: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts
         mechanically from git and the newest run log
-      harvest: Post-build consolidation scan
+      harvest: Post-build consolidation scan; --corrections mines past sessions for corrections the
+        user typed and writes them to the machine-wide store as dated preference lessons, each
+        carrying the sentence verbatim
       query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
       review: Post-sprint lesson extraction from git history
@@ -477,6 +479,8 @@ tools:
       command: agent-zpc review --auto --phase 'Sprint 3'
     - intent: consolidate after swarm build
       command: agent-zpc harvest
+    - intent: learn from the corrections I have already typed
+      command: agent-zpc harvest --corrections --dry-run
     - intent: check memory status
       command: agent-zpc status
     - intent: search for docker lessons
@@ -553,6 +557,7 @@ tools:
       - decide-batch
       - position
       - retract
+      - harvest
       attributes:
         harvest:
         - polymorphic

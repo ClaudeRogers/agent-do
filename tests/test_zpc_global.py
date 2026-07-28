@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -142,14 +143,30 @@ def main() -> None:
         )
         tail_injected = checked(tail, tail_env, "inject").stdout
         require(
-            '"takeaway": "global takeaway 1"' not in tail_injected,
+            "global takeaway 1 " not in tail_injected and not tail_injected.endswith("global takeaway 1"),
             "inject included a global lesson older than the newest 10",
         )
         require(
-            '"takeaway": "global takeaway 2"' not in tail_injected,
+            "global takeaway 2" not in tail_injected,
             "inject included a global lesson older than the newest 10",
         )
-        require(tail_injected.count('"takeaway": "global takeaway') == 10, "inject must include exactly the newest 10 global lessons")
+        require(tail_injected.count("global takeaway") == 10, "inject must include exactly the newest 10 global lessons")
+
+        # Machine-wide claims render like every other claim: dated, kinded, and
+        # carrying the id you would need to retract one.
+        require("[2026-07-12] les-" in tail_injected, f"global lessons must render dated and addressable: {tail_injected}")
+        require("[tags: tail-limit]" in tail_injected, "global lessons must render their tags")
+        require('"context": "tail limit"' not in tail_injected, "global slice must not dump raw rows")
+
+        # A retracted machine-wide claim stops being delivered, which a raw tail
+        # of the file could never honour.
+        tail_ids = re.findall(r"\b(les-[0-9a-f]{6})\b", tail_injected)
+        require(tail_ids, "no claim ids rendered in the global slice")
+        checked(tail, tail_env, "retract", tail_ids[-1], "--evidence", "the newest global lesson is a fixture")
+        require(
+            "global takeaway 12" not in checked(tail, tail_env, "inject").stdout,
+            "a retracted global lesson kept rendering",
+        )
 
         empty_env = env.copy()
         empty_env["AGENT_DO_HOME"] = str(tmp / "empty-home")

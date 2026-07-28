@@ -36,6 +36,7 @@ Commands:
   position add|flip|list|show                           Verdict + falsifier ledger
   counsel --brief <file> | --auto-brief                 Clean-context second opinion
   harvest [--auto] [--dry-run]                          Consolidation scan
+  harvest --corrections [--since DATE] [--dry-run]      Mine past corrections into preference lessons
   query [--global] [--tag X] [--since DATE] [--text "..."] Search project and optional global memory
   patterns [--score]                                    View/score patterns
   review [--since DATE] [--auto] [--dry-run]             Post-sprint lesson extraction
@@ -59,6 +60,7 @@ Examples:
   agent-zpc checkpoint --phase "Phase 1" --agents "agent-a,agent-b"
   agent-zpc review --since HEAD~20 --dry-run
   agent-zpc harvest
+  agent-zpc harvest --corrections --dry-run             # what past sessions already told you
   agent-zpc query --tag testing --since 2025-01-01
   agent-zpc inject
   agent-zpc inject --compact                            # bounded blob for a subagent's prompt

@@ -4513,7 +4513,7 @@ Concurrency: `mixed`
 - `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
 - `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
 - `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
-- `harvest`: Post-build consolidation scan
+- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and writes them to the machine-wide store as dated preference lessons, each carrying the sentence verbatim
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
@@ -4541,6 +4541,8 @@ agent-do zpc review --since HEAD~20 --dry-run
 agent-do zpc review --auto --phase 'Sprint 3'
 # consolidate after swarm build
 agent-do zpc harvest
+# learn from the corrections I have already typed
+agent-do zpc harvest --corrections --dry-run
 # check memory status
 agent-do zpc status
 # search for docker lessons

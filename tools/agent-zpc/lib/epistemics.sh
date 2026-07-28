@@ -22,9 +22,26 @@ _zpc_claim_count() {
     _epistemics count "$file" 2>/dev/null || count_lines "$file"
 }
 
+# Which file holds this claim. A les- id can name a project lesson or a
+# machine-wide one — promoted and mined rows carry the same prefix — so the id
+# alone does not say, and the answer is whichever store actually resolves it.
+# Project first: that is the store the command is standing in. An id found in
+# neither reports against the project store, where the "no such claim" message
+# belongs.
 _zpc_store_file() {
-    case "$1" in
-        les-*) printf '%s' "$ZPC_MEMORY_DIR/lessons.jsonl" ;;
+    local id="$1" project global
+    case "$id" in
+        les-*)
+            project="$ZPC_MEMORY_DIR/lessons.jsonl"
+            global="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
+            if _epistemics resolve "$project" "les-" "$id" >/dev/null 2>&1; then
+                printf '%s' "$project"
+            elif [[ -f "$global" ]] && _epistemics resolve "$global" "les-" "$id" >/dev/null 2>&1; then
+                printf '%s' "$global"
+            else
+                printf '%s' "$project"
+            fi
+            ;;
         dec-*) printf '%s' "$ZPC_MEMORY_DIR/decisions.jsonl" ;;
         *) return 1 ;;
     esac
