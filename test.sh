@@ -80,6 +80,7 @@ check_cmd "zpc epistemics tests" python3 "$SCRIPT_DIR/tests/test_zpc_epistemics.
 check_cmd "zpc delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_delivery.py"
 check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitigate.py"
 check_cmd "zpc correction mining tests" python3 "$SCRIPT_DIR/tests/test_zpc_corrections.py"
+check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_preferences.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"

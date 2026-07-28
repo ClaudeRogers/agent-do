@@ -350,16 +350,186 @@ else:
 PYTHON
 }
 
+# The preference slice's ceiling, the same 2000 characters the compact blob
+# spends and for the same reason: this is a paste into somebody else's prompt.
+ZPC_INJECT_PREFERENCES_MAX=2000
+
+# The tag that says a claim is about how this user wants to be worked with,
+# rather than about how some codebase behaves. Correction mining writes it.
+ZPC_INJECT_PREFERENCES_TAG='preference'
+
+# A receipt for a read that happened outside any project store. log_access
+# writes into .zpc/.state, which is exactly what this path does not have, so the
+# same row shape goes to the machine-wide log instead. Append-only and silent:
+# an unwritable receipt is never a reason for the read it describes to fail.
+_log_global_access() {
+    local cmd="$1"
+
+    local ts source line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
+    source="${AGENT_DO_ZPC_SOURCE:-cli}"
+
+    printf -v line '{"ts":"%s","cmd":"%s","source":"%s","project":"%s"}' \
+        "$(_json_escape "$ts")" \
+        "$(_json_escape "$cmd")" \
+        "$(_json_escape "$source")" \
+        "$(_json_escape "$PWD")"
+
+    {
+        mkdir -p "$ZPC_GLOBAL_DIR" &&
+        printf '%s\n' "$line" >> "$ZPC_GLOBAL_DIR/access-log.jsonl"
+    } 2>/dev/null || true
+
+    return 0
+}
+
+# The machine-wide slice on its own: what this user has already said about how
+# to work, carried into a directory that was never asked to have memory. A
+# preference does not belong to a project, so requiring a project store to read
+# one is how the same correction gets typed a fourth time.
+_inject_preferences() {
+    local global_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
+
+    # Nothing recorded is nothing to say. An empty section would be a claim in
+    # itself — that the store was consulted and found wanting — and the caller
+    # is pasting this straight into a prompt.
+    if [[ ! -f "$global_file" || ! -s "$global_file" ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            printf '{"additionalContext": ""}\n'
+        fi
+        return 0
+    fi
+
+    # Failure exits 0 with nothing said, stderr intact: a directory with no
+    # memory and a directory whose memory would not parse are the same answer to
+    # the caller, and neither is worth failing a session start over.
+    python3 << 'PYTHON' - "$global_file" "$ZPC_INJECT_PREFERENCES_MAX" "$ZPC_INJECT_TRUNCATED" \
+        "${OUTPUT_FORMAT:-text}" "$ZPC_LIB_DIR" "$ZPC_INJECT_TIEBREAKER" \
+        "$ZPC_INJECT_PREFERENCES_TAG" || return 0
+import json, sys
+
+global_path = sys.argv[1]
+limit, marker, fmt = int(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+sys.path.insert(0, sys.argv[5])
+import epistemics
+
+TIEBREAKER = sys.argv[6]
+PREFERENCE_TAG = sys.argv[7]
+HEADER = "--- ZPC preferences (machine-wide, this user) ---"
+LABEL = "Recorded preferences (newest first):"
+
+
+def joined(lines):
+    return "\n".join(lines)
+
+
+def fit(lines, budget):
+    """Trim to budget by whole claims, spending part of it on admitting the cut.
+
+    Character-granular trimming is wrong here in a way it is not elsewhere: half
+    a preference is still a sentence, and "never do X unless Y" cut at the comma
+    is a claim the user never made. A dropped claim is merely missing.
+    """
+    kept = []
+    for line in lines:
+        if len(joined(kept + [line])) > budget:
+            break
+        kept.append(line)
+    if len(kept) == len(lines):
+        return joined(kept)
+    while kept and len(joined(kept + [marker])) > budget:
+        kept.pop()
+    return joined(kept + [marker]) if kept else marker
+
+
+def render(record):
+    row = record["row"]
+    tags = epistemics.tags_of(row)
+    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
+    if record["challenges"]:
+        suffix += f"  [challenged: {len(record['challenges'])}]"
+    text = epistemics.claim_text(row) or "(no takeaway recorded)"
+    return f"- [{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {text}{suffix}"
+
+
+# Retracted claims are absent here as they are everywhere else. A withdrawn
+# preference is the one most likely to be obeyed on reflex, since nobody
+# re-reads a rule they think they already know.
+live = [
+    record
+    for record in epistemics.analyze(global_path, "les-")["claims"]
+    if record["retraction"] is None
+]
+
+# Dated order, not file order: promotions and mining append at different times
+# than the days they describe, and "newest first" has to mean the claim's day.
+live.sort(key=lambda record: record["row"].get("date", ""), reverse=True)
+
+# Preferences first, then the rest of the technique claims. The cut takes from
+# the end, so the budget is spent on how this user works before it is spent on
+# how some other project did.
+preferred, technique = [], []
+for record in live:
+    if PREFERENCE_TAG in epistemics.tags_of(record["row"]):
+        preferred.append(record)
+    elif epistemics.kind_of(record["row"]) == "technique":
+        technique.append(record)
+
+# Mined corrections repeat verbatim across sessions — "try again" is typed a
+# hundred times — and five copies of one line spend a budget that five different
+# lines were the point of.
+lines, seen = [], set()
+for record in preferred + technique:
+    text = epistemics.claim_text(record["row"])
+    if not text or text in seen:
+        continue
+    seen.add(text)
+    lines.append(render(record))
+
+if not lines:
+    if fmt == "json":
+        print(json.dumps({"additionalContext": ""}))
+    sys.exit(0)
+
+scaffold = len(HEADER) + len(TIEBREAKER) + len(LABEL) + 4
+body = fit(lines, max(0, limit - scaffold))
+
+blob = "\n".join([HEADER, TIEBREAKER, "", LABEL, body])
+if len(blob) > limit:
+    blob = blob[: max(0, limit - len(marker) - 1)].rstrip() + "\n" + marker
+
+if fmt == "json":
+    print(json.dumps({"additionalContext": blob}))
+else:
+    print(blob)
+PYTHON
+}
+
 cmd_inject() {
-    local compact=false relitigate=false
+    local compact=false relitigate=false preferences=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --compact) compact=true; shift ;;
             --relitigate) relitigate=true; shift ;;
+            --preferences) preferences=true; shift ;;
             *) shift ;;
         esac
     done
+
+    # The preference slice answers before a project store exists, so it runs
+    # before the check that would demand one. Everything below this point —
+    # ensure_zpc, the overdue harvest, re-litigation — is project work.
+    if [[ "$preferences" == true ]]; then
+        if init_zpc_dirs 2>/dev/null; then
+            log_access "inject --preferences"
+        else
+            _log_global_access "inject --preferences"
+        fi
+        _inject_preferences
+        return 0
+    fi
 
     ensure_zpc
     log_access "inject"

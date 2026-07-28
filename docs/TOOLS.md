@@ -4495,6 +4495,7 @@ Concurrency: `mixed`
 - hold positions with a falsifier and refuse evidence-free flips
 - name every claim with a content-derived id (les-/dec-) and retract it with evidence
 - inject memory as dated claims that live observation outranks, never as standing law
+- carry the user's recorded preferences into any directory, store or no store
 - re-litigate the most-exposed claims against current code and file challenges on divergence
 - clean-context second opinion on a receipts-only brief
 - consolidate lessons into patterns via harvest
@@ -4518,7 +4519,7 @@ Concurrency: `mixed`
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
 - `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); --compact bounds it for pasting into a subagent's prompt; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); --compact bounds it for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
 - `init`: Initialize .zpc/ in a project
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check
@@ -4543,6 +4544,8 @@ agent-do zpc review --auto --phase 'Sprint 3'
 agent-do zpc harvest
 # learn from the corrections I have already typed
 agent-do zpc harvest --corrections --dry-run
+# what has this user already told me about how to work
+agent-do zpc inject --preferences
 # check memory status
 agent-do zpc status
 # search for docker lessons
