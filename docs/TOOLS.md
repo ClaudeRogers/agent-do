@@ -2307,14 +2307,14 @@ Concurrency: `write`
 - `init`: Initialize manna repository
 - `status`: Show current session and claimed issues
 - `create`: Create new issue (--type track|item|dream, --track, --source)
-- `claim`: Claim an issue for the current session
+- `claim`: Claim an issue for the current session (refuses dreams, exit 2, until converted)
 - `done`: Mark a claimed issue as done
 - `abandon`: Release a claimed issue back to open
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
 - `show`: Show issue details
-- `update`: Update issue title, description, status, type, track, or source
+- `update`: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
@@ -2334,6 +2334,8 @@ agent-do manna list
 agent-do manna show 1
 # capture an idea for later
 agent-do manna dream 'Unify the auth flows'
+# convert a dream into claimable work
+agent-do manna update mn-abc123 --type item
 # check the board for drift
 agent-do manna reconcile --write-drift
 ```

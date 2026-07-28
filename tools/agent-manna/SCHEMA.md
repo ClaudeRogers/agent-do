@@ -75,6 +75,19 @@ in_progress → open (via abandon)
 blocked → * (when blocked_by becomes empty)
 ```
 
+### The dream gate
+
+A `type: dream` row has no entry into that diagram. `claim` refuses it — exit
+2, nothing written — and names the conversion; the refusal, not hiding, is the
+gate. Dreams stay visible in `list` and `context` throughout, every row marked
+`[DREAM: not claimable, needs conversion]`, so an agent reads the idea and its
+un-actionable status in the same glance.
+
+`update <id> --type item` is the authorization act (Erik's to make) and prints
+an explicit `AUTHORIZED:` line saying the row is now claimable work; the
+reverse prints `PARKED:`. Every other verb still works on a dream, and
+`update --status done` remains the way a dream is closed with a reason.
+
 ### ID Format
 
 - Prefix: `mn-` (manna)

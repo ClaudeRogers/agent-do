@@ -1,7 +1,7 @@
 //! Manna CLI - Issue tracking for AI agents.
 //!
 //! All output is YAML format for machine parsing.
-//! Exit codes: 0=success, 1=user error, 2=system error.
+//! Exit codes: 0=success, 1=user error, 2=system error or needs authorization.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,9 @@ use serde::Serialize;
 
 use manna_core::error::MannaError;
 use manna_core::id::generate_unique_id;
-use manna_core::issue::{is_default_type, Issue, IssueStatus, IssueType};
+use manna_core::issue::{
+    dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, DREAM_INERT_MARKER,
+};
 use manna_core::reconcile::{
     check_blocker_desync, check_dangling_track, check_landed_open, check_stale_dream,
     claim_command_ids, extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid,
@@ -24,6 +26,9 @@ use manna_core::store::MannaStore;
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USER_ERROR: i32 = 1;
 const EXIT_SYSTEM_ERROR: i32 = 2;
+/// A refusal awaiting a human decision, not a typo: shares the 2 the ecosystem
+/// already reads as "stop and escalate" rather than "fix your arguments".
+const EXIT_NEEDS_AUTHORIZATION: i32 = 2;
 
 #[derive(Parser)]
 #[command(name = "manna-core")]
@@ -242,6 +247,16 @@ struct IssueData {
     issue: Issue,
 }
 
+/// `update` result. The authorization line appears only when a type change
+/// crossed the dream boundary, because that crossing is the act that decides
+/// whether an agent may work the row.
+#[derive(Serialize)]
+struct UpdateData {
+    issue: Issue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization: Option<String>,
+}
+
 #[derive(Serialize)]
 struct IssueListData {
     issues: Vec<IssueSummary>,
@@ -258,6 +273,9 @@ struct IssueSummary {
     issue_type: IssueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     track: Option<String>,
+    /// Present only on dreams: the row is visible but not workable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -604,6 +622,12 @@ fn cmd_claim(id: String) -> ! {
     // Find issue
     let mut issue = find_issue(&issues, &id);
 
+    // Dreams are visible but inert: refuse before the store is ever touched,
+    // and exit 2 so an orchestrator reads "escalate", not "retry differently".
+    if issue.issue_type == IssueType::Dream {
+        output_error(&dream_claim_refusal(&issue.id), EXIT_NEEDS_AUTHORIZATION);
+    }
+
     // Claim it
     if let Err(e) = issue.claim(session_id) {
         output_error(&e, EXIT_USER_ERROR);
@@ -797,6 +821,8 @@ fn cmd_list(
                 .map_or(true, |f| i.track.as_ref() == Some(f))
         })
         .map(|i| IssueSummary {
+            gate: (i.issue_type == IssueType::Dream)
+                .then(|| DREAM_INERT_MARKER.to_string()),
             id: i.id,
             title: i.title,
             status: i.status,
@@ -869,6 +895,7 @@ fn cmd_update(
         Err(err) => handle_manna_error(err),
     };
     let mut issue = find_issue(&issues, &id);
+    let type_before = issue.issue_type;
     if let Some(new_title) = title {
         if new_title.is_empty() || new_title.len() > 500 {
             output_error("Title must be 1-500 characters", EXIT_USER_ERROR);
@@ -920,10 +947,30 @@ fn cmd_update(
         );
     }
     issue.updated_at = chrono::Utc::now();
+    let authorization = conversion_authorization(&issue.id, type_before, issue.issue_type);
     if let Err(err) = store.update_issue(&issue) {
         handle_manna_error(err);
     }
-    output_success(IssueData { issue });
+    output_success(UpdateData { issue, authorization });
+}
+
+/// The line `update` prints when a type change crosses the dream boundary.
+///
+/// Conversion is the authorization act, so it is stated out loud in both
+/// directions rather than left to be inferred from a changed field.
+fn conversion_authorization(id: &str, before: IssueType, after: IssueType) -> Option<String> {
+    match (before, after) {
+        (IssueType::Dream, IssueType::Item) | (IssueType::Dream, IssueType::Track) => Some(format!(
+            "AUTHORIZED: {} converted dream -> {}. It is now claimable work: agent-do manna claim {}",
+            id, after, id
+        )),
+        (_, IssueType::Dream) if before != IssueType::Dream => Some(format!(
+            "PARKED: {} converted {} -> dream. It is no longer claimable; convert it back with \
+             agent-do manna update {} --type item before any agent works it.",
+            id, before, id
+        )),
+        _ => None,
+    }
 }
 
 fn cmd_delete(id: String) -> ! {
@@ -946,24 +993,40 @@ fn cmd_delete(id: String) -> ! {
 }
 
 /// One context line for an issue, matching the v1 per-status format.
+///
+/// Dream rows carry the inert marker: they stay in every list an agent reads,
+/// so the line itself has to say the idea is not workable yet.
 fn context_line(issue: &Issue) -> String {
-    match issue.status {
+    let body = match issue.status {
         IssueStatus::InProgress => {
             let claimed = issue
                 .claimed_by
                 .as_ref()
                 .map_or("".to_string(), |s| format!(", claimed by {}", s));
-            format!("- {}: {} [in_progress{}]\n", issue.id, issue.title, claimed)
+            format!("- {}: {} [in_progress{}]", issue.id, issue.title, claimed)
         }
         IssueStatus::Blocked => format!(
-            "- {}: {} [blocked by: {}]\n",
+            "- {}: {} [blocked by: {}]",
             issue.id,
             issue.title,
             issue.blocked_by.join(", ")
         ),
-        _ => format!("- {}: {} [{}]\n", issue.id, issue.title, issue.status),
+        _ => format!("- {}: {} [{}]", issue.id, issue.title, issue.status),
+    };
+
+    if issue.issue_type == IssueType::Dream {
+        format!("{} {}\n", body, DREAM_INERT_MARKER)
+    } else {
+        format!("{}\n", body)
     }
 }
+
+/// The conversion instruction, printed once wherever dreams are rendered: the
+/// per-row marker stays short, so the command is spelled out per section
+/// instead of per line.
+const DREAMS_SECTION_NOTE: &str =
+    "Dreams are parked sparks, not work. `claim` refuses them; Erik converts one \
+     with `agent-do manna update <id> --type item` before any agent builds it.\n";
 
 /// Build the context blob. Boards with track rows render a track tree
 /// (per-track sections, then Untracked, then Dreams); boards with zero
@@ -1017,6 +1080,7 @@ fn build_context(issues: &[Issue]) -> String {
             .collect();
         if !dreams.is_empty() {
             context.push_str("## Dreams\n");
+            context.push_str(DREAMS_SECTION_NOTE);
             for dream in &dreams {
                 context.push_str(&context_line(dream));
             }
@@ -1041,32 +1105,33 @@ fn build_context(issues: &[Issue]) -> String {
     // Open issues
     context.push_str(&format!("## Open Issues ({})\n", open.len()));
     for issue in &open {
-        context.push_str(&format!("- {}: {} [open]\n", issue.id, issue.title));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // In-progress issues
     context.push_str(&format!("## In Progress Issues ({})\n", in_progress.len()));
     for issue in &in_progress {
-        let claimed = issue
-            .claimed_by
-            .as_ref()
-            .map_or("".to_string(), |s| format!(", claimed by {}", s));
-        context.push_str(&format!(
-            "- {}: {} [in_progress{}]\n",
-            issue.id, issue.title, claimed
-        ));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // Blocked issues
     context.push_str(&format!("## Blocked Issues ({})\n", blocked.len()));
     for issue in &blocked {
-        let blockers = issue.blocked_by.join(", ");
-        context.push_str(&format!(
-            "- {}: {} [blocked by: {}]\n",
-            issue.id, issue.title, blockers
-        ));
+        context.push_str(&context_line(issue));
+    }
+
+    // Trackless boards (the global dream inbox, above all) render dreams inside
+    // the by-status sections, so the conversion instruction trails the render.
+    let renders_dream = open
+        .iter()
+        .chain(in_progress.iter())
+        .chain(blocked.iter())
+        .any(|i| i.issue_type == IssueType::Dream);
+    if renders_dream {
+        context.push('\n');
+        context.push_str(DREAMS_SECTION_NOTE);
     }
 
     context
@@ -1919,6 +1984,7 @@ mod tests {
             claimed_by: None,
             issue_type: IssueType::Item,
             track: None,
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
@@ -1941,6 +2007,7 @@ mod tests {
             claimed_by: Some("ses_123".to_string()),
             issue_type: IssueType::Item,
             track: None,
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
@@ -1956,11 +2023,13 @@ mod tests {
             claimed_by: None,
             issue_type: IssueType::Dream,
             track: Some("mn-def456".to_string()),
+            gate: Some(DREAM_INERT_MARKER.to_string()),
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
         assert!(yaml.contains("type: dream"));
         assert!(yaml.contains("track: mn-def456"));
+        assert!(yaml.contains("not claimable"));
     }
 
     #[test]
@@ -2051,7 +2120,11 @@ mod tests {
         assert!(context.contains("## Untracked\n"));
         assert!(context.contains("- mn-eee555: Loose item [open]\n"));
         assert!(context.contains("- mn-fff666: Dangling item [open]\n"));
-        assert!(context.contains("## Dreams\n- mn-abc123: Spark [open]\n"));
+        assert!(context.contains("## Dreams\nDreams are parked sparks"));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] {}\n",
+            DREAM_INERT_MARKER
+        )));
         // v1 by-status sections replaced by the tree
         assert!(!context.contains("## Open Issues"));
         // Ordering: track section, then Untracked, then Dreams
@@ -2059,6 +2132,48 @@ mod tests {
         let untracked_pos = context.find("## Untracked").unwrap();
         let dreams_pos = context.find("## Dreams").unwrap();
         assert!(track_pos < untracked_pos && untracked_pos < dreams_pos);
+    }
+
+    #[test]
+    fn test_build_context_zero_tracks_marks_dreams() {
+        // The trackless render (the global dream inbox above all) has no
+        // Dreams section, so the marker on the row is what carries the gate.
+        let item = Issue::new("mn-aaa111".to_string(), "Open item".to_string()).unwrap();
+        let mut spark = Issue::new("mn-abc123".to_string(), "Spark".to_string()).unwrap();
+        spark.issue_type = IssueType::Dream;
+
+        let context = build_context(&[item, spark]);
+
+        assert!(context.contains("- mn-aaa111: Open item [open]\n"));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] {}\n",
+            DREAM_INERT_MARKER
+        )));
+        assert!(context.contains("Dreams are parked sparks"));
+        assert!(!context.contains("## Dreams"));
+    }
+
+    #[test]
+    fn test_conversion_authorization_lines() {
+        let promoted =
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Item).unwrap();
+        assert!(promoted.contains("AUTHORIZED"));
+        assert!(promoted.contains("now claimable work"));
+        assert!(promoted.contains("agent-do manna claim mn-abc123"));
+
+        let parked =
+            conversion_authorization("mn-abc123", IssueType::Item, IssueType::Dream).unwrap();
+        assert!(parked.contains("PARKED"));
+        assert!(parked.contains("no longer claimable"));
+        assert!(parked.contains("--type item"));
+
+        // Non-crossing changes stay silent: the line marks the boundary, not
+        // every edit.
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Item).is_none());
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Track).is_none());
+        assert!(
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Dream).is_none()
+        );
     }
 
     #[test]

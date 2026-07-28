@@ -656,6 +656,100 @@ fi
 cd "$TEST_DIR"
 rm -rf "$PAIR_DIR"
 
+# ----------------------------------------------------------------------------
+# Test G8: dreams are visible and inert until converted
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G8: dream claim gate"
+GATE_DIR=$(mktemp -d)
+cd "$GATE_DIR"
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "Umbrella track" --type track 2>&1) || true
+G_TRACK=$(extract_id "$output")
+output=$("$MANNA" create "Real work" --track "$G_TRACK" 2>&1) || true
+G_ITEM=$(extract_id "$output")
+output=$("$MANNA" dream "A parked spark" 2>&1) || true
+G_DREAM=$(extract_id "$output")
+
+# The refusal must not touch the board: hash the file on both sides.
+if command -v md5 &>/dev/null; then
+    hash_cmd() { md5 -q "$1"; }
+else
+    hash_cmd() { md5sum "$1" | awk '{print $1}'; }
+fi
+before_hash=$(hash_cmd .manna/issues.jsonl)
+claim_exit=0
+output=$("$MANNA" claim "$G_DREAM" 2>&1) || claim_exit=$?
+after_hash=$(hash_cmd .manna/issues.jsonl)
+
+check_exit 2 "$claim_exit" "claim on a dream exits 2"
+check_yaml "$output" "success: false" "claim on a dream refuses"
+check_yaml "$output" "$G_DREAM" "refusal names the dream id"
+check_yaml "$output" "not claimable work" "refusal says a dream is not claimable work"
+check_yaml "$output" "update $G_DREAM --type item" "refusal gives the exact conversion command"
+check_yaml "$output" "Erik" "refusal names who authorizes"
+if [[ "$before_hash" == "$after_hash" ]]; then
+    pass "refused claim wrote nothing (board byte-identical)"
+else
+    fail "refused claim wrote nothing (board byte-identical)" "issues.jsonl changed: $before_hash -> $after_hash"
+fi
+output=$("$MANNA" show "$G_DREAM" 2>&1) || true
+check_yaml "$output" "status: open" "refused dream is still open"
+check_yaml "$output" "type: dream" "refused dream is still a dream"
+if [[ "$output" != *"claimed_by"* ]]; then
+    pass "refused dream carries no claim"
+else
+    fail "refused dream carries no claim" "claimed_by present: $output"
+fi
+
+# Visibility is the ruling: the dream stays in every list, marked inert.
+output=$("$MANNA" list 2>&1) || true
+check_yaml "$output" "$G_DREAM" "list still shows the dream"
+check_yaml "$output" "not claimable, needs conversion" "list marks the dream inert"
+output=$("$MANNA" list --json 2>&1) || true
+check_yaml "$output" '"gate":"[DREAM: not claimable, needs conversion]"' "list --json carries the gate marker"
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "$G_DREAM" "context still shows the dream"
+check_yaml "$output" "$G_DREAM: A parked spark [open] [DREAM: not claimable, needs conversion]" \
+    "context marks the dream row inert"
+check_yaml "$output" "update <id> --type item" "context spells out the conversion command"
+
+# Items are untouched by the gate.
+claim_exit=0
+output=$("$MANNA" claim "$G_ITEM" 2>&1) || claim_exit=$?
+check_exit 0 "$claim_exit" "claim on an item still succeeds"
+check_yaml "$output" "status: in_progress" "claimed item goes in_progress"
+"$MANNA" abandon "$G_ITEM" >/dev/null 2>&1
+
+# Conversion is the authorization act.
+output=$("$MANNA" update "$G_DREAM" --type item 2>&1) || true
+check_yaml "$output" "AUTHORIZED" "conversion prints an authorization line"
+check_yaml "$output" "now claimable work" "authorization line says the row is claimable"
+claim_exit=0
+output=$("$MANNA" claim "$G_DREAM" 2>&1) || claim_exit=$?
+check_exit 0 "$claim_exit" "claim succeeds after conversion"
+check_yaml "$output" "status: in_progress" "converted dream claims like any item"
+
+# And back: parking an item prints the inverse and restores the gate.
+"$MANNA" abandon "$G_DREAM" >/dev/null 2>&1
+output=$("$MANNA" update "$G_DREAM" --type dream 2>&1) || true
+check_yaml "$output" "PARKED" "parking prints the inverse line"
+check_yaml "$output" "no longer claimable" "inverse line says the row is not claimable"
+claim_exit=0
+"$MANNA" claim "$G_DREAM" >/dev/null 2>&1 || claim_exit=$?
+check_exit 2 "$claim_exit" "re-parked dream refuses claim again"
+
+# A non-crossing edit stays silent.
+output=$("$MANNA" update "$G_ITEM" --title "Real work, renamed" 2>&1) || true
+if [[ "$output" != *"authorization"* ]]; then
+    pass "non-crossing update prints no authorization line"
+else
+    fail "non-crossing update prints no authorization line" "unexpected line: $output"
+fi
+
+cd "$TEST_DIR"
+rm -rf "$GATE_DIR"
+
 # ============================================================================
 # Summary
 # ============================================================================

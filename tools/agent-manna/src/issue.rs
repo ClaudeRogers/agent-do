@@ -60,6 +60,25 @@ pub fn is_default_type(issue_type: &IssueType) -> bool {
     *issue_type == IssueType::Item
 }
 
+/// Marker rendered beside every dream in `list` and `context`.
+///
+/// Dreams stay visible on purpose; the marker is what makes the visibility
+/// safe, so an agent reads the idea and its un-actionable status at once.
+pub const DREAM_INERT_MARKER: &str = "[DREAM: not claimable, needs conversion]";
+
+/// The refusal text for claiming a dream.
+///
+/// A dream is a parked spark, not work. Conversion (`update --type item`) is
+/// the authorization act, and Erik is the one who performs it; refusing here,
+/// rather than hiding the row, is what keeps an agent from building it unasked.
+pub fn dream_claim_refusal(id: &str) -> String {
+    format!(
+        "{id} is a dream, not claimable work: nothing was written. \
+         A dream is a parked spark and becomes work only when Erik converts it. \
+         Authorize with: agent-do manna update {id} --type item"
+    )
+}
+
 /// An issue in Manna.
 ///
 /// See SCHEMA.md for field definitions.
@@ -156,6 +175,12 @@ impl Issue {
     /// # Returns
     /// Result indicating success or error if already claimed
     pub fn claim(&mut self, session_id: String) -> Result<(), String> {
+        // The gate lives on the model so no caller can claim a dream, whatever
+        // path it arrives by. The CLI checks first to exit 2 with the same text.
+        if self.issue_type == IssueType::Dream {
+            return Err(dream_claim_refusal(&self.id));
+        }
+
         if self.status != IssueStatus::Open {
             return Err(format!(
                 "Cannot claim issue with status '{}', must be 'open'",
@@ -636,5 +661,59 @@ mod tests {
         assert!(is_default_type(&IssueType::Item));
         assert!(!is_default_type(&IssueType::Track));
         assert!(!is_default_type(&IssueType::Dream));
+    }
+
+    #[test]
+    fn test_claim_dream_refused_and_unchanged() {
+        let mut spark = Issue::new("mn-abc123".to_string(), "Parked spark".to_string()).unwrap();
+        spark.issue_type = IssueType::Dream;
+
+        let result = spark.claim("ses_123".to_string());
+
+        assert!(result.is_err());
+        assert_eq!(spark.status, IssueStatus::Open);
+        assert!(spark.claimed_by.is_none());
+        assert!(spark.claimed_at.is_none());
+    }
+
+    #[test]
+    fn test_dream_refusal_names_id_and_conversion() {
+        let message = dream_claim_refusal("mn-abc123");
+        assert!(message.contains("mn-abc123"));
+        assert!(message.contains("not claimable work"));
+        assert!(message.contains("agent-do manna update mn-abc123 --type item"));
+        assert!(message.contains("Erik"));
+    }
+
+    #[test]
+    fn test_dream_refusal_beats_status_check() {
+        // A dream that somehow reached done still refuses as a dream, not with
+        // the generic status message: the type is the reason.
+        let mut spark = Issue::new("mn-abc123".to_string(), "Parked spark".to_string()).unwrap();
+        spark.issue_type = IssueType::Dream;
+        spark.status = IssueStatus::Done;
+
+        let err = spark.claim("ses_123".to_string()).unwrap_err();
+        assert!(err.contains("not claimable work"));
+        assert!(!err.contains("must be 'open'"));
+    }
+
+    #[test]
+    fn test_claim_after_conversion_to_item_succeeds() {
+        let mut spark = Issue::new("mn-abc123".to_string(), "Parked spark".to_string()).unwrap();
+        spark.issue_type = IssueType::Dream;
+        assert!(spark.claim("ses_123".to_string()).is_err());
+
+        spark.issue_type = IssueType::Item;
+        assert!(spark.claim("ses_123".to_string()).is_ok());
+        assert_eq!(spark.status, IssueStatus::InProgress);
+    }
+
+    #[test]
+    fn test_claim_track_still_allowed() {
+        // Only dreams are gated; tracks and items keep their v1 claim path.
+        let mut umbrella = Issue::new("mn-abc123".to_string(), "Umbrella".to_string()).unwrap();
+        umbrella.issue_type = IssueType::Track;
+        assert!(umbrella.claim("ses_123".to_string()).is_ok());
     }
 }

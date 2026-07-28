@@ -218,6 +218,7 @@ All tools follow: **Connect → Snapshot → Interact → Verify → Save**
 
 The board (`.manna/`) is the single backlog. The grammar is universal (track | item | dream); full doctrine and machinery: ARCHITECTURE.md's Manna Subsystem section. Schema: `type: track|item|dream` (default `item`), `track: <mn-id>` edge on items, `source: <citation>` for provenance, `prompt: <path>` pairing an issue with its work order. Set fields through the manna CLI (`--type/--track/--source/--prompt`); never hand-edit `.manna/issues.jsonl`.
 
+- **Dream gate:** dreams stay visible in `list` and `context`, every row marked `[DREAM: not claimable, needs conversion]`, and `claim` refuses one (exit 2, nothing written) until Erik converts it with `agent-do manna update <id> --type item`; the refusal is the gate, not hiding.
 - **Trailer rule:** any commit advancing an item carries a `Manna: mn-xxxxxx` trailer (same mechanic as `Co-Authored-By`).
 - **Single-truth rule:** memories and handoff docs point at mn- IDs; they never carry their own checklists.
 - **This project's vocabulary** (data, not grammar): track rows mn-b7a0cc "Agentic Work OS" and mn-69368a "Companion / Second Chair"; item titles keep their program names ("Moon trunk A" through "Moon trunk G", "Companion: ...", "Charter Law N: ...", "Harness: ..."). The old title-prefix grammar built from those names was interim scaffolding; the typed fields replaced it, and prefixes surviving in titles are display only.
