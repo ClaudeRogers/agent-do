@@ -15,6 +15,11 @@ from pathlib import Path
 ZPC_INJECT_TIMEOUT = 3
 ZPC_INJECT_MAX_CHARS = 6000
 ZPC_INJECT_TRUNCATION_MARKER = "[zpc inject truncated]"
+ZPC_AUTOINIT_TIMEOUT = 3
+# The --preferences slice bounds its own output; this is the belt to that pair
+# of braces.
+ZPC_PREFERENCES_MAX_CHARS = 2000
+ZPC_PREFERENCES_TRUNCATION_MARKER = "[zpc preferences truncated]"
 
 
 def read_payload() -> dict:
@@ -327,7 +332,60 @@ def zpc_has_records(cwd: str) -> bool:
     return False
 
 
-def run_zpc_inject(agent_do: str, cwd: str) -> str:
+def zpc_autoinit(agent_do: str | None, cwd: str | None) -> None:
+    """Give every project a store, without the hook ever writing a tracked file.
+
+    Two limits make that true. A git worktree is the unit of "project", so a
+    bare directory never gets one. And `zpc init` does more than create the
+    store: it appends to .gitignore and writes (or appends to) the repo's agent
+    instruction file, which is not something a silent session-start hook may do
+    to a repo it does not own. So auto-init rides a store-only mode and stays
+    home without it.
+    """
+    if os.environ.get("AGENT_DO_ZPC_AUTOINIT", "1") == "0":
+        return
+    if not agent_do or not cwd:
+        return
+
+    code, toplevel, _ = run_capture(
+        ["git", "rev-parse", "--show-toplevel"], cwd=cwd, timeout=ZPC_AUTOINIT_TIMEOUT
+    )
+    toplevel = toplevel.strip()
+    if code != 0 or not toplevel:
+        return
+    root = Path(toplevel)
+    if not root.is_dir():
+        return
+
+    # zpc resolves a store by walking up from cwd, so a store anywhere between
+    # cwd and the toplevel means this project already has one.
+    probe = Path(cwd)
+    while True:
+        if (probe / ".zpc").exists():
+            return
+        if probe == root or probe.parent == probe:
+            break
+        probe = probe.parent
+    if (root / ".zpc").exists():
+        return
+
+    # init's argument loop swallows flags it does not know, so asking an older
+    # zpc for --store-only gets a full invasive init that reports success. The
+    # gate has to be positive: no such flag in the help text, no auto-init.
+    code, help_text, _ = run_capture(
+        [agent_do, "zpc", "init", "--help"], cwd=str(root), timeout=ZPC_AUTOINIT_TIMEOUT
+    )
+    if code != 0 or "--store-only" not in help_text:
+        return
+
+    run_capture(
+        [agent_do, "zpc", "init", "--store-only"],
+        cwd=str(root),
+        timeout=ZPC_AUTOINIT_TIMEOUT,
+    )
+
+
+def run_zpc_inject(agent_do: str, cwd: str, preferences: bool = False) -> str:
     """Inject stdout, or "" on any failure.
 
     Output lands in a temp file rather than a pipe: inject detaches a harvest,
@@ -344,7 +402,7 @@ def run_zpc_inject(agent_do: str, cwd: str) -> str:
         with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as out:
             # cwd must be inside the project: inject resolves the store from there.
             proc = subprocess.Popen(
-                [agent_do, "zpc", "inject"],
+                [agent_do, "zpc", "inject"] + (["--preferences"] if preferences else []),
                 cwd=cwd,
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -369,40 +427,79 @@ def run_zpc_inject(agent_do: str, cwd: str) -> str:
         return ""
 
 
-def bound_zpc_inject(text: str) -> str:
-    if len(text) <= ZPC_INJECT_MAX_CHARS:
+def bound_zpc_inject(
+    text: str,
+    limit: int = ZPC_INJECT_MAX_CHARS,
+    marker: str = ZPC_INJECT_TRUNCATION_MARKER,
+) -> str:
+    if len(text) <= limit:
         return text
-    clipped = text[:ZPC_INJECT_MAX_CHARS]
+    clipped = text[:limit]
     head, newline, _ = clipped.rpartition("\n")
     if newline:
         clipped = head
-    return f"{clipped}\n{ZPC_INJECT_TRUNCATION_MARKER}"
+    return f"{clipped}\n{marker}"
+
+
+def zpc_preferences_section(agent_do: str | None, cwd: str) -> str:
+    """Preferences are the user's, not the project's, so they travel: an empty
+    store and a directory that will never have one both get them. Returns ""
+    unless there is real content, which keeps every caller's fallback intact."""
+    if not agent_do:
+        return ""
+    preferences = run_zpc_inject(agent_do, cwd, preferences=True).rstrip("\n")
+    if not preferences.strip():
+        return ""
+    bounded = bound_zpc_inject(
+        preferences, ZPC_PREFERENCES_MAX_CHARS, ZPC_PREFERENCES_TRUNCATION_MARKER
+    )
+    return (
+        "## ZPC Preferences (global memory)\n\n"
+        "Preferences recorded across earlier sessions, loaded below. They are "
+        "user-level, not project-level: they hold here regardless of what this "
+        "directory contains.\n\n"
+        f"{bounded}\n\n"
+        "Log new ones where they happen: `agent-do zpc learn` and "
+        "`agent-do zpc decide`.\n"
+    )
 
 
 def zpc(agent_do: str | None, cwd: str | None) -> str:
-    if not cwd or not (Path(cwd) / ".zpc").exists():
+    if not cwd:
         return ""
+
+    embedding = bool(agent_do) and os.environ.get("AGENT_DO_ZPC_INJECT", "1") != "0"
+
+    # No store here, and none coming: auto-init already declined this directory
+    # (not a git worktree, or it has no store-only mode to use). Preferences are
+    # still his, so they still arrive.
+    if not (Path(cwd) / ".zpc").exists():
+        return zpc_preferences_section(agent_do, cwd) if embedding else ""
 
     # The advisory below only *asks* the agent to go read the store, and asking
     # is not a mechanism. When there are records to show, put the memory itself
     # in context. Every failure mode (kill-switch, empty store, missing
     # dispatcher, nonzero exit, timeout) falls through to the advisory, so the
     # section degrades instead of disappearing.
-    if (
-        agent_do
-        and os.environ.get("AGENT_DO_ZPC_INJECT", "1") != "0"
-        and zpc_has_records(cwd)
-    ):
-        memory = run_zpc_inject(agent_do, cwd).rstrip("\n")
-        if memory.strip():
-            return (
-                "## ZPC Project Memory\n\n"
-                "This project's recorded memory, loaded below. Read it before coding; "
-                "it is already in context, so do not re-run `agent-do zpc inject`.\n\n"
-                f"{bound_zpc_inject(memory)}\n\n"
-                "Keep the loop closed: `agent-do zpc learn` and `agent-do zpc decide` as "
-                "you work, `agent-do zpc harvest` after significant work.\n"
-            )
+    if embedding:
+        if zpc_has_records(cwd):
+            memory = run_zpc_inject(agent_do, cwd).rstrip("\n")
+            if memory.strip():
+                return (
+                    "## ZPC Project Memory\n\n"
+                    "This project's recorded memory, loaded below. Read it before coding; "
+                    "it is already in context, so do not re-run `agent-do zpc inject`.\n\n"
+                    f"{bound_zpc_inject(memory)}\n\n"
+                    "Keep the loop closed: `agent-do zpc learn` and `agent-do zpc decide` as "
+                    "you work, `agent-do zpc harvest` after significant work.\n"
+                )
+        else:
+            # A store with nothing in it yet — every project's first session,
+            # now that init runs automatically. Preferences beat an advisory
+            # nobody reads.
+            section = zpc_preferences_section(agent_do, cwd)
+            if section:
+                return section
 
     return (
         "## ZPC Memory Available\n\n"
@@ -429,6 +526,10 @@ def main() -> None:
     payload = read_payload()
     cwd = payload.get("cwd") or os.getcwd()
     agent_do = resolve_agent_do()
+
+    # Auto-init first: the memory section below reads the store this may have
+    # just created.
+    zpc_autoinit(agent_do, cwd)
 
     sections = [
         "## TOOLING REMINDER - agent-do\n\n"

@@ -411,6 +411,45 @@ $drift_block
 Reconcile the board against reality before claiming new work, then remove \`.manna/drift.yaml\` once resolved."
 }
 
+# Every project gets a store, without the hook ever writing a tracked file.
+# Two limits make that true. A git worktree is the unit of "project", so a bare
+# directory never gets one. And `zpc init` does more than create the store: it
+# appends to .gitignore and writes (or appends to) the repo's agent instruction
+# file, which is not something a silent session-start hook may do to a repo it
+# does not own. So auto-init rides a store-only mode and stays home without it.
+zpc_autoinit() {
+    local toplevel dir init_help
+
+    [ "${AGENT_DO_ZPC_AUTOINIT:-1}" != "0" ] || return 0
+    [ -n "$CWD" ] || return 0
+    [ -n "$AGENT_DO_DIR" ] || return 0
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
+
+    toplevel=$(cd "$CWD" 2>/dev/null && bounded_run 3 git rev-parse --show-toplevel 2>/dev/null) || return 0
+    [ -n "$toplevel" ] && [ -d "$toplevel" ] || return 0
+
+    # zpc resolves a store by walking up from cwd, so a store anywhere between
+    # cwd and the toplevel means this project already has one.
+    dir="$CWD"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+        [ -d "$dir/.zpc" ] && return 0
+        [ "$dir" = "$toplevel" ] && break
+        dir=$(dirname "$dir")
+    done
+    [ -d "$toplevel/.zpc" ] && return 0
+
+    # init's argument loop swallows flags it does not know, so asking an older
+    # zpc for --store-only gets a full invasive init that reports success. The
+    # gate has to be positive: no such flag in the help text, no auto-init.
+    init_help=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --help 2>/dev/null || true)
+    case "$init_help" in
+        *--store-only*) ;;
+        *) return 0 ;;
+    esac
+
+    (cd "$toplevel" && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --store-only) >/dev/null 2>&1 || return 0
+}
+
 # At least one recorded line under .zpc/memory/. An initialized-but-empty store
 # has nothing worth embedding, so it keeps the advisory.
 zpc_has_records() {
@@ -464,11 +503,57 @@ zpc_write_session_baseline() {
     } > "$baseline" 2>/dev/null || return 0
 }
 
+# Preferences are the user's, not the project's, so they travel: an empty store
+# and a directory that will never have one both get them. Emits nothing and
+# reports failure unless there is real content, which keeps every caller's
+# existing fallback intact.
+append_zpc_preferences() {
+    local prefs_out prefs_rc
+
+    [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] || return 1
+    [ -n "$AGENT_DO_DIR" ] || return 1
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 1
+
+    prefs_out=$(cd "$1" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject --preferences 2>/dev/null)
+    prefs_rc=$?
+    [ "$prefs_rc" -eq 0 ] && [ -n "$prefs_out" ] || return 1
+
+    # The flag bounds its own output; this is the belt to that pair of braces.
+    if [ ${#prefs_out} -gt 2000 ]; then
+        prefs_out="${prefs_out:0:2000}"
+        # Back up to the last complete line: a cut landing mid-character would
+        # hand jq -Rs invalid UTF-8 and cost the whole envelope.
+        prefs_out="${prefs_out%$'\n'*}"
+        prefs_out="$prefs_out
+[zpc preferences truncated]"
+    fi
+
+    CONTEXT="$CONTEXT
+
+---
+
+## ZPC Preferences (global memory)
+
+Preferences recorded across earlier sessions, loaded below. They are user-level, not project-level: they hold here regardless of what this directory contains.
+
+$prefs_out
+
+Log new ones where they happen: \`agent-do zpc learn\` and \`agent-do zpc decide\`."
+    return 0
+}
+
 append_zpc_memory() {
     local inject_out inject_rc
 
     [ -n "$CWD" ] || return 0
-    [ -d "$CWD/.zpc" ] || return 0
+
+    # No store here, and none coming: auto-init already declined this directory
+    # (not a git worktree, or it has no store-only mode to use). Preferences are
+    # still his, so they still arrive.
+    if [ ! -d "$CWD/.zpc" ]; then
+        append_zpc_preferences "$CWD"
+        return 0
+    fi
 
     # The advisory below only *asks* the agent to go read the store, and asking
     # is not a mechanism. When there are records to show, put the memory itself
@@ -477,25 +562,26 @@ append_zpc_memory() {
     # section degrades instead of disappearing.
     if [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] &&
        [ -n "$AGENT_DO_DIR" ] &&
-       [ -x "$AGENT_DO_DIR/agent-do" ] &&
-       zpc_has_records "$CWD"; then
-        # cwd must be inside the project: inject resolves the store from there.
-        # AGENT_DO_ZPC_SOURCE tags the access log; the export dies with the
-        # subshell so it never leaks into the rest of the hook.
-        inject_out=$(cd "$CWD" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
-        inject_rc=$?
+       [ -x "$AGENT_DO_DIR/agent-do" ]; then
+        if zpc_has_records "$CWD"; then
+            # cwd must be inside the project: inject resolves the store from
+            # there. AGENT_DO_ZPC_SOURCE tags the access log; the export dies
+            # with the subshell so it never leaks into the rest of the hook.
+            inject_out=$(cd "$CWD" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
+            inject_rc=$?
 
-        if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
-            if [ ${#inject_out} -gt 6000 ]; then
-                inject_out="${inject_out:0:6000}"
-                # Back up to the last complete line: a cut landing mid-character
-                # would hand jq -Rs invalid UTF-8 and cost the whole envelope.
-                inject_out="${inject_out%$'\n'*}"
-                inject_out="$inject_out
+            if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
+                if [ ${#inject_out} -gt 6000 ]; then
+                    inject_out="${inject_out:0:6000}"
+                    # Back up to the last complete line: a cut landing
+                    # mid-character would hand jq -Rs invalid UTF-8 and cost
+                    # the whole envelope.
+                    inject_out="${inject_out%$'\n'*}"
+                    inject_out="$inject_out
 [zpc inject truncated]"
-            fi
+                fi
 
-            CONTEXT="$CONTEXT
+                CONTEXT="$CONTEXT
 
 ---
 
@@ -506,7 +592,13 @@ This project's recorded memory, loaded below. Read it before coding; it is alrea
 $inject_out
 
 Keep the loop closed: \`agent-do zpc learn\` and \`agent-do zpc decide\` as you work, \`agent-do zpc harvest\` after significant work."
-            return 0
+                return 0
+            fi
+        else
+            # A store with nothing in it yet — every project's first session,
+            # now that init runs automatically. Preferences beat an advisory
+            # nobody reads.
+            append_zpc_preferences "$CWD" && return 0
         fi
     fi
 
@@ -631,6 +723,9 @@ Screenshots for evaluation. Snapshots for inventory. Both, in that order."
 fi
 
 # --- Detect ZPC project → embed memory (advisory fallback) ---
+# Auto-init first: the baseline and the memory block below both read the store
+# this may have just created.
+zpc_autoinit
 zpc_write_session_baseline
 append_zpc_memory
 
