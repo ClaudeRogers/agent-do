@@ -83,6 +83,7 @@ display_path() { case "$1" in "$HOME"/*) echo "~${1#"$HOME"}" ;; *) echo "$1" ;;
 CLAUDE_SETTINGS_SPECS=(
     "SessionStart||agent-do-session-start.sh|10"
     "UserPromptSubmit||agent-do-prompt-router.py|5"
+    "UserPromptSubmit||agent-do-correction-keys.py|5"
     "PreToolUse|Bash|agent-do-pretooluse-check.py|5"
     "SessionEnd||agent-do-coord-stop.sh|10"
     "Stop||agent-do-zpc-write-nudge.sh|5"
@@ -315,6 +316,7 @@ uninstall() {
     local hooks=(
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
+        "agent-do-correction-keys.py"
         "agent-do-pretooluse-check.py"
         "agent-do-coord-stop.sh"
         "agent-do-zpc-write-nudge.sh"
@@ -526,6 +528,7 @@ mkdir -p "$CLAUDE_HOOKS_DIR"
 CLAUDE_HOOK_SPECS=(
     "agent-do-session-start.sh|hooks/claude/agent-do-session-start.sh|sh|required"
     "agent-do-prompt-router.py|hooks/claude/agent-do-prompt-router.py|py|required"
+    "agent-do-correction-keys.py|hooks/claude/agent-do-correction-keys.py|py|required"
     "agent-do-pretooluse-check.py|hooks/claude/agent-do-pretooluse-check.py|py|required"
     "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh|required"
     "agent-do-zpc-write-nudge.sh|hooks/claude/agent-do-zpc-write-nudge.sh|sh|optional"
