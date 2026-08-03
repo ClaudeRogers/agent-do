@@ -39,8 +39,10 @@ Commands:
   status                                 Show current state summary and interrupt counts
   interrupts [--mark-seen] [--limit N]   Show contention/notice/dependency/novelty interrupts
   focus set <goal> [--path <path> ...] [--phase <p>] [--note <text>]
-            [--blocking-on <ref> ...] [--last-ship <text>]
+            [--blocking-on <ref> ...] [--last-ship <text>] [--branch <name>]
                                          Set structured focus (phase: building|gating|watching|quiet|blocked|stopped)
+                                         --branch declares the branch this lane needs; a branch this
+                                         checkout is not on raises a mandatory-isolation interrupt
   focus show [peer]                      Show current focus
   focus clear                            Clear current focus
   claims                                 List advisory claims
@@ -61,12 +63,19 @@ Commands:
 Options:
   --json                                 Output structured JSON
 
+Environment:
+  AGENT_DO_COORD_ISOLATION_NUDGE=0       Silence the isolation nudge: contention interrupts stop
+                                         naming the remedy and a declared branch that differs from
+                                         HEAD stops raising one. Interrupts themselves are unchanged;
+                                         nothing here ever blocks or changes an exit code.
+
 Examples:
   agent-coord touch
   agent-coord whoami
   agent-coord role set builder --territory dm-ephemeris --territory shared/schema.json
   agent-coord focus set "lane 14 packaging" --path dm-ck --phase building
   agent-coord focus set "lane 14 packaging" --phase quiet --note "QUIET while tmux-30 audits"
+  agent-coord focus set "lane 14 packaging" --branch feat/packaging
   agent-coord claim recognition-oracle/render.yaml --reason "private Render blueprint wiring"
   agent-coord need add dm-sdk@1.2.2 --why "switch off tarball dependency"
   agent-coord publish add dm-sdk@1.2.2 --status ready --summary "private package published"
@@ -93,6 +102,46 @@ RUNTIMES = ("claude", "codex", "human", "other")
 FOCUS_PHASES = ("building", "gating", "watching", "quiet", "blocked", "stopped")
 ROLES = ("builder", "auditor", "researcher", "overseer")
 ROLE_DEFAULT_MODES = {"builder": "writer", "auditor": "read-only", "researcher": "read-only", "overseer": "read-only"}
+
+
+def env_off(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"0", "false", "off", "no"}
+
+
+# Whether contention interrupts name the isolation remedy, and whether a declared
+# branch that differs from HEAD raises one. Nudge text only: nothing blocks either way.
+ISOLATION_NUDGE = not env_off("AGENT_DO_COORD_ISOLATION_NUDGE")
+
+# Delete this caveat once mn-68d471 lands (worktrees bind board + memory to the
+# primary checkout); the remedy text below reads plainly without it.
+WORKTREE_CAVEAT = "caveat: a worktree may not share this board yet, so claims made there may not reach it (mn-68d471)"
+
+WORKTREE_COMMAND = "agent-do git worktree add <branch>"
+
+
+def overlap_remedy(paths: list[str]) -> list[str]:
+    """Ownership first: it is the cheaper fix, and disjoint lanes share one checkout safely."""
+    joined = ", ".join(paths) or "the contended paths"
+    return [
+        f"split ownership so each contended path has one owner: {joined} "
+        "(cheapest fix, and lanes with disjoint paths share one checkout safely)",
+        f"if the work truly cannot share a tree, isolate it: {WORKTREE_COMMAND} ({WORKTREE_CAVEAT})",
+    ]
+
+
+def branch_remedy(branch: str) -> list[str]:
+    """A branch mismatch is not a preference: one working tree holds one branch."""
+    return [
+        f"isolation is mandatory here: agent-do git worktree add {branch} ({WORKTREE_CAVEAT})",
+        "or drop the branch declaration and work on this checkout's branch",
+    ]
+
+
+def with_remedy(summary: str, remedy: list[str]) -> str:
+    if not remedy:
+        return summary
+    steps = "; ".join(f"{index}) {step}" for index, step in enumerate(remedy, start=1))
+    return f"{summary} — remedy: {steps}"
 
 
 def now() -> datetime:
@@ -160,6 +209,20 @@ def git_output(cwd: Path, *args: str) -> str | None:
     if completed.returncode != 0:
         return None
     return completed.stdout.strip()
+
+
+def normalize_branch(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if raw.startswith("refs/heads/"):
+        raw = raw[len("refs/heads/"):]
+    return raw or None
+
+
+def checkout_branch(cwd: Path) -> str | None:
+    """The branch this working tree is on; None when detached or outside a repo."""
+    return normalize_branch(git_output(cwd, "symbolic-ref", "--quiet", "--short", "HEAD"))
 
 
 def resolve_project_paths(cwd: Path) -> dict[str, str]:
@@ -729,6 +792,7 @@ class CoordStore:
         note: str | None = None,
         blocking_on: list[str] | None = None,
         last_ship: str | None = None,
+        branch: str | None = None,
     ) -> dict[str, Any]:
         self.register_self()
 
@@ -760,6 +824,7 @@ class CoordStore:
                 "note": resolve_text(note, existing.get("note")),
                 "blocking_on": resolved_blocking,
                 "last_ship": resolve_text(last_ship, existing.get("last_ship")),
+                "branch": normalize_branch(resolve_text(branch, existing.get("branch"))),
                 "updated_at": now_iso(),
             }
             focus[self.agent_id] = payload
@@ -770,6 +835,23 @@ class CoordStore:
                 summary=f"{payload.get('alias') or self.agent_id} set focus: {goal} [phase:{resolved_phase}]",
             )
         return payload
+
+    def branch_mismatch(self, focus: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """A lane declaring a branch this working tree is not on must isolate.
+
+        One working tree holds one branch, so unlike overlapping ownership this
+        is not a preference: no split of paths makes this checkout serve both.
+        """
+        if not ISOLATION_NUDGE:
+            return None
+        record = focus if focus is not None else (self.focus_for() or {})
+        declared = normalize_branch(record.get("branch"))
+        if not declared:
+            return None
+        head = checkout_branch(self.project_root)
+        if not head or head == declared:
+            return None
+        return {"declared": declared, "head": head, "remedy": branch_remedy(declared)}
 
     def clear_focus(self) -> dict[str, Any] | None:
         self.register_self()
@@ -1474,6 +1556,7 @@ class CoordStore:
             if not overlaps:
                 continue
             peer_label = peer.get("alias") or peer["agent_id"]
+            remedy = overlap_remedy(overlaps) if ISOLATION_NUDGE else []
             interrupts.append(
                 {
                     "kind": "contention",
@@ -1482,7 +1565,11 @@ class CoordStore:
                     "peer_label": peer_label,
                     "paths": overlaps,
                     "keys": [],
-                    "summary": f"{peer_label} is active in overlapping paths: {', '.join(overlaps)}",
+                    "summary": with_remedy(
+                        f"{peer_label} is active in overlapping paths: {', '.join(overlaps)}",
+                        remedy,
+                    ),
+                    "remedy": remedy,
                     "new": False,
                     "event_id": None,
                 }
@@ -1494,6 +1581,7 @@ class CoordStore:
         my_territory = self._record_territory(my_record)
         if my_mode == "writer" and my_territory:
             for overlap in self._territory_overlaps(my_territory, agents, mode="writer"):
+                remedy = overlap_remedy(overlap["paths"]) if ISOLATION_NUDGE else []
                 interrupts.append(
                     {
                         "kind": "contention",
@@ -1502,14 +1590,38 @@ class CoordStore:
                         "peer_label": overlap["peer_label"],
                         "paths": overlap["paths"],
                         "keys": [],
-                        "summary": (
+                        "summary": with_remedy(
                             f"Exclusive-writer overlap with {overlap['peer_label']}: "
-                            f"{', '.join(overlap['paths'])}"
+                            f"{', '.join(overlap['paths'])}",
+                            remedy,
                         ),
+                        "remedy": remedy,
                         "new": False,
                         "event_id": None,
                     }
                 )
+
+        # Declared branch that this working tree is not on: isolation is mandatory.
+        mismatch = self.branch_mismatch(focus)
+        if mismatch:
+            interrupts.append(
+                {
+                    "kind": "contention",
+                    "severity": "warning",
+                    "peer": None,
+                    "peer_label": None,
+                    "paths": [],
+                    "keys": [],
+                    "summary": with_remedy(
+                        f"Declared branch {mismatch['declared']} is not this checkout's branch "
+                        f"({mismatch['head']}): one working tree holds one branch",
+                        mismatch["remedy"],
+                    ),
+                    "remedy": mismatch["remedy"],
+                    "new": False,
+                    "event_id": None,
+                }
+            )
 
         # Courtesy notice: an auditor is reading paths this writer owns.
         if my_mode == "writer":
@@ -1797,6 +1909,7 @@ def parser() -> argparse.ArgumentParser:
     focus_set.add_argument("--note")
     focus_set.add_argument("--blocking-on", action="append", dest="blocking_on")
     focus_set.add_argument("--last-ship", dest="last_ship")
+    focus_set.add_argument("--branch")
     focus_show = focus_sub.add_parser("show")
     focus_show.add_argument("peer", nargs="?")
     focus_sub.add_parser("clear")
@@ -2017,8 +2130,17 @@ def main(argv: list[str]) -> int:
                 note=args.note,
                 blocking_on=args.blocking_on,
                 last_ship=args.last_ship,
+                branch=args.branch,
             )
-            return print_payload({"success": True, "tool": "coord", "focus": payload}, args.json)
+            return print_payload(
+                {
+                    "success": True,
+                    "tool": "coord",
+                    "focus": payload,
+                    "branch_mismatch": store.branch_mismatch(payload),
+                },
+                args.json,
+            )
         if args.focus_command == "show":
             payload = store.focus_for(args.peer)
             if payload is None:

@@ -1018,8 +1018,9 @@ Concurrency: `mixed`
 
 - mint session-UUID identities anchored to process pid + start time (pane reuse never inherits a dead session)
 - verify peer liveness (kill -0 + start-time match) and classify peers as active, idle, dead, stopped, or stale
-- declare structured focus (goal, phase, note, blocking_on, last_ship) with project-relative paths
+- declare structured focus (goal, phase, note, blocking_on, last_ship, branch) with project-relative paths
 - declare roles with exclusive-writer territories and compute overlap contention for both writers
+- name the isolation remedy in contention interrupts (split ownership first, worktree second) and flag a declared branch this checkout is not on as mandatory isolation
 - manage advisory claims and a warn-only pre-commit guard over live claims and territories
 - point peers at files via drops, declare dependencies, publish artifacts with file pointers
 - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
@@ -1038,7 +1039,7 @@ Concurrency: `mixed`
 - `guard`: Advisory commit guard: guard check [\<path> ...] [--staged] | guard install
 - `status`: Show current focus, needs, publishes, and interrupt counts
 - `interrupts`: Show current interrupts: interrupts [--mark-seen] [--limit \<n>]
-- `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] | show | clear
+- `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] [--branch \<name>] | show | clear
 - `claims`: List advisory claims
 - `claim`: Claim a file/path: claim \<path> [--reason \<text>] [--strength soft|strong]
 - `release`: Release a claim you own: release \<path>
@@ -1062,6 +1063,8 @@ agent-do coord role set builder --territory dm-ephemeris --territory shared/sche
 agent-do coord focus set "private Render networking" --path recognition-oracle/render.yaml --phase building
 # go quiet while another agent audits
 agent-do coord focus set "private Render networking" --phase quiet --note "QUIET while auditor runs"
+# declare the branch this lane needs so a mismatch with this checkout surfaces
+agent-do coord focus set "private Render networking" --branch feat/render-networking
 # claim a file to avoid overlap
 agent-do coord claim recognition-oracle/render.yaml --reason "private Render blueprint wiring"
 # declare that I am waiting on a package
