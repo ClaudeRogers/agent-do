@@ -462,18 +462,65 @@ zpc_autoinit() {
     (cd "$toplevel" && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --store-only) >/dev/null 2>&1 || return 0
 }
 
-# Owning uid of a path, following symlinks so a .zpc pointing somewhere else is
-# judged by what it actually resolves to. Prints nothing when it cannot tell,
-# and every caller treats "cannot tell" as "do not trust". GNU stat reads -f as
-# --file-system and answers with something that is not a uid at all, so the
-# answer has to look like one before it counts.
+# Owning uid of a path. Mode `link` reads the name itself; `target` (the
+# default) follows symlinks, so a .zpc pointing somewhere else is judged by what
+# it actually resolves to. Prints nothing when it cannot tell, and every caller
+# treats "cannot tell" as "do not trust". GNU stat reads -f as --file-system and
+# answers with something that is not a uid at all, so the answer has to look
+# like one before it counts.
 _path_uid() {
     local uid
-    uid=$(stat -L -f %u "$1" 2>/dev/null) || uid=$(stat -L -c %u "$1" 2>/dev/null) || return 1
+    if [ "${2:-target}" = "link" ]; then
+        uid=$(stat -f %u "$1" 2>/dev/null) || uid=$(stat -c %u "$1" 2>/dev/null) || return 1
+    else
+        uid=$(stat -L -f %u "$1" 2>/dev/null) || uid=$(stat -L -c %u "$1" 2>/dev/null) || return 1
+    fi
     case "$uid" in
         ''|*[!0-9]*) return 1 ;;
     esac
     printf '%s' "$uid"
+}
+
+# A store is ours only when we own both the name and what it resolves to: a
+# link owned by somebody else can be re-aimed whenever they like, and a link we
+# own can still land in a directory we do not. zpc applies the identical pair
+# (tools/agent-zpc/lib/common.sh:_zpc_store_is_ours).
+_zpc_store_is_ours() {
+    local uid
+    uid=$(_path_uid "$1" link) || return 1
+    [ "$uid" = "$EUID" ] || return 1
+    uid=$(_path_uid "$1" target) || return 1
+    [ "$uid" = "$EUID" ]
+}
+
+# A bound store stands in for another and holds nothing itself: `agent-git
+# worktree add` leaves one in every linked worktree, because .zpc/ is gitignored
+# and an unbound worktree would record its lessons into a store that dies with
+# `worktree remove`. Trusted only when the containing store passed the ownership
+# check (the caller's job), the file names an absolute path, that path is a
+# `.zpc` directory, and we own it by both name and target. One hop only.
+zpc_store_pointer_target() {
+    local pointer="$1/primary-store" line target=""
+    [ -f "$pointer" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        target="$line"
+        break
+    done < "$pointer"
+
+    target="${target%/}"
+    case "$target" in
+        /*/.zpc) ;;
+        *) return 1 ;;
+    esac
+    [ -d "$target" ] || return 1
+    _zpc_store_is_ours "$target" || return 1
+    printf '%s' "$target"
 }
 
 # The worktree holding a directory: nearest ancestor-or-self carrying .git.
@@ -511,7 +558,7 @@ zpc_worktree_root() {
 # stopping guards nothing — it only hands anyone who can write a directory on
 # your path a silent way to black out the real store above it.
 zpc_store_root() {
-    local dir="${1%/}" home under_home toplevel ceiling uid
+    local dir="${1%/}" home under_home toplevel ceiling target
 
     [ -n "$dir" ] || return 1
     home="${HOME:-}"
@@ -538,10 +585,17 @@ zpc_store_root() {
     fi
 
     while :; do
-        if [ -d "$dir/.zpc" ]; then
-            uid=$(_path_uid "$dir/.zpc")
-            # Not ours: fall through and keep climbing.
-            if [ -n "$uid" ] && [ "$uid" = "$EUID" ]; then
+        # Not ours: fall through and keep climbing. A bound store whose pointer
+        # no longer resolves is stepped over the same way — it holds no memory
+        # of its own, so answering with it would inject an empty store as this
+        # project's.
+        if [ -d "$dir/.zpc" ] && _zpc_store_is_ours "$dir/.zpc"; then
+            if [ -f "$dir/.zpc/primary-store" ]; then
+                if target=$(zpc_store_pointer_target "$dir/.zpc"); then
+                    printf '%s' "${target%/.zpc}"
+                    return 0
+                fi
+            else
                 printf '%s' "$dir"
                 return 0
             fi

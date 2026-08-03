@@ -1733,6 +1733,7 @@ Concurrency: `mixed`
 - inspect status, diffs, logs, conflicts, reflog, and unreachable commits
 - manage branches, stashes, remotes, and worktrees
 - seed named gitignored local files into fresh worktrees without overwriting targets
+- bind a new worktree's zpc memory to the primary store and warn that the manna board does not follow it
 - inspect and recover files from refs/auto shadow snapshots
 - preview safe branch cleanup before explicit apply
 
@@ -1748,7 +1749,7 @@ Concurrency: `mixed`
 - `push`: Push the current branch and establish upstream when absent
 - `sync`: Pull with rebase, then push
 - `snapshot`: Emit full repository state as JSON
-- `worktree add`: Add a worktree and seed named gitignored files by default
+- `worktree add`: Add a worktree, seed named gitignored files, and bind its zpc memory to this checkout's store
 - `worktree list`: List registered worktrees
 - `worktree remove`: Remove a clean registered worktree
 - `snap list`: List refs/auto shadow snapshots

@@ -24,7 +24,16 @@ Commands:
   push             Push to remote
   sync             Pull and push (sync with remote)
   snapshot          Full repo state as JSON (branch, status, log, remotes, stashes)
-  worktree add <branch> [--path <dir>] [--no-seed]
+  worktree add <branch> [--path <dir>] [--no-seed] [--no-bind]
+    Seeds named gitignored files, and binds the new worktree's zpc memory to
+    this checkout's store by writing .zpc/primary-store there — .zpc/ is
+    gitignored, so an unbound worktree records its lessons into a store that
+    dies with it. The pointer is honored only while both this checkout's store
+    and the worktree's .zpc are owned by you.
+    --no-seed  copy no gitignored files
+    --no-bind  give the worktree its own throwaway store instead
+    The manna board does NOT bind: each checkout carries its own .manna, so
+    worktree add warns and tells you to run board commands from here.
   worktree list
   worktree remove <path>
   snap list|diff
@@ -444,17 +453,93 @@ print(json.dumps({"ok": True, "worktrees": items}))
     fi
 }
 
+# The uid owning a path: `link` reads the name, `target` (default) reads what
+# it resolves to. Identical rule to zpc's own (tools/agent-zpc/lib/common.sh)
+# and the session-start hooks', because this writes the pointer those two then
+# trust. GNU stat reads -f as --file-system and answers with something that is
+# not a uid at all, so the answer has to look like one before it counts.
+_git_path_uid() {
+    local uid
+    if [[ "${2:-target}" == "link" ]]; then
+        uid="$(stat -f %u "$1" 2>/dev/null)"
+        [[ "$uid" =~ ^[0-9]+$ ]] || uid="$(stat -c %u "$1" 2>/dev/null)"
+    else
+        uid="$(stat -L -f %u "$1" 2>/dev/null)"
+        [[ "$uid" =~ ^[0-9]+$ ]] || uid="$(stat -L -c %u "$1" 2>/dev/null)"
+    fi
+    [[ "$uid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$uid"
+}
+
+_git_store_is_ours() {
+    local me="${EUID:-$(id -u)}" owner
+    owner="$(_git_path_uid "$1" link)" || return 1
+    [[ "$owner" == "$me" ]] || return 1
+    owner="$(_git_path_uid "$1" target)" || return 1
+    [[ "$owner" == "$me" ]]
+}
+
+# The store a new worktree should be bound to: the primary checkout's, or —
+# when the primary is itself a bound worktree — the store it points at, so the
+# chain stays one hop deep however many worktrees are nested. Prints nothing
+# and fails when there is no store worth binding to.
+_git_primary_zpc_store() {
+    local store="$1/.zpc" pointer target
+    [[ -d "$store" ]] || return 1
+    _git_store_is_ours "$store" || return 1
+
+    pointer="$store/primary-store"
+    if [[ -f "$pointer" ]]; then
+        target="$(grep -v '^[[:space:]]*#' "$pointer" 2>/dev/null | grep -m1 '[^[:space:]]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        target="${target%/}"
+        [[ -n "$target" && "$target" == /* && "$target" == */.zpc && -d "$target" ]] || return 1
+        _git_store_is_ours "$target" || return 1
+        printf '%s' "$target"
+        return 0
+    fi
+    printf '%s' "$store"
+}
+
+# Bind a fresh worktree's memory to the store that outlives it.
+#
+# .zpc/ is gitignored, so a linked worktree starts with no store at all, and
+# the session-start hook's auto-init then creates an empty one at the worktree
+# toplevel. Every lesson that agent records lands there and dies with
+# `worktree remove`. The binding is a real .zpc directory holding one pointer
+# file: real, because a symlink is not matched by the `.zpc/` ignore rule and
+# would leave the worktree untracked-dirty, which makes `worktree remove`
+# refuse without --force. Ownership is checked on both ends before writing,
+# and an existing .zpc in the destination is never touched.
+_git_bind_worktree_zpc() {
+    local repo_root="$1" destination="$2" store
+    [[ -e "$destination/.zpc" ]] && return 1
+    store="$(_git_primary_zpc_store "$repo_root")" || return 1
+
+    mkdir -p "$destination/.zpc" || return 1
+    chmod 700 "$destination/.zpc" 2>/dev/null || true
+    cat > "$destination/.zpc/primary-store" <<EOF || return 1
+# This worktree's memory lives in the checkout that outlives it.
+# zpc and the session-start hooks read the first path below and use that store
+# for everything: lessons, decisions, patterns, injected context. The pointer
+# is honored only when this directory and the target are both owned by you.
+# Delete this file to give the worktree its own throwaway store instead.
+$store
+EOF
+    printf '%s' "$store"
+}
+
 cmd_worktree_add() {
     local branch="${1:-}"
-    [[ -n "$branch" ]] || { echo "Usage: agent-git worktree add <branch> [--path <dir>] [--no-seed]" >&2; return 1; }
+    [[ -n "$branch" ]] || { echo "Usage: agent-git worktree add <branch> [--path <dir>] [--no-seed] [--no-bind]" >&2; return 1; }
     shift
     git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "Error: invalid branch name: $branch" >&2; return 1; }
 
-    local destination="" seed=true
+    local destination="" seed=true bind=true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --path) destination="${2:-}"; shift 2 ;;
             --no-seed) seed=false; shift ;;
+            --no-bind) bind=false; shift ;;
             *) echo "Error: unknown worktree add option: $1" >&2; return 1 ;;
         esac
     done
@@ -515,13 +600,36 @@ cmd_worktree_add() {
         done
     fi
 
+    local bound_store=""
+    if [[ "$bind" == "true" ]]; then
+        bound_store="$(_git_bind_worktree_zpc "$repo_root" "$destination" || true)"
+    fi
+
+    # The board does not bind. manna resolves .manna relative to the checkout
+    # (tools/agent-manna/src/store.rs) with no path override, so this worktree
+    # carries its own copy of the tracked board from the moment it exists, and
+    # claims made on either side never reach the other. That cannot be fixed
+    # from here, so it is said out loud instead: a fork the operator knows about
+    # is a decision, a fork nobody mentioned is a lost afternoon.
+    local board_warning=""
+    if [[ -d "$repo_root/.manna" ]]; then
+        board_warning="WARNING: the manna board does not follow this worktree.
+  $destination/.manna is a separate copy of the board at this branch's HEAD.
+  Claims, done, and block made from inside the worktree stay there, diverge
+  from the primary board, and collide when the branch merges.
+  Run board commands against the primary checkout instead:
+    (cd $repo_root && agent-do manna claim <id>)"
+    fi
+
     if [[ "$JSON_MODE" == "1" ]]; then
-        DESTINATION="$destination" BRANCH="$branch" SEED="$seed" \
+        [[ -n "$board_warning" ]] && printf '%s\n' "$board_warning" >&2
+        DESTINATION="$destination" BRANCH="$branch" SEED="$seed" BOUND="$bound_store" WARNING="$board_warning" \
         SEEDED="$(printf '%s\n' "${seeded[@]}")" SKIPPED="$(printf '%s\n' "${skipped[@]}")" \
         python3 -c '
 import json
 import os
 lines = lambda name: [line for line in os.environ.get(name, "").splitlines() if line]
+warning = os.environ.get("WARNING", "")
 print(json.dumps({
     "ok": True,
     "branch": os.environ["BRANCH"],
@@ -529,6 +637,8 @@ print(json.dumps({
     "seed_enabled": os.environ["SEED"] == "true",
     "seeded": lines("SEEDED"),
     "skipped_existing": lines("SKIPPED"),
+    "zpc_store": os.environ.get("BOUND") or None,
+    "warnings": [warning] if warning else [],
 }))
 '
     else
@@ -536,7 +646,12 @@ print(json.dumps({
         echo "Worktree: $destination"
         [[ "$seed" == "true" ]] && echo "Seeded: ${seeded[*]:-(none)}"
         [[ ${#skipped[@]} -gt 0 ]] && echo "Skipped existing: ${skipped[*]}"
+        [[ -n "$bound_store" ]] && echo "ZPC memory: bound to $bound_store"
+        [[ -n "$board_warning" ]] && printf '\n%s\n' "$board_warning"
     fi
+    # An explicit success: every line above is a conditional, and under `set -e`
+    # the last one to be false would otherwise become this command's exit code.
+    return 0
 }
 
 cmd_worktree_remove() {

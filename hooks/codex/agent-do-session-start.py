@@ -354,6 +354,53 @@ def zpc_worktree_root(cwd: Path) -> Path | None:
         probe = probe.parent
 
 
+def zpc_store_is_ours(store: Path) -> bool:
+    """A store is ours only when we own both the name and what it resolves to.
+
+    A link owned by somebody else can be re-aimed whenever they like, and a link
+    we own can still land in a directory we do not. zpc applies the identical
+    pair (tools/agent-zpc/lib/common.sh:_zpc_store_is_ours).
+    """
+    me = os.getuid()
+    try:
+        if store.lstat().st_uid != me:
+            return False
+        return store.stat().st_uid == me
+    except OSError:
+        return False
+
+
+def zpc_store_pointer_target(store: Path) -> Path | None:
+    """The store a bound one stands in for, or None when it cannot be trusted.
+
+    `agent-git worktree add` leaves a bound store in every linked worktree,
+    because .zpc/ is gitignored and an unbound worktree would record its lessons
+    into a store that dies with `worktree remove`. Trusted only when the
+    containing store passed the ownership check (the caller's job), the file
+    names an absolute path, that path is a `.zpc` directory, and we own it by
+    both name and target. One hop only — a target's own pointer is not followed.
+    """
+    try:
+        raw = (store / "primary-store").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    target = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        target = line
+        break
+
+    if not target.startswith("/"):
+        return None
+    path = Path(target)
+    if path.name != ".zpc" or not path.is_dir():
+        return None
+    return path if zpc_store_is_ours(path) else None
+
+
 def zpc_store_root(cwd: str) -> Path | None:
     """Where zpc would resolve a store from here — the upward walk
     resolve_zpc_dir does (tools/agent-zpc/lib/common.sh) — but bounded and
@@ -375,7 +422,6 @@ def zpc_store_root(cwd: str) -> Path | None:
     above it.
     """
     probe = Path(str(cwd).rstrip("/") or "/")
-    me = os.getuid()
 
     home = (os.environ.get("HOME") or "").rstrip("/")
     under_home = bool(home) and (
@@ -396,14 +442,17 @@ def zpc_store_root(cwd: str) -> Path | None:
 
     while True:
         store = probe / ".zpc"
-        if store.is_dir():
-            try:
-                # stat() follows symlinks, so a .zpc pointing elsewhere is
-                # judged by what it actually resolves to.
-                if store.stat().st_uid == me:
-                    return probe
-            except OSError:
-                pass
+        # Not ours: fall through and keep climbing. A bound store whose pointer
+        # no longer resolves is stepped over the same way — it holds no memory
+        # of its own, so answering with it would inject an empty store as this
+        # project's.
+        if store.is_dir() and zpc_store_is_ours(store):
+            if (store / "primary-store").is_file():
+                target = zpc_store_pointer_target(store)
+                if target is not None:
+                    return target.parent
+            else:
+                return probe
         if probe == ceiling or probe.parent == probe:
             break
         probe = probe.parent

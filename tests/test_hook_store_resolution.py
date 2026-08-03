@@ -60,6 +60,8 @@ def bash_store_root(cwd: str, home: str | None = None) -> str:
     """
     parts = [
         _extract_bash_func("_path_uid"),
+        _extract_bash_func("_zpc_store_is_ours"),
+        _extract_bash_func("zpc_store_pointer_target"),
         _extract_bash_func("zpc_worktree_root"),
         _extract_bash_func("zpc_store_root"),
     ]
@@ -285,6 +287,50 @@ def main() -> int:
             answer == str(owned),
             f"got {answer!r}",
         )
+
+    # --- a bound store: the pointer `agent-git worktree add` leaves in a linked
+    # worktree, whose whole purpose is that all three resolvers walk through it
+    # to the checkout that outlives the worktree. If one of them stops at the
+    # pointer instead, that session's lessons die with `worktree remove`.
+    with tempfile.TemporaryDirectory() as tmp:
+        primary = Path(tmp).resolve() / "primary"
+        (primary / ".zpc" / "memory").mkdir(parents=True)
+        (primary / ".zpc" / "memory" / "lessons.jsonl").write_text("", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(primary)], check=False)
+
+        worktree = Path(tmp).resolve() / "worktree"
+        (worktree / ".zpc").mkdir(parents=True)
+        (worktree / ".git").write_text(f"gitdir: {primary}/.git/worktrees/worktree\n", encoding="utf-8")
+        (worktree / ".zpc" / "primary-store").write_text(
+            f"# bound by agent-git worktree add\n{primary}/.zpc\n", encoding="utf-8"
+        )
+
+        print("a worktree bound to the primary checkout's store:")
+        truth = zpc_reported_project(str(worktree))
+        check(
+            "zpc status --json resolves through the pointer",
+            truth == str(primary),
+            f"got {truth!r}, want {str(primary)!r}",
+        )
+        codex_answer = codex.zpc_store_root(str(worktree))
+        check(
+            "codex hook agrees with zpc",
+            codex_answer is not None and str(codex_answer) == truth,
+            f"hook {str(codex_answer)!r} vs zpc {truth!r}",
+        )
+        bash_answer = bash_store_root(str(worktree))
+        check("claude hook agrees with zpc", bash_answer == truth, f"hook {bash_answer!r} vs zpc {truth!r}")
+
+        print("the same pointer, aimed at a directory owned by another uid:")
+        (worktree / ".zpc" / "primary-store").write_text("/usr\n", encoding="utf-8")
+        check("zpc refuses it", zpc_reported_project(str(worktree)) == "")
+        check(
+            "codex hook refuses it",
+            codex.zpc_store_root(str(worktree)) is None,
+            f"got {str(codex.zpc_store_root(str(worktree)))!r}",
+        )
+        answer = bash_store_root(str(worktree))
+        check("claude hook refuses it", answer == "", f"got {answer!r}")
 
     if FAILURES:
         print(f"\nhook store resolution tests FAILED ({len(FAILURES)})")

@@ -700,6 +700,36 @@ EOF
 
     local project_dir="$PWD"
 
+    # A checkout bound to another's store already has its memory: the binding is
+    # the store. Initializing over it plants a decoy nothing reads — resolution
+    # prefers the pointer — and, without --store-only, dirties the worktree's
+    # tracked .gitignore besides. --force is the way through, as everywhere else
+    # in init; deleting the pointer file is the other.
+    local bound=""
+    if [[ "$force" == true ]]; then
+        # --force asked for a local store, so it gets one: leaving the pointer
+        # in place would keep sending every write to the other checkout and make
+        # the store this just created a decoy.
+        rm -f "$project_dir/.zpc/${ZPC_POINTER_FILE:-primary-store}"
+    elif _zpc_store_is_ours "$project_dir/.zpc" 2>/dev/null; then
+        bound="$(_zpc_store_pointer_target "$project_dir/.zpc" 2>/dev/null || true)"
+    fi
+    if [[ -n "$bound" ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            BOUND="$bound" PROJECT="$project_dir" python3 -c '
+import json, os
+print(json.dumps({
+    "success": True,
+    "result": {"created": [], "bound_to": os.environ["BOUND"], "project": os.environ["PROJECT"]},
+}))
+'
+        else
+            echo "Already bound: $project_dir keeps its memory in $bound"
+            echo "  (.zpc/primary-store points there; delete it, or pass --force, for a local store)"
+        fi
+        return 0
+    fi
+
     # Create directories
     mkdir -p "$project_dir/.zpc/memory"
     mkdir -p "$project_dir/.zpc/team"
