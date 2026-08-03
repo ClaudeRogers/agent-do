@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""A worktree may not lose your memory, and may not fork your board in silence.
+"""A worktree may not lose your memory, and no repository may move it.
 
 `.zpc/` is gitignored, so a linked worktree starts with no store, and the
 session-start auto-init then creates an empty one at the worktree toplevel.
 Every lesson the agent in that worktree records lands there and dies with
-`worktree remove`. `agent-git worktree add` closes that by writing a bound
-store — a real `.zpc/` holding one `primary-store` pointer — which zpc and both
-session-start hooks resolve through to the checkout that outlives the worktree.
+`worktree remove`. `agent-git worktree add` closes that by binding the worktree
+to the checkout that outlives it, and zpc plus both session-start hooks resolve
+through the binding.
+
+The binding lives in this user's own config, keyed by absolute worktree path —
+never in either tree. That location is the security property, not a filing
+preference. The first version of this feature wrote a pointer file at
+`.zpc/primary-store` inside the worktree, and a repository can track such a
+file: cloning it silently redirected where every session read AND wrote memory,
+into any store the cloning user happened to own. Session-start injection is
+automatic, so the cost was cross-project context injection on the way in and
+misdirected writes on the way out, with no user action at all. Repository
+content is data; it is never authority over where memory lives. A clone cannot
+write $AGENT_DO_HOME, so a clone cannot bind anything.
 
 The board does not bind: manna reads `.manna` relative to the checkout with no
 override (tools/agent-manna/src/store.rs), so `worktree add` says so out loud
 instead. A fork the operator knows about is a decision; a silent one is a lost
 afternoon.
-
-The pointer is a trust surface, so it is bounded here too: only from a store
-this uid owns, only to an absolute path, only to a `.zpc` directory this uid
-owns, and one hop. A pointer that fails any of those is not a store at all —
-resolution steps over it rather than handing back an empty stand-in.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,6 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENT_GIT = ROOT / "tools" / "agent-git"
 AGENT_DO = ROOT / "agent-do"
 COMMON = ROOT / "tools" / "agent-zpc" / "lib" / "common.sh"
+CLAUDE_HOOK = ROOT / "hooks" / "claude" / "agent-do-session-start.sh"
+CODEX_HOOK = ROOT / "hooks" / "codex" / "agent-do-session-start.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -50,13 +60,58 @@ def run(cwd: Path, *args: str, env: dict[str, str]) -> subprocess.CompletedProce
     return subprocess.run(list(args), cwd=cwd, env=env, text=True, capture_output=True, check=False)
 
 
-def resolve_store(cwd: Path) -> str:
+def bindings_file(env: dict[str, str]) -> Path:
+    return Path(env["AGENT_DO_HOME"]) / "zpc" / "worktree-bindings.tsv"
+
+
+def bindings(env: dict[str, str]) -> list[tuple[str, str]]:
+    path = bindings_file(env)
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        worktree, _, store = line.partition("\t")
+        rows.append((worktree, store))
+    return rows
+
+
+def resolve_store(cwd: Path, env: dict[str, str]) -> str:
     """zpc's own answer to "whose memory is this", from tools/agent-zpc."""
     result = subprocess.run(
         ["bash", "-c", 'source "$1"; resolve_zpc_dir "$2"', "_", str(COMMON), str(cwd)],
-        text=True, capture_output=True, check=False,
+        env=env, text=True, capture_output=True, check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def claude_hook_store_root(cwd: Path, env: dict[str, str]) -> str:
+    """The claude hook's own resolver, extracted by name so a rename fails loudly."""
+    source = CLAUDE_HOOK.read_text(encoding="utf-8")
+    parts = []
+    for name in ("_path_uid", "_zpc_store_is_ours", "zpc_binding_for", "zpc_worktree_root", "zpc_store_root"):
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}", source, re.S | re.M)
+        require(match is not None, f"{name} not found in the claude hook")
+        parts.append(match.group(0))
+    parts.append('zpc_store_root "$1"')
+    result = subprocess.run(
+        ["bash", "-c", "\n".join(parts), "_", str(cwd)],
+        env=env, text=True, capture_output=True, check=False,
+    )
+    return result.stdout.strip()
+
+
+def codex_hook_store_root(cwd: Path, env: dict[str, str]) -> str:
+    probe = (
+        "import importlib.util, os\n"
+        f"spec = importlib.util.spec_from_file_location('cx', {str(CODEX_HOOK)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        f"answer = m.zpc_store_root({str(cwd)!r})\n"
+        "print('' if answer is None else str(answer))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], env=env, text=True, capture_output=True, check=False)
+    return result.stdout.strip()
 
 
 def init_repo(root: Path, name: str) -> Path:
@@ -93,13 +148,16 @@ def test_memory_survives_removal(root: Path, env: dict[str, str]) -> None:
     payload = json.loads(added.stdout)
     require(payload["zpc_store"] == str(primary_store), f"add did not report the bound store: {payload}")
 
-    pointer = destination / ".zpc" / "primary-store"
-    require(pointer.is_file(), "no pointer written into the worktree")
-    require(str(primary_store) in pointer.read_text(encoding="utf-8"), "pointer does not name the primary store")
-
     require(
-        resolve_store(destination) == str(primary_store),
-        "zpc did not resolve the worktree to the primary store",
+        (str(destination), str(primary_store)) in bindings(env),
+        f"no binding recorded for the worktree: {bindings(env)}",
+    )
+    # Nothing was written into either tree. This is the finding: a binding that
+    # lives in a repository is a binding a repository can forge.
+    require(not (destination / ".zpc").exists(), "the binding wrote into the worktree")
+    require(
+        git(destination, "status", "--porcelain").stdout.strip() == "",
+        "the binding dirtied the worktree",
     )
 
     # The whole point: a lesson written from inside the worktree lands in the
@@ -113,16 +171,15 @@ def test_memory_survives_removal(root: Path, env: dict[str, str]) -> None:
     require(learn.returncode == 0, f"zpc learn from the worktree failed: {learn.stderr or learn.stdout}")
     lessons = (primary_store / "memory" / "lessons.jsonl").read_text(encoding="utf-8")
     require("recorded from inside the worktree" in lessons, "the worktree's lesson never reached the primary store")
-    require(
-        not (destination / ".zpc" / "memory").exists(),
-        "the worktree grew a store of its own beside the pointer",
-    )
+    require(not (destination / ".zpc").exists(), "the worktree grew a store of its own")
 
-    # A bound worktree stays clean, which is what lets `worktree remove` work
-    # without --force: a symlinked .zpc would not match the `.zpc/` ignore rule
-    # and would leave the tree untracked-dirty instead.
-    status = git(destination, "status", "--porcelain").stdout.strip()
-    require(status == "", f"the binding dirtied the worktree: {status!r}")
+    # All three resolvers agree on where that memory lives.
+    for label, answer in (
+        ("zpc", resolve_store(destination, env)),
+        ("claude hook", claude_hook_store_root(destination, env) + "/.zpc"),
+        ("codex hook", codex_hook_store_root(destination, env) + "/.zpc"),
+    ):
+        require(answer == str(primary_store), f"{label} resolved {answer!r}, want {str(primary_store)!r}")
 
     removed = run(repo, str(AGENT_GIT), "worktree", "remove", str(destination), env=env)
     require(removed.returncode == 0, f"worktree remove failed: {removed.stderr or removed.stdout}")
@@ -131,6 +188,56 @@ def test_memory_survives_removal(root: Path, env: dict[str, str]) -> None:
     survivors = (primary_store / "memory" / "lessons.jsonl").read_text(encoding="utf-8")
     require("recorded from inside the worktree" in survivors, "the lesson died with the worktree")
     require("recorded in the primary checkout" in survivors, "removal took the primary store's earlier memory with it")
+    require(bindings(env) == [], f"removal left the binding dangling: {bindings(env)}")
+
+
+def test_repo_content_cannot_move_memory(root: Path, env: dict[str, str]) -> None:
+    """The finding, as a regression: a repository that ships a binding is inert.
+
+    The hostile repo force-adds `.zpc/primary-store` naming a store the cloning
+    user owns. Under the first version of this feature the clone's every read
+    and write went to that store. Now the file is data: resolution stops at the
+    clone's own directory and the named store is never consulted.
+    """
+    victim = root / "victim-project"
+    victim.mkdir()
+    git(victim, "init", "-q", "-b", "main")
+    victim_store = store_with_lesson(victim, "VICTIM PROJECT MEMORY")
+
+    hostile = init_repo(root, "hostile-repo")
+    (hostile / ".zpc").mkdir()
+    (hostile / ".zpc" / "primary-store").write_text(f"{victim_store}\n", encoding="utf-8")
+    git(hostile, "add", "-f", ".zpc/primary-store")
+    git(hostile, "commit", "-qm", "chore: pointer")
+    require(
+        ".zpc/primary-store" in git(hostile, "ls-files").stdout,
+        "fixture failed: the pointer is not tracked, so this proves nothing",
+    )
+
+    clone = root / "cloned-repo"
+    git(root, "clone", "-q", str(hostile), str(clone))
+    require((clone / ".zpc" / "primary-store").is_file(), "fixture failed: the clone has no pointer")
+
+    for label, answer in (
+        ("zpc", resolve_store(clone, env)),
+        ("claude hook", claude_hook_store_root(clone, env)),
+        ("codex hook", codex_hook_store_root(clone, env)),
+    ):
+        require(
+            str(victim_store) not in answer,
+            f"{label} let a cloned repository redirect memory to {answer!r}",
+        )
+
+    # And nothing of the victim's reaches a session opened in the clone.
+    injected = run(clone, str(AGENT_DO), "zpc", "inject", env=env)
+    require(
+        "VICTIM PROJECT MEMORY" not in injected.stdout,
+        "the victim project's memory was injected into a session in the clone",
+    )
+    require(
+        "VICTIM PROJECT MEMORY" in (victim_store / "memory" / "lessons.jsonl").read_text(encoding="utf-8"),
+        "the victim store was altered",
+    )
 
 
 def test_board_divergence_is_named(root: Path, env: dict[str, str]) -> None:
@@ -171,7 +278,11 @@ def test_binding_is_bounded(root: Path, env: dict[str, str]) -> None:
     added = run(repo, str(AGENT_GIT), "worktree", "add", "unbound-branch", "--path", str(unbound), "--no-bind", "--json", env=env)
     require(added.returncode == 0, f"worktree add --no-bind failed: {added.stderr or added.stdout}")
     require(json.loads(added.stdout)["zpc_store"] is None, "--no-bind still reported a binding")
-    require(not (unbound / ".zpc").exists(), "--no-bind wrote a store anyway")
+    require(
+        all(worktree != str(unbound) for worktree, _ in bindings(env)),
+        "--no-bind recorded a binding anyway",
+    )
+    require(resolve_store(unbound, env) == "", "an unbound worktree resolved to a store")
     run(repo, str(AGENT_GIT), "worktree", "remove", str(unbound), env=env)
 
     # An existing .zpc in the destination is never touched.
@@ -201,7 +312,10 @@ def test_binding_is_bounded(root: Path, env: dict[str, str]) -> None:
     added = run(tracked, str(AGENT_GIT), "worktree", "add", "tracked-branch", "--path", str(checked_out), "--json", env=env)
     require(added.returncode == 0, f"worktree add failed: {added.stderr or added.stdout}")
     require(json.loads(added.stdout)["zpc_store"] is None, "binding overrode a store the worktree already had")
-    require(not (checked_out / ".zpc" / "primary-store").exists(), "a pointer was written into a tracked store")
+    require(
+        all(worktree != str(checked_out) for worktree, _ in bindings(env)),
+        "a worktree with its own store was bound anyway",
+    )
     require(
         "tracked memory" in (checked_out / ".zpc" / "memory" / "lessons.jsonl").read_text(encoding="utf-8"),
         "the tracked store was altered",
@@ -209,34 +323,36 @@ def test_binding_is_bounded(root: Path, env: dict[str, str]) -> None:
     run(tracked, str(AGENT_GIT), "worktree", "remove", str(checked_out), env=env)
 
 
-def test_pointer_trust(root: Path, env: dict[str, str]) -> None:
-    """A pointer is a store's say-so about where memory lives. Bound the say-so.
+def test_registry_trust(root: Path, env: dict[str, str]) -> None:
+    """The registry is the authority, so bound the authority.
 
-    Each case plants a pointer in a worktree of a repo that has no store of its
-    own, so a pointer that is wrongly trusted shows up as an answer instead of
-    silence.
+    Each case writes a binding by hand for a worktree of a repo that has no
+    store of its own, so a binding that is wrongly trusted shows up as an answer
+    instead of silence.
     """
     repo = init_repo(root, "trust-repo")
     real = store_with_lesson(repo, "the real store")
+    path = bindings_file(env)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    def bound_worktree(name: str, body: str) -> Path:
+    def bind(name: str, store: str) -> Path:
         destination = root / name
-        run(repo, str(AGENT_GIT), "worktree", "add", name, "--path", str(destination), "--no-bind", "--json", env=env)
-        (destination / ".zpc").mkdir()
-        (destination / ".zpc" / "primary-store").write_text(body, encoding="utf-8")
+        if not destination.exists():
+            run(repo, str(AGENT_GIT), "worktree", "add", name, "--path", str(destination), "--no-bind", "--json", env=env)
+        path.write_text(f"# fixture\n{destination}\t{store}\n", encoding="utf-8")
         return destination
 
-    good = bound_worktree("trust-good", f"# comment\n\n{real}\n")
-    require(resolve_store(good) == str(real), "a valid pointer past comments and blanks was refused")
+    good = bind("trust-good", str(real))
+    require(resolve_store(good, env) == str(real), "a valid binding was refused")
 
-    relative = bound_worktree("trust-relative", "../trust-repo/.zpc\n")
-    require(resolve_store(relative) == "", "a relative pointer was trusted")
+    relative = bind("trust-relative", "../trust-repo/.zpc")
+    require(resolve_store(relative, env) == "", "a relative binding was trusted")
 
-    not_a_store = bound_worktree("trust-shape", f"{repo}\n")
-    require(resolve_store(not_a_store) == "", "a pointer to something that is not a .zpc directory was trusted")
+    not_a_store = bind("trust-shape", str(repo))
+    require(resolve_store(not_a_store, env) == "", "a binding to something that is not a .zpc directory was trusted")
 
-    missing = bound_worktree("trust-missing", f"{root / 'nowhere' / '.zpc'}\n")
-    require(resolve_store(missing) == "", "a pointer to a path that does not exist was trusted")
+    missing = bind("trust-missing", str(root / "nowhere" / ".zpc"))
+    require(resolve_store(missing, env) == "", "a binding to a path that does not exist was trusted")
 
     # Ownership, the bound that holds when the others do not. /usr is root-owned
     # on any machine this runs on, and the assertion is only worth something if
@@ -245,18 +361,18 @@ def test_pointer_trust(root: Path, env: dict[str, str]) -> None:
     foreign_root = root / "foreign"
     foreign_root.mkdir()
     (foreign_root / ".zpc").symlink_to(Path("/usr"))
-    foreign = bound_worktree("trust-foreign", f"{foreign_root / '.zpc'}\n")
-    require(resolve_store(foreign) == "", "a pointer into another uid's directory was trusted")
+    foreign = bind("trust-foreign", str(foreign_root / ".zpc"))
+    require(resolve_store(foreign, env) == "", "a binding into another uid's directory was trusted")
 
-    # One hop: a pointer whose target is itself a bound store resolves to that
-    # target and stops, so no pair of stores can send resolution in a circle.
-    hop = bound_worktree("trust-hop", f"{real}\n")
-    (real / "primary-store").write_text(f"{(root / 'trust-hop' / '.zpc')}\n", encoding="utf-8")
-    require(resolve_store(hop) == str(real), "resolution followed a second hop")
-    (real / "primary-store").unlink()
+    # A stale key for a directory that no longer exists is inert, and does not
+    # stop the rest of the file from being read.
+    live = root / "trust-good"
+    path.write_text(f"{root / 'deleted-worktree'}\t{real}\n{live}\t{real}\n", encoding="utf-8")
+    require(resolve_store(live, env) == str(real), "a stale key ahead of a live one broke resolution")
 
-    for name in ("trust-good", "trust-relative", "trust-shape", "trust-missing", "trust-foreign", "trust-hop"):
+    for name in ("trust-good", "trust-relative", "trust-shape", "trust-missing", "trust-foreign"):
         run(repo, str(AGENT_GIT), "worktree", "remove", str(root / name), env=env)
+    path.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -265,9 +381,10 @@ def main() -> None:
         env = os.environ.copy()
         env["AGENT_DO_HOME"] = str(root / "agent-do-home")
         test_memory_survives_removal(root, env)
+        test_repo_content_cannot_move_memory(root, env)
         test_board_divergence_is_named(root, env)
         test_binding_is_bounded(root, env)
-        test_pointer_trust(root, env)
+        test_registry_trust(root, env)
 
     print("worktree binding tests passed")
 

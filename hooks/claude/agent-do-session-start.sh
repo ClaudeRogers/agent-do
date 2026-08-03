@@ -450,6 +450,11 @@ zpc_autoinit() {
     done
     [ -d "$toplevel/.zpc" ] && return 0
 
+    # A bound worktree already has memory — someone else's directory holds it.
+    # Creating a store here would shadow that binding on the very next session
+    # and put this tree back on the path where its lessons die with it.
+    zpc_binding_for "$toplevel" >/dev/null 2>&1 && return 0
+
     # init's argument loop swallows flags it does not know, so asking an older
     # zpc for --store-only gets a full invasive init that reports success. The
     # gate has to be positive: no such flag in the help text, no auto-init.
@@ -493,34 +498,42 @@ _zpc_store_is_ours() {
     [ "$uid" = "$EUID" ]
 }
 
-# A bound store stands in for another and holds nothing itself: `agent-git
-# worktree add` leaves one in every linked worktree, because .zpc/ is gitignored
-# and an unbound worktree would record its lessons into a store that dies with
-# `worktree remove`. Trusted only when the containing store passed the ownership
-# check (the caller's job), the file names an absolute path, that path is a
-# `.zpc` directory, and we own it by both name and target. One hop only.
-zpc_store_pointer_target() {
-    local pointer="$1/primary-store" line target=""
-    [ -f "$pointer" ] || return 1
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        case "$line" in
+# The store a directory is bound to, or nothing. `agent-git worktree add` binds
+# every linked worktree it creates, because .zpc/ is gitignored and an unbound
+# worktree would record its lessons into a store that dies with
+# `worktree remove`.
+#
+# The binding lives in this user's config, never in the repository, and that
+# location is the whole security property: a pointer file inside the tree would
+# let repository content decide where this hook reads memory from and where the
+# session writes it, and this hook injects what it finds as the project's
+# recorded truth without anyone asking. A clone cannot write $AGENT_DO_HOME.
+# Trust rules identical to zpc's (tools/agent-zpc/lib/common.sh:_zpc_binding_for).
+zpc_binding_for() {
+    local key="${1%/}" bindings worktree store
+    [ -n "$key" ] || return 1
+    bindings="${AGENT_DO_HOME:-$HOME/.agent-do}/zpc/worktree-bindings.tsv"
+    [ -f "$bindings" ] || return 1
+    _zpc_store_is_ours "$bindings" || return 1
+
+    while IFS="$(printf '\t')" read -r worktree store || [ -n "$worktree" ]; do
+        case "$worktree" in
             ''|'#'*) continue ;;
         esac
-        target="$line"
-        break
-    done < "$pointer"
+        [ "${worktree%/}" = "$key" ] || continue
+        store="${store%$'\r'}"
+        store="${store%/}"
+        case "$store" in
+            /*/.zpc) ;;
+            *) return 1 ;;
+        esac
+        [ -d "$store" ] || return 1
+        _zpc_store_is_ours "$store" || return 1
+        printf '%s' "$store"
+        return 0
+    done < "$bindings"
 
-    target="${target%/}"
-    case "$target" in
-        /*/.zpc) ;;
-        *) return 1 ;;
-    esac
-    [ -d "$target" ] || return 1
-    _zpc_store_is_ours "$target" || return 1
-    printf '%s' "$target"
+    return 1
 }
 
 # The worktree holding a directory: nearest ancestor-or-self carrying .git.
@@ -585,20 +598,16 @@ zpc_store_root() {
     fi
 
     while :; do
-        # Not ours: fall through and keep climbing. A bound store whose pointer
-        # no longer resolves is stepped over the same way — it holds no memory
-        # of its own, so answering with it would inject an empty store as this
-        # project's.
+        # Not ours: fall through and keep climbing. A real store at a rung
+        # answers before that rung's binding does — memory sitting in front of
+        # you outranks a note about memory elsewhere.
         if [ -d "$dir/.zpc" ] && _zpc_store_is_ours "$dir/.zpc"; then
-            if [ -f "$dir/.zpc/primary-store" ]; then
-                if target=$(zpc_store_pointer_target "$dir/.zpc"); then
-                    printf '%s' "${target%/.zpc}"
-                    return 0
-                fi
-            else
-                printf '%s' "$dir"
-                return 0
-            fi
+            printf '%s' "$dir"
+            return 0
+        fi
+        if target=$(zpc_binding_for "$dir"); then
+            printf '%s' "${target%/.zpc}"
+            return 0
         fi
         [ "$dir" = "$ceiling" ] && break
         [ "$dir" = "/" ] && break

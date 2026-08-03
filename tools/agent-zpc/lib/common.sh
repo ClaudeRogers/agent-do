@@ -4,9 +4,10 @@
 
 ZPC_GLOBAL_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/zpc"
 
-# The file that makes a store a stand-in for another one. See
-# _zpc_store_pointer_target for what it may contain and who may write it.
-ZPC_POINTER_FILE="primary-store"
+# Where memory bindings live: outside every repository, in this user's own
+# config. See _zpc_binding_for for the format and why the location is the
+# security property.
+ZPC_BINDINGS_FILE="$ZPC_GLOBAL_DIR/worktree-bindings.tsv"
 
 # The uid owning a path, or nothing if it cannot be read. Mode `link` reads the
 # path itself, `target` (the default) reads what it resolves to. BSD form first
@@ -43,35 +44,48 @@ _zpc_store_is_ours() {
     [[ "$owner" == "$me" ]]
 }
 
-# A bound store stands in for another and holds nothing itself. A linked
-# worktree gets one from `agent-git worktree add`: .zpc/ is gitignored, so a
-# fresh worktree starts blank, and every lesson written inside it would die
-# with `worktree remove`. The pointer sends them to the checkout that outlives
-# it instead.
+# The store a directory is bound to, or nothing.
 #
-# Trusted only when all of it holds: the containing store passed the ownership
-# check (the caller's job, done before this runs), the file names an absolute
-# path, that path is a `.zpc` directory, and this user owns it by both name and
-# target. One hop only — a target's own pointer is not followed, so no pair of
-# stores can send resolution in a circle. `#` lines and blanks are skipped so
-# the file can explain itself to whoever opens it.
-_zpc_store_pointer_target() {
-    local pointer="$1/$ZPC_POINTER_FILE" line target=""
-    [[ -f "$pointer" ]] || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%$'\r'}"
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -n "$line" && "$line" != \#* ]] || continue
-        target="$line"
-        break
-    done < "$pointer"
+# A linked worktree has no memory of its own: .zpc/ is gitignored, so it starts
+# blank, and every lesson written inside it would die with `worktree remove`.
+# `agent-git worktree add` binds it to the checkout that outlives it.
+#
+# The binding lives in this user's config, never in the repository, and that
+# location IS the security property. A pointer file inside the tree would make
+# repository content the authority over where memory is read and written: a
+# repo can track such a file (nothing stops `git add -f`, and a repo that does
+# not ignore .zpc/ needs no force at all), and cloning it would silently
+# redirect a session's memory into another project's store — injected as this
+# project's recorded truth on the way in, and written to on the way out. A
+# clone cannot write $AGENT_DO_HOME, so a clone cannot bind anything.
+#
+# Format: one binding per line, <absolute worktree>TAB<absolute .zpc>, `#`
+# comments and blanks skipped. Paths containing a tab or newline are refused at
+# write time rather than escaped, which keeps every reader a plain line split.
+#
+# Trusted only when all of it holds: the bindings file is this user's by both
+# name and target, the value is an absolute path to a `.zpc` directory, and
+# this user owns that too. One hop only — the target's own binding, if it
+# somehow has one, is not followed.
+_zpc_binding_for() {
+    local key="${1%/}" line worktree store
+    [[ -n "$key" ]] || return 1
+    [[ -f "$ZPC_BINDINGS_FILE" ]] || return 1
+    _zpc_store_is_ours "$ZPC_BINDINGS_FILE" || return 1
 
-    target="${target%/}"
-    [[ -n "$target" && "$target" == /* && "$target" == */.zpc ]] || return 1
-    [[ -d "$target" ]] || return 1
-    _zpc_store_is_ours "$target" || return 1
-    printf '%s' "$target"
+    while IFS=$'\t' read -r worktree store || [[ -n "$worktree" ]]; do
+        [[ -n "$worktree" && "$worktree" != \#* ]] || continue
+        [[ "${worktree%/}" == "$key" ]] || continue
+        store="${store%$'\r'}"
+        store="${store%/}"
+        [[ -n "$store" && "$store" == /* && "$store" == */.zpc ]] || return 1
+        [[ -d "$store" ]] || return 1
+        _zpc_store_is_ours "$store" || return 1
+        printf '%s' "$store"
+        return 0
+    done < "$ZPC_BINDINGS_FILE"
+
+    return 1
 }
 
 # Walk up from cwd to find .zpc/, bounded three ways.
@@ -130,22 +144,21 @@ resolve_zpc_dir() {
 
     # The ceiling is probed, never skipped: $HOME is the last rung, not a rung
     # we stop short of. A store that fails the ownership check is passed over
-    # rather than fatal — anything found above it faces the same test, and a
-    # bound store whose pointer no longer resolves is passed over the same way:
-    # it holds no memory of its own to fall back to, so answering with it would
-    # hand the caller an empty store dressed as this project's.
+    # rather than fatal — anything found above it faces the same test.
+    #
+    # A real store at a rung answers before that rung's binding does. Memory
+    # sitting in front of you outranks a note about memory elsewhere, and the
+    # order costs nothing in practice: this repo's own tools never leave both
+    # (init deletes the binding when it creates a local store).
     probe="$dir"
     while :; do
         if [[ -d "$probe/.zpc" ]] && _zpc_store_is_ours "$probe/.zpc"; then
-            if [[ -f "$probe/.zpc/$ZPC_POINTER_FILE" ]]; then
-                if target="$(_zpc_store_pointer_target "$probe/.zpc")"; then
-                    printf '%s\n' "$target"
-                    return 0
-                fi
-            else
-                printf '%s\n' "$probe/.zpc"
-                return 0
-            fi
+            printf '%s\n' "$probe/.zpc"
+            return 0
+        fi
+        if target="$(_zpc_binding_for "$probe")"; then
+            printf '%s\n' "$target"
+            return 0
         fi
         [[ "$probe" == "$ceiling" || "$probe" == "/" ]] && break
         probe="${probe%/*}"

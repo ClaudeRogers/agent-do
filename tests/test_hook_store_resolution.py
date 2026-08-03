@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -52,7 +53,7 @@ def _extract_bash_func(name: str) -> str:
     return match.group(0)
 
 
-def bash_store_root(cwd: str, home: str | None = None) -> str:
+def bash_store_root(cwd: str, home: str | None = None, agent_do_home: str | None = None) -> str:
     """Run the claude hook's own zpc_store_root, extracted by name.
 
     A rename breaks this test rather than silently skipping it, which is the
@@ -61,12 +62,14 @@ def bash_store_root(cwd: str, home: str | None = None) -> str:
     parts = [
         _extract_bash_func("_path_uid"),
         _extract_bash_func("_zpc_store_is_ours"),
-        _extract_bash_func("zpc_store_pointer_target"),
+        _extract_bash_func("zpc_binding_for"),
         _extract_bash_func("zpc_worktree_root"),
         _extract_bash_func("zpc_store_root"),
     ]
     parts.append('zpc_store_root "$1"')
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    if agent_do_home is not None:
+        env["AGENT_DO_HOME"] = agent_do_home
     if home is not None:
         env["HOME"] = home
     proc = subprocess.run(
@@ -92,10 +95,14 @@ def with_home(codex, home: str, fn):
             codex.os.environ["HOME"] = previous
 
 
-def zpc_reported_project(cwd: str) -> str:
+def zpc_reported_project(cwd: str, agent_do_home: str | None = None) -> str:
+    env = dict(os.environ)
+    if agent_do_home is not None:
+        env["AGENT_DO_HOME"] = agent_do_home
     proc = subprocess.run(
         [str(AGENT_DO), "zpc", "status", "--json"],
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -288,10 +295,10 @@ def main() -> int:
             f"got {answer!r}",
         )
 
-    # --- a bound store: the pointer `agent-git worktree add` leaves in a linked
-    # worktree, whose whole purpose is that all three resolvers walk through it
+    # --- a bound worktree: the binding `agent-git worktree add` records in this
+    # user's config, whose whole purpose is that all three resolvers follow it
     # to the checkout that outlives the worktree. If one of them stops at the
-    # pointer instead, that session's lessons die with `worktree remove`.
+    # worktree instead, that session's lessons die with `worktree remove`.
     with tempfile.TemporaryDirectory() as tmp:
         primary = Path(tmp).resolve() / "primary"
         (primary / ".zpc" / "memory").mkdir(parents=True)
@@ -299,38 +306,68 @@ def main() -> int:
         subprocess.run(["git", "init", "-q", str(primary)], check=False)
 
         worktree = Path(tmp).resolve() / "worktree"
-        (worktree / ".zpc").mkdir(parents=True)
+        worktree.mkdir()
         (worktree / ".git").write_text(f"gitdir: {primary}/.git/worktrees/worktree\n", encoding="utf-8")
-        (worktree / ".zpc" / "primary-store").write_text(
-            f"# bound by agent-git worktree add\n{primary}/.zpc\n", encoding="utf-8"
-        )
 
-        print("a worktree bound to the primary checkout's store:")
-        truth = zpc_reported_project(str(worktree))
-        check(
-            "zpc status --json resolves through the pointer",
-            truth == str(primary),
-            f"got {truth!r}, want {str(primary)!r}",
-        )
-        codex_answer = codex.zpc_store_root(str(worktree))
-        check(
-            "codex hook agrees with zpc",
-            codex_answer is not None and str(codex_answer) == truth,
-            f"hook {str(codex_answer)!r} vs zpc {truth!r}",
-        )
-        bash_answer = bash_store_root(str(worktree))
-        check("claude hook agrees with zpc", bash_answer == truth, f"hook {bash_answer!r} vs zpc {truth!r}")
+        agent_do_home = Path(tmp).resolve() / "agent-do-home"
+        registry = agent_do_home / "zpc" / "worktree-bindings.tsv"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(f"# bound by agent-git worktree add\n{worktree}\t{primary}/.zpc\n", encoding="utf-8")
 
-        print("the same pointer, aimed at a directory owned by another uid:")
-        (worktree / ".zpc" / "primary-store").write_text("/usr\n", encoding="utf-8")
-        check("zpc refuses it", zpc_reported_project(str(worktree)) == "")
-        check(
-            "codex hook refuses it",
-            codex.zpc_store_root(str(worktree)) is None,
-            f"got {str(codex.zpc_store_root(str(worktree)))!r}",
-        )
-        answer = bash_store_root(str(worktree))
-        check("claude hook refuses it", answer == "", f"got {answer!r}")
+        previous_home = os.environ.get("AGENT_DO_HOME")
+        os.environ["AGENT_DO_HOME"] = str(agent_do_home)
+        try:
+            print("a worktree bound to the primary checkout's store:")
+            truth = zpc_reported_project(str(worktree), agent_do_home=str(agent_do_home))
+            check(
+                "zpc status --json resolves through the binding",
+                truth == str(primary),
+                f"got {truth!r}, want {str(primary)!r}",
+            )
+            codex_answer = codex.zpc_store_root(str(worktree))
+            check(
+                "codex hook agrees with zpc",
+                codex_answer is not None and str(codex_answer) == truth,
+                f"hook {str(codex_answer)!r} vs zpc {truth!r}",
+            )
+            bash_answer = bash_store_root(str(worktree), agent_do_home=str(agent_do_home))
+            check("claude hook agrees with zpc", bash_answer == truth, f"hook {bash_answer!r} vs zpc {truth!r}")
+
+            print("the same binding, aimed at a directory owned by another uid:")
+            registry.write_text(f"{worktree}\t/usr\n", encoding="utf-8")
+            check(
+                "zpc refuses it",
+                zpc_reported_project(str(worktree), agent_do_home=str(agent_do_home)) == "",
+            )
+            check(
+                "codex hook refuses it",
+                codex.zpc_store_root(str(worktree)) is None,
+                f"got {str(codex.zpc_store_root(str(worktree)))!r}",
+            )
+            answer = bash_store_root(str(worktree), agent_do_home=str(agent_do_home))
+            check("claude hook refuses it", answer == "", f"got {answer!r}")
+
+            print("a pointer file inside the worktree, which no resolver may honor:")
+            registry.unlink()
+            (worktree / ".zpc").mkdir()
+            (worktree / ".zpc" / "primary-store").write_text(f"{primary}/.zpc\n", encoding="utf-8")
+            # The worktree's own .zpc is a store at its own path — that much is
+            # unchanged — but nothing in it may move memory to another one.
+            for label, got in (
+                ("zpc", zpc_reported_project(str(worktree), agent_do_home=str(agent_do_home))),
+                ("codex hook", str(codex.zpc_store_root(str(worktree)))),
+                ("claude hook", bash_store_root(str(worktree), agent_do_home=str(agent_do_home))),
+            ):
+                check(
+                    f"{label} ignores a repo-resident pointer",
+                    got != str(primary),
+                    f"followed it to {got!r}",
+                )
+        finally:
+            if previous_home is None:
+                os.environ.pop("AGENT_DO_HOME", None)
+            else:
+                os.environ["AGENT_DO_HOME"] = previous_home
 
     if FAILURES:
         print(f"\nhook store resolution tests FAILED ({len(FAILURES)})")

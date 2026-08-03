@@ -370,35 +370,45 @@ def zpc_store_is_ours(store: Path) -> bool:
         return False
 
 
-def zpc_store_pointer_target(store: Path) -> Path | None:
-    """The store a bound one stands in for, or None when it cannot be trusted.
+def zpc_binding_for(directory: Path) -> Path | None:
+    """The store a directory is bound to, or None when there is none to trust.
 
-    `agent-git worktree add` leaves a bound store in every linked worktree,
-    because .zpc/ is gitignored and an unbound worktree would record its lessons
-    into a store that dies with `worktree remove`. Trusted only when the
-    containing store passed the ownership check (the caller's job), the file
-    names an absolute path, that path is a `.zpc` directory, and we own it by
-    both name and target. One hop only — a target's own pointer is not followed.
+    `agent-git worktree add` binds every linked worktree it creates, because
+    .zpc/ is gitignored and an unbound worktree would record its lessons into a
+    store that dies with `worktree remove`.
+
+    The binding lives in this user's config, never in the repository, and that
+    location is the whole security property: a pointer file inside the tree
+    would let repository content decide where this hook reads memory from and
+    where the session writes it, and this hook injects what it finds as the
+    project's recorded truth without anyone asking. A clone cannot write
+    $AGENT_DO_HOME. Trust rules identical to zpc's
+    (tools/agent-zpc/lib/common.sh:_zpc_binding_for).
     """
+    home = os.environ.get("AGENT_DO_HOME") or os.path.join(
+        os.environ.get("HOME", ""), ".agent-do"
+    )
+    bindings = Path(home) / "zpc" / "worktree-bindings.tsv"
+    if not bindings.is_file() or not zpc_store_is_ours(bindings):
+        return None
+
+    key = str(directory).rstrip("/")
     try:
-        raw = (store / "primary-store").read_text(encoding="utf-8", errors="replace")
+        raw = bindings.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
-    target = ""
     for line in raw.splitlines():
-        line = line.strip()
         if not line or line.startswith("#"):
             continue
-        target = line
-        break
-
-    if not target.startswith("/"):
-        return None
-    path = Path(target)
-    if path.name != ".zpc" or not path.is_dir():
-        return None
-    return path if zpc_store_is_ours(path) else None
+        worktree, _, store = line.partition("\t")
+        if worktree.rstrip("/") != key:
+            continue
+        path = Path(store.rstrip("/"))
+        if not store.startswith("/") or path.name != ".zpc" or not path.is_dir():
+            return None
+        return path if zpc_store_is_ours(path) else None
+    return None
 
 
 def zpc_store_root(cwd: str) -> Path | None:
@@ -442,17 +452,14 @@ def zpc_store_root(cwd: str) -> Path | None:
 
     while True:
         store = probe / ".zpc"
-        # Not ours: fall through and keep climbing. A bound store whose pointer
-        # no longer resolves is stepped over the same way — it holds no memory
-        # of its own, so answering with it would inject an empty store as this
-        # project's.
+        # Not ours: fall through and keep climbing. A real store at a rung
+        # answers before that rung's binding does — memory sitting in front of
+        # you outranks a note about memory elsewhere.
         if store.is_dir() and zpc_store_is_ours(store):
-            if (store / "primary-store").is_file():
-                target = zpc_store_pointer_target(store)
-                if target is not None:
-                    return target.parent
-            else:
-                return probe
+            return probe
+        bound = zpc_binding_for(probe)
+        if bound is not None:
+            return bound.parent
         if probe == ceiling or probe.parent == probe:
             break
         probe = probe.parent
@@ -502,6 +509,12 @@ def zpc_autoinit(agent_do: str | None, cwd: str | None, toplevel: Path | None) -
             break
         probe = probe.parent
     if (root / ".zpc").exists():
+        return
+
+    # A bound worktree already has memory — someone else's directory holds it.
+    # Creating a store here would shadow that binding on the very next session
+    # and put this tree back on the path where its lessons die with it.
+    if zpc_binding_for(root) is not None:
         return
 
     # init's argument loop swallows flags it does not know, so asking an older
