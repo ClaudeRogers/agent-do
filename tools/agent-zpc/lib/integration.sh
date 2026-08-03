@@ -163,10 +163,10 @@ for record in live[-window:]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
     when = checked.get(record["id"])
     if when:
-        suffix += f"  [checked: {when}]"
+        suffix += f"  [checked: {epistemics.dated(when)}]"
     text = epistemics.claim_text(row) or "(no takeaway recorded)"
     kind = epistemics.kind_of(row)
-    lines.append(f"[{row.get('date', '?')}] {record['id']} ({kind}) {text}{suffix}")
+    lines.append(f"[{epistemics.dated(row.get('date'))}] {record['id']} ({kind}) {text}{suffix}")
 
 print("\n".join(lines) if lines else "(none)")
 
@@ -191,7 +191,7 @@ for record in claims:
     # leaves the frame. The id is the pointer for anyone who needs the original:
     # agent-do zpc query --text "<id>".
     corrections.append(
-        f"[{stamp[:10]}] {record['id']} corrected to: {tombstone['takeaway']}"
+        f"[{epistemics.dated(stamp[:10])}] {record['id']} corrected to: {tombstone['takeaway']}"
     )
 
 if corrections:
@@ -231,7 +231,10 @@ for record in live[-limit:]:
     if record["challenges"]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
     text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    lines.append(f"[{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {text}{suffix}")
+    lines.append(
+        f"[{epistemics.dated(row.get('date'))}] {record['id']} "
+        f"({epistemics.kind_of(row)}) {text}{suffix}"
+    )
 
 print("\n".join(lines) if lines else "(none)")
 PYTHON
@@ -325,9 +328,10 @@ for record in reversed(records):
     suffix = f"  [{','.join(tags)}]" if tags else ""
     if record["challenges"]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
-    # Dated and kinded here too: the compact blob is shorter, not softer.
+    # Dated, aged, and kinded here too: the compact blob is shorter, not softer.
     rendered.append(
-        f"- [{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {takeaway}{suffix}"
+        f"- [{epistemics.dated(row.get('date'))}] {record['id']} "
+        f"({epistemics.kind_of(row)}) {takeaway}{suffix}"
     )
 lessons_text = "\n".join(rendered) or "(none yet)"
 
@@ -450,7 +454,10 @@ def render(record):
     if record["challenges"]:
         suffix += f"  [challenged: {len(record['challenges'])}]"
     text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    return f"- [{row.get('date', '?')}] {record['id']} ({epistemics.kind_of(row)}) {text}{suffix}"
+    return (
+        f"- [{epistemics.dated(row.get('date'))}] {record['id']} "
+        f"({epistemics.kind_of(row)}) {text}{suffix}"
+    )
 
 
 # Retracted claims are absent here as they are everywhere else. A withdrawn
@@ -615,7 +622,10 @@ for record in epistemics.analyze(sys.argv[1], "dec-")["claims"]:
         continue
     row = record["row"]
     marker = f"  [challenged: {len(record['challenges'])}]" if record["challenges"] else ""
-    print(f"[{row.get('date', '?')}] {record['id']} {row.get('chosen', '?')}: {row.get('rationale', '')}{marker}")
+    print(
+        f"[{epistemics.dated(row.get('date'))}] {record['id']} "
+        f"{row.get('chosen', '?')}: {row.get('rationale', '')}{marker}"
+    )
 PYTHON
 )\n"
     else

@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -33,6 +34,17 @@ MAX_CHARS = 2000
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def aged(day: str) -> str:
+    """`2026-07-20 (14d ago)` — the fixture's date the way inject renders it.
+
+    Computed rather than pinned: the expected age of a fixed date changes
+    every midnight, and an age that is merely present proves nothing.
+    """
+    when = datetime.strptime(day, "%Y-%m-%d").date()
+    days = (datetime.now().date() - when).days
+    return f"{day} (today)" if days == 0 else f"{day} ({days}d ago)"
 
 
 def run(cwd: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -108,7 +120,10 @@ def main() -> None:
         require("this one was withdrawn" not in blob, f"a retracted preference kept rendering:\n{blob}")
         require("[challenged: 1]" in blob, f"a challenged claim renders its marker:\n{blob}")
         require("les-aaa001" in blob, "a claim renders the id you would retract it by")
-        require("[2026-07-20]" in blob and "[2026-07-18]" in blob, f"every claim is dated:\n{blob}")
+        require(
+            f"[{aged('2026-07-20')}]" in blob and f"[{aged('2026-07-18')}]" in blob,
+            f"every claim is dated and says how old that date is:\n{blob}",
+        )
         require("the gateway times out at 30s" not in blob, "world-state claims are not preferences")
 
         # Preferences before the rest, newest first inside each tier: the cut

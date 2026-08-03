@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -18,6 +19,17 @@ AGENT_DO = ROOT / "agent-do"
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def aged(day: str) -> str:
+    """`2026-07-20 (14d ago)` — the fixture's date the way inject renders it.
+
+    Computed rather than pinned: the expected age of a fixed date changes
+    every midnight, and an age that is merely present proves nothing.
+    """
+    when = datetime.strptime(day, "%Y-%m-%d").date()
+    days = (datetime.now().date() - when).days
+    return f"{day} (today)" if days == 0 else f"{day} ({days}d ago)"
 
 
 def run(project: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -154,7 +166,10 @@ def main() -> None:
 
         # Machine-wide claims render like every other claim: dated, kinded, and
         # carrying the id you would need to retract one.
-        require("[2026-07-12] les-" in tail_injected, f"global lessons must render dated and addressable: {tail_injected}")
+        require(
+            f"[{aged('2026-07-12')}] les-" in tail_injected,
+            f"global lessons must render dated, aged, and addressable: {tail_injected}",
+        )
         require("[tags: tail-limit]" in tail_injected, "global lessons must render their tags")
         require('"context": "tail limit"' not in tail_injected, "global slice must not dump raw rows")
 

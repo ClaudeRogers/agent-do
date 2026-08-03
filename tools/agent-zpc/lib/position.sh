@@ -420,10 +420,13 @@ _position_list() {
     file="$(_position_file)"
 
     local rendered
-    rendered=$(python3 << 'PYTHON' - "$file" "${OUTPUT_FORMAT:-text}"
+    rendered=$(python3 << 'PYTHON' - "$file" "${OUTPUT_FORMAT:-text}" "$ZPC_LIB_DIR"
 import json, os, sys
 
 path, fmt = sys.argv[1], sys.argv[2]
+
+sys.path.insert(0, sys.argv[3])
+import epistemics
 
 rows = []
 if os.path.exists(path):
@@ -448,7 +451,8 @@ if not rows:
 print(f"{len(rows)} position(s):\n")
 for row in rows:
     flips = row.get("flips", []) or []
-    print(f"{row.get('id', '?')}  {row.get('confidence', '?'):<4}  {row.get('ts', '')[:10]}  flips:{len(flips)}")
+    when = epistemics.dated(row.get("ts", "")[:10], fallback="")
+    print(f"{row.get('id', '?')}  {row.get('confidence', '?'):<4}  {when}  flips:{len(flips)}")
     print(f"  claim:   {row.get('claim', '')}")
     print(f"  verdict: {row.get('verdict', '')}")
 PYTHON
@@ -511,12 +515,15 @@ PYTHON
         return 0
     fi
 
-    python3 << 'PYTHON' - "$row"
+    python3 << 'PYTHON' - "$row" "$ZPC_LIB_DIR"
 import json, sys
+
+sys.path.insert(0, sys.argv[2])
+import epistemics
 
 p = json.loads(sys.argv[1])
 print(p.get("id", "?"))
-print(f"  recorded:   {p.get('ts', '')}")
+print(f"  recorded:   {epistemics.dated(p.get('ts', ''), fallback='')}")
 print(f"  claim:      {p.get('claim', '')}")
 print(f"  verdict:    {p.get('verdict', '')}")
 print(f"  confidence: {p.get('confidence', '')}")
@@ -524,7 +531,7 @@ print(f"  falsifier:  {p.get('falsifier', '')}")
 flips = p.get("flips", []) or []
 print(f"  flips:      {len(flips)}")
 for flip in flips:
-    print(f"    {flip.get('ts', '')}  ->  {flip.get('new_verdict', '')}")
+    print(f"    {epistemics.dated(flip.get('ts', ''), fallback='')}  ->  {flip.get('new_verdict', '')}")
     print(f"      evidence: {flip.get('evidence', '')}")
 PYTHON
 

@@ -56,6 +56,65 @@ def is_correction(row) -> bool:
     return isinstance(row, dict) and ("retracts" in row or "challenges" in row)
 
 
+def age_of(value) -> str | None:
+    """How long ago, in agent-coord's words: `3m ago`, `4h ago`, `7d ago`.
+
+    One vocabulary for the whole system, borrowed rather than invented:
+    agent-coord has rendered `last_seen 3m ago` since it shipped, and its ages
+    are never misreported the way bare dates are. A second dialect would put
+    the reader back in the business of translating.
+
+    A date with no time in it can only be answered at day resolution, and the
+    day it names is `today` rather than `0d ago` — the zero case is the one a
+    reader most needs to be unable to misread. Unparseable or absent returns
+    None, which is the caller's cue to render the raw value and claim nothing.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            day = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        days = max(0, (datetime.now().date() - day).days)
+        return "today" if days == 0 else f"{days}d ago"
+
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+
+    seconds = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def dated(value, fallback: str = "?") -> str:
+    """`2026-07-27 (7d ago)` — the stored date, then how old it is.
+
+    Additive by construction: the age is appended, never substituted, so the
+    exact date a claim was made stays recoverable from the same line that
+    saves the reader from computing its distance. Nothing here writes: the age
+    is derived at render time from the stored value, every time.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return fallback
+    age = age_of(text)
+    return f"{text} ({age})" if age else text
+
+
 def load(path: str):
     """Parse a store into (raw_line, parsed_or_None) pairs, in file order.
 
@@ -269,7 +328,9 @@ def render_patterns(patterns_path: str, lessons_path: str) -> str:
             span = spans.get(tag)
             if span and span[2]:
                 first, last, count = span
-                window = first if first == last else f"{first}..{last}"
+                # The span is aged by its newest claim: how stale a section is
+                # depends on when it was last added to, not on when it started.
+                window = dated(last) if first == last else f"{first}..{dated(last)}"
                 out.append(f"## {tag}  [{count} claim(s), {window}]")
                 continue
         out.append(line)

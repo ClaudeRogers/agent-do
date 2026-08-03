@@ -710,7 +710,11 @@ output=$("$MANNA" list --json 2>&1) || true
 check_yaml "$output" '"gate":"[DREAM: not claimable, needs conversion]"' "list --json carries the gate marker"
 output=$("$MANNA" context 2>&1) || true
 check_yaml "$output" "$G_DREAM" "context still shows the dream"
-check_yaml "$output" "$G_DREAM: A parked spark [open] [DREAM: not claimable, needs conversion]" \
+# Every context row carries when it last moved, so the inert marker is pinned
+# around the age rather than against a stamp that changes every second.
+check_yaml "$output" "$G_DREAM: A parked spark [open] updated $(date -u +%Y-%m-%d) (" \
+    "context dates and ages the dream row"
+check_yaml "$output" "ago) [DREAM: not claimable, needs conversion]" \
     "context marks the dream row inert"
 check_yaml "$output" "update <id> --type item" "context spells out the conversion command"
 

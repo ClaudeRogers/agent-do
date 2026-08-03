@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 
@@ -31,6 +32,17 @@ TIEBREAKER = (
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def aged(day: str) -> str:
+    """`2026-01-04 (211d ago)` — the fixture's date the way delivery renders it.
+
+    Computed here rather than pinned, because the expected age of a fixed date
+    changes every midnight. A wrong age fails this the same as a missing one.
+    """
+    when = datetime.strptime(day, "%Y-%m-%d").date()
+    days = (datetime.now().date() - when).days
+    return f"{day} (today)" if days == 0 else f"{day} ({days}d ago)"
 
 
 def checked(project: Path, env: dict, *args: str) -> subprocess.CompletedProcess:
@@ -94,20 +106,27 @@ def main() -> None:
             require("<!-- zpc:auto -->" not in blob, f"{label} must strip harvest bookkeeping")
             require("(world-state)" in blob, f"{label} must render claim kind:\n{blob}")
             require("(technique)" in blob, f"{label} must distinguish technique from world-state")
-            require("2026-01-04" in blob and "2026-01-06" in blob, f"{label} must date every claim")
+            require(
+                aged("2026-01-04") in blob and aged("2026-01-06") in blob,
+                f"{label} must date every claim and say how old the date is:\n{blob}",
+            )
             require(ids[0] in blob, f"{label} must name the id you would retract by")
 
         require("Recorded Patterns (claims, dated)" in full, f"full blob renames the section:\n{full}")
         require("Recorded patterns (claims, dated):" in compact, "compact renames the section")
         require(
-            "## proxy  [2 claim(s), 2026-01-04..2026-01-06]" in full,
-            f"a consolidated section is dated by the claims behind it:\n{full}",
+            f"## proxy  [2 claim(s), 2026-01-04..{aged('2026-01-06')}]" in full,
+            f"a consolidated section is dated by the claims behind it, and aged "
+            f"by its newest:\n{full}",
         )
         require(
             "## handwritten" in full and "## handwritten  [" not in full,
             "a section with no claims behind it gets no invented dating",
         )
-        require(f"[checked: 2026-07-20]" in full, f"a re-litigated claim shows when:\n{full}")
+        require(
+            f"[checked: {aged('2026-07-20')}]" in full,
+            f"a re-litigated claim shows when, and how long ago that was:\n{full}",
+        )
         require("[checked:" not in full.split(ids[1])[1].split("\n")[0],
                 "an unexamined claim claims no check")
 
