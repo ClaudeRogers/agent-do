@@ -502,9 +502,10 @@ def test_isolation_nudge(tmp_path: Path, env_base: dict[str, str]) -> None:
             f"ownership-splitting is the cheaper fix and must be named first: {summary}",
         )
         require(
-            "mn-68d471" in summary,
-            # Delete this assertion together with the caveat once mn-68d471 lands.
-            f"worktree remedy must carry the open board/memory caveat: {summary}",
+            "does not share this board" in summary,
+            # The board is per-checkout by design (agent-manna store.rs:17); mn-68d471
+            # bound only memory. Drop this with the caveat if the board ever binds.
+            f"worktree remedy must carry the per-checkout board caveat: {summary}",
         )
         require(
             contention["remedy"] and "split ownership" in contention["remedy"][0],

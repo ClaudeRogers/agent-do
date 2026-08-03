@@ -112,9 +112,12 @@ def env_off(name: str) -> bool:
 # branch that differs from HEAD raises one. Nudge text only: nothing blocks either way.
 ISOLATION_NUDGE = not env_off("AGENT_DO_COORD_ISOLATION_NUDGE")
 
-# Delete this caveat once mn-68d471 lands (worktrees bind board + memory to the
-# primary checkout); the remedy text below reads plainly without it.
-WORKTREE_CAVEAT = "caveat: a worktree may not share this board yet, so claims made there may not reach it (mn-68d471)"
+# Standing fact, not a temporary gap: manna resolves .manna relative to the
+# checkout (tools/agent-manna/src/store.rs:17), so a worktree carries its own
+# copy of the board. mn-68d471 bound worktree MEMORY to the primary store and
+# left the board deliberately unbound, warning at add time instead. Drop this
+# caveat only when the board itself binds.
+WORKTREE_CAVEAT = "caveat: a worktree does not share this board, so claims made there stay there"
 
 WORKTREE_COMMAND = "agent-do git worktree add <branch>"
 
