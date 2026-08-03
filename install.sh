@@ -84,6 +84,7 @@ CLAUDE_SETTINGS_SPECS=(
     "SessionStart||agent-do-session-start.sh|10"
     "UserPromptSubmit||agent-do-prompt-router.py|5"
     "UserPromptSubmit||agent-do-correction-keys.py|5"
+    "UserPromptSubmit||agent-do-now-stamp.py|5"
     "PreToolUse|Bash|agent-do-pretooluse-check.py|5"
     "SessionEnd||agent-do-coord-stop.sh|10"
     "Stop||agent-do-zpc-write-nudge.sh|5"
@@ -317,6 +318,7 @@ uninstall() {
         "agent-do-session-start.sh"
         "agent-do-prompt-router.py"
         "agent-do-correction-keys.py"
+        "agent-do-now-stamp.py"
         "agent-do-pretooluse-check.py"
         "agent-do-coord-stop.sh"
         "agent-do-zpc-write-nudge.sh"
@@ -333,6 +335,7 @@ uninstall() {
     local codex_hooks=(
         "agent-do-session-start.py"
         "agent-do-prompt-router.py"
+        "agent-do-now-stamp.py"
         "agent-do-pretooluse-check.py"
         "stop-quality-gate.sh"
         "stop-quality-gate.py"
@@ -529,6 +532,7 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-session-start.sh|hooks/claude/agent-do-session-start.sh|sh|required"
     "agent-do-prompt-router.py|hooks/claude/agent-do-prompt-router.py|py|required"
     "agent-do-correction-keys.py|hooks/claude/agent-do-correction-keys.py|py|required"
+    "agent-do-now-stamp.py|hooks/claude/agent-do-now-stamp.py|py|required"
     "agent-do-pretooluse-check.py|hooks/claude/agent-do-pretooluse-check.py|py|required"
     "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh|required"
     "agent-do-zpc-write-nudge.sh|hooks/claude/agent-do-zpc-write-nudge.sh|sh|optional"
@@ -564,9 +568,13 @@ if [ "$should_install_codex" = "yes" ]; then
     step "Installing Codex hooks (wrapper-based)"
     mkdir -p "$CODEX_HOOKS_DIR"
 
+    # The now stamp needs no Codex-side shim: it reads stdin, writes under
+    # AGENT_DO_HOME, and imports nothing from the repo, so the canonical Claude
+    # hook is already the whole implementation on both runtimes.
     CODEX_HOOK_SPECS=(
         "agent-do-session-start.py|hooks/codex/agent-do-session-start.py|py"
         "agent-do-prompt-router.py|hooks/codex/agent-do-prompt-router.py|py"
+        "agent-do-now-stamp.py|hooks/claude/agent-do-now-stamp.py|py"
         "agent-do-pretooluse-check.py|hooks/codex/agent-do-pretooluse-check.py|py"
         "stop-quality-gate.sh|hooks/codex/stop-quality-gate.sh|sh"
         "stop-quality-gate.py|hooks/codex/stop-quality-gate.py|py"

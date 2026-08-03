@@ -43,6 +43,7 @@ notifications) belong in your own dotfiles, not in this repo.
 | `agent-do-session-start.py` | Codex SessionStart: agent-do project context, tooling reminder, bootstrap dialog with macOS notification + log on completion. |
 | `agent-do-prompt-router.py` | Codex UserPromptSubmit: AI-classified routing nudges toward agent-do tools. |
 | `agent-do-pretooluse-check.py` | Codex PreToolUse: raw-command nudges (`agent-do api` instead of `from anthropic import` etc.). |
+| *(no file)* `agent-do-now-stamp.py` | Codex UserPromptSubmit: one line per turn with the current local time, the gap since the last turn, and how long the session has run. Installed from `hooks/claude/agent-do-now-stamp.py`; it reads stdin and writes under `AGENT_DO_HOME`, so there is nothing runtime-specific for a Codex shim to do. |
 | `stop-quality-gate.sh` | Codex Stop: advisory DPT scoring of the current agent-do browse session, surfaced as additionalContext for the model. Does not block. |
 | `stop-quality-gate.py` | DPT scoring helper called by `stop-quality-gate.sh`; uses `agent-do browse` and `agent-do dpt`. |
 | `hooks.json.example` | The Codex hook registration template. Copy to `~/.codex/hooks.json` and merge with existing entries. |
