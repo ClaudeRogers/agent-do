@@ -200,6 +200,36 @@ Only `passthrough` and `long_running` may stand alone without beat membership.
 
 No tool merges without a contracts declaration: the gate runs in `./test.sh` and in the `contracts-gate` GitHub workflow on every push and pull request.
 
+### Bounds: the second property the machine holds (`lib/bounds.py`)
+
+Contracts hold "which beats does this verb perform" across 95 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
+
+**Declaration** (`bounds:` beside `contracts:`), keyed by verb, or `*` for caps in shared library code that belong to no single verb. Four sources, and the source picks which enforcement applies:
+
+| `source` | `ref` is | Drift enforces | Audit enforces |
+|----------|----------|----------------|----------------|
+| `registry` | an authority key | the shipped literal equals it exactly — a copy that differs is stale by definition | output carries its total |
+| `derived` | an expression over authority keys | the literal equals what the expression computes; the factor in it is the explanation | output carries its total |
+| `measured` | a census expression | **no literal may ship at all** — a counted quantity is true only now | output carries its total |
+| `none` | nothing (a ref here is an error) | nothing: no ceiling is claimed | output carries its total, and any truncation marker carries magnitude |
+
+**Detection is evidence-based, never prose-based.** A command is bounding because a numeric literal sits in a bounding position in its implementation, at a file and line the gate prints — not because its description sounded like it returns a lot of rows. `BOUND_PARAMETERS` maps ~30 curated names to units; six syntaxes recognize the literal (kwarg/object assignment including quoted shell locals, shell `${X:-N}` defaults, `|| N` / `?? N` fallbacks, SQL `LIMIT N`, argparse `default=N`, `head -n` / `.slice(0, N)`). Comment and help-text lines are classified `doc` and never gated: a bound quoted in help documents a cap, it is not one. Test files are excluded — a bound asserted in a test is the test's fixture. Verb attribution walks up to the nearest enclosing definition or `case` arm and returns `None` rather than guessing, because a wrong attribution sends a reviewer to the wrong verb.
+
+**Gate reach equals authority reach** (`mark_gate_eligible`). The gate demands a receipt only for units the authority currently holds a ceiling in — `{unit for entry in authority_entries()}`, computed every run, listed nowhere. Demanding a citation the authority cannot supply would push the next agent toward inventing one, which is the defect, not the fix. Today that is `tokens` and `records`: 15 sites gate, and 164 caps in `rows`/`levels` are **inventoried on every run, never suppressed** — there is no grandfather file, nothing to empty, and nothing to forget. When lane-27's authority learns a unit, every site in it gates the same day with no change to this code.
+
+**What the gate cannot reach, it names.** The declaration surface is a tool's registry entry, so caps in `lib/` and `bin/` (8 today, including `lib/ai_router.py:DEFAULT_MAX_TOKENS`) belong to no tool and have nowhere to declare. They are counted and printed on every gate run rather than skipped: naming what the gate cannot reach is the difference between a boundary and a blind spot.
+
+**Drift** (`agent-do harness bounds drift [--tool X]`). Resolves each declared `ref` (longest-match key substitution, then arithmetic with no names, calls, or attribute access) and compares. The only tolerances in the module, both derived rather than chosen:
+
+- **Integer rounding: 0.5.** Rounding a real to an integer moves it by at most 0.5, so 0.5 is the unique tolerance that admits exactly the rounding a correct expression performs and no second number beyond it.
+- **The authority delivery floor: `min(max_tokens / max_input_tokens)` over every model record**, today 0.128 from `anthropic/claude-opus-4-8`. Every model record pairs a capacity with a delivery ceiling; that pair is a published statement, by the people who built the system, about how small one delivery may be relative to the space it is drawn from. A bound that *claims a ceiling governs it* (`registry` or `derived`) and lands below the tightest such ratio in the authority is smaller than any delivery ceiling any provider considered worth publishing, so its stated factor is doing no work and the number came from somewhere other than the ceiling it cites. That is the `inject at 6000 chars against a 200k-token window` shape. The number is **read, never written**: recomputed each run, stored nowhere, and it moves when the authority moves. It applies only to bounds asserting a ceiling relationship — `source: none` claims none, so there is no ratio to judge and the audit holds it to totals instead. With no record publishing both numbers there is no floor at all, because a checker with no evidence must not invent one.
+
+Same command checks **router coverage**: every model a `roles.*.chain` can select must have an authority record (mn-b7cb18). Reachability is exactly what the chains declare — a model no chain names cannot be selected, so nothing is owed for it — which keeps the check inside what the registry can prove and leaves the data fix with `models.yaml`'s maintainer.
+
+**Audit** (`agent-do harness bounds audit [--tool X]`). Probes declared bounding verbs and grades what comes back: a payload returning rows with no total fails, because a caller cannot tell a complete set from a capped one; a payload declaring `has_more`/`truncated` with no total fails as the bare fact of a cut; text output fails when a truncation marker carries no magnitude (`[truncated: 30 of 197 shown]` passes, `... output truncated` does not). Probes reach only verbs the registry already declares read-only, through `quantities._read_only_verb` — the same safety source the census uses, so a probe can never reach a write. Like `contracts audit`, the live run is on demand and its fixtures are what `./test.sh` enforces.
+
+**Outward scan** (`agent-do harness bounds scan <path> [--out FILE]`). The same detector, aimed at any project, because the pollution is already shipped and there is no map of it. Outward the context signal is a precondition rather than corroboration: a literal counts only in a file that references an LLM, DB, or HTTP client, since nothing else establishes that the number bounds a fetched set. The signal is file-scoped because imports are file-scoped in every language it reads. Each finding carries the published ceiling when the file names a model the authority knows, and names the missing authority record when it does not — the honest half of the same refusal `quantity lookup` makes. Report-only: it never rewrites a file.
+
 ## Internal Model Roles
 
 agent-do's own LLM calls (intent routing, suggest rerank, hook routing) never hardcode a model. `models.yaml` is the source of truth; `lib/models.py` resolves it; `lib/ai_router.py:llm_call(role, ...)` executes it. Generated templates and user-selected engines are out of scope by design.

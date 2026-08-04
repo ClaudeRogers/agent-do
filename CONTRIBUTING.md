@@ -48,12 +48,14 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full routing flow and component m
    - Add `routing` metadata (discovery keywords, raw CLI equivalents, readiness hints, project signals) when the tool should participate in `suggest`, prompt-hook routing, or PreToolUse nudges.
    - Add `credentials` metadata when the tool needs API keys or tokens, so `agent-do creds` can declare, check, and resolve them.
 3. Declare a `contracts:` block mapping each command verb to its beats (Connect → Snapshot → Interact → Verify → Save), with `attributes:` flags for verbs a single beat cannot express. This is mandatory: the gate fails any registry tool without one. Draft it with `agent-do harness contracts propose --tool <name>`, which applies `lib/contracts-lexicon.yaml` mechanically. Verbs the lexicon does not know get a classification in the lexicon (or a per-tool `overrides:` entry) and a regenerated draft; the proposed inventory is a build product, never hand-edited.
-4. Run the gates before submitting:
+4. Declare a `bounds:` block for any cap the tool ships. If a command bounds its output, say where the number came from: `{source: registry|derived|measured|none, ref, why}`, keyed by verb (or `*` for caps in shared library code that belong to no single verb). `registry` cites an authority key and the literal must equal it; `derived` cites an expression over keys and the factor in it is the explanation; `measured` means counted at call time, so shipping a literal contradicts it; `none` means no ceiling governs the number, which is an explicit exemption from the capacity checks and never silence. Find what you owe with `./agent-do harness contracts validate` — it names the file and line of every undeclared cap. Numbers themselves come from `agent-do harness quantity lookup`, never from memory.
+5. Run the gates before submitting:
 
 ```bash
-./agent-do harness contracts validate   # Shape errors, full coverage, concurrency-from-contracts
+./agent-do harness contracts validate   # Shape errors, full coverage, concurrency, bound provenance
 ./agent-do harness contracts drift      # Registry promises vs the tool's own --help
-./test.sh                               # Full suite (runs both gates plus all tool tests)
+./agent-do harness bounds drift         # Declared caps vs the ceilings they cite, + router coverage
+./test.sh                               # Full suite (runs the gates plus all tool tests)
 ```
 
 Shared helpers reduce boilerplate:

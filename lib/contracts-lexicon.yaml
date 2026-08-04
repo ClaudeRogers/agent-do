@@ -399,6 +399,7 @@ overrides:
   harness:
     quantity: {beats: [snapshot]}   # reads models.yaml; writes nothing anywhere
     census: {beats: [snapshot]}     # counts what exists; `rows` only runs verbs already declared read-only
+    bounds: {beats: [verify]}       # grades declared caps against the authority; `scan` only reads a tree
   context:
     maintain: {beats: [interact], attributes: [composite, destructive]}  # refresh + prune cache
   obsidian: {}                          # declared block preserved; overrides unused

@@ -122,8 +122,11 @@ check_cmd "quantity authority tests" python3 "$SCRIPT_DIR/tests/test_quantities.
 check_cmd "contracts gate tests" python3 "$SCRIPT_DIR/tests/test_contracts_gate.py"
 check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drift.py"
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
+check_cmd "bounds gate tests" python3 "$SCRIPT_DIR/tests/test_bounds_gate.py"
 check_cmd "routing contracts tests" python3 "$SCRIPT_DIR/tests/test_routing_contracts.py"
 check_cmd "contracts drift channel empty" "$AGENT_DO" harness contracts drift
+check_cmd "bounds drift clean against the authority" "$AGENT_DO" harness bounds drift
+check_output "contracts validate gates bounds too" "Bounds:" "$AGENT_DO" harness contracts validate
 check_cmd "tools reference doc in sync" "$SCRIPT_DIR/bin/gen-tools-doc" --check
 check_cmd "health probe tests" python3 "$SCRIPT_DIR/tests/test_health_probes.py"
 check_cmd "hook outcome telemetry tests" python3 "$SCRIPT_DIR/tests/test_hook_outcome_telemetry.py"

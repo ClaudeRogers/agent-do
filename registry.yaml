@@ -148,6 +148,28 @@ tools:
         maintain:
         - composite
         - destructive
+    bounds:
+      retrieve:
+        source: none
+        why: >-
+          --max-tokens is the caller's knob and 8000 is its default
+          (lib/retrieve.sh). The set it draws from is the local document index,
+          not a model window, so no published ceiling governs the number. Held
+          instead to disclosure: the returned context must say how much of the
+          matching corpus it carried.
+      inject:
+        source: none
+        why: >-
+          Same knob, same default, at lib/budget.sh:176. A budget the caller
+          chooses is not a ceiling somebody published, so there is nothing to
+          cite; what it owes is a total beside the blob.
+      init:
+        source: none
+        why: >-
+          Writes 8000 as defaults.max_tokens into the generated config so a
+          fresh install and a fresh call agree on the same caller-facing
+          default. It mirrors the retrieval knob rather than deriving from any
+          ceiling.
     concurrency: mixed
   creds:
     description: Secure credential storage and resolution for agent-do tools
@@ -1702,6 +1724,15 @@ tools:
       - type
       - press
       - scroll
+    bounds:
+      "*":
+        source: none
+        why: >-
+          screen_ops.py:751 asks a vision model for a concise description of one
+          screen; 500 tokens is the length of the answer being requested, not a
+          fraction of a ceiling. The model's own limit is enforced at the call
+          by lib/ai_router.py:_cap_tokens, which clamps the request to the
+          resolved model's max_tokens rather than trusting this number.
     concurrency: mixed
   vision:
     description: AI-first visual perception with object detection, OCR, and face detection
@@ -1769,6 +1800,14 @@ tools:
         - own_state
         source window:
         - own_state
+    bounds:
+      "*":
+        source: none
+        why: >-
+          vision_ops.py:1173 asks a vision model to describe one image; 500
+          tokens sizes that description. lib/ai_router.py:_cap_tokens clamps the
+          request to the resolved model's own max_tokens, so the ceiling is
+          enforced at the call instead of copied here.
     concurrency: read
   slack:
     description: Control Slack
@@ -3352,6 +3391,7 @@ tools:
     - create and verify falsifiable harness change manifests
     - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
     - answer quantity questions from an authority instead of a literal, and refuse to estimate
+    - fail the build on a cap with no declared provenance, and report bare bounding literals in any project
     commands:
       inspect: Inventory tools, hooks, instructions, libraries, state refs, and tests
       nudges: Summarize hook outcome telemetry and nudge effectiveness
@@ -3360,6 +3400,7 @@ tools:
       contracts: 'Contracts gate, lexicon, surface, and drift: contracts validate|propose|surface|drift'
       quantity: 'Looked-up ceilings by stable key, with provenance: quantity lookup|keys'
       census: 'Measured totals right now, exact or refused: census lines|entries|rows'
+      bounds: 'Declared caps checked against the authority: bounds drift|audit|scan'
     examples:
     - intent: inspect the agent-do harness
       command: agent-harness inspect
@@ -3375,6 +3416,10 @@ tools:
       command: agent-harness quantity lookup anthropic.claude-sonnet-5.max_tokens
     - intent: how many lines are in this file right now
       command: agent-harness census lines registry.yaml
+    - intent: check every declared cap against the ceiling it cites
+      command: agent-harness bounds drift
+    - intent: find hardcoded token and row limits in a project
+      command: agent-harness bounds scan ~/Custom-Coding/some-project
     routing:
       discover_keywords:
       - harness
@@ -3391,6 +3436,10 @@ tools:
       - rate limit ceiling
       - count rows
       - count files
+      - hardcoded limit
+      - magic number
+      - bound provenance
+      - undeclared bound
       prompt_patterns:
       - \bharness\b
       - \bharness inventory\b
@@ -3403,6 +3452,8 @@ tools:
       - \bhow many\b
       - \bmax_tokens\b
       - \bcontext window\b
+      - \bhardcoded (limit|bound|cap)\b
+      - \bmagic number\b
       recommended_entrypoints:
       - agent-do harness inspect --json
       - agent-do harness nudges effectiveness --since 7d
@@ -3410,6 +3461,7 @@ tools:
       - agent-do harness manifest new <change-id>
       - agent-do harness quantity lookup <namespace>.<subject>.<quantity>
       - agent-do harness census lines <file>
+      - agent-do harness bounds drift
       default_command: inspect
     contracts:
       snapshot:
@@ -3419,11 +3471,14 @@ tools:
       - contracts surface
       - quantity
       - census
+      - bounds scan
       verify:
       - manifest
       - contracts validate
       - contracts drift
       - contracts audit
+      - bounds drift
+      - bounds audit
       save:
       - evidence
       - manifest
@@ -3432,6 +3487,8 @@ tools:
         contracts drift:
         - composite
         contracts audit:
+        - composite
+        bounds audit:
         - composite
         evidence:
         - composite
@@ -3955,6 +4012,16 @@ tools:
         agent:
         - composite
         - long_running
+    bounds:
+      "*":
+        source: none
+        why: >-
+          The vision and agent calls request a paragraph (1024) or a small JSON
+          object (512); the number is the size of the answer being asked for.
+          Unlike the Python tools, nothing clamps it to the resolved model's
+          limit — model-resolver.js:81,114 pass the request straight through
+          with `|| 1024` as its default — so claiming a ceiling relationship
+          would assert something this code does not do.
     concurrency: mixed
   burp:
     description: Burp Suite automation
@@ -4399,6 +4466,15 @@ tools:
         run:
         - composite
         - own_state
+    bounds:
+      run:
+        source: none
+        why: >-
+          1024 tokens for the case response and 256 for the PASS/FAIL judgment
+          size the two answers being requested — an eval reply and a one-word
+          verdict with a reason. lib/ai_router.py:_cap_tokens clamps whatever is
+          requested down to the resolved model's own max_tokens, so the ceiling
+          is applied at the call and never copied into this tool.
     concurrency: read
   memory:
     description: Persistent memory and context

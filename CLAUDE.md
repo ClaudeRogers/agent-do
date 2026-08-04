@@ -244,8 +244,19 @@ Numbers come from an authority, never from a literal. `models.yaml` holds looked
 
 - The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable: tools declare `contracts:` blocks in `registry.yaml`; verbs that resist a single beat carry `attributes:` instead of inventing new beats.
 - `lib/contracts-lexicon.yaml` is the canonical verb→beat/attribute mapping (with per-tool `overrides:`); `agent-do harness contracts propose` regenerates draft declarations from it — the inventory is a build product, never hand-edited.
-- `agent-do harness contracts validate` is the gate: registry shape errors + full-coverage enforcement (the grandfather baseline emptied 2026-06-11 and was deleted; every tool declares).
+- `agent-do harness contracts validate` is the gate: registry shape errors + full-coverage enforcement (the grandfather baseline emptied 2026-06-11 and was deleted; every tool declares) + bound provenance.
 - Multi-word contract verbs ("embed status") match commands by first token (`lib/registry.py:_contract_command_exists`).
+
+### Bounds layer (`lib/bounds.py`)
+
+The second property the contracts machine holds: a command that caps its output declares where the cap came from, beside its `contracts:` block.
+
+- **Declaration.** `bounds:` maps a verb (or `*` for caps in shared library code) to `{source: registry|derived|measured|none, ref, why}`. `registry` means the literal IS a published ceiling and must equal it; `derived` means an expression over authority keys, and the factor in the expression is the explanation; `measured` means counted at call time, so no literal may ship; `none` means no ceiling governs it — an explicit exemption from the capacity checks only, still held to carrying its totals.
+- **Detection is evidence-based.** A command is bounding because a numeric literal sits in a bounding position in its implementation, at a file and line the gate prints. Never because a description sounded like it returns a lot of rows.
+- **Gate reach = authority reach.** `contracts validate` demands a receipt only for units the authority can answer in (`bounds.mark_gate_eligible`), computed each run. Bounds in units it cannot answer are inventoried on every run, never suppressed — there is no grandfather list. When the authority learns a unit, those sites gate the same day with no code change.
+- **Drift** (`agent-do harness bounds drift`) checks every declared bound against the value it cites, and fails a bound that resolves below the authority's own **delivery floor**: `min(max_tokens / max_input_tokens)` over every model record, recomputed each run and never stored. A bound below it is smaller than any delivery ceiling any provider in the authority published. Same command checks router coverage: every model a `roles.*.chain` can select must have an authority record (mn-b7cb18).
+- **Audit** (`agent-do harness bounds audit`) probes declared read verbs and grades whether output carries its total, and whether a truncation marker carries magnitude (`[truncated: 30 of 197 shown]`, never a bare cut).
+- **Outward scan** (`agent-do harness bounds scan <path>`) runs the same detector over any project and reports bare bounding literals near LLM/DB/HTTP calls with the published ceiling, or names the authority record that is owed. Report-only; it never rewrites a file.
 
 ## Dependencies
 

@@ -58,7 +58,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
-| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 7 |
+| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 8 |
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
 | [ide](#ide) | Control VS Code/Cursor editor | read | 5 |
 | [image](#image) | Image processing | mixed | 3 |
@@ -1837,6 +1837,7 @@ Concurrency: `mixed`
 - create and verify falsifiable harness change manifests
 - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
 - answer quantity questions from an authority instead of a literal, and refuse to estimate
+- fail the build on a cap with no declared provenance, and report bare bounding literals in any project
 
 **Commands**
 
@@ -1847,6 +1848,7 @@ Concurrency: `mixed`
 - `contracts`: Contracts gate, lexicon, surface, and drift: contracts validate|propose|surface|drift
 - `quantity`: Looked-up ceilings by stable key, with provenance: quantity lookup|keys
 - `census`: Measured totals right now, exact or refused: census lines|entries|rows
+- `bounds`: Declared caps checked against the authority: bounds drift|audit|scan
 
 **Examples**
 
@@ -1865,14 +1867,18 @@ agent-do harness manifest new email-hydration --component-type tool --file tools
 agent-do harness quantity lookup anthropic.claude-sonnet-5.max_tokens
 # how many lines are in this file right now
 agent-do harness census lines registry.yaml
+# check every declared cap against the ceiling it cites
+agent-do harness bounds drift
+# find hardcoded token and row limits in a project
+agent-do harness bounds scan ~/Custom-Coding/some-project
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `census`, `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`, `quantity`
+- Read-only (snapshot/verify; safe to parallelize): `bounds audit`, `bounds drift`, `bounds scan`, `census`, `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`, `quantity`
 - Write (connect/interact/save): `contracts propose`, `evidence`, `manifest`
 - polymorphic (beat decided by payload or flag at call time): `contracts propose`, `manifest`
-- composite (one call performs several beats internally): `contracts audit`, `contracts drift`, `evidence`
+- composite (one call performs several beats internally): `bounds audit`, `contracts audit`, `contracts drift`, `evidence`
 
 ### homekit
 
