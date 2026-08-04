@@ -80,6 +80,13 @@ display_path() { case "$1" in "$HOME"/*) echo "~${1#"$HOME"}" ;; *) echo "$1" ;;
 # Format: event | matcher | installed-hook-name | timeout-seconds
 # An empty matcher means "every invocation of this event", which is how Claude
 # Code's own settings.json spells it.
+#
+# A matcher is a regex and may itself contain `|` (Edit|Write). Both parsers
+# below therefore read the fields from the ends — first field, then last two —
+# instead of splitting left to right. One spec row per hook is not a style
+# choice: the merge dedupes on (event, command) across every matcher, so a hook
+# split into two rows would register only its first matcher and silently never
+# fire on the second.
 CLAUDE_SETTINGS_SPECS=(
     "SessionStart||agent-do-session-start.sh|10"
     "UserPromptSubmit||agent-do-prompt-router.py|5"
@@ -89,15 +96,24 @@ CLAUDE_SETTINGS_SPECS=(
     "SessionEnd||agent-do-coord-stop.sh|10"
     "Stop||agent-do-zpc-write-nudge.sh|5"
     "PostToolUse|ExitPlanMode|agent-do-zpc-position-nudge.sh|5"
+    "PostToolUse|Edit|Write|agent-do-quantity-check.py|5"
 )
 
 # Emit the spec as event|matcher|command|timeout, with the command spelled the
 # way settings.json wants it: `~/.claude/hooks/x` for a stock install, an
 # absolute path when the hooks directory has been relocated.
 claude_settings_stream() {
-    local spec event matcher name timeout command
+    local spec event matcher name timeout command rest
     for spec in "${CLAUDE_SETTINGS_SPECS[@]}"; do
-        IFS='|' read -r event matcher name timeout <<< "$spec"
+        # Read from the ends: event is the first field, timeout the last, name
+        # the one before it, and whatever remains in the middle is the matcher,
+        # `|` and all.
+        event="${spec%%|*}"
+        rest="${spec#*|}"
+        timeout="${rest##*|}"
+        rest="${rest%|*}"
+        name="${rest##*|}"
+        matcher="${rest%|*}"
         if [ "$CLAUDE_HOOKS_DIR" = "$HOME/.claude/hooks" ]; then
             command="~/.claude/hooks/$name"
         else
@@ -138,7 +154,10 @@ specs = []
 for line in os.environ.get("AGENT_DO_MERGE_SPECS", "").splitlines():
     if not line.strip():
         continue
-    event, matcher, command, timeout = line.split("|", 3)
+    # Read from the ends, because a matcher is a regex and may contain `|`.
+    event, remainder = line.split("|", 1)
+    remainder, timeout = remainder.rsplit("|", 1)
+    matcher, command = remainder.rsplit("|", 1)
     specs.append((event, matcher, command, int(timeout)))
 
 if not specs:
@@ -323,6 +342,7 @@ uninstall() {
         "agent-do-coord-stop.sh"
         "agent-do-zpc-write-nudge.sh"
         "agent-do-zpc-position-nudge.sh"
+        "agent-do-quantity-check.py"
     )
     for hook in "${hooks[@]}"; do
         if [ -f "$CLAUDE_HOOKS_DIR/$hook" ]; then
@@ -537,6 +557,7 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-coord-stop.sh|hooks/claude/agent-do-coord-stop.sh|sh|required"
     "agent-do-zpc-write-nudge.sh|hooks/claude/agent-do-zpc-write-nudge.sh|sh|optional"
     "agent-do-zpc-position-nudge.sh|hooks/claude/agent-do-zpc-position-nudge.sh|sh|optional"
+    "agent-do-quantity-check.py|hooks/claude/agent-do-quantity-check.py|py|required"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
     IFS='|' read -r name rel kind requirement <<< "$spec"
