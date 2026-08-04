@@ -3351,12 +3351,15 @@ tools:
     - build drill-down evidence bundles for sessions, runs, and harness changes
     - create and verify falsifiable harness change manifests
     - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
+    - answer quantity questions from an authority instead of a literal, and refuse to estimate
     commands:
       inspect: Inventory tools, hooks, instructions, libraries, state refs, and tests
       nudges: Summarize hook outcome telemetry and nudge effectiveness
       evidence: Build local drill-down evidence bundles
       manifest: Create and verify harness change manifests
       contracts: 'Contracts gate, lexicon, surface, and drift: contracts validate|propose|surface|drift'
+      quantity: 'Looked-up ceilings by stable key, with provenance: quantity lookup|keys'
+      census: 'Measured totals right now, exact or refused: census lines|entries|rows'
     examples:
     - intent: inspect the agent-do harness
       command: agent-harness inspect
@@ -3368,6 +3371,10 @@ tools:
       command: agent-harness evidence build latest-session
     - intent: create a falsifiable manifest for an email hydration fix
       command: agent-harness manifest new email-hydration --component-type tool --file tools/agent-email
+    - intent: what is this model's max output token ceiling
+      command: agent-harness quantity lookup anthropic.claude-sonnet-5.max_tokens
+    - intent: how many lines are in this file right now
+      command: agent-harness census lines registry.yaml
     routing:
       discover_keywords:
       - harness
@@ -3378,6 +3385,12 @@ tools:
       - nudge effectiveness
       - component observability
       - AHE
+      - how many
+      - max tokens
+      - token ceiling
+      - rate limit ceiling
+      - count rows
+      - count files
       prompt_patterns:
       - \bharness\b
       - \bharness inventory\b
@@ -3387,11 +3400,16 @@ tools:
       - \bnudge effectiveness\b
       - \bcomponent observability\b
       - \bAHE\b
+      - \bhow many\b
+      - \bmax_tokens\b
+      - \bcontext window\b
       recommended_entrypoints:
       - agent-do harness inspect --json
       - agent-do harness nudges effectiveness --since 7d
       - agent-do harness evidence build <session-or-run>
       - agent-do harness manifest new <change-id>
+      - agent-do harness quantity lookup <namespace>.<subject>.<quantity>
+      - agent-do harness census lines <file>
       default_command: inspect
     contracts:
       snapshot:
@@ -3399,6 +3417,8 @@ tools:
       - nudges
       - contracts propose
       - contracts surface
+      - quantity
+      - census
       verify:
       - manifest
       - contracts validate

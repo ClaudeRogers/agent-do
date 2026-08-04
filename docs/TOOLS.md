@@ -58,7 +58,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
-| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 5 |
+| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 7 |
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
 | [ide](#ide) | Control VS Code/Cursor editor | read | 5 |
 | [image](#image) | Image processing | mixed | 3 |
@@ -1836,6 +1836,7 @@ Concurrency: `mixed`
 - build drill-down evidence bundles for sessions, runs, and harness changes
 - create and verify falsifiable harness change manifests
 - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
+- answer quantity questions from an authority instead of a literal, and refuse to estimate
 
 **Commands**
 
@@ -1844,6 +1845,8 @@ Concurrency: `mixed`
 - `evidence`: Build local drill-down evidence bundles
 - `manifest`: Create and verify harness change manifests
 - `contracts`: Contracts gate, lexicon, surface, and drift: contracts validate|propose|surface|drift
+- `quantity`: Looked-up ceilings by stable key, with provenance: quantity lookup|keys
+- `census`: Measured totals right now, exact or refused: census lines|entries|rows
 
 **Examples**
 
@@ -1858,11 +1861,15 @@ agent-do harness nudges effectiveness --since 7d
 agent-do harness evidence build latest-session
 # create a falsifiable manifest for an email hydration fix
 agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
+# what is this model's max output token ceiling
+agent-do harness quantity lookup anthropic.claude-sonnet-5.max_tokens
+# how many lines are in this file right now
+agent-do harness census lines registry.yaml
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`
+- Read-only (snapshot/verify; safe to parallelize): `census`, `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`, `quantity`
 - Write (connect/interact/save): `contracts propose`, `evidence`, `manifest`
 - polymorphic (beat decided by payload or flag at call time): `contracts propose`, `manifest`
 - composite (one call performs several beats internally): `contracts audit`, `contracts drift`, `evidence`

@@ -118,6 +118,7 @@ check_cmd "worktree binding tests" python3 "$SCRIPT_DIR/tests/test_worktree_bind
 check_cmd "hardware tests" python3 "$SCRIPT_DIR/tests/test_hardware.py"
 check_cmd "meetings tests" python3 "$SCRIPT_DIR/tests/test_meetings.py"
 check_cmd "harness tests" python3 "$SCRIPT_DIR/tests/test_harness.py"
+check_cmd "quantity authority tests" python3 "$SCRIPT_DIR/tests/test_quantities.py"
 check_cmd "contracts gate tests" python3 "$SCRIPT_DIR/tests/test_contracts_gate.py"
 check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drift.py"
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"

@@ -135,6 +135,23 @@ models:
         values: [none, low, medium, high, xhigh, max]
     docs: https://developers.openai.com/api/docs/models/gpt-5.6-luna
 
+# Published ceilings that are not per-model: API page limits, quotas, caps.
+# Read them with `agent-do harness quantity lookup <provider>.<subject>.<name>`
+# instead of typing the number into code.
+#
+# Unlike the model records above, nothing here is machine-refreshed, so every
+# entry carries its own citation and the date it was read — in data, not in a
+# comment, because `models doctor --fix` round-trips this file through a YAML
+# dumper and comments do not survive that.
+limits:
+  anthropic/models_list:
+    provider: anthropic
+    page_limit:
+      value: 1000
+      unit: records
+      source: 'https://platform.claude.com/docs/en/api/models-list — limit: defaults to 20, ranges from 1 to 1000'
+      verified: '2026-08-03'
+
 retired:
   anthropic:
     - claude-3-sonnet-20240229

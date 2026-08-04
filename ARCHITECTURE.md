@@ -210,6 +210,39 @@ agent-do's own LLM calls (intent routing, suggest rerank, hook routing) never ha
 - **Cross-provider fallback**: `llm_call` filters the chain to providers whose SDK and API key are both present, then walks it, crossing providers only on model-not-found (HTTP 404). Every fallback is reported to stderr and recorded as a `model_fallback` telemetry event. Other errors propagate; a 404 chain exhaustion raises.
 - **`agent-do models doctor`**: fetches each provider's complete model listing (Anthropic paginated to the end; pagination that claims more without a cursor fails loud), then classifies configured models: present in the listing = available; missing models get an individual probe where 404 = retired, 403 = unavailable-to-these-credentials (never auto-retired), anything else = error. `--fix` persists only verified retirements and Anthropic-published capability refreshes, atomically. `agent-do models list` and `agent-do models resolve <role>` expose the resolved state.
 
+## Quantity Authority (lib/quantities.py, `harness quantity` / `harness census`)
+
+Agents invent numbers because measuring costs a tool call and guessing costs nothing. This layer inverts that trade: one place to read a published number from, one place to measure a present one, so typing a literal is the more expensive option. Two kinds, and the distinction is load-bearing.
+
+- **LOOKED_UP** — a static, versioned ceiling somebody else published (a model's `max_tokens`, an API's page limit). Lives in `models.yaml` and is answered with the record it came from, so a caller can cite it.
+- **MEASURED** — how many exist *right now* (lines, directory entries, rows behind a read command). Computed on demand, never cached into a literal, because it is true only now.
+
+**Key grammar.** `<namespace>.<subject>.<quantity>`, e.g. `anthropic.claude-sonnet-5.max_tokens`. Parsed from the ends, never by splitting on every dot: subjects carry dots of their own (`openai.gpt-5.6-sol.max_tokens`), while namespace and quantity never do. Consumers reference a key; they never copy the value into code.
+
+**Two storage shapes in `models.yaml`, because they have two maintainers.** `models:` records are rewritten wholesale by `agent-do models doctor` from the provider's `/v1/models` response, so they carry no per-field provenance — the record is the citation and the doctor is the maintainer. `limits:` entries (page ceilings, quotas) are hand-maintained and each carries `value` + `unit` + `source` + `verified` **in data**, not in a comment: `models doctor --fix` round-trips the file through a YAML dumper and comments do not survive that.
+
+**Output shape (pinned; downstream lanes code against it).**
+
+Every `--json` payload also carries `ok` and `tool:"harness"`; successes add `command` and a timestamp (`generated_at` for lookups, `measured_at` for a census).
+
+| Verb | Bare stdout | `--json` payload |
+|------|-------------|------------------|
+| `quantity lookup <key>` | the number alone, newline-terminated (shell-substitutable) | `key`, `value`, `unit` (may be `null`), `kind:"looked_up"`, `provenance{file,record,field,maintained_by[,source,verified]}` |
+| `quantity keys [--prefix P]` | one key per line, sorted | `prefix`, `total`, `keys[]` — each entry `{key,value,unit,kind,provenance}` |
+| `census lines` | the total alone | `target`, `total`, `unit:"lines"`, `kind:"measured"`, `exact:true`, `method:"newline-count"`, `method_detail`, `final_line_unterminated`, `bytes_scanned` |
+| `census entries` | the total alone | …`unit:"entries"`, `method:"dir-scan"`, `glob`, `recursive` |
+| `census rows` | the total alone | …`unit:"rows"`, `method:"json-array"`, `verb`, `json_path` |
+| any refusal | nothing on stdout | `{ok:false, exact:false, refused:true, reason, detail}` — **no `total` key at all** |
+| any caller error | nothing on stdout | `{ok:false, error}` — **no `value` or `total` key at all** |
+
+**Exit codes.** `0` answered exactly · `1` the request could not run as asked (unknown or malformed key, unreadable target, non-read or undeclared verb, a `--path` that is not there) · `2` it ran but no exact count exists (payload not JSON, no array, ambiguous array, paginated, command failed, timed out). Refused and crashed must never look alike, and neither ever carries a number. Absence is the contract: a consumer that reads `payload["value"]` or `payload["total"]` on a failure gets a `KeyError`, not a silent `None`.
+
+**Census methods**, each self-reported in `method` (stable id) and `method_detail` (prose): `newline-count` counts `0x0A` bytes to match `wc -l` exactly and reports an unterminated final line in `final_line_unterminated` rather than silently adding it; `dir-scan` enumerates glob matches (`--recursive` for the whole tree); `json-array` runs an agent-do read command through argv (never a shell) and counts one JSON array.
+
+**`census rows` refuses more often than it answers, by design.** It runs only verbs the registry already declares read-only (beat union ⊆ `{snapshot, verify}`) — safety comes from the contracts layer, not a list kept alongside it, and an *undeclared* verb is refused because unknown safety is not safe. It then refuses when the payload is not JSON, contains no array, contains more than one array (name it with `--path`), or shows any sign of being one page of a larger set: `has_more`/`truncated`/`is_truncated` true, a `next_page`/`next_cursor`/`next_page_token`/`next_offset` present, or a declared `limit` exactly equal to the row count — at the page boundary a complete count and a capped one are the same number, which is precisely the failure this layer exists to prevent.
+
+**Consumers, not just producers.** `lib/ai_router.py:_cap_tokens` clamps requested output to the model's recorded ceiling, and `lib/models.py:fetch_provider_models` reads the Anthropic list-endpoint page size from `limits.anthropic/models_list.page_limit` instead of a literal. Both fail loud on absence: a guessed page size can silently return a truncated listing, and a truncated listing is how `models doctor` would decide a live model was retired.
+
 ## Manna Subsystem (tools/agent-manna, Rust)
 
 Git-backed issue tracking with a typed board grammar. Every issue is a **track** (a named grouping with intent), an **item** on a track, or a **dream** (raw intake, exempt from tracking, converted or closed with a written reason). Commits that advance an item cite it with a `Manna: mn-xxxxxx` trailer. The board is the only backlog.
@@ -380,7 +413,7 @@ Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the coun
 | `1` | Error | Tool error, missing dependency, invalid arguments, no matching tool |
 | `2` | Needs clarification | Natural language and offline modes: ambiguous intent, or a destructive/sensitive route without `AGENT_DO_AUTO_DESTRUCTIVE=1` |
 
-Exit 2 tells the orchestrator to answer the question and retry with `--context "answer"`. Individual tools may define their own conventions (agent-manna uses 2 for system errors); the 0/1/2 contract above is the dispatcher's natural-language surface.
+Exit 2 tells the orchestrator to answer the question and retry with `--context "answer"`. Individual tools may define their own conventions (agent-manna uses 2 for system errors; `harness census` uses 2 for a principled refusal to estimate, and `zpc position` for a refused flip); the 0/1/2 contract above is the dispatcher's natural-language surface.
 
 ## Test/CI Surface
 

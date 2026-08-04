@@ -153,6 +153,70 @@ def contracts_validate(strict: bool) -> dict[str, Any]:
     return payload
 
 
+def _quantities() -> Any:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import quantities  # noqa: WPS433
+
+    return quantities
+
+
+def quantity_lookup(key: str) -> dict[str, Any]:
+    """Resolve one authority key to its value and the record it came from."""
+    payload = dict(_quantities().lookup(key))
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = "quantity lookup"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def quantity_keys(prefix: str | None = None) -> dict[str, Any]:
+    """Enumerate the authority — discovery is what makes reading cheaper than guessing."""
+    entries = _quantities().authority_entries()
+    if prefix:
+        entries = [item for item in entries if item["key"].startswith(prefix)]
+    return {
+        "ok": True,
+        "tool": "harness",
+        "command": "quantity keys",
+        "generated_at": now_iso(),
+        "prefix": prefix,
+        "total": len(entries),
+        "keys": entries,
+    }
+
+
+def census(args: Any) -> dict[str, Any]:
+    """Measure how many exist right now, or refuse to answer at all."""
+    module = _quantities()
+    if args.census_command == "lines":
+        payload = module.census_lines(args.target)
+    elif args.census_command == "entries":
+        payload = module.census_entries(args.target, glob=args.glob, recursive=args.recursive)
+    else:
+        payload = module.census_rows(args.via, path=args.path, timeout=read_probe_timeout(args.timeout))
+    payload = dict(payload)
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = f"census {args.census_command}"
+    payload["measured_at"] = now_iso()
+    return payload
+
+
+def render_quantity_lookup(payload: dict[str, Any]) -> None:
+    """Bare output is the number alone, so `$(...)` substitutes cleanly."""
+    print(payload["value"])
+
+
+def render_quantity_keys(payload: dict[str, Any]) -> None:
+    for item in payload["keys"]:
+        print(item["key"])
+
+
+def render_census(payload: dict[str, Any]) -> None:
+    print(payload["total"])
+
+
 def contracts_propose(tool: str | None = None) -> dict[str, Any]:
     sys.path.insert(0, str(REPO_ROOT / "lib"))
     from contracts import propose_contracts  # noqa: WPS433
@@ -1031,6 +1095,14 @@ Commands:
                                                     Bounded behavioral probe of the declared read surface (tri-state)
   contracts audit --install-schedule [weekly|daily] Install launchd agent: audit + notify on failures
   contracts audit --uninstall-schedule              Remove the scheduled audit
+  quantity lookup <key> [--json]                    Published ceiling + its provenance (bare: the number alone)
+  quantity keys [--prefix P] [--json]               Every authority key that can be looked up
+  census lines <file> [--json]                      Lines in a file, right now
+  census entries <dir> [--glob G] [--recursive]     Entries in a directory, right now
+  census rows --via "<agent-do read cmd>" [--path P]  Rows a read command returns, right now
+
+Quantities never estimate. An unknown key exits 1 naming the key; a census that
+cannot count exactly exits 2 with the reason and emits no total.
 
 Examples:
   agent-do harness inspect
@@ -1040,8 +1112,23 @@ Examples:
   agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
   agent-do harness contracts validate --json
   agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md
+  agent-do harness quantity lookup anthropic.claude-sonnet-5.max_tokens
+  agent-do harness quantity keys --prefix anthropic --json
+  agent-do harness census lines registry.yaml
+  agent-do harness census entries tools --glob 'agent-*'
+  agent-do harness census rows --via "manna list --json"
 """
     )
+
+
+def read_probe_timeout(explicit: int | None) -> int:
+    """One bounded-read budget for every surface that runs a declared read verb.
+
+    Defined once in lib/quantities.py and resolved here at dispatch rather than
+    at parser-build time, so parsing `harness inspect` does not depend on the
+    quantity module importing cleanly.
+    """
+    return explicit if explicit is not None else _quantities().READ_PROBE_TIMEOUT_SECONDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1095,10 +1182,35 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--json", action="store_true")
     contracts.add_argument("--include-network", action="store_true")
     contracts.add_argument("--schema-check", action="store_true")
-    contracts.add_argument("--timeout", type=int, default=15)
+    contracts.add_argument("--timeout", type=int, default=None)
     contracts.add_argument("--notify", action="store_true")
     contracts.add_argument("--install-schedule", nargs="?", const="weekly", choices=["weekly", "daily"])
     contracts.add_argument("--uninstall-schedule", action="store_true")
+
+    quantity = sub.add_parser("quantity", add_help=False)
+    quantity_sub = quantity.add_subparsers(dest="quantity_command")
+    quantity_lookup_parser = quantity_sub.add_parser("lookup", add_help=False)
+    quantity_lookup_parser.add_argument("key")
+    quantity_lookup_parser.add_argument("--json", action="store_true")
+    quantity_keys_parser = quantity_sub.add_parser("keys", add_help=False)
+    quantity_keys_parser.add_argument("--prefix")
+    quantity_keys_parser.add_argument("--json", action="store_true")
+
+    census_parser = sub.add_parser("census", add_help=False)
+    census_sub = census_parser.add_subparsers(dest="census_command")
+    census_lines_parser = census_sub.add_parser("lines", add_help=False)
+    census_lines_parser.add_argument("target")
+    census_lines_parser.add_argument("--json", action="store_true")
+    census_entries_parser = census_sub.add_parser("entries", add_help=False)
+    census_entries_parser.add_argument("target")
+    census_entries_parser.add_argument("--glob")
+    census_entries_parser.add_argument("--recursive", action="store_true")
+    census_entries_parser.add_argument("--json", action="store_true")
+    census_rows_parser = census_sub.add_parser("rows", add_help=False)
+    census_rows_parser.add_argument("--via", required=True)
+    census_rows_parser.add_argument("--path")
+    census_rows_parser.add_argument("--timeout", type=int, default=None)
+    census_rows_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1161,6 +1273,7 @@ def main(argv: list[str]) -> int:
                 payload = contracts_audit_schedule(args.install_schedule, args.uninstall_schedule)
                 print(json.dumps(payload, indent=2))
                 return 0 if payload["ok"] else 1
+            args.timeout = read_probe_timeout(args.timeout)
             payload = contracts_audit(args)
             if json_mode:
                 print(json.dumps(payload, indent=2))
@@ -1174,6 +1287,27 @@ def main(argv: list[str]) -> int:
             else:
                 render_contracts_drift(payload)
             return 0 if payload["ok"] else 1
+        if args.command == "quantity" and args.quantity_command == "lookup":
+            payload = quantity_lookup(args.key)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_quantity_lookup(payload)
+            return 0
+        if args.command == "quantity" and args.quantity_command == "keys":
+            payload = quantity_keys(args.prefix)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_quantity_keys(payload)
+            return 0
+        if args.command == "census" and args.census_command in {"lines", "entries", "rows"}:
+            payload = census(args)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_census(payload)
+            return 0
         if args.command == "contracts" and args.contracts_command == "propose":
             payload = contracts_propose(tool=args.tool)
             if args.out:
@@ -1194,6 +1328,27 @@ def main(argv: list[str]) -> int:
                     print(f"Inventory written to {payload['out']}")
             return 0
     except Exception as exc:
+        # A refusal is not a crash. Census exits 2 — the same code zpc uses when
+        # it declines on principle — so a caller can tell "cannot count exactly"
+        # apart from "broke", and neither ever carries a total.
+        try:
+            refusal_type = _quantities().CensusRefusal
+        except Exception:  # noqa: BLE001 - a broken import must not mask the real error
+            refusal_type = ()
+        if refusal_type and isinstance(exc, refusal_type):
+            payload = {
+                "ok": False,
+                "tool": "harness",
+                "exact": False,
+                "refused": True,
+                "reason": exc.reason,
+                "detail": exc.detail,
+            }
+            if "--json" in argv:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Refused: cannot count exactly.\n  reason: {exc.reason}\n  {exc.detail}", file=sys.stderr)
+            return 2
         if "--json" in argv:
             print(json.dumps({"ok": False, "tool": "harness", "error": str(exc)}, indent=2))
         else:
