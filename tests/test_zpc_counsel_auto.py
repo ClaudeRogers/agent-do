@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -191,7 +192,23 @@ def main() -> None:
 
         # ---- bounds: every cut says it is a cut ---------------------------
 
-        big = "\n".join(f"line {i}: padding that overflows the diff bound" for i in range(600))
+        # Sized against the derived receipt budget rather than a pinned number:
+        # counsel takes the smallest single delivery the quantity authority
+        # publishes, so a fixture that overflows it has to be read off the
+        # authority too. Doubling it means the diff overflows whichever record
+        # currently holds that minimum, without this file naming any of them.
+        keys = json.loads(
+            subprocess.run(
+                [str(AGENT_DO), "harness", "quantity", "keys", "--json"],
+                text=True, capture_output=True, check=True,
+            ).stdout
+        )["keys"]
+        budget = min(
+            entry["value"] for entry in keys if entry["key"].endswith(".max_tokens")
+        )
+        padding = "line {}: padding that overflows the diff bound"
+        line_count = (2 * budget) // (len(padding) + 2) + 1
+        big = "\n".join(padding.format(i) for i in range(line_count))
         (project / "big.txt").write_text(big)
         git(project, "add", "big.txt")
         git(project, "commit", "-qm", "big")
@@ -199,8 +216,11 @@ def main() -> None:
 
         logs = project / "tmp" / "logs" / "session"
         logs.mkdir(parents=True)
+        # Padded to the same width as the diff fixture, so one derived line
+        # count overflows both receipts instead of two hand-tuned ones.
         (logs / "combined.log").write_text(
-            "\n".join(f"log line {i}" for i in range(2000)) + "\nLAST-LOG-LINE-MARKER\n"
+            "\n".join(f"log line {i}: " + "x" * 30 for i in range(line_count))
+            + "\nLAST-LOG-LINE-MARKER\n"
         )
         (project / "tmp" / "logs" / "latest").symlink_to("session")
 
@@ -209,11 +229,18 @@ def main() -> None:
         bounded = newest.read_text()
 
         diff_block = bounded.split("--- RECEIPT: git diff HEAD")[1].split("--- RECEIPT:")[0]
-        require("[receipt truncated]" in diff_block, "an overflowing diff must be marked as cut")
-        require(len(diff_block) < 12600, f"the diff bound must hold: {len(diff_block)} chars")
+        require("[receipt truncated:" in diff_block, "an overflowing diff must be marked as cut")
+        require(
+            re.search(r"receipt truncated: \d+ of \d+ lines shown", diff_block),
+            f"the cut must say how much it took: {diff_block[-300:]}",
+        )
+        require(
+            len(diff_block.encode()) < budget + 600,
+            f"the diff must hold the derived budget: {len(diff_block.encode())} bytes vs {budget}",
+        )
 
         log_block = bounded.split("combined.log ---")[1]
-        require("[receipt truncated]" in log_block, "an overflowing log must be marked as cut")
+        require("[receipt truncated:" in log_block, "an overflowing log must be marked as cut")
         require("LAST-LOG-LINE-MARKER" in log_block, "a log is cut from the front: the failure is at the end")
 
         # ---- collectors with nothing to say say so ------------------------
@@ -445,21 +472,29 @@ def main() -> None:
         patterns = project / ".zpc" / "memory" / "patterns.md"
         patterns.write_text("# Established Patterns\n\n" + ("- a pattern line worth following\n" * 80))
 
-        compact = checked(project, env, "inject", "--compact")
+        # 2000 is the caller's number here, passed in, not a ceiling the tool
+        # ships: --compact's own budget is the derived one, and what makes it
+        # compact is what it leaves out.
+        squeeze = "2000"
+        compact = checked(project, env, "inject", "--compact", "--max-tokens", squeeze)
         blob = compact.stdout.rstrip("\n")
-        require(len(blob) <= 2000, f"the compact blob must stay within 2000 chars: {len(blob)}")
-        require("[zpc inject truncated]" in blob, "an overflowing compact blob must admit the cut")
+        require(len(blob.encode()) <= int(squeeze), f"the caller's budget must hold: {len(blob)}")
+        require(
+            re.search(r"truncated: \d+ of \d+ \w+ shown", blob),
+            f"an overflowing compact blob must admit the cut, with both numbers: {blob}",
+        )
         require("a pattern line worth following" in blob, f"patterns must survive the budget: {blob[:200]}")
         require(f"takeaway number {newest_lesson} " in blob, f"the newest lesson must survive the budget: {blob[-400:]}")
         require("takeaway number 0 " not in blob, "the oldest lessons are what the cut takes")
 
-        compact_json = checked(project, env, "inject", "--compact", "--json")
+        compact_json = checked(project, env, "inject", "--compact", "--max-tokens", squeeze, "--json")
         parsed = json.loads(compact_json.stdout)
         require(set(parsed) == {"additionalContext"}, f"json mode keeps the hook contract: {parsed.keys()}")
-        require(len(parsed["additionalContext"]) <= 2000, "the bound holds in json mode too")
+        require(len(parsed["additionalContext"].encode()) <= int(squeeze),
+                "the bound holds in json mode too")
 
         full = checked(project, env, "inject")
-        require(len(full.stdout) > 2000, "the full blob is unbounded and must stay that way")
+        require(len(full.stdout) > int(squeeze), "the full blob carries more than a squeezed compact one")
         require("ZPC Agent Protocol" in full.stdout, "the full blob is unchanged by --compact")
 
         access = project / ".zpc" / ".state" / "access-log.jsonl"

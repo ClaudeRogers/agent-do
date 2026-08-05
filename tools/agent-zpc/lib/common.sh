@@ -9,6 +9,13 @@ ZPC_GLOBAL_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/zpc"
 # security property.
 ZPC_BINDINGS_FILE="$ZPC_GLOBAL_DIR/worktree-bindings.tsv"
 
+# agent-do's own lib/, where the quantity authority lives. Delivery bounds are
+# read from it at call time rather than copied into this tool, so there is one
+# resolver for every published number and nothing here to go stale. Empty when
+# zpc is running detached from its repo — which means no ceiling is available,
+# and lib/delivery.py applies none rather than inventing one.
+ZPC_AUTHORITY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../lib" 2>/dev/null && pwd)" || ZPC_AUTHORITY_LIB=""
+
 # The uid owning a path, or nothing if it cannot be read. Mode `link` reads the
 # path itself, `target` (the default) reads what it resolves to. BSD form first
 # since darwin is the primary target; GNU `stat -f` means --file-system and

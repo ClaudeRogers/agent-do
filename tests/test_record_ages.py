@@ -28,12 +28,12 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENT_DO = ROOT / "agent-do"
 ZPC_LIB = ROOT / "tools" / "agent-zpc" / "lib"
 
-# The bounds already in force, restated here because age strings are the most
-# likely thing to push a blob past one.
-COMPACT_MAX = 2000
-PREFERENCES_MAX = 2000
-SESSION_START_MAX = 6000
-TRUNCATION_MARKER = "[zpc inject truncated]"
+# The caller's own squeeze, handed to --max-tokens. Age strings are the most
+# likely thing to push a blob past a bound, so the bound is exercised here at a
+# size small enough to bite; the delivery path itself ships no ceiling to pin,
+# it derives one from the quantity authority at call time.
+SQUEEZE = 2000
+TRUNCATION_MARKER = "truncated:"
 
 
 def require(condition: bool, message: str) -> None:
@@ -217,8 +217,10 @@ def test_zpc_bounds_still_bind_with_ages_in_the_blob() -> None:
                 }) + "\n")
         (memory / "patterns.md").write_text("# Patterns\n\n" + ("- a long pattern line\n" * 200))
 
-        compact = run(["zpc", "inject", "--compact"], project, env).stdout
-        require(len(compact) <= COMPACT_MAX, f"compact blew its ceiling: {len(compact)} chars")
+        compact = run(["zpc", "inject", "--compact", "--max-tokens", str(SQUEEZE)],
+                      project, env).stdout
+        require(len(compact.encode()) <= SQUEEZE,
+                f"compact blew the caller's budget: {len(compact)} chars")
         require(TRUNCATION_MARKER in compact, "a cut blob still admits the cut")
 
         global_lessons = Path(env["AGENT_DO_HOME"]) / "zpc" / "global-lessons.jsonl"
@@ -230,22 +232,26 @@ def test_zpc_bounds_still_bind_with_ages_in_the_blob() -> None:
                     "takeaway": f"preference {n} " + "y" * 70, "tags": ["preference"],
                 }) + "\n")
 
-        preferences = run(["zpc", "inject", "--preferences"], project, env).stdout
+        preferences = run(["zpc", "inject", "--preferences", "--max-tokens", str(SQUEEZE)],
+                          project, env).stdout
         require(
-            len(preferences) <= PREFERENCES_MAX,
-            f"the preference slice blew its ceiling: {len(preferences)} chars",
+            len(preferences.encode()) <= SQUEEZE,
+            f"the preference slice blew the caller's budget: {len(preferences)} chars",
         )
         require(TRUNCATION_MARKER in preferences, "a cut preference slice admits the cut")
 
-        # The full blob has no ceiling of its own; the session-start hook cuts
-        # it at 6000 and backs up to a whole line. That arithmetic is what the
-        # ages must survive, so it is exercised on real oversized output.
-        full = run(["zpc", "inject"], project, env).stdout
-        require(len(full) > SESSION_START_MAX, "fixture must be big enough to exercise the cut")
-        cut = full[:SESSION_START_MAX]
-        cut = cut[: cut.rfind("\n")] + f"\n{TRUNCATION_MARKER}"
-        require(len(cut) <= SESSION_START_MAX, f"the session-start cut must hold: {len(cut)}")
-        require(cut.endswith(TRUNCATION_MARKER), "the cut blob keeps its marker")
+        # The session-start hooks no longer cut at all — inject fits its own
+        # blob and the hooks pass it through — so what the ages have to survive
+        # is inject's own arithmetic on real oversized output. Every marker it
+        # leaves must still carry both numbers with age strings in the lines.
+        full = run(["zpc", "inject", "--max-tokens", str(SQUEEZE)], project, env).stdout
+        require(len(full.encode()) <= SQUEEZE, f"the full blob must hold its budget: {len(full)}")
+        markers = [line for line in full.splitlines() if TRUNCATION_MARKER in line]
+        require(markers, f"an oversized store must produce a cut:\n{full}")
+        require(
+            all(re.search(r"\b\d+ of \d+\b", line) for line in markers),
+            f"every marker carries its magnitude even with ages in the lines: {markers}",
+        )
 
 
 def test_zpc_position_renders_its_age() -> None:

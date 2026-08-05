@@ -41,7 +41,8 @@ Commands:
   patterns [--score]                                    View/score patterns
   review [--since DATE] [--auto] [--dry-run]             Post-sprint lesson extraction
   promote <source> --to team|global                     Promote lessons
-  inject [--compact] [--preferences] [--relitigate]     Emit agent context blob
+  inject [--compact] [--preferences] [--relitigate] [--max-tokens N]
+                                                        Emit agent context blob
   init [--platform claude|cursor|codex|generic]         Initialize .zpc/
   status                                                Memory snapshot
   checkpoint [--phase "name"] [--agents "a1,a2"]        Swarm phase boundary
@@ -63,7 +64,8 @@ Examples:
   agent-zpc harvest --corrections --dry-run             # what past sessions already told you
   agent-zpc query --tag testing --since 2025-01-01
   agent-zpc inject
-  agent-zpc inject --compact                            # bounded blob for a subagent's prompt
+  agent-zpc inject --compact                            # patterns + claims only, for a subagent's prompt
+  agent-zpc inject --max-tokens 4000                    # your budget; the default is derived from the quantity authority
   agent-zpc inject --preferences                        # machine-wide preferences; no .zpc store needed
   agent-zpc inject --relitigate                         # also re-try the most-injected claims now (detached)
   agent-zpc retract les-1a2b3c --evidence "src/api.ts:44 sets Retry-After on every 429"

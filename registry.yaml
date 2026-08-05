@@ -481,7 +481,9 @@ tools:
       review: Post-sprint lesson extraction from git history
       promote: Promote lessons to team or global
       inject: Emit agent context blob (claims rendered dated, kinded and retractable, never as law);
-        --compact bounds it for pasting into a subagent's prompt; --preferences emits only the
+        fits itself to a budget derived from the quantity authority and states the magnitude of
+        anything it drops, or takes the caller's own with --max-tokens;
+        --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the
         machine-wide preference slice and needs no .zpc store, so what the user already said about
         working follows them into any directory; --relitigate re-tries the most-exposed
         claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
@@ -601,6 +603,35 @@ tools:
         counsel:
         - long_running
         - own_state
+    bounds:
+      inject:
+        source: measured
+        ref: min(<provider>.<model>.max_tokens) over every record in models.yaml
+        why: >-
+          How much memory one blob may carry. `max_tokens` is the authority's
+          published size of ONE DELIVERY — the most text a model may hand over
+          in a single response — and a memory blob is one delivery of text into
+          a session, so it gets one delivery's worth. The minimum over every
+          record is taken because a session-start hook cannot know which model
+          it is feeding, and a bound that holds only on the roomiest model is
+          not a bound. lib/delivery.py resolves it through lib/quantities.py at
+          call time and ships no literal, so nothing here can go stale; when the
+          authority cannot be reached no ceiling is applied at all, because a
+          fallback constant is the defect this declaration exists to prevent.
+          The budget is in tokens and the blob is trimmed in bytes, bridged by
+          proof rather than by a conversion factor: every token of a byte-level
+          BPE tokenizer decodes to at least one byte, so bytes <= budget
+          guarantees tokens <= budget. --max-tokens overrides it, since the
+          caller is the only party who knows what else is going in the window.
+      counsel:
+        source: measured
+        ref: min(<provider>.<model>.max_tokens) over every record in models.yaml
+        why: >-
+          The same derivation, for the same reason: an auto-assembled brief is
+          one delivery into a fresh judge's window. It replaced three unexplained
+          literals (12000 for a diff, 6000 for a log, 6000 for a supplied
+          receipt). Resolved per brief through lib/delivery.py; every receipt
+          that gets trimmed says how many of its lines survived.
     concurrency: mixed
   tui:
     description: Control any terminal/TUI application via tmux

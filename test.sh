@@ -78,6 +78,7 @@ check_cmd "zpc position ledger tests" python3 "$SCRIPT_DIR/tests/test_zpc_positi
 check_cmd "zpc auto-counsel tests" python3 "$SCRIPT_DIR/tests/test_zpc_counsel_auto.py"
 check_cmd "zpc epistemics tests" python3 "$SCRIPT_DIR/tests/test_zpc_epistemics.py"
 check_cmd "zpc delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_delivery.py"
+check_cmd "zpc memory bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_memory_bounds.py"
 check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitigate.py"
 check_cmd "zpc correction mining tests" python3 "$SCRIPT_DIR/tests/test_zpc_corrections.py"
 check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_preferences.py"

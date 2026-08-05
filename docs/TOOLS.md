@@ -4538,7 +4538,7 @@ Concurrency: `mixed`
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
 - `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); --compact bounds it for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
 - `init`: Initialize .zpc/ in a project; --store-only creates the store alone (no .gitignore append, no agent instruction file) and keeps it out of git through .git/info/exclude, which is what an unattended caller may run in a repo it does not own
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check

@@ -5,13 +5,14 @@ Retraction assumes a noticer, and injection is what suppresses noticing: an
 agent handed bare assertions at birth has no reason to argue with them. So the
 delivery itself is pinned here — the tie-breaker sentence verbatim in both
 blobs, every claim carrying its date and kind, no "follow these" anywhere, and
-the compact blob still inside its 2000-character ceiling with all of it.
+a squeezed blob keeping the law while saying in numbers what it dropped.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -130,10 +131,8 @@ def main() -> None:
         require("[checked:" not in full.split(ids[1])[1].split("\n")[0],
                 "an unexamined claim claims no check")
 
-        require(len(compact) <= 2000, f"compact stays bounded: {len(compact)} chars")
-
-        # The ceiling holds when the store is far too big for it, and the law
-        # survives the cut that the claims do not.
+        # A store far too big for the budget it is given: the law survives the
+        # cut that the claims do not, and the cut says how much it took.
         with (memory / "lessons.jsonl").open("a") as handle:
             for n in range(120):
                 handle.write(json.dumps({
@@ -142,10 +141,26 @@ def main() -> None:
                     "tags": ["bulk"],
                 }) + "\n")
         (memory / "patterns.md").write_text("# Patterns\n\n" + ("- a long pattern line\n" * 200))
-        crowded = checked(project, env, "inject", "--compact").stdout
-        require(len(crowded) <= 2000, f"compact stays bounded when crowded: {len(crowded)} chars")
+        squeeze = 2000
+        crowded = checked(project, env, "inject", "--compact",
+                          "--max-tokens", str(squeeze)).stdout
+        require(len(crowded.encode()) <= squeeze,
+                f"the caller's budget holds when crowded: {len(crowded)} chars")
         require(TIEBREAKER in crowded, f"the law is not what gets trimmed:\n{crowded}")
-        require("[zpc inject truncated]" in crowded, "a cut blob still admits the cut")
+
+        # Both numbers, on every marker. The fact of a cut without its size is a
+        # half-receipt: it tells a reader something went missing and leaves them
+        # no way to ask how much, which reads as completeness with a footnote.
+        markers = [line for line in crowded.splitlines() if "truncated" in line]
+        require(markers, f"a cut blob still admits the cut:\n{crowded}")
+        require(
+            all(re.search(r"\b\d+ of \d+\b", line) for line in markers),
+            f"every truncation marker carries its magnitude: {markers}",
+        )
+        require(
+            any("[budget:" in line for line in crowded.splitlines()),
+            f"a cut names the budget that made it:\n{crowded}",
+        )
 
     print("zpc delivery: claims arrive dated, kinded, and outranked by observation")
 

@@ -685,15 +685,11 @@ append_zpc_preferences() {
     prefs_rc=$?
     [ "$prefs_rc" -eq 0 ] && [ -n "$prefs_out" ] || return 1
 
-    # The flag bounds its own output; this is the belt to that pair of braces.
-    if [ ${#prefs_out} -gt 2000 ]; then
-        prefs_out="${prefs_out:0:2000}"
-        # Back up to the last complete line: a cut landing mid-character would
-        # hand jq -Rs invalid UTF-8 and cost the whole envelope.
-        prefs_out="${prefs_out%$'\n'*}"
-        prefs_out="$prefs_out
-[zpc preferences truncated]"
-    fi
+    # No second cut here. `inject --preferences` fits its own blob to a budget
+    # read from the quantity authority and marks what it dropped with both
+    # numbers; a belt applied on top of that would cut at a byte offset it has
+    # no way to place, which is exactly how the project blob came to deliver
+    # zero claims. This hook's constraint is time, and bounded_run above is it.
 
     CONTEXT="$CONTEXT
 
@@ -739,15 +735,14 @@ append_zpc_memory() {
             inject_rc=$?
 
             if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
-                if [ ${#inject_out} -gt 6000 ]; then
-                    inject_out="${inject_out:0:6000}"
-                    # Back up to the last complete line: a cut landing
-                    # mid-character would hand jq -Rs invalid UTF-8 and cost
-                    # the whole envelope.
-                    inject_out="${inject_out%$'\n'*}"
-                    inject_out="$inject_out
-[zpc inject truncated]"
-                fi
+                # The blob arrives already fitted. It used to be cut again here,
+                # at 6000 characters, and the receipt is worth keeping: against a
+                # store of 197 rows that cut landed inside the protocol header,
+                # so the session received the boilerplate, none of the claims,
+                # and the four words `[zpc inject truncated]` to describe the
+                # loss. Two bounds on one payload is one bound too many — only
+                # inject can rank what it is cutting, so only inject cuts. What
+                # this hook owes the session is time, and bounded_run is that.
 
                 CONTEXT="$CONTEXT
 

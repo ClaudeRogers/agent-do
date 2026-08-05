@@ -116,236 +116,67 @@ _maybe_auto_harvest() {
 # contradiction from a dissonance to rationalize into a finding to file.
 ZPC_INJECT_TIEBREAKER='These are recorded claims, each true as of its date. Live observation outranks memory: when the code in front of you contradicts a lesson, the code wins, and filing the contradiction (zpc retract --candidate <id> --evidence "<receipt>") is worth more than complying with the lesson.'
 
-# How many claims the full blob carries, and how long a correction stays news.
-# A retraction is worth reading while the belief it corrects may still be in
-# someone's head; after a month it is history, and history lives in the file.
-ZPC_INJECT_LESSON_WINDOW=20
+# How long a correction stays news. A retraction is worth reading while the
+# belief it corrects may still be in someone's head; after a month it is
+# history, and history lives in the file.
 ZPC_INJECT_CORRECTION_DAYS=30
 
-# The machine-wide slice is smaller than the project's: it is context from other
-# projects, and it rides in every blob this machine emits.
-ZPC_INJECT_GLOBAL_WINDOW=10
-
-# The rendered claims section: retracted claims are gone, challenged claims are
-# marked, and every line carries its date, its kind, and the id you would need to
-# argue with it. Raw JSON rows used to go here — unreadable, undated, and
-# unaddressable, which is how a lesson comes to read like a rule.
-_inject_lessons() {
-    local lessons_file="$1"
-
-    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$lessons_file" "$ZPC_INJECT_LESSON_WINDOW" \
-        "$ZPC_INJECT_CORRECTION_DAYS" "$ZPC_STATE_DIR/relitigation-log.jsonl"
-import json, os, sys
-from datetime import datetime, timezone
-
-sys.path.insert(0, sys.argv[1])
-import epistemics
-
-lessons_path = sys.argv[2]
-window, correction_days = int(sys.argv[3]), int(sys.argv[4])
-relit_log = sys.argv[5]
-
-state = epistemics.analyze(lessons_path, "les-")
-claims = state["claims"]
-
-# When a claim was last tried against current reality, if it ever was. A claim
-# checked yesterday and a claim last examined the day it was written are not
-# equally trustworthy, and only one of them says so on its own line.
-checked = epistemics.last_checked(relit_log)
-
-live = [record for record in claims if record["retraction"] is None]
-lines = []
-for record in live[-window:]:
-    row = record["row"]
-    tags = epistemics.tags_of(row)
-    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
-    if record["challenges"]:
-        suffix += f"  [challenged: {len(record['challenges'])}]"
-    when = checked.get(record["id"])
-    if when:
-        suffix += f"  [checked: {epistemics.dated(when)}]"
-    text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    kind = epistemics.kind_of(row)
-    lines.append(f"[{epistemics.dated(row.get('date'))}] {record['id']} ({kind}) {text}{suffix}")
-
-print("\n".join(lines) if lines else "(none)")
-
-# A retraction with no replacement claim is bookkeeping: the row stops
-# rendering and there is nothing to put in its place. One that names what is
-# true instead is the correction worth carrying into the next session.
-now = datetime.now(timezone.utc)
-corrections = []
-for record in claims:
-    tombstone = record["retraction"]
-    if not tombstone or not tombstone.get("takeaway"):
-        continue
-    stamp = tombstone.get("ts", "")
-    try:
-        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    except ValueError:
-        continue
-    if (now - when).days > correction_days:
-        continue
-    # The withdrawn wording is deliberately not quoted here. A correction that
-    # repeats the wrong sentence re-injects it, and a skimmer takes the text and
-    # leaves the frame. The id is the pointer for anyone who needs the original:
-    # agent-do zpc query --text "<id>".
-    corrections.append(
-        f"[{epistemics.dated(stamp[:10])}] {record['id']} corrected to: {tombstone['takeaway']}"
-    )
-
-if corrections:
-    print()
-    print("## Corrections (recent)")
-    print("\n".join(corrections))
-PYTHON
-}
-
-# The machine-wide slice, rendered the same way the project's own claims are.
-# Raw JSON rows used to go here, which had two costs: a reader could not name a
-# row to argue with it, and a retracted row kept rendering forever because a
-# tail knows nothing about corrections. Mined corrections land in this store, so
-# it is exactly the section that most needs an escape hatch.
-_inject_global() {
-    local global_file="$1" limit="$2"
-
-    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$global_file" "$limit"
-import sys
-
-sys.path.insert(0, sys.argv[1])
-import epistemics
-
-limit = int(sys.argv[3])
-
-live = [
-    record
-    for record in epistemics.analyze(sys.argv[2], "les-")["claims"]
-    if record["retraction"] is None
-]
-
-lines = []
-for record in live[-limit:]:
-    row = record["row"]
-    tags = epistemics.tags_of(row)
-    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
-    if record["challenges"]:
-        suffix += f"  [challenged: {len(record['challenges'])}]"
-    text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    lines.append(
-        f"[{epistemics.dated(row.get('date'))}] {record['id']} "
-        f"({epistemics.kind_of(row)}) {text}{suffix}"
-    )
-
-print("\n".join(lines) if lines else "(none)")
-PYTHON
-}
-
-# Patterns rendered as dated claims. The work is in epistemics.render_patterns
-# so the compact blob below renders them the same way.
-_inject_patterns() {
-    local patterns_file="$1" lessons_file="$2"
-
-    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$patterns_file" "$lessons_file"
-import sys
-
-sys.path.insert(0, sys.argv[1])
-import epistemics
-
-print(epistemics.render_patterns(sys.argv[2], sys.argv[3]))
-PYTHON
-}
-
-# The compact blob's ceiling, and the literal marker that admits the cut.
-# 2000 chars is a paste, not a payload: it goes in a lane prompt beside the
-# lane's own instructions, where an unbounded memory dump would crowd out the
-# work it is supposed to inform.
-ZPC_INJECT_COMPACT_MAX=2000
-ZPC_INJECT_TRUNCATED='[zpc inject truncated]'
-
-# Patterns are consolidated truth and lessons are raw, so patterns get first
-# call on the budget — but a fixed share, never all of it, so a long
-# patterns.md can never starve the lessons section out of existence.
-ZPC_INJECT_COMPACT_PATTERNS_SHARE=60
+# How many claims a blob carries is no longer a number written here. It used to
+# be two of them — a top-20 project window and a top-10 global one — and between
+# them and the session hook's own 6000-character cut, a store of 197 rows
+# delivered nothing at all. What replaced them: one budget, read from the
+# quantity authority at call time, and a cut that takes whole records from the
+# least valuable end. The derivation is in lib/delivery.py.
 
 _inject_compact() {
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
 
-    python3 << 'PYTHON' - "$patterns_file" "$lessons_file" "$ZPC_INJECT_COMPACT_MAX" \
-        "$ZPC_INJECT_TRUNCATED" "$ZPC_INJECT_COMPACT_PATTERNS_SHARE" "${OUTPUT_FORMAT:-text}" \
-        "$ZPC_LIB_DIR" "$ZPC_INJECT_TIEBREAKER"
-import json, os, sys
+    python3 << 'PYTHON' - "$patterns_file" "$lessons_file" "${1:-}" \
+        "${OUTPUT_FORMAT:-text}" "$ZPC_LIB_DIR" "$ZPC_INJECT_TIEBREAKER" "$ZPC_AUTHORITY_LIB"
+import json, sys
 
 patterns_path, lessons_path = sys.argv[1], sys.argv[2]
-limit, marker, share, fmt = int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), sys.argv[6]
+override, fmt = sys.argv[3], sys.argv[4]
 
-sys.path.insert(0, sys.argv[7])
-import epistemics
+sys.path.insert(0, sys.argv[5])
+import delivery, epistemics
 
-# The tie-breaker costs a sixth of the budget and buys the frame the rest is
-# read in. A subagent handed this blob has no other context: it is the surface
-# where memory is most likely to be mistaken for instruction, so it is the last
-# place the law should be trimmed to make room for more claims.
-TIEBREAKER = sys.argv[8]
+# The tie-breaker buys the frame the rest is read in. A subagent handed this
+# blob has no other context: it is the surface where memory is most likely to be
+# mistaken for instruction, so it is the last place the law should be trimmed to
+# make room for more claims. Hence `protected` below.
+TIEBREAKER = sys.argv[6]
 HEADER = "--- ZPC compact (this project's memory) ---"
 PATTERNS_LABEL = "Recorded patterns (claims, dated):"
 LESSONS_LABEL = "Recent lessons (newest first):"
 
-
-def cut(text, budget):
-    """Trim to budget, spending part of it on the admission that we trimmed."""
-    if budget <= 0:
-        return marker
-    if len(text) <= budget:
-        return text
-    keep = max(0, budget - len(marker) - 1)
-    return text[:keep].rstrip() + "\n" + marker
-
+# Compact is compact because of what it leaves out — no protocol, no decisions,
+# no baseline counts — not because it spends a smaller invented number than the
+# full blob. Both are one delivery, so both get one delivery's worth, and a
+# caller who needs less says so with --max-tokens.
+max_tokens, budget_origin = delivery.resolve(sys.argv[7], override)
 
 patterns = epistemics.render_patterns(patterns_path, lessons_path).strip() or "(none yet)"
-
-# Retracted claims are absent from every rendering, this one included: a bounded
-# blob is exactly where a withdrawn claim would be least likely to be questioned.
-records = [
-    record
-    for record in epistemics.analyze(lessons_path, "les-")["claims"]
-    if record["retraction"] is None
-]
-
-# Newest first, so the cut always takes the oldest — the one worth losing.
-# Identical takeaways collapse to their newest instance: auto-captured lessons
-# repeat verbatim, and five copies of one line spend a budget that five
-# different lines were the point of.
-rendered = []
-seen = set()
-for record in reversed(records):
-    row = record["row"]
-    takeaway = epistemics.claim_text(row)
-    if not takeaway or takeaway in seen:
-        continue
-    seen.add(takeaway)
-    tags = epistemics.tags_of(row)
-    suffix = f"  [{','.join(tags)}]" if tags else ""
-    if record["challenges"]:
-        suffix += f"  [challenged: {len(record['challenges'])}]"
-    # Dated, aged, and kinded here too: the compact blob is shorter, not softer.
-    rendered.append(
-        f"- [{epistemics.dated(row.get('date'))}] {record['id']} "
-        f"({epistemics.kind_of(row)}) {takeaway}{suffix}"
-    )
-lessons_text = "\n".join(rendered) or "(none yet)"
-
-scaffold = len(HEADER) + len(TIEBREAKER) + len(PATTERNS_LABEL) + len(LESSONS_LABEL) + 8
-budget = max(0, limit - scaffold)
-
-patterns_text = cut(patterns, budget * share // 100)
-lessons_text = cut(lessons_text, budget - len(patterns_text))
-
-blob = "\n".join(
-    [HEADER, TIEBREAKER, "", PATTERNS_LABEL, patterns_text, "", LESSONS_LABEL, lessons_text]
+lessons, _counts = delivery.render_claims(
+    delivery.live_claims(lessons_path), bullet=True, tag_label=False
 )
-if len(blob) > limit:
-    blob = cut(blob, limit)
+
+# Patterns first: a subagent handed this blob is about to write code, and
+# patterns are the project's conventions where lessons are single incidents.
+# Order only breaks ties here — the two share the budget turn by turn, so a long
+# patterns.md cannot starve the lessons the way a strict priority would.
+fitted = delivery.fit(
+    [
+        {"key": "law", "header": HEADER, "body": TIEBREAKER, "unit": "lines", "protected": True},
+        {"key": "patterns", "header": PATTERNS_LABEL, "body": patterns, "unit": "lines"},
+        {"key": "lessons", "header": LESSONS_LABEL, "body": lessons or "(none yet)",
+         "unit": "lessons"},
+    ],
+    max_tokens,
+    delivery.receipt_reserve(max_tokens, budget_origin),
+)
+blob = delivery.assemble(fitted, ["law", "patterns", "lessons"], max_tokens, budget_origin)
 
 if fmt == "json":
     print(json.dumps({"additionalContext": blob}))
@@ -353,10 +184,6 @@ else:
     print(blob)
 PYTHON
 }
-
-# The preference slice's ceiling, the same 2000 characters the compact blob
-# spends and for the same reason: this is a paste into somebody else's prompt.
-ZPC_INJECT_PREFERENCES_MAX=2000
 
 # The tag that says a claim is about how this user wants to be worked with,
 # rather than about how some codebase behaves. Correction mining writes it.
@@ -407,67 +234,27 @@ _inject_preferences() {
     # Failure exits 0 with nothing said, stderr intact: a directory with no
     # memory and a directory whose memory would not parse are the same answer to
     # the caller, and neither is worth failing a session start over.
-    python3 << 'PYTHON' - "$global_file" "$ZPC_INJECT_PREFERENCES_MAX" "$ZPC_INJECT_TRUNCATED" \
-        "${OUTPUT_FORMAT:-text}" "$ZPC_LIB_DIR" "$ZPC_INJECT_TIEBREAKER" \
-        "$ZPC_INJECT_PREFERENCES_TAG" || return 0
+    python3 << 'PYTHON' - "$global_file" "${1:-}" "${OUTPUT_FORMAT:-text}" "$ZPC_LIB_DIR" \
+        "$ZPC_INJECT_TIEBREAKER" "$ZPC_INJECT_PREFERENCES_TAG" "$ZPC_AUTHORITY_LIB" || return 0
 import json, sys
 
 global_path = sys.argv[1]
-limit, marker, fmt = int(sys.argv[2]), sys.argv[3], sys.argv[4]
+override, fmt = sys.argv[2], sys.argv[3]
 
-sys.path.insert(0, sys.argv[5])
-import epistemics
+sys.path.insert(0, sys.argv[4])
+import delivery, epistemics
 
-TIEBREAKER = sys.argv[6]
-PREFERENCE_TAG = sys.argv[7]
+TIEBREAKER = sys.argv[5]
+PREFERENCE_TAG = sys.argv[6]
 HEADER = "--- ZPC preferences (machine-wide, this user) ---"
 LABEL = "Recorded preferences (newest first):"
 
-
-def joined(lines):
-    return "\n".join(lines)
-
-
-def fit(lines, budget):
-    """Trim to budget by whole claims, spending part of it on admitting the cut.
-
-    Character-granular trimming is wrong here in a way it is not elsewhere: half
-    a preference is still a sentence, and "never do X unless Y" cut at the comma
-    is a claim the user never made. A dropped claim is merely missing.
-    """
-    kept = []
-    for line in lines:
-        if len(joined(kept + [line])) > budget:
-            break
-        kept.append(line)
-    if len(kept) == len(lines):
-        return joined(kept)
-    while kept and len(joined(kept + [marker])) > budget:
-        kept.pop()
-    return joined(kept + [marker]) if kept else marker
-
-
-def render(record):
-    row = record["row"]
-    tags = epistemics.tags_of(row)
-    suffix = f"  [tags: {','.join(tags)}]" if tags else ""
-    if record["challenges"]:
-        suffix += f"  [challenged: {len(record['challenges'])}]"
-    text = epistemics.claim_text(row) or "(no takeaway recorded)"
-    return (
-        f"- [{epistemics.dated(row.get('date'))}] {record['id']} "
-        f"({epistemics.kind_of(row)}) {text}{suffix}"
-    )
-
+max_tokens, budget_origin = delivery.resolve(sys.argv[7], override)
 
 # Retracted claims are absent here as they are everywhere else. A withdrawn
 # preference is the one most likely to be obeyed on reflex, since nobody
 # re-reads a rule they think they already know.
-live = [
-    record
-    for record in epistemics.analyze(global_path, "les-")["claims"]
-    if record["retraction"] is None
-]
+live = delivery.live_claims(global_path)
 
 # Dated order, not file order: promotions and mining append at different times
 # than the days they describe, and "newest first" has to mean the claim's day.
@@ -483,28 +270,30 @@ for record in live:
     elif epistemics.kind_of(record["row"]) == "technique":
         technique.append(record)
 
-# Mined corrections repeat verbatim across sessions — "try again" is typed a
-# hundred times — and five copies of one line spend a budget that five different
-# lines were the point of.
-lines, seen = [], set()
-for record in preferred + technique:
-    text = epistemics.claim_text(record["row"])
-    if not text or text in seen:
-        continue
-    seen.add(text)
-    lines.append(render(record))
+# render_claims collapses identical takeaways and walks newest-to-oldest, so the
+# ordering above is handed to it reversed and comes back out in it.
+body, _counts = delivery.render_claims(
+    list(reversed(preferred + technique)), bullet=True, tag_label=True
+)
 
-if not lines:
+if not body:
     if fmt == "json":
         print(json.dumps({"additionalContext": ""}))
     sys.exit(0)
 
-scaffold = len(HEADER) + len(TIEBREAKER) + len(LABEL) + 4
-body = fit(lines, max(0, limit - scaffold))
+# Trimming by whole claims, never by character, matters more here than anywhere
+# else: half a preference is still a sentence, and "never do X unless Y" cut at
+# the comma is a claim the user never made. A dropped claim is merely missing.
+fitted = delivery.fit(
+    [
+        {"key": "law", "header": HEADER, "body": TIEBREAKER, "unit": "lines", "protected": True},
+        {"key": "prefs", "header": LABEL, "body": body, "unit": "preferences"},
+    ],
+    max_tokens,
+    delivery.receipt_reserve(max_tokens, budget_origin),
+)
 
-blob = "\n".join([HEADER, TIEBREAKER, "", LABEL, body])
-if len(blob) > limit:
-    blob = blob[: max(0, limit - len(marker) - 1)].rstrip() + "\n" + marker
+blob = delivery.assemble(fitted, ["law", "prefs"], max_tokens, budget_origin)
 
 if fmt == "json":
     print(json.dumps({"additionalContext": blob}))
@@ -514,16 +303,24 @@ PYTHON
 }
 
 cmd_inject() {
-    local compact=false relitigate=false preferences=false
+    local compact=false relitigate=false preferences=false max_tokens=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --compact) compact=true; shift ;;
             --relitigate) relitigate=true; shift ;;
             --preferences) preferences=true; shift ;;
+            --max-tokens) max_tokens="${2:-}"; shift 2 ;;
+            --max-tokens=*) max_tokens="${1#*=}"; shift ;;
             *) shift ;;
         esac
     done
+
+    # The one number a human may type in this path, because it is the one number
+    # a human knows: what else is going into that window beside this blob.
+    # Anything that is not a positive count is discarded rather than obeyed — a
+    # typo must fall back to the derived budget, never silence memory.
+    [[ "$max_tokens" =~ ^[1-9][0-9]*$ ]] || max_tokens=""
 
     # The preference slice answers before a project store exists, so it runs
     # before the check that would demand one. Everything below this point —
@@ -534,7 +331,7 @@ cmd_inject() {
         else
             _log_global_access "inject --preferences"
         fi
-        _inject_preferences
+        _inject_preferences "$max_tokens"
         return 0
     fi
 
@@ -549,7 +346,7 @@ cmd_inject() {
     _maybe_relitigate "$relitigate" 2>/dev/null || true
 
     if [[ "$compact" == true ]]; then
-        _inject_compact
+        _inject_compact "$max_tokens"
         return 0
     fi
 
@@ -564,90 +361,122 @@ cmd_inject() {
     lesson_count=$(_zpc_claim_count "$lessons_file")
     decision_count=$(_zpc_claim_count "$decisions_file")
 
-    local context=""
+    # One process renders and fits the whole blob. It used to be four, each
+    # emitting a section that nothing downstream could weigh against the others,
+    # which is how the hook came to cut a blob at a byte offset it had no way to
+    # place: nobody held all the sections at once, so nobody could choose.
+    python3 << 'PYTHON' - "$ZPC_LIB_DIR" "$ZPC_AUTHORITY_LIB" "$max_tokens" \
+        "$profile_file" "$patterns_file" "$lessons_file" "$decisions_file" \
+        "$global_lessons_file" "$ZPC_STATE_DIR/relitigation-log.jsonl" \
+        "$ZPC_INJECT_CORRECTION_DAYS" "$lesson_count" "$decision_count" \
+        "${OUTPUT_FORMAT:-text}" "$ZPC_INJECT_TIEBREAKER"
+import json, os, sys
 
-    # Section 1: Protocol
-    context+="--- ZPC Agent Protocol (MANDATORY) ---\n"
-    context+="${ZPC_INJECT_TIEBREAKER}\n"
-    context+="BEFORE writing code: read the Recorded Patterns below and note which the code still supports.\n"
-    context+="DURING work: use 'agent-do zpc learn' to capture lessons.\n"
-    context+="  EXACT format is handled by the tool. Usage:\n"
-    context+="  agent-do zpc learn \"context\" \"problem\" \"solution\" \"takeaway\" --tags \"tag1,tag2\"\n"
-    context+="BEFORE reporting completion:\n"
-    context+="  Log EVERY error-resolution pair as a lesson.\n"
-    context+="  Include in completion message: \"Lessons logged: N (new) | Decisions logged: N (new)\"\n"
-    context+="\n"
+sys.path.insert(0, sys.argv[1])
+import delivery, epistemics
 
-    # Section 2: Profile
-    if [[ -f "$profile_file" && -s "$profile_file" ]]; then
-        context+="--- Project Profile ---\n"
-        context+="$(cat "$profile_file")\n\n"
-    fi
+authority_lib, override = sys.argv[2], sys.argv[3]
+profile_path, patterns_path, lessons_path = sys.argv[4], sys.argv[5], sys.argv[6]
+decisions_path, global_path, relit_log = sys.argv[7], sys.argv[8], sys.argv[9]
+correction_days = int(sys.argv[10])
+lesson_count, decision_count = sys.argv[11], sys.argv[12]
+fmt, TIEBREAKER = sys.argv[13], sys.argv[14]
 
-    # Section 3: Patterns
-    if [[ -f "$patterns_file" && -s "$patterns_file" ]]; then
-        context+="--- Recorded Patterns (claims, dated) ---\n"
-        context+="$(_inject_patterns "$patterns_file" "$lessons_file")\n\n"
-    fi
+max_tokens, budget_origin = delivery.resolve(authority_lib, override)
 
-    # Section 4: Machine-wide lessons (bounded; omit the section when empty)
-    if [[ -f "$global_lessons_file" && -s "$global_lessons_file" ]]; then
-        context+="--- Global Lessons (machine-wide) ---\n"
-        context+="$(_inject_global "$global_lessons_file" "$ZPC_INJECT_GLOBAL_WINDOW")\n\n"
-    fi
 
-    # Section 5: Recent project lessons
-    context+="--- Recent Lessons (newest last) ---\n"
-    if [[ -f "$lessons_file" && -s "$lessons_file" ]]; then
-        context+="$(_inject_lessons "$lessons_file")\n"
-    else
-        context+="(none)\n"
-    fi
-    context+="\n"
+def readable(path):
+    return os.path.isfile(path) and os.path.getsize(path) > 0
 
-    # Section 6: Decisions
-    context+="--- Settled Decisions (do not re-derive; retract with evidence to re-open) ---\n"
-    if [[ -f "$decisions_file" && -s "$decisions_file" ]]; then
-        context+="$(python3 << 'PYTHON' - "$decisions_file" "$ZPC_LIB_DIR"
-import json, sys, os
 
-sys.path.insert(0, sys.argv[2])
-import epistemics
+def contents(path):
+    if not readable(path):
+        return ""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read().strip()
 
-# A decision binds until someone re-opens it, which is the difference between a
-# decision and a lesson — but it binds under its own id, so re-opening it is a
-# command and not an argument.
-for record in epistemics.analyze(sys.argv[1], "dec-")["claims"]:
-    if record["retraction"] is not None:
-        continue
-    row = record["row"]
-    marker = f"  [challenged: {len(record['challenges'])}]" if record["challenges"] else ""
-    print(
-        f"[{epistemics.dated(row.get('date'))}] {record['id']} "
-        f"{row.get('chosen', '?')}: {row.get('rationale', '')}{marker}"
-    )
+
+PROTOCOL = "\n".join([
+    TIEBREAKER,
+    "BEFORE writing code: read the Recorded Patterns below and note which the code still supports.",
+    "DURING work: use 'agent-do zpc learn' to capture lessons.",
+    "  EXACT format is handled by the tool. Usage:",
+    '  agent-do zpc learn "context" "problem" "solution" "takeaway" --tags "tag1,tag2"',
+    "BEFORE reporting completion:",
+    "  Log EVERY error-resolution pair as a lesson.",
+    '  Include in completion message: "Lessons logged: N (new) | Decisions logged: N (new)"',
+])
+
+COUNTS = "\n".join([
+    f"lessons.jsonl: {lesson_count} entries | decisions.jsonl: {decision_count} entries",
+    "Only count entries YOU append as 'new'. Do not count pre-existing entries.",
+])
+
+lessons_claims = delivery.live_claims(lessons_path) if readable(lessons_path) else []
+all_lesson_records = (
+    epistemics.analyze(lessons_path, "les-")["claims"] if readable(lessons_path) else []
+)
+
+# When a claim was last tried against current reality, if it ever was. A claim
+# checked yesterday and a claim last examined the day it was written are not
+# equally trustworthy, and only one of them says so on its own line.
+checked = epistemics.last_checked(relit_log)
+
+lessons_text, _lesson_counts = delivery.render_claims(lessons_claims, checked=checked)
+global_text, _global_counts = delivery.render_claims(
+    delivery.live_claims(global_path) if readable(global_path) else []
+)
+
+# VALUE ORDER, which is the order a cut reads. It is not the reading order
+# below, and the difference is the whole fix.
+#
+# The law and the baseline counts go first and are never trimmed: they are the
+# frame everything else is read through and the receipt a reader checks their
+# own work against. Then the claims, because a claim is what only memory holds.
+# The project profile comes LAST despite being useful, and that placement is
+# the lesson of this bug written down: an agent can re-read a profile out of the
+# repo in one command, and a freshly initialized store carries a stub of "(not
+# yet documented)" headings that will happily eat an entire budget before a
+# single claim is reached. Boilerplate outranking knowledge is exactly how a
+# store of 197 rows came to deliver none of them.
+sections = [
+    {"key": "protocol", "header": "--- ZPC Agent Protocol (MANDATORY) ---",
+     "body": PROTOCOL, "protected": True},
+    {"key": "counts", "header": "--- Baseline Counts (your starting point) ---",
+     "body": COUNTS, "protected": True},
+    {"key": "corrections", "header": "## Corrections (recent)",
+     "body": delivery.render_corrections(all_lesson_records, correction_days),
+     "unit": "corrections"},
+    {"key": "decisions",
+     "header": "--- Settled Decisions (do not re-derive; retract with evidence to re-open) ---",
+     "body": delivery.render_decisions(decisions_path) if readable(decisions_path) else "(none)",
+     "unit": "decisions"},
+    {"key": "lessons", "header": "--- Recent Lessons (newest first) ---",
+     "body": lessons_text or "(none)", "unit": "lessons"},
+    {"key": "patterns", "header": "--- Recorded Patterns (claims, dated) ---",
+     "body": (epistemics.render_patterns(patterns_path, lessons_path).strip()
+              if readable(patterns_path) else ""),
+     "unit": "lines"},
+    {"key": "global", "header": "--- Global Lessons (machine-wide) ---",
+     "body": global_text, "unit": "lessons"},
+    {"key": "profile", "header": "--- Project Profile ---",
+     "body": contents(profile_path), "unit": "lines"},
+]
+
+fitted = delivery.fit(sections, max_tokens, delivery.receipt_reserve(max_tokens, budget_origin))
+blob = delivery.assemble(
+    fitted,
+    ["protocol", "profile", "patterns", "global", "lessons", "corrections",
+     "decisions", "counts"],
+    max_tokens,
+    budget_origin,
+)
+
+if fmt == "json":
+    print(json.dumps({"additionalContext": blob}))
+else:
+    print(blob)
 PYTHON
-)\n"
-    else
-        context+="(none)\n"
-    fi
-    context+="\n"
-
-    # Section 7: Baseline counts
-    context+="--- Baseline Counts (your starting point) ---\n"
-    context+="lessons.jsonl: ${lesson_count} entries | decisions.jsonl: ${decision_count} entries\n"
-    context+="Only count entries YOU append as 'new'. Do not count pre-existing entries.\n"
-
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        # Claude Code additionalContext format
-        python3 << 'PYTHON' - "$context"
-import json, sys
-ctx = sys.argv[1]
-print(json.dumps({"additionalContext": ctx}))
-PYTHON
-    else
-        printf '%b' "$context"
-    fi
 }
 
 # Keep the store out of git without touching a file the repo would commit.

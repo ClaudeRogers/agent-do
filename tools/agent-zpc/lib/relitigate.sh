@@ -150,9 +150,12 @@ _relit_run() {
     mkdir -p "$run_dir" 2>/dev/null || return 0
 
     local candidates
+    # Exposure window 0: every live claim counts as exposed. Delivery fits
+    # claims to a budget rather than taking a fixed top-N, so the old "outside
+    # the injected window" exemption no longer names anything real.
     candidates="$(_epistemics relit-rank \
         "$ZPC_MEMORY_DIR/lessons.jsonl" "les-" \
-        "$ZPC_INJECT_LESSON_WINDOW" "$ZPC_RELIT_TOP_N" \
+        0 "$ZPC_RELIT_TOP_N" \
         "$log_file" "$ZPC_RELIT_MAX_AGE_DAYS" 2>/dev/null)" || candidates="[]"
 
     printf '%s\n' "$candidates" > "$run_dir/candidates.json" 2>/dev/null || true

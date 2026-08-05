@@ -5,13 +5,24 @@
 
 ZPC_COUNSEL_TIMEOUT_DEFAULT=300
 
-# Receipt bounds. A brief that overflows the model's window is not a brief, and
-# a silent overflow is worse than a marked cut: every cut says so, in these
-# exact words, so the reader can tell "all of it" from "the start of it".
-ZPC_COUNSEL_DIFF_MAX=12000
-ZPC_COUNSEL_LOG_MAX=6000
-ZPC_COUNSEL_RECEIPT_MAX=6000
-ZPC_COUNSEL_TRUNCATED='[receipt truncated]'
+# The receipt bound. A brief that overflows the judge's window is not a brief,
+# and a silent overflow is worse than a marked cut.
+#
+# There used to be three numbers here — 12000 for a diff, 6000 for a log, 6000
+# for a supplied receipt — and no reason recorded for any of them being what it
+# was. A brief is one delivery into a fresh model's window, so it gets what
+# lib/delivery.py derives for one delivery, and a receipt that gets cut says by
+# how much. Resolved once per brief and passed down, because the authority is
+# read from disk and a brief assembles several receipts.
+_counsel_budget() {
+    python3 - "$ZPC_LIB_DIR" "$ZPC_AUTHORITY_LIB" << 'PYTHON' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import delivery
+resolved = delivery.budget(sys.argv[2])
+print(resolved["tokens"] if resolved else "")
+PYTHON
+}
 
 # Keeps the memory store out of the receipts it supplies. See _counsel_auto_brief.
 ZPC_COUNSEL_EXCLUDE=':(exclude).zpc'
@@ -72,23 +83,41 @@ _counsel_state_dir() {
     printf '%s' "$ZPC_STATE_DIR/counsel"
 }
 
-# Cut a receipt to its bound, marking the cut in place so a truncated receipt
-# can never be mistaken for a complete one. `tail` keeps the end (a log fails
-# at the bottom); `head` keeps the start (a diff names its files at the top).
+# Cut a receipt to the brief's budget, by whole lines, marking the cut in place
+# with its magnitude so a trimmed receipt can never be mistaken for a complete
+# one. `tail` keeps the end (a log fails at the bottom); `head` keeps the start
+# (a diff names its files at the top). An empty limit means the authority could
+# not answer, so nothing is cut: a receipt trimmed against an invented ceiling
+# is evidence a judge cannot audit.
+#
+# The receipt arrives on stdin, so the program cannot: `python3 -c` rather than a
+# heredoc, or the script itself would eat the evidence it was meant to trim.
 _counsel_bound() {
     local limit="$1" keep="${2:-head}"
     python3 -c '
 import sys
 
-limit, keep, marker = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+sys.path.insert(0, sys.argv[1])
+import delivery
+
+limit, keep = sys.argv[2], sys.argv[3]
 text = sys.stdin.read()
-if len(text) <= limit:
+if not limit or delivery.measured(text) <= int(limit):
     sys.stdout.write(text)
-elif keep == "tail":
-    sys.stdout.write(marker + "\n" + text[-limit:])
-else:
-    sys.stdout.write(text[:limit] + "\n" + marker)
-' "$limit" "$keep" "$ZPC_COUNSEL_TRUNCATED"
+    raise SystemExit(0)
+
+budget, lines = int(limit), text.splitlines()
+kept, spent = [], 0
+for line in (lines if keep == "head" else reversed(lines)):
+    step = delivery.measured(line) + 1
+    if spent + step > budget:
+        break
+    kept.append(line)
+    spent += step
+note = "[receipt truncated: %d of %d lines shown]" % (len(kept), len(lines))
+body = "\n".join(kept if keep == "head" else list(reversed(kept)))
+sys.stdout.write(body + "\n" + note + "\n" if keep == "head" else note + "\n" + body + "\n")
+' "$ZPC_LIB_DIR" "$limit" "$keep"
 }
 
 # Resolve a path through every symlink, or fail if it does not exist. macOS
@@ -248,6 +277,8 @@ _counsel_auto_brief() {
         # evidence: removal of the ledger from its own trial.
         local status_label="git status --porcelain (excluding .zpc)"
         local diff_label="git diff HEAD (excluding .zpc)"
+        local max_tokens
+        max_tokens="$(_counsel_budget)"
 
         case "$(_counsel_git_state "$root")" in
             none)
@@ -255,17 +286,17 @@ _counsel_auto_brief() {
                 _counsel_unavailable "$diff_label" "no git repository at $root"
                 ;;
             unborn)
-                _counsel_collect "$status_label" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+                _counsel_collect "$status_label" "" "$max_tokens" head "$root" \
                     "nothing modified and nothing untracked" \
                     git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE"
                 _counsel_unavailable "$diff_label" \
                     "the repository at $root has no commits yet: there is no HEAD to diff against"
                 ;;
             *)
-                _counsel_collect "$status_label" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+                _counsel_collect "$status_label" "" "$max_tokens" head "$root" \
                     "nothing modified and nothing untracked" \
                     git status --porcelain -- . "$ZPC_COUNSEL_EXCLUDE"
-                _counsel_collect "$diff_label" "diff" "$ZPC_COUNSEL_DIFF_MAX" head "$root" \
+                _counsel_collect "$diff_label" "diff" "$max_tokens" head "$root" \
                     "no tracked file differs from HEAD" \
                     git diff HEAD -- . "$ZPC_COUNSEL_EXCLUDE"
                 ;;
@@ -278,9 +309,13 @@ _counsel_auto_brief() {
         fi
 
         if [[ "$log_state" == "ok" ]]; then
-            _counsel_collect "$log_path" "" "$ZPC_COUNSEL_LOG_MAX" tail "$root" \
+            # `cat`, not a pre-trimmed tail: _counsel_bound holds the end of the
+            # stream and reports how many lines it dropped, and a `tail -c` in
+            # front of it would silently discard the very lines the marker is
+            # supposed to be counting.
+            _counsel_collect "$log_path" "" "$max_tokens" tail "$root" \
                 "the log exists but is empty" \
-                tail -c $((ZPC_COUNSEL_LOG_MAX * 4)) "$log_path"
+                cat "$log_path"
         elif [[ "$log_state" == "refused" ]]; then
             # A refusal is not an absence. Saying "no log" here would hide the
             # fact that something pointed out of the project and was stopped.
@@ -299,7 +334,7 @@ _counsel_auto_brief() {
 
         local receipt
         for receipt in "${receipts[@]+"${receipts[@]}"}"; do
-            _counsel_collect "$receipt" "" "$ZPC_COUNSEL_RECEIPT_MAX" head "$root" \
+            _counsel_collect "$receipt" "" "$max_tokens" head "$root" \
                 "the file is empty" \
                 cat "$receipt"
         done

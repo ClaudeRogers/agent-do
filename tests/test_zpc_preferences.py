@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -27,8 +28,10 @@ TIEBREAKER = (
     'code wins, and filing the contradiction (zpc retract --candidate <id> '
     '--evidence "<receipt>") is worth more than complying with the lesson.'
 )
-MARKER = "[zpc inject truncated]"
-MAX_CHARS = 2000
+# The caller's squeeze, passed in with --max-tokens. The slice's own budget
+# is derived from the quantity authority; nothing in this path ships a
+# ceiling for a test to pin.
+SQUEEZE = 2000
 
 
 def require(condition: bool, message: str) -> None:
@@ -136,8 +139,7 @@ def main() -> None:
             blob.index("stop hedging") < blob.index("Always pin the random seed"),
             f"preference-tagged claims outrank other techniques:\n{blob}",
         )
-        require(len(blob) <= MAX_CHARS, f"the slice stays bounded: {len(blob)} chars")
-        require(MARKER not in blob, "a slice that fits does not claim to have been cut")
+        require("truncated" not in blob, "a slice that fits does not claim to have been cut")
 
         # The receipt for a read that happened outside any store.
         global_log = home / "zpc" / "access-log.jsonl"
@@ -185,10 +187,15 @@ def main() -> None:
              "tags": ["preference", "mined"], "kind": "technique"}
             for index in range(60)
         ])
-        crowded = checked(loose, fat_env, "inject", "--preferences").stdout
-        require(len(crowded) <= MAX_CHARS, f"the slice stays bounded when crowded: {len(crowded)}")
+        crowded = checked(loose, fat_env, "inject", "--preferences",
+                          "--max-tokens", str(SQUEEZE)).stdout
+        require(len(crowded.encode()) <= SQUEEZE,
+                f"the caller's budget holds when crowded: {len(crowded)}")
         require(TIEBREAKER in crowded, f"the law is not what gets trimmed:\n{crowded}")
-        require(MARKER in crowded, "a cut slice admits the cut")
+        cuts = [line for line in crowded.splitlines() if "truncated" in line]
+        require(cuts, "a cut slice admits the cut")
+        require(all(re.search(r"\b\d+ of \d+\b", line) for line in cuts),
+                f"every truncation marker carries its magnitude: {cuts}")
         for line in crowded.splitlines():
             require(
                 not line.startswith("- ") or line.rstrip().endswith('"  [tags: preference,mined]'),
@@ -220,9 +227,10 @@ def main() -> None:
         require("--- ZPC Agent Protocol (MANDATORY) ---" in full, "plain inject changed shape")
         require("a project claim that is not a preference" in full, "plain inject lost project claims")
         require("--- Global Lessons (machine-wide) ---" in full, "plain inject lost the global section")
-        compact = checked(project, env, "inject", "--compact").stdout
+        compact = checked(project, env, "inject", "--compact",
+                          "--max-tokens", str(SQUEEZE)).stdout
         require("--- ZPC compact (this project's memory) ---" in compact, "--compact changed shape")
-        require(len(compact) <= MAX_CHARS, f"--compact stays bounded: {len(compact)}")
+        require(len(compact.encode()) <= SQUEEZE, f"--compact honours the caller: {len(compact)}")
 
         # A store that cannot be read is a directory with no memory, not a
         # failure the caller has to handle.

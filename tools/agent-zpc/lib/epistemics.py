@@ -512,11 +512,15 @@ def cmd_terms(argv) -> int:
 def cmd_relit_rank(argv) -> int:
     """The claims most worth re-trying, and why they rank where they do.
 
-    Exposure first: a claim outside the injected window is not being repeated
-    into anyone's context, so re-litigating it buys nothing. Then age, because
-    world-state rots and technique mostly does not, and then challenges,
-    because someone already looked at this one and doubted it. A claim checked
-    within the cooling window is skipped unless it was challenged since.
+    Exposure first: a claim nothing is repeating into anyone's context is not
+    worth re-litigating. Then age, because world-state rots and technique mostly
+    does not, and then challenges, because someone already looked at this one
+    and doubted it. A claim checked within the cooling window is skipped unless
+    it was challenged since.
+
+    `window` of 0 means every live claim is exposed, which is now the ordinary
+    case: delivery fits claims to a budget instead of taking a fixed top-N, so
+    there is no fixed count of claims below which nothing is being repeated.
     """
     lessons_path, prefix = argv[0], argv[1]
     window, top = int(argv[2]), int(argv[3])
@@ -533,7 +537,7 @@ def cmd_relit_rank(argv) -> int:
     ]
 
     candidates = []
-    for record in live[-window:]:
+    for record in (live if window <= 0 else live[-window:]):
         row = record["row"]
         kind = kind_of(row)
         if kind != "world-state":

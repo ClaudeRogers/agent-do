@@ -13,13 +13,16 @@ import tempfile
 from pathlib import Path
 
 ZPC_INJECT_TIMEOUT = 3
-ZPC_INJECT_MAX_CHARS = 6000
-ZPC_INJECT_TRUNCATION_MARKER = "[zpc inject truncated]"
 ZPC_AUTOINIT_TIMEOUT = 3
-# The --preferences slice bounds its own output; this is the belt to that pair
-# of braces.
-ZPC_PREFERENCES_MAX_CHARS = 2000
-ZPC_PREFERENCES_TRUNCATION_MARKER = "[zpc preferences truncated]"
+
+# No size bound lives here any more, and its absence is the fix. `zpc inject`
+# fits its own blob to a budget read from the quantity authority and marks any
+# cut with both numbers; a second cut applied here could only land at a byte
+# offset, because this file holds none of the sections and cannot weigh them.
+# It used to cut at 6000 characters, which against a real store meant the
+# session got the protocol header, no claims at all, and four words admitting
+# something had gone missing. What a hook owes a session is promptness, and
+# ZPC_INJECT_TIMEOUT above is the whole of that obligation.
 
 
 def read_payload() -> dict:
@@ -575,20 +578,6 @@ def run_zpc_inject(agent_do: str, cwd: str, preferences: bool = False) -> str:
         return ""
 
 
-def bound_zpc_inject(
-    text: str,
-    limit: int = ZPC_INJECT_MAX_CHARS,
-    marker: str = ZPC_INJECT_TRUNCATION_MARKER,
-) -> str:
-    if len(text) <= limit:
-        return text
-    clipped = text[:limit]
-    head, newline, _ = clipped.rpartition("\n")
-    if newline:
-        clipped = head
-    return f"{clipped}\n{marker}"
-
-
 def zpc_preferences_section(agent_do: str | None, cwd: str) -> str:
     """Preferences are the user's, not the project's, so they travel: an empty
     store and a directory that will never have one both get them. Returns ""
@@ -598,15 +587,12 @@ def zpc_preferences_section(agent_do: str | None, cwd: str) -> str:
     preferences = run_zpc_inject(agent_do, cwd, preferences=True).rstrip("\n")
     if not preferences.strip():
         return ""
-    bounded = bound_zpc_inject(
-        preferences, ZPC_PREFERENCES_MAX_CHARS, ZPC_PREFERENCES_TRUNCATION_MARKER
-    )
     return (
         "## ZPC Preferences (global memory)\n\n"
         "Preferences recorded across earlier sessions, loaded below. They are "
         "user-level, not project-level: they hold here regardless of what this "
         "directory contains.\n\n"
-        f"{bounded}\n\n"
+        f"{preferences}\n\n"
         "Log new ones where they happen: `agent-do zpc learn` and "
         "`agent-do zpc decide`.\n"
     )
@@ -641,7 +627,7 @@ def zpc(agent_do: str | None, cwd: str | None) -> str:
                     "## ZPC Project Memory\n\n"
                     "This project's recorded memory, loaded below. Read it before coding; "
                     "it is already in context, so do not re-run `agent-do zpc inject`.\n\n"
-                    f"{bound_zpc_inject(memory)}\n\n"
+                    f"{memory}\n\n"
                     "Keep the loop closed: `agent-do zpc learn` and `agent-do zpc decide` as "
                     "you work, `agent-do zpc harvest` after significant work.\n"
                 )
