@@ -10,10 +10,16 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ZPC_INJECT_TIMEOUT = 3
 ZPC_AUTOINIT_TIMEOUT = 3
+
+# Wall-clock bound on one JSON read from agent-do. The coord pair spends it
+# once between them rather than twice in turn, because they run at the same
+# time; every other read here spends it alone.
+JSON_READ_TIMEOUT = 4
 
 # No size bound lives here any more, and its absence is the fix. `zpc inject`
 # fits its own blob to a budget read from the quantity authority and marks any
@@ -57,7 +63,7 @@ def run_json(cmd: list[str], cwd: str | None = None) -> dict:
             cwd=cwd,
             text=True,
             capture_output=True,
-            timeout=4,
+            timeout=JSON_READ_TIMEOUT,
             check=False,
         )
     except Exception:
@@ -233,30 +239,13 @@ def is_frontend_project(cwd: str | None) -> bool:
     return pubspec.exists() and "flutter" in pubspec.read_text(errors="ignore").lower()
 
 
-def project_tools(agent_do: str, cwd: str | None) -> str:
-    if not cwd:
-        return ""
-    data = run_json([agent_do, "suggest", "--project", "--json", "--cwd", cwd, "--limit", "5"])
-    results = data.get("results") or []
-    if not results:
-        return ""
-    lines = []
-    for item in results[:5]:
-        tool = item.get("tool")
-        primary = item.get("primary") or f"agent-do {tool} --help"
-        if tool:
-            lines.append(f"- {tool}: start with `{primary}`")
-    if not lines:
-        return ""
-    signals = ", ".join(data.get("signals") or []) or "general"
-    project = data.get("project") or cwd
-    return (
-        "## Project-Scoped agent-do Tools\n\n"
-        f"Project root: `{project}`\n"
-        f"Detected signals: `{signals}`\n\n"
-        + "\n".join(lines)
-        + "\n\nRefresh with `agent-do suggest --project`.\n"
-    )
+# There is no project-tooling section here, and its absence is deliberate.
+# `agent-do suggest --project` needs ~10.5s against a real repo and a session
+# hook can afford single digits, so the block it fed was killed before it could
+# render. What it would have said reaches the session by other roads anyway —
+# the routing table in the repo's agent instructions, the just-in-time nudge
+# when a raw command is typed, and zpc's project profile. `agent-do suggest
+# --project` remains on demand, where the caller chose to wait for it.
 
 
 def bootstrap(agent_do: str, cwd: str | None) -> str:
@@ -280,17 +269,87 @@ def bootstrap(agent_do: str, cwd: str | None) -> str:
     )
 
 
+def coord_command(agent_do: str) -> list[str]:
+    """How to reach coord: the tool itself when it is there, else the dispatcher.
+
+    `agent-do <tool>` spends most of a second before the tool starts — a
+    registry parse to resolve declared credentials, then a telemetry write —
+    and coord declares no credentials to resolve. The dispatched form stays as
+    the fallback, for an install whose resolved agent-do has no tools/ beside
+    it.
+    """
+    try:
+        direct = Path(agent_do).resolve().parent / "tools" / "agent-coord"
+    except OSError:
+        return [agent_do, "coord"]
+    if direct.is_file() and os.access(direct, os.X_OK):
+        return [str(direct)]
+    return [agent_do, "coord"]
+
+
+def coord_reads(agent_do: str, cwd: str) -> tuple[dict, dict]:
+    """Presence and interrupts, read at the same time.
+
+    No single verb answers both questions and minting one is not a hook's call:
+    `touch` renews the presence lease and is the only read carrying
+    peer_counts, `interrupts --mark-seen` is the only read that consumes what
+    it shows, and `coord status` marks nothing seen, so it substitutes for
+    neither. So the two stay two and overlap, for one read's wall clock instead
+    of two. Overlapping is safe: coord takes its own lock around every
+    read-modify-write, and both spawns resolve one identity, anchored to the
+    runtime process rather than to either spawn.
+    """
+    base = coord_command(agent_do)
+    wanted = {
+        "touch": [*base, "touch", "--json"],
+        "interrupts": [*base, "interrupts", "--json", "--mark-seen", "--limit", "5"],
+    }
+    running: dict[str, subprocess.Popen | None] = {}
+    for name, cmd in wanted.items():
+        try:
+            running[name] = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            running[name] = None
+
+    deadline = time.monotonic() + JSON_READ_TIMEOUT
+    parsed: dict[str, dict] = {"touch": {}, "interrupts": {}}
+    for name, proc in running.items():
+        if proc is None:
+            continue
+        try:
+            stdout, _ = proc.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            continue
+        except Exception:
+            continue
+        if proc.returncode != 0 or not stdout.strip():
+            continue
+        try:
+            loaded = json.loads(stdout)
+        except Exception:
+            continue
+        if isinstance(loaded, dict):
+            parsed[name] = loaded
+    return parsed["touch"], parsed["interrupts"]
+
+
 def coord(agent_do: str, cwd: str | None) -> str:
     if not cwd:
         return ""
-    touch = run_json([agent_do, "coord", "touch", "--json"], cwd=cwd)
+    touch, interrupts_payload = coord_reads(agent_do, cwd)
     if not touch:
         return ""
 
-    interrupts = run_json(
-        [agent_do, "coord", "interrupts", "--json", "--mark-seen", "--limit", "5"],
-        cwd=cwd,
-    ).get("interrupts") or []
+    interrupts = interrupts_payload.get("interrupts") or []
     if interrupts:
         lines = [
             f"- {'[new] ' if item.get('new') else ''}{item.get('kind')}: {item.get('summary')}"
@@ -682,7 +741,6 @@ def main() -> None:
         sections.extend(
             part
             for part in (
-                project_tools(agent_do, cwd),
                 bootstrap(agent_do, cwd),
                 coord(agent_do, cwd),
             )

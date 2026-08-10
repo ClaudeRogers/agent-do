@@ -152,12 +152,12 @@ append_bootstrap_prompt() {
     bootstrap_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
     [ -n "$bootstrap_json" ] || return 0
 
-    needs_bootstrap=$(echo "$bootstrap_json" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('needs_bootstrap') else 'false')" 2>/dev/null || echo "false")
+    needs_bootstrap=$(echo "$bootstrap_json" | jq -r 'if .needs_bootstrap then "true" else "false" end' 2>/dev/null || echo "false")
     [ "$needs_bootstrap" = "true" ] || return 0
 
-    ask_prompt=$(echo "$bootstrap_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ask_prompt',''))" 2>/dev/null || true)
-    project_root=$(echo "$bootstrap_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project_root',''))" 2>/dev/null || true)
-    commands=$(echo "$bootstrap_json" | python3 -c "import json,sys; data=json.load(sys.stdin); [print(cmd) for cmd in data.get('commands', [])]" 2>/dev/null || true)
+    ask_prompt=$(echo "$bootstrap_json" | jq -r '.ask_prompt // ""' 2>/dev/null || true)
+    project_root=$(echo "$bootstrap_json" | jq -r '.project_root // ""' 2>/dev/null || true)
+    commands=$(echo "$bootstrap_json" | jq -r '.commands[]?' 2>/dev/null || true)
 
     prompt_mode="${AGENT_DO_BOOTSTRAP_PROMPT_MODE:-}"
     if [ -z "$prompt_mode" ]; then
@@ -202,52 +202,15 @@ $commands
     If the user says no, continue normally and do not ask again in this session."
 }
 
-append_project_tooling() {
-    local suggest_json project_root signals tools_block
-
-    [ -n "$AGENT_DO_DIR" ] || return 0
-    [ -n "$CWD" ] || return 0
-    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
-
-    suggest_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
-    [ -n "$suggest_json" ] || return 0
-
-    project_root=$(echo "$suggest_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project',''))" 2>/dev/null || true)
-    tools_block=$(echo "$suggest_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-lines = []
-for item in data.get('results', []):
-    lines.append(f\"- {item.get('tool')}: start with \`{item.get('primary')}\`\")
-    readiness = item.get('readiness') or {}
-    fix = readiness.get('fix')
-    note = readiness.get('note')
-    if fix and note:
-        lines.append(f\"  setup: \`{fix}\` ({note})\")
-print('\\n'.join(lines))
-" 2>/dev/null || true)
-    signals=$(echo "$suggest_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(', '.join(data.get('signals', [])))" 2>/dev/null || true)
-
-    [ -n "$tools_block" ] || return 0
-
-    CONTEXT="$CONTEXT
-
----
-
-## Project-Scoped agent-do Tools
-
-Current project root:
-\`$project_root\`
-
-Detected signals:
-\`${signals:-general}\`
-
-Top likely agent-do tools for this repo:
-$tools_block
-
-Refresh this list any time with:
-\`agent-do suggest --project\`"
-}
+# There is no project-tooling section here, and its absence is deliberate.
+# `agent-do suggest --project` needs ~10.5s against a real repo and this hook
+# could only afford 3, so it was killed on every session and the block it fed
+# never once rendered: the cost was paid, the text never arrived. What it would
+# have said reaches the session by three other roads anyway — CLAUDE.md's
+# task-to-tool routing table, the PreToolUse nudge at the moment a raw command
+# is typed, and zpc's project profile — and each of those is either free or
+# paid for elsewhere. `agent-do suggest --project` remains on demand, where a
+# ten-second answer is something the caller chose to wait for.
 
 # Run a command with a hard wall-clock bound, SIGKILLing its entire process
 # group on expiry so orphaned grandchildren cannot hold pipes open.
@@ -265,33 +228,79 @@ bounded_run() {
 
 append_coord_context() {
     local touch_json interrupts_json active_count focus_goal active_block interrupt_count interrupt_block
+    local coord_scratch
+    local -a coord_cmd
 
     [ -n "$AGENT_DO_DIR" ] || return 0
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    # bounded_run kills the whole process group on timeout: a slow or wedged
-    # agent-do spawn must degrade to "no coord context", never hold the pipe
-    # open and eat the hook's whole timeout budget.
-    touch_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
+    # Straight at the tool rather than through the dispatcher. `agent-do <tool>`
+    # spends most of a second before the tool itself starts — a registry parse
+    # to resolve declared credentials, then a telemetry write — and coord
+    # declares no credentials to resolve (`agent-do creds required coord`: none).
+    # Measured here: 1,126ms dispatched against 300ms direct. The dispatched
+    # form stays as the fallback, for an install whose resolved agent-do has no
+    # tools/ beside it.
+    if [ -x "$AGENT_DO_DIR/tools/agent-coord" ]; then
+        coord_cmd=("$AGENT_DO_DIR/tools/agent-coord")
+    else
+        coord_cmd=("$AGENT_DO_DIR/agent-do" coord)
+    fi
+
+    # Two reads, taken at the same time, because no single verb answers both
+    # questions and minting one is not this hook's call. `touch` renews the
+    # presence lease and is the only read carrying peer_counts, which is where
+    # the dead/stopped/stale tail comes from; `interrupts --mark-seen` is the
+    # only read that consumes what it shows. `coord status` carries both shapes
+    # and substitutes for neither: it marks nothing seen and drops peer_counts.
+    # So the two stay two and overlap, for one call's wall clock instead of two,
+    # each still under the same 2s bound it had alone. Overlapping is safe:
+    # coord takes its own flock around every read-modify-write, and both spawns
+    # resolve one identity, anchored to the runtime process rather than to
+    # either spawn's pid.
+    #
+    # bounded_run kills the whole process group on timeout, both children with
+    # it: a wedged coord must degrade to "no coord context", never hold the
+    # hook's budget open.
+    coord_scratch=$(mktemp -d "${TMPDIR:-/tmp}/agent-do-session-coord.XXXXXX" 2>/dev/null) || return 0
+    bounded_run 2 bash -c '
+        cd "$1" || exit 0
+        scratch="$2"
+        shift 2
+        "$@" touch --json > "$scratch/touch.json" 2>/dev/null &
+        "$@" interrupts --json --mark-seen --limit 5 > "$scratch/interrupts.json" 2>/dev/null &
+        wait
+    ' agent-do-session-coord "$CWD" "$coord_scratch" "${coord_cmd[@]}" >/dev/null 2>&1 || true
+
+    [ -s "$coord_scratch/touch.json" ] && touch_json=$(<"$coord_scratch/touch.json")
+    [ -s "$coord_scratch/interrupts.json" ] && interrupts_json=$(<"$coord_scratch/interrupts.json")
+    rm -rf "$coord_scratch" 2>/dev/null
+
     [ -n "$touch_json" ] || return 0
 
-    active_count=$(echo "$touch_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('active_peers', [])))" 2>/dev/null || echo "0")
-    focus_goal=$(echo "$touch_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(((data.get('focus') or {}).get('goal')) or '')" 2>/dev/null || true)
+    # jq rather than python3 for every parse below: the same answer for ~10ms
+    # instead of ~190ms, which is what an interpreter costs to start here. The
+    # counters keep a numeric guard because a parse failure now yields an empty
+    # string where python yielded a fallback integer, and `[ "" -gt 0 ]` is an
+    # error message, not a comparison.
+    active_count=$(echo "$touch_json" | jq -r '.active_peers | length' 2>/dev/null || echo "0")
+    case "$active_count" in
+        ''|*[!0-9]*) active_count=0 ;;
+    esac
+    focus_goal=$(echo "$touch_json" | jq -r '.focus.goal? // ""' 2>/dev/null || true)
 
-    interrupts_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
-    interrupt_count=$(echo "$interrupts_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('interrupts', [])))" 2>/dev/null || echo "0")
+    interrupt_count=$(echo "$interrupts_json" | jq -r '.interrupts | length' 2>/dev/null || echo "0")
+    case "$interrupt_count" in
+        ''|*[!0-9]*) interrupt_count=0 ;;
+    esac
 
     if [ "$interrupt_count" -gt 0 ]; then
-        interrupt_block=$(echo "$interrupts_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-lines = []
-for item in data.get('interrupts', []):
-    prefix = '[new] ' if item.get('new') else ''
-    lines.append(f'- {prefix}{item.get(\"kind\")}: {item.get(\"summary\")}')
-print('\n'.join(lines))
-" 2>/dev/null || true)
+        interrupt_block=$(echo "$interrupts_json" | jq -r '
+            .interrupts[]?
+            | "- " + (if .new then "[new] " else "" end)
+              + (.kind | tostring) + ": " + (.summary | tostring)
+        ' 2>/dev/null || true)
 
         [ -n "$interrupt_block" ] || return 0
 
@@ -315,31 +324,24 @@ Use:
     [ "$active_count" -gt 0 ] || return 0
     [ -z "$focus_goal" ] || return 0
 
-    active_block=$(echo "$touch_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-peers = data.get('active_peers', [])
-peers.sort(key=lambda item: 0 if (item.get('mode') or 'writer') == 'writer' else 1)
-lines = []
-for peer in peers:
-    label = peer.get('alias') or peer.get('agent_id')
-    focus = peer.get('focus') or {}
-    details = []
-    if (peer.get('mode') or 'writer') == 'read-only':
-        details.append(f\"{peer.get('role') or 'auditor'}, read-only\")
-    if peer.get('phase'):
-        details.append(f\"phase:{peer['phase']}\")
-    if peer.get('age'):
-        details.append(peer['age'])
-    suffix = f\" ({', '.join(details)})\" if details else ''
-    goal = f\" goal: {focus.get('goal')}\" if focus.get('goal') else ''
-    lines.append(f'- {label}{suffix}{goal}')
-counts = data.get('peer_counts') or {}
-hidden = int(counts.get('dead', 0)) + int(counts.get('stopped', 0)) + int(counts.get('stale', 0))
-if hidden:
-    lines.append(f'- ({hidden} dead/stopped/stale sessions on the board, not shown)')
-print('\n'.join(lines))
-" 2>/dev/null || true)
+    # Writers first, then everyone else, each group in the order coord gave
+    # them: a partition rather than a sort, so nothing depends on whether jq's
+    # sort happens to be stable.
+    active_block=$(echo "$touch_json" | jq -r '
+        (([.active_peers[]? | select((.mode // "writer") == "writer")]
+          + [.active_peers[]? | select((.mode // "writer") != "writer")])[]
+         | ([(if (.mode // "writer") == "read-only"
+              then ((.role // "auditor") | tostring) + ", read-only" else empty end),
+             (if .phase then "phase:" + (.phase | tostring) else empty end),
+             (if .age then (.age | tostring) else empty end)]) as $details
+         | "- " + ((.alias // .agent_id) | tostring)
+           + (if ($details | length) > 0 then " (" + ($details | join(", ")) + ")" else "" end)
+           + (if (.focus.goal? // null) then " goal: " + (.focus.goal | tostring) else "" end)),
+        ((((.peer_counts.dead? // 0) + (.peer_counts.stopped? // 0) + (.peer_counts.stale? // 0)) as $hidden
+          | if $hidden > 0
+            then "- (\($hidden) dead/stopped/stale sessions on the board, not shown)"
+            else empty end))
+    ' 2>/dev/null || true)
 
     [ -n "$active_block" ] || return 0
 
@@ -374,7 +376,7 @@ append_manna_board() {
 
     board_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" manna context --max-tokens 1500 --json 2>/dev/null || true)
     if [ -n "$board_json" ]; then
-        board_block=$(echo "$board_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('context',''))" 2>/dev/null || true)
+        board_block=$(echo "$board_json" | jq -r '.context // ""' 2>/dev/null || true)
         if [ -n "$board_block" ]; then
             CONTEXT="$CONTEXT
 
@@ -894,7 +896,6 @@ zpc_autoinit
 zpc_write_session_baseline
 append_zpc_memory
 
-append_project_tooling
 append_bootstrap_prompt
 append_coord_context
 append_manna_board

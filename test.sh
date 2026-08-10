@@ -85,6 +85,7 @@ check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_prefe
 check_cmd "zpc store-only init tests" python3 "$SCRIPT_DIR/tests/test_zpc_init_store_only.py"
 check_cmd "zpc store walk bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_store_walk.py"
 check_cmd "hook store resolution tests" python3 "$SCRIPT_DIR/tests/test_hook_store_resolution.py"
+check_cmd "session-start read tests" python3 "$SCRIPT_DIR/tests/test_session_start_reads.py"
 check_cmd "now stamp hook tests" python3 "$SCRIPT_DIR/tests/test_now_stamp.py"
 check_cmd "quantity write-check hook tests" python3 "$SCRIPT_DIR/tests/test_quantity_write_check.py"
 check_cmd "record age rendering tests" python3 "$SCRIPT_DIR/tests/test_record_ages.py"
