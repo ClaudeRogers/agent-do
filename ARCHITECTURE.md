@@ -130,7 +130,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 ├── hooks/
 │   ├── claude/             # Canonical Claude Code hooks (4 events)
 │   └── codex/              # Canonical Codex hooks + Stop quality gate
-├── tools/agent-*           # 95 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 96 tools (standalone scripts + directory-based tools)
 ├── models.yaml             # Internal model roles: chains, capabilities, retired list
 ├── registry.yaml           # Master tool catalog with contracts
 └── test.sh                 # Test suite (gate inventory below)
@@ -161,7 +161,7 @@ Registries merge with higher priority overwriting lower:
 
 ## Contracts Layer
 
-The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 95 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 95 Declared: 95` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
+The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 96 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 96 Declared: 96` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -202,7 +202,7 @@ No tool merges without a contracts declaration: the gate runs in `./test.sh` and
 
 ### Bounds: the second property the machine holds (`lib/bounds.py`)
 
-Contracts hold "which beats does this verb perform" across 95 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
+Contracts hold "which beats does this verb perform" across 96 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
 
 **Declaration** (`bounds:` beside `contracts:`), keyed by verb, or `*` for caps in shared library code that belong to no single verb. Four sources, and the source picks which enforcement applies:
 
@@ -433,7 +433,7 @@ json_list ...                # JSON array output
 
 ## Tool Concurrency Classification
 
-Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the counts in the current registry are 17 read, 17 write, 61 mixed (95 total). The field is a coarse summary validated against the contracts write surface; per-verb truth lives in the contracts blocks, and `harness contracts surface --json` is the machine-readable form orchestrators should consume. Read-only tools parallelize freely; write tools serialize; mixed tools require per-command inspection.
+Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the counts in the current registry are 17 read, 17 write, 62 mixed (96 total). The field is a coarse summary validated against the contracts write surface; per-verb truth lives in the contracts blocks, and `harness contracts surface --json` is the machine-readable form orchestrators should consume. Read-only tools parallelize freely; write tools serialize; mixed tools require per-command inspection.
 
 ## Exit Codes
 

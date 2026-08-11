@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-agent-do is a universal automation CLI for AI agents with 95 specialized tools. Two modes:
+agent-do is a universal automation CLI for AI agents with 96 specialized tools. Two modes:
 - **Structured API** (AI/scripts): `agent-do <tool> <command> [args...]` (instant, no LLM)
 - **Natural Language** (humans): `agent-do -n "what you want"` (LLM-routed via Claude)
 
@@ -137,7 +137,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # filterEntries: removes static assets, CDN, deduplicates
 │       ├── auth.js         # extractAuth: identifies auth patterns in captured traffic
 │       └── generator.js    # generateSkill: writes skill package to ~/.agent-do/skills/
-├── tools/agent-*           # 95 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 96 tools (standalone scripts + directory-based tools)
 └── registry.yaml           # Master tool catalog: tool descriptions, commands, examples
 ```
 
@@ -180,6 +180,7 @@ Registries merge in reverse priority order (higher-priority wins):
 | `agent-hardware` | Bash | Unified hardware family surface over serial, bluetooth, USB, printers, and MIDI. `snapshot` gives one combined view, and `hardware <serial|bluetooth|usb|printer|midi> ...` delegates through a stable family tool without breaking the legacy leaf commands. |
 | `agent-meetings` | Bash | Unified enterprise meeting surface over Zoom, Google Meet, and Microsoft Teams. `snapshot` reports provider readiness and active meeting state, `join` auto-detects meeting URLs and codes, generic controls like `mute` and `share` route to the active provider, and provider passthroughs stay available under one family tool. |
 | `agent-slack` | Python | Slack messaging over user tokens, bot tokens, and incoming webhooks. `dm --as-user` resolves people by name, email, user ID, or existing DM ID, opens one-to-one conversations, and posts as the authenticated Slack user. `send --as-bot` preserves channel/app delivery, while `resolve-user`, `channels`, `snapshot`, `upload`, and `webhook` keep the Slack surface scriptable. |
+| `agent-brief` | Python | Estate briefing engine. Joins gh inbox rows ↔ manna items (`Manna:` trailers, title mn-ids) ↔ live coord sessions ↔ last commits ↔ claim state into ranked threads whose reasons ride with the score. `holy` emits the versioned full-shape JSON contract for the Holy panel (honest degradations, never absent fields); `now`/`ask` speak through the model adapter when a credential is configured (receipts-only grounding, citations verified) and fall back to deterministic human prose, annotated. `pin`/`snooze`/`observe` feed the behavior journal; until-changed snoozes self-clear. Every source degrades to an annotation carrying its full reason; the GitHub sweep budget self-calibrates from its last measured duration. |
 | `agent-gh` | Python | GitHub repository, pull request, review, and merge work-state across accessible repos. Uses the GitHub CLI as transport, caches accessible repo inventory under `~/.agent-do/gh/`, supports `inbox`, `awaiting`, `prs`, `pr`, `diff`, `threads`, `checks`, `review`, `approve`, `request-changes`, `comment`, `merge`, `ready`, and `draft`, and keeps GitHub PR/review operations separate from local `agent-git` and workflow-level `agent-ci`. |
 | `agent-coord` | Python | Project-local state-and-interrupt broker for parallel agents (v2). Identity is a session UUID anchored to pid + process start time (a recycled tmux pane never inherits a dead session; thread-env identities keep their v1 form). Presence is liveness-verified — `peers` renders active/idle/dead/stopped/stale with last_seen age, plus `--active-only`/`--writers` filters and `stop`/`bye` lifecycle verbs for Stop hooks. Roles (`role set builder\|auditor\|researcher\|overseer`) declare exclusive-writer territories: overlapping writers get a contention interrupt on both sides, auditors on a writer's paths emit a courtesy notice. Structured focus carries goal/phase/note/blocking_on/last_ship (v1 `focus set <goal> --path` still valid). `drop add`/`drops --for-me` hand file pointers between agents (board, not mailbox), `guard install` drops a warn-only pre-commit hook over live claims/territories, and `history` reads the events journal. v1 records are read as-is and upgraded lazily on write. |
 | `agent-obsidian` | Bash + Python | Obsidian vault surface with obsidian-cli fallback plus local SQLite FTS5 and semantic chunk index mode. With `AGENT_OBSIDIAN_VAULT_PATH` or `--vault /path/to/vault`, supports `refresh`, `embed status|refresh`, keyword/semantic/hybrid `search`, `context build`, `chat`, structured `read/query/relate/summarize`, conventions-backed `save/save-group`, unified tasks, graph/audit, templates, journaled move/delete, and `+live` eval/dev/plugin escape hatches. |
@@ -213,7 +214,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-17 read-only tools (ocr, vision, metrics, dns, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 61 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
+17 read-only tools (ocr, vision, metrics, dns, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 62 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
 
 ### Universal Tool Pattern
 
@@ -233,7 +234,7 @@ The board (`.manna/`) is the single backlog. The grammar is universal (track | i
 1. Create executable at `tools/agent-<name>` (must support `--help` flag)
 2. Add entry to `registry.yaml` with `description`, `capabilities`, `commands`, `examples`
    - add `routing` metadata for discovery keywords, raw CLI equivalents, readiness hints, and project signals when the tool should participate in `suggest`, UserPromptSubmit AI catalog routing, or PreToolUse hard nudges
-3. **Declare `contracts:` — mandatory.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool without a contracts block. All 95 tools declare contracts; contract warnings must stay at zero.
+3. **Declare `contracts:` — mandatory.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool without a contracts block. All 96 tools declare contracts; contract warnings must stay at zero.
 4. `--list` auto-discovers tools via filesystem scan of `tools/agent-*`
 
 ### Quantity authority
