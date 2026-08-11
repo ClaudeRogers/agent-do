@@ -69,7 +69,18 @@ RANK_CLAIMABLE = 0.5       # ready work floats above plain inventory, below anyt
 RECENCY_WINDOW_HOURS = 168.0  # attention decays across one week of estate time
 JOURNAL_MAX_SHIFT = 1.0    # learned behavior nudges rank, never dominates it
 
-GIT_LOG_FORMAT = "%H%x1f%cI%x1f%s%x1f%(trailers:key=Manna,valueonly,separator= )%x1e"
+# Record separator LEADS each record so the --name-only file list that git
+# prints after the format line stays inside its own record when we split.
+# %B (raw body) is carried beside the strict trailers because the wild is
+# full of split trailer paragraphs: a blank line between "Manna:" and
+# "Co-Authored-By:" demotes the Manna line to body text under git's trailer
+# parser, while the board tool still counts it. The trailing %x1f fences the
+# multiline body off from the --name-only file list.
+GIT_LOG_FORMAT = "%x1e%H%x1f%cI%x1f%s%x1f%(trailers:key=Manna,valueonly,separator= )%x1f%B%x1f"
+
+# The board convention, line-anchored: prose mentioning an mn-id is not a
+# reference; a "Manna: mn-xxxxxx" line anywhere in the message is.
+MANNA_TRAILER_LINE_RE = re.compile(r"^Manna:\s*(mn-[0-9a-f]{6})\s*$", re.MULTILINE)
 
 
 def now_utc() -> datetime:
@@ -246,23 +257,26 @@ def gather_git(repo: Path, timeout: float) -> dict[str, Any]:
     if not (repo / ".git").exists():
         return _source("absent", None, "live", f"{repo} is not a git repository")
     rc, out, err = _run(
-        ["git", "-C", str(repo), "log", f"--format={GIT_LOG_FORMAT}"], None, timeout
+        ["git", "-C", str(repo), "log", "--name-only", f"--format={GIT_LOG_FORMAT}"],
+        None, timeout,
     )
     if rc != 0:
         return _source("degraded", None, "live", err.strip() or f"git log exit {rc}")
     commits: list[dict[str, Any]] = []
     for record in out.split("\x1e"):
-        record = record.strip("\n")
         if not record.strip():
             continue
         parts = record.split("\x1f")
-        if len(parts) < 3:
+        if len(parts) < 6:
             continue
+        trailer_ids = MN_ID_RE.findall(parts[3])
+        body_ids = MANNA_TRAILER_LINE_RE.findall(parts[4])
         commits.append({
             "hash": parts[0].strip(),
             "date": parts[1].strip(),
             "subject": parts[2].strip(),
-            "manna": MN_ID_RE.findall(parts[3]) if len(parts) > 3 else [],
+            "manna": sorted(set(trailer_ids) | set(body_ids)),
+            "files": [line for line in parts[5].splitlines() if line.strip()],
         })
     return _source("ok", {"commits": commits}, "live")
 
@@ -660,6 +674,39 @@ def compute_delta(
 # nothing here executes anything.
 # ---------------------------------------------------------------------------
 
+BOARD_DIR_NAME = ".manna"
+
+
+def _board_only_landing(evidence: str, git_source: dict[str, Any]) -> bool:
+    """True only on positive proof that the 'landing' was board bookkeeping.
+
+    A `Manna:` trailer proves a commit REFERENCED the item, not that its work
+    landed — a board-staging chore touches only .manna/ (consumer feedback on
+    mn-f79edc, 2026-08-11; same trailer≠landed class the holy-ghostty board
+    audit flagged). Downgrade only when every evidence commit resolves in the
+    focused repo's log AND every file across them sits under .manna/; an
+    unresolved commit or a missing file list stays unknown, and unknown keeps
+    reconcile's own claim.
+    """
+    if git_source.get("status") != "ok":
+        return False
+    commits = (git_source.get("data") or {}).get("commits", [])
+    prefixes = re.findall(r"\b[0-9a-f]{7,40}\b", evidence or "")
+    if not prefixes:
+        return False
+    matched: list[dict[str, Any]] = []
+    for prefix in prefixes:
+        found = next((c for c in commits if c.get("hash", "").startswith(prefix)), None)
+        if found is None or not found.get("files"):
+            return False
+        matched.append(found)
+    return all(
+        path.split("/", 1)[0] == BOARD_DIR_NAME
+        for commit in matched
+        for path in commit["files"]
+    )
+
+
 def build_suggestions(
     sources: dict[str, dict[str, Any]], receipts: ReceiptBook
 ) -> list[dict[str, Any]]:
@@ -689,8 +736,15 @@ def build_suggestions(
             })
             continue
         if kind == "landed_open" and issue_id:
-            label = f"Close {issue_id} — commits carrying its trailer already landed"
-            argv = ["agent-do", "manna", "done", issue_id]
+            if _board_only_landing(finding.get("evidence", ""), sources["git"]):
+                label = (
+                    f"{issue_id} looks landed, but its trailer commits touch only "
+                    f"{BOARD_DIR_NAME}/ (board staging, not work); inspect before closing"
+                )
+                argv = ["agent-do", "manna", "show", issue_id]
+            else:
+                label = f"Close {issue_id} — commits carrying its trailer already landed"
+                argv = ["agent-do", "manna", "done", issue_id]
         elif kind == "stale_dream" and issue_id:
             label = f"Convert or close stale dream {issue_id}"
             argv = ["agent-do", "manna", "update", issue_id, "--type", "item"]

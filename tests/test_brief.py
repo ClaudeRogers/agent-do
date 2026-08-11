@@ -124,6 +124,13 @@ def write_fixtures(fixtures: Path, *, mn_def_title: str = "def: second item, unc
                 "evidence": "hostile board text",
                 "proposed_fix": "should never become a command",
             },
+            {
+                "kind": "landed_open",
+                "issue_id": "mn-def456",
+                "detail": "referenced by landed commit trailer but status is open",
+                "evidence": "0a4dc0ffee00",
+                "proposed_fix": "review the commits; if the work landed, claim and done mn-def456",
+            },
         ],
     }))
     (fixtures / "coord.json").write_text(json.dumps({
@@ -145,7 +152,15 @@ def write_fixtures(fixtures: Path, *, mn_def_title: str = "def: second item, unc
                 "date": "2026-08-11T11:30:00Z",
                 "subject": "feat(engine): trunk lands",
                 "manna": ["mn-abc123"],
-            }
+                "files": ["src/engine.py", "tests/test_engine.py"],
+            },
+            {
+                "hash": "0a4dc0ffee000000000000000000000000000000",
+                "date": "2026-08-11T10:30:00Z",
+                "subject": "chore(manna): stage mn-def456 on the board",
+                "manna": ["mn-def456"],
+                "files": [".manna/issues.jsonl"],
+            },
         ],
     }))
     (fixtures / "ask_sessions.json").write_text(json.dumps({"success": True, "result": []}))
@@ -182,12 +197,17 @@ def test_help() -> None:
 def test_contract_shape_and_joins(home: Path, fixtures: Path) -> None:
     payload = holy(home, fixtures, "--peek")
     require(payload["contract"] == 1, "contract version must be 1")
-    for key in (
-        "generated_at", "caller", "paragraph", "threads", "threads_total",
-        "delta", "suggestions", "suggestions_total", "ranking", "read_state",
-        "annotations", "receipts", "sources",
-    ):
-        require(key in payload, f"contract missing full-shape key {key}")
+    # The consumer PINNED contract v1 from live output: these fourteen keys
+    # and the suggestion key set are load-bearing. A shape change here means
+    # bumping CONTRACT_VERSION, never mutating v1 silently.
+    require(set(payload) == {
+        "contract", "generated_at", "caller", "paragraph", "threads",
+        "threads_total", "delta", "suggestions", "suggestions_total",
+        "ranking", "read_state", "annotations", "receipts", "sources",
+    }, f"contract v1 top-level shape drifted: {sorted(payload)}")
+    for suggestion in payload["suggestions"]:
+        require(set(suggestion) == {"id", "kind", "issue_id", "label", "command", "argv", "receipts"},
+                f"suggestion shape drifted under v1: {sorted(suggestion)}")
 
     by_id = {t["id"]: t for t in payload["threads"]}
     require("mn-abc123" in by_id, "mn-abc123 thread missing")
@@ -221,6 +241,13 @@ def test_contract_shape_and_joins(home: Path, fixtures: Path) -> None:
     require(len(poisoned) == 1 and poisoned[0]["command"] is None and poisoned[0]["argv"] is None,
             f"a malformed issue id must never become a command: {poisoned}")
     require("malformed" in poisoned[0]["label"], "the poisoned finding must say why it lost its command")
+    # Trailer != landed: mn-def456's only evidence commit touches .manna/
+    # alone (board staging), so the one-tap must inspect, never close.
+    landed = [s for s in payload["suggestions"] if s["kind"] == "landed_open" and s["issue_id"] == "mn-def456"]
+    require(len(landed) == 1, f"expected one landed_open finding for mn-def456: {payload['suggestions']}")
+    require(landed[0]["argv"] == ["agent-do", "manna", "show", "mn-def456"],
+            f"board-only landing must downgrade to inspect: {landed[0]}")
+    require("board staging" in landed[0]["label"], f"downgrade must say why: {landed[0]['label']}")
     for suggestion in payload["suggestions"]:
         for rid in suggestion["receipts"]:
             require(rid in payload["receipts"], f"suggestion cites unissued receipt {rid}")
