@@ -53,6 +53,25 @@ tools:
       - agent-do brief threads
       - agent-do brief holy --json
       default_command: now
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+    bounds:
+      now: &brief-sweep-bound
+        source: measured
+        ref: 2 x the sweep's last measured duration (brief's own calibration state); bootstrap 2 x lib/quantities.READ_PROBE_TIMEOUT_SECONDS, the shared read-probe budget
+        why: >-
+          The GitHub inbox sweep is a network fan-out, not a local probe, so
+          the shared probe budget alone starves it (consumer-verified: the
+          sweep needs roughly twice the probe budget warm). Factor 2 is the
+          hung-detector: slower than twice the known-good pace reads as hung,
+          not slow. After one success the budget derives from the sweep's own
+          measured duration, held in brief's state; the caller's explicit
+          --timeout overrides everything. Local sources keep the probe budget.
+      threads: *brief-sweep-bound
+      ask: *brief-sweep-bound
+      holy: *brief-sweep-bound
     contracts:
       snapshot:
       - now

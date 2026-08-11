@@ -528,6 +528,10 @@ agent-do brief snooze mn-53da2c --until-changed
 agent-do brief observe ovachiever/agent-do#23 acted
 ```
 
+**Credentials**
+
+- Optional: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
+
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `state`, `threads`

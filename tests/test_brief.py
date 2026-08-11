@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -171,14 +172,37 @@ def write_fixtures(fixtures: Path, *, mn_def_title: str = "def: second item, unc
     (fixtures / "ask_git.json").write_text(json.dumps({"commits": []}))
 
 
-def run_brief(home: Path, fixtures: Path, *argv: str) -> subprocess.CompletedProcess:
+def run_brief(
+    home: Path, fixtures: Path, *argv: str,
+    ai: str | None = "off", drop_model_keys: bool = False,
+) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["AGENT_DO_HOME"] = str(home)
     env["AGENT_BRIEF_FIXTURES"] = str(fixtures)
-    env["AGENT_BRIEF_AI"] = "off"
+    if ai is None:
+        env.pop("AGENT_BRIEF_AI", None)
+    else:
+        env["AGENT_BRIEF_AI"] = ai
+    if drop_model_keys:
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("OPENAI_API_KEY", None)
     return subprocess.run(
         [str(TOOL), *argv], capture_output=True, text=True, env=env, cwd=str(home)
     )
+
+
+def load_brief_module():
+    """Import the extensionless agent-brief tool for unit-level tests."""
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("agent_brief", str(TOOL))
+    spec = importlib.util.spec_from_loader("agent_brief", loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["agent_brief"] = module
+    loader.exec_module(module)
+    return module
 
 
 def holy(home: Path, fixtures: Path, *argv: str) -> dict:
@@ -255,6 +279,16 @@ def test_contract_shape_and_joins(home: Path, fixtures: Path) -> None:
     require(payload["paragraph"]["mode"] == "deterministic", "no model configured: voice must be deterministic")
     require(any(a["kind"] == "voice" for a in payload["annotations"]),
             "deterministic voice must be annotated, not silent")
+    # Round 3: deterministic mode must still write human prose.
+    text = payload["paragraph"]["text"]
+    require("(s)" not in text, f"machine-speak pluralization reached the paragraph: {text}")
+    require(not re.search(r"\d{4}-\d{2}-\d{2}T", text), f"raw ISO timestamp reached the paragraph: {text}")
+    require("Two threads need you — one board item and one pull request." in text,
+            f"needs-you sentence must count in words: {text}")
+    require("Four one-tap suggestions are waiting." in text,
+            f"suggestions sentence must count in words: {text}")
+    require("One item sits claimable for any lane." in text,
+            f"claimable sentence must count in words: {text}")
     require(payload["sources"]["github"]["origin"] == "fixture", "fixture origin must be reported")
     require(payload["ranking"]["mode"] == "heuristic" and payload["ranking"]["journal_observations"] == 0,
             f"empty journal must report heuristic: {payload['ranking']}")
@@ -329,8 +363,8 @@ def test_fail_closed(home: Path, fixtures: Path) -> None:
             "degraded source must be an annotation")
     require(any(t["id"] == "mn-abc123" for t in payload["threads"]),
             "other sources must survive one broken source")
-    require("github" in payload["paragraph"]["text"] or "Degraded" in payload["paragraph"]["text"],
-            "the paragraph must not stay silent about a degraded source")
+    require("GitHub is unreadable right now." in payload["paragraph"]["text"],
+            f"degradation must read as plain consequence: {payload['paragraph']['text']}")
     write_fixtures(fixtures, mn_def_title="def: second item, retitled")
 
 
@@ -348,8 +382,98 @@ def test_ask(home: Path, fixtures: Path) -> None:
     require(payload["hits_total"] == len(payload["hits"]), "totals must match the data")
 
 
+def test_voice_reason(home: Path, fixtures: Path) -> None:
+    proc = run_brief(home, fixtures, "holy", "--focused-repo", str(home), "--peek",
+                     ai=None, drop_model_keys=True)
+    require(proc.returncode == 0, f"holy failed: {proc.stderr}")
+    payload = json.loads(proc.stdout)
+    voice = [a for a in payload["annotations"] if a["kind"] == "voice"]
+    require(len(voice) == 1, f"voice skip must be annotated exactly once: {voice}")
+    reason = voice[0]["reason"]
+    require("ANTHROPIC_API_KEY" in reason,
+            f"the annotation must name what the voice path is missing: {reason}")
+    require("creds store" in reason,
+            f"the annotation must say how to supply it in a subprocess environment: {reason}")
+
+
+def test_board_resolution_and_budget() -> None:
+    brief = load_brief_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        board = repo / ".manna"
+        board.mkdir()
+        (board / "issues.jsonl").write_text("")
+        # Liberal inputs: repo root, the .manna dir itself, the ledger file.
+        for value in (str(repo), str(board), str(board / "issues.jsonl")):
+            resolved, _ = brief.resolve_board(value, repo)
+            require(resolved == board.resolve(), f"board must resolve from {value}: got {resolved}")
+        # An explicit nonexistent value must fail loudly, not fall back.
+        try:
+            brief.resolve_board(str(repo / "nowhere"), repo)
+            require(False, "nonexistent --focused-board must raise SystemExit(2)")
+        except SystemExit as exc:
+            require(exc.code == 2, f"loud failure must exit 2, got {exc.code}")
+        try:
+            brief.resolve_repo(str(repo / "nowhere"))
+            require(False, "nonexistent --focused-repo must raise SystemExit(2)")
+        except SystemExit as exc:
+            require(exc.code == 2, f"loud failure must exit 2, got {exc.code}")
+        # A default-path miss stays honest and names its search in the reason.
+        os.environ.pop("AGENT_BRIEF_FIXTURES", None)
+        missing = repo / "empty" / ".manna"
+        source = brief.gather_manna(missing, [str(missing)])
+        require(source["status"] == "absent" and "looked at" in source["reason"],
+                f"false board-absent must name its search: {source}")
+
+    probe = float(brief.READ_PROBE_TIMEOUT_SECONDS)
+    require(brief.github_budget(99.0, {}) == 99.0, "explicit --timeout must win")
+    require(brief.github_budget(None, {}) == 2.0 * probe,
+            "uncalibrated sweep bootstraps at twice the probe budget")
+    calibrated = {"calibration": {"github": {"last_ok_seconds": 40.0}}}
+    require(brief.github_budget(None, calibrated) == 80.0,
+            "calibrated sweep budgets at twice its last observed duration")
+    fast = {"calibration": {"github": {"last_ok_seconds": 2.0}}}
+    require(brief.github_budget(None, fast) == probe,
+            "a fast sweep still gets at least the probe budget")
+
+
+def test_no_verdict_under_impairment(tmp: Path) -> None:
+    """The covenant's core case: degraded is not empty — no clean bill over
+    dead sources (consumer round 2, finding 1)."""
+    home = tmp / "quiet-home"
+    home.mkdir()
+    fixtures = tmp / "quiet-fixtures"
+    fixtures.mkdir()
+    (fixtures / "github.json").write_text("{broken")
+    (fixtures / "manna.json").write_text(json.dumps({"issues": []}))
+    (fixtures / "reconcile.json").write_text(json.dumps({"success": True, "findings": []}))
+    (fixtures / "coord.json").write_text(json.dumps({"success": True, "peers": []}))
+    (fixtures / "sessions.json").write_text(json.dumps({"success": True, "result": []}))
+    (fixtures / "git.json").write_text(json.dumps({"commits": []}))
+    payload = holy(home, fixtures, "--peek")
+    text = payload["paragraph"]["text"]
+    require("Nothing needs you." not in text,
+            f"a clean bill over an unreadable source breaks the covenant: {text}")
+    require("no verdict" in text, f"impaired quiet must say no-verdict: {text}")
+    require("One of six sources is unreadable" in text,
+            f"the no-verdict sentence counts its blind spots in words: {text}")
+    # All healthy and quiet -> the proudest state, plainly.
+    (fixtures / "github.json").write_text(json.dumps({"count": 0, "items": []}))
+    payload = holy(home, fixtures, "--peek")
+    require("Nothing needs you." in payload["paragraph"]["text"],
+            f"healthy quiet must say so plainly: {payload['paragraph']['text']}")
+
+    proc = run_brief(home, fixtures, "holy", "--focused-repo", str(home / "nowhere"))
+    require(proc.returncode == 2, f"nonexistent --focused-repo must exit 2: {proc.returncode}")
+    require("--focused-repo" in proc.stdout, f"loud failure must name the flag: {proc.stdout}")
+    proc = run_brief(home, fixtures, "holy", "--focused-repo", str(home),
+                     "--focused-board", str(home / "nowhere"))
+    require(proc.returncode == 2, f"nonexistent --focused-board must exit 2: {proc.returncode}")
+
+
 def main() -> int:
     test_help()
+    test_board_resolution_and_budget()
     with tempfile.TemporaryDirectory() as tmp:
         home = Path(tmp) / "home"
         home.mkdir()
@@ -360,6 +484,8 @@ def main() -> int:
         test_pin_snooze_observe(home, fixtures)
         test_fail_closed(home, fixtures)
         test_ask(home, fixtures)
+        test_voice_reason(home, fixtures)
+        test_no_verdict_under_impairment(Path(tmp))
     print("agent-brief: all tests passed")
     return 0
 

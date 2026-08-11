@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,62 @@ RANK_STRANDED = 1.5        # a claim with no live session is quiet trouble
 RANK_CLAIMABLE = 0.5       # ready work floats above plain inventory, below anything needing the human
 RECENCY_WINDOW_HOURS = 168.0  # attention decays across one week of estate time
 JOURNAL_MAX_SHIFT = 1.0    # learned behavior nudges rank, never dominates it
+
+# A network sweep (gh inbox) is not a local probe. Until a sweep has taught
+# us its real duration it is budgeted at this multiple of the probe budget;
+# after one success, at this multiple of its last observed duration —
+# slower than twice the known-good pace reads as hung, not slow. The caller's
+# explicit --timeout overrides both.
+SWEEP_BUDGET_FACTOR = 2.0
+
+# Deterministic prose spells out counts a person would say in words; a sum a
+# person would write in digits stays digits. Twenty is where speech gives up.
+NUMBER_WORDS = (
+    "no", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+)
+
+# What each source is to the person reading the paragraph.
+SOURCE_HUMAN = {
+    "github": "GitHub",
+    "manna": "the board",
+    "reconcile": "board reconcile",
+    "coord": "live sessions",
+    "sessions": "session history",
+    "git": "commit history",
+}
+
+KIND_HUMAN = {
+    "pr": ("pull request", "pull requests"),
+    "manna": ("board item", "board items"),
+    "session": ("live session", "live sessions"),
+    "other": ("thread", "threads"),
+}
+
+
+def count_word(n: int) -> str:
+    return NUMBER_WORDS[n] if 0 <= n < len(NUMBER_WORDS) else str(n)
+
+
+def count_phrase(n: int, singular: str, plural: str | None = None) -> str:
+    noun = singular if n == 1 else (plural or singular + "s")
+    return f"{count_word(n)} {noun}"
+
+
+def relative_phrase(since: datetime, now: datetime) -> str:
+    seconds = max(0.0, (now - since).total_seconds())
+    if seconds < 90:
+        return "in the last minute"
+    if seconds < 3600:
+        return f"in the last {count_phrase(int(seconds // 60), 'minute')}"
+    if seconds < 7200:
+        return "in the last hour"
+    if seconds < 86400:
+        return f"in the last {count_phrase(int(seconds // 3600), 'hour')}"
+    if seconds < 172800:
+        return "since yesterday"
+    return f"in the last {count_phrase(int(seconds // 86400), 'day')}"
 
 # Record separator LEADS each record so the --name-only file list that git
 # prints after the format line stays inside its own record when we split.
@@ -189,20 +246,65 @@ def _run_json(cmd: list[str], cwd: str | None, timeout: float) -> dict[str, Any]
     return _source("ok", payload, "live")
 
 
+def github_budget(explicit: float | None, state: dict[str, Any]) -> float:
+    """The sweep budget: caller's explicit timeout, else calibration, else bootstrap."""
+    if explicit is not None:
+        return explicit
+    last_ok = ((state.get("calibration", {}).get("github")) or {}).get("last_ok_seconds")
+    if isinstance(last_ok, (int, float)) and last_ok > 0:
+        return max(float(READ_PROBE_TIMEOUT_SECONDS), SWEEP_BUDGET_FACTOR * float(last_ok))
+    return SWEEP_BUDGET_FACTOR * float(READ_PROBE_TIMEOUT_SECONDS)
+
+
 def gather_github(timeout: float) -> dict[str, Any]:
     fixture = _from_fixture("github")
     if fixture is not None:
         return fixture
-    return _run_json([str(ROOT / "tools" / "agent-gh"), "inbox", "--json"], None, timeout)
+    started = time.monotonic()
+    source = _run_json([str(ROOT / "tools" / "agent-gh"), "inbox", "--json"], None, timeout)
+    if source["status"] == "ok":
+        # Private calibration field; stripped before the payload ships so
+        # contract v1's source shape stays exactly as the consumer pinned it.
+        source["_duration_seconds"] = round(time.monotonic() - started, 1)
+    return source
 
 
-def gather_manna(board_dir: Path) -> dict[str, Any]:
+def resolve_board(value: str | None, repo: Path) -> tuple[Path, list[str]]:
+    """Resolve a board directory liberally: the .manna dir itself, a repo
+    root containing one, or the issues.jsonl file. Returns the choice plus
+    every candidate tried, so a miss can say exactly where it looked
+    (consumer round 3: a false board-absent must name its search)."""
+    if not value:
+        candidate = repo / ".manna"
+        return candidate, [str(candidate)]
+    path = Path(value).expanduser().resolve()
+    if not path.exists():
+        _fail_loud(
+            f"--focused-board does not exist: {value} — pass the .manna directory, "
+            f"its repo root, or the issues.jsonl file, as a PATH"
+        )
+    candidates: list[Path] = []
+    if path.name == "issues.jsonl":
+        candidates.append(path.parent)
+    if path.name == ".manna":
+        candidates.append(path)
+    candidates.append(path / ".manna")
+    tried: list[str] = []
+    for candidate in candidates:
+        tried.append(str(candidate))
+        if (candidate / "issues.jsonl").exists():
+            return candidate, tried
+    return candidates[0], tried
+
+
+def gather_manna(board_dir: Path, tried: list[str] | None = None) -> dict[str, Any]:
     fixture = _from_fixture("manna")
     if fixture is not None:
         return fixture
     ledger = board_dir / "issues.jsonl"
     if not ledger.exists():
-        return _source("absent", None, "live", f"no board at {board_dir}")
+        looked = "; looked at: " + ", ".join(tried) if tried else ""
+        return _source("absent", None, "live", f"no board ledger at {ledger}{looked}")
     issues: list[dict[str, Any]] = []
     bad_lines = 0
     try:
@@ -281,14 +383,20 @@ def gather_git(repo: Path, timeout: float) -> dict[str, Any]:
     return _source("ok", {"commits": commits}, "live")
 
 
-def gather_all(repo: Path, board_dir: Path, timeout: float) -> dict[str, dict[str, Any]]:
+def gather_all(
+    repo: Path,
+    board_dir: Path,
+    local_budget: float,
+    sweep_budget: float,
+    board_tried: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     jobs = {
-        "github": lambda: gather_github(timeout),
-        "manna": lambda: gather_manna(board_dir),
-        "reconcile": lambda: gather_reconcile(repo, timeout),
-        "coord": lambda: gather_coord(repo, timeout),
-        "sessions": lambda: gather_sessions(repo.name, timeout),
-        "git": lambda: gather_git(repo, timeout),
+        "github": lambda: gather_github(sweep_budget),
+        "manna": lambda: gather_manna(board_dir, board_tried),
+        "reconcile": lambda: gather_reconcile(repo, local_budget),
+        "coord": lambda: gather_coord(repo, local_budget),
+        "sessions": lambda: gather_sessions(repo.name, local_budget),
+        "git": lambda: gather_git(repo, local_budget),
     }
     results: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
@@ -773,44 +881,121 @@ def build_suggestions(
 # replaces it only when its every citation checks out.
 # ---------------------------------------------------------------------------
 
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def deterministic_paragraph(
     threads: list[dict[str, Any]],
     delta: dict[str, Any],
     suggestions: list[dict[str, Any]],
     annotations: list[dict[str, Any]],
+    source_total: int,
 ) -> dict[str, Any]:
+    """Human prose, not machine-speak (consumer round 3): counts in words,
+    times as relative phrases, degradation as plain consequence."""
     need = [t for t in threads if t["needs_me"] and not t["snoozed"]]
     claimable = [t for t in threads if t.get("claimable") and not t["snoozed"]]
     cited: list[str] = []
     for thread in need + claimable:
         cited.extend(thread["receipts"][:1])
-    parts: list[str] = []
+    impaired = sorted({a["source"] for a in annotations if a.get("kind") == "source"})
+    sentences: list[str] = []
     if not need and not suggestions:
-        parts.append("Nothing needs you.")
+        # The covenant's core case (round 2, finding 1): degraded is not
+        # empty. A clean bill may only be issued by healthy sources; under
+        # impairment the paragraph says what it cannot see.
+        if impaired:
+            count = len(impaired)
+            verb = "is" if count == 1 else "are"
+            sentences.append(
+                f"{count_word(count).capitalize()} of {count_word(source_total)} sources "
+                f"{verb} unreadable — no verdict on what needs you."
+            )
+        else:
+            sentences.append("Nothing needs you.")
     else:
         if need:
             kinds: dict[str, int] = {}
             for thread in need:
                 kinds[thread["kind"]] = kinds.get(thread["kind"], 0) + 1
-            breakdown = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
-            parts.append(f"{len(need)} thread(s) need you ({breakdown}).")
+            breakdown = _join_names([
+                count_phrase(count, *KIND_HUMAN.get(kind, KIND_HUMAN["other"]))
+                for kind, count in sorted(kinds.items())
+            ])
+            lead = count_phrase(len(need), "thread").capitalize()
+            verb = "needs" if len(need) == 1 else "need"
+            sentences.append(f"{lead} {verb} you — {breakdown}.")
         if suggestions:
-            parts.append(f"{len(suggestions)} one-tap suggestion(s) pending.")
+            count = len(suggestions)
+            verb = "is" if count == 1 else "are"
+            sentences.append(f"{count_phrase(count, 'one-tap suggestion').capitalize()} {verb} waiting.")
     if claimable:
-        parts.append(f"{len(claimable)} item(s) sit claimable for any lane.")
+        count = len(claimable)
+        verb = "sits" if count == 1 else "sit"
+        sentences.append(f"{count_phrase(count, 'item').capitalize()} {verb} claimable for any lane.")
     if delta["mode"] == "first_look":
-        parts.append("First look: no read-state yet, everything counts as new.")
+        sentences.append("This is a first look, so everything counts as new.")
     elif delta["count"]:
-        parts.append(f"{delta['count']} thread(s) changed since {delta['since']}.")
-    degraded = [a["source"] for a in annotations if a.get("kind") == "source"]
+        since = parse_iso(delta.get("since") or "")
+        when = relative_phrase(since, now_utc()) if since else "since your last look"
+        sentences.append(f"{count_phrase(delta['count'], 'thread').capitalize()} changed {when}.")
+    degraded = sorted({
+        SOURCE_HUMAN.get(a["source"], a["source"])
+        for a in annotations
+        if a.get("kind") == "source" and a.get("status") == "degraded"
+    })
+    missing = sorted({
+        SOURCE_HUMAN.get(a["source"], a["source"])
+        for a in annotations
+        if a.get("kind") == "source" and a.get("status") == "absent"
+    })
     if degraded:
-        parts.append(f"Degraded sources: {', '.join(sorted(degraded))}.")
+        verb = "is" if len(degraded) == 1 else "are"
+        sentence = f"{_join_names(degraded)} {verb} unreadable right now."
+        sentences.append(sentence[0].upper() + sentence[1:])
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        sentence = f"{_join_names(missing)} {verb} missing here."
+        sentences.append(sentence[0].upper() + sentence[1:])
     return {
-        "text": " ".join(parts),
+        "text": " ".join(sentences),
         "mode": "deterministic",
         "model": None,
         "receipts": sorted(set(cited)),
     }
+
+
+def _voice_unavailable_reason() -> str:
+    """Say exactly why the voice is off and what would turn it on — a silent
+    fallback inside a subprocess cost the consumer a diagnosis round."""
+    flag = (os.environ.get("AGENT_BRIEF_AI") or "").strip().lower()
+    if flag in {"0", "false", "no", "off", "never", "disabled"}:
+        return "voice disabled by AGENT_BRIEF_AI=off"
+    details: list[str] = []
+    for sdk_name, key_name in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY")):
+        try:
+            __import__(sdk_name)
+            sdk_present = True
+        except Exception:
+            sdk_present = False
+        key_present = bool(os.environ.get(key_name))
+        if sdk_present and key_present:
+            return ""
+        if sdk_present:
+            details.append(f"{sdk_name} SDK present but {key_name} is unset in this process environment")
+        elif key_present:
+            details.append(f"{key_name} is set but the {sdk_name} SDK is not importable here")
+        else:
+            details.append(f"{sdk_name} SDK not importable and {key_name} unset")
+    return (
+        "voice skipped: " + "; ".join(details) + ". Voice needs one provider key in the calling "
+        "process's environment — export it there, or store it once with "
+        "`agent-do creds store ANTHROPIC_API_KEY --stdin` and invoke through `agent-do brief` "
+        "so the dispatcher injects the declared credential."
+    )
 
 
 def model_paragraph(
@@ -827,7 +1012,10 @@ def model_paragraph(
         annotations.append({"kind": "voice", "reason": f"model adapter unavailable: {exc}"})
         return None
     if not ai_requested("AGENT_BRIEF_AI"):
-        annotations.append({"kind": "voice", "reason": "no model credential configured; deterministic voice"})
+        annotations.append({
+            "kind": "voice",
+            "reason": _voice_unavailable_reason() or "no model credential configured; deterministic voice",
+        })
         return None
     facts = {
         "threads": [
@@ -847,6 +1035,9 @@ def model_paragraph(
         "suggestions": [
             {"label": s["label"], "receipts": s["receipts"]} for s in suggestions
         ],
+        "impaired_sources": sorted({
+            a["source"] for a in annotations if a.get("kind") == "source"
+        }),
         "receipts": receipts.entries,
     }
     system = (
@@ -855,7 +1046,8 @@ def model_paragraph(
         "structured facts provided and cite the receipt ids it rests on in "
         "square brackets, e.g. [r3]. Use ONLY receipt ids that appear in the "
         "facts. No numbers that are not in the facts. If nothing needs the "
-        "reader, say so plainly."
+        "reader AND no source is impaired, say so plainly. If sources are "
+        "impaired, never issue a clean bill — say what could not be read."
     )
     try:
         response = llm_call(
@@ -893,8 +1085,24 @@ def model_paragraph(
 # Assembly — the composite contract.
 # ---------------------------------------------------------------------------
 
+def _fail_loud(message: str) -> None:
+    """An explicit caller value that cannot be honored fails with exit 2 —
+    silently falling back to cwd masked a slug-vs-path bug for a full
+    consumer round (mn-f79edc round 2, finding 3)."""
+    print(json.dumps({"success": False, "error": message}))
+    raise SystemExit(2)
+
+
 def resolve_repo(value: str | None) -> Path:
-    candidate = Path(value).expanduser().resolve() if value else Path.cwd()
+    if value:
+        candidate = Path(value).expanduser().resolve()
+        if not candidate.exists():
+            _fail_loud(
+                f"--focused-repo does not exist: {value} — pass the repo root as a "
+                f"filesystem PATH (absolute, or relative to the calling cwd), not a slug"
+            )
+    else:
+        candidate = Path.cwd()
     probe = candidate
     while probe != probe.parent:
         if (probe / ".git").exists():
@@ -907,14 +1115,25 @@ def assemble(
     repo: Path,
     board_dir: Path,
     since: str | None,
-    timeout: float,
+    timeout: float | None,
     use_model: bool,
     peek: bool,
+    board_tried: list[str] | None = None,
 ) -> dict[str, Any]:
     receipts = ReceiptBook()
     state = load_state()
     journal = journal_read()
-    sources = gather_all(repo, board_dir, timeout)
+    local_budget = timeout if timeout is not None else float(READ_PROBE_TIMEOUT_SECONDS)
+    sources = gather_all(repo, board_dir, local_budget, github_budget(timeout, state), board_tried)
+
+    calibrated = False
+    duration = sources["github"].pop("_duration_seconds", None)
+    if duration is not None:
+        state.setdefault("calibration", {})["github"] = {
+            "last_ok_seconds": duration,
+            "at": iso(now_utc()),
+        }
+        calibrated = True
 
     annotations: list[dict[str, Any]] = []
     for name, source in sources.items():
@@ -938,11 +1157,12 @@ def assemble(
     else:
         annotations.append({"kind": "voice", "reason": "model voice disabled by caller (--no-model)"})
     if paragraph is None:
-        paragraph = deterministic_paragraph(threads, delta, suggestions, annotations)
+        paragraph = deterministic_paragraph(threads, delta, suggestions, annotations, len(sources))
 
     generated = iso(now_utc())
     if not peek:
         state.setdefault("callers", {})[caller_key] = {"last_brief_at": generated}
+    if not peek or calibrated:
         save_state(state)
 
     return {
@@ -979,10 +1199,17 @@ def assemble(
 # ask — a question over the estate, receipts attached to every hit.
 # ---------------------------------------------------------------------------
 
-def gather_ask(repo: Path, board_dir: Path, question: str, timeout: float) -> tuple[list[dict[str, Any]], ReceiptBook, list[dict[str, Any]]]:
+def gather_ask(
+    repo: Path,
+    board_dir: Path,
+    question: str,
+    timeout: float | None,
+    board_tried: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], ReceiptBook, list[dict[str, Any]]]:
     receipts = ReceiptBook()
     annotations: list[dict[str, Any]] = []
     hits: list[dict[str, Any]] = []
+    timeout = timeout if timeout is not None else float(READ_PROBE_TIMEOUT_SECONDS)
 
     sessions_bin = ROOT / "tools" / "agent-sessions"
     source = _from_fixture("ask_sessions") or _run_json(
@@ -1017,7 +1244,7 @@ def gather_ask(repo: Path, board_dir: Path, question: str, timeout: float) -> tu
             rid = receipts.add("commit", commit.get("hash", ""), commit.get("subject", ""))
             hits.append({"source": "git", "summary": commit.get("subject", ""), "receipt": rid})
 
-    manna_src = gather_manna(board_dir)
+    manna_src = gather_manna(board_dir, board_tried)
     if manna_src["status"] != "absent" and manna_src.get("data"):
         needle = question.lower()
         for issue in manna_src["data"].get("issues", []):
@@ -1047,9 +1274,8 @@ def gather_ask(repo: Path, board_dir: Path, question: str, timeout: float) -> tu
 
 def run_ask(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.focused_repo)
-    board_dir = Path(args.focused_board).expanduser().resolve() if args.focused_board else repo / ".manna"
-    timeout = args.timeout
-    hits, receipts, annotations = gather_ask(repo, board_dir, args.question, timeout)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    hits, receipts, annotations = gather_ask(repo, board_dir, args.question, args.timeout, board_tried)
 
     answer: dict[str, Any] | None = None
     if not args.no_model:
@@ -1088,7 +1314,10 @@ def run_ask(args: argparse.Namespace) -> int:
                         "reason": f"model cited unissued receipts ({', '.join(sorted(unknown))}); rejected",
                     })
             else:
-                annotations.append({"kind": "voice", "reason": "no model credential configured; deterministic answer"})
+                annotations.append({
+                    "kind": "voice",
+                    "reason": _voice_unavailable_reason() or "no model credential configured; deterministic answer",
+                })
         except Exception as exc:
             annotations.append({"kind": "voice", "reason": f"model call failed: {exc}"})
     if answer is None:
@@ -1130,16 +1359,16 @@ def run_ask(args: argparse.Namespace) -> int:
 
 def run_holy(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.focused_repo)
-    board_dir = Path(args.focused_board).expanduser().resolve() if args.focused_board else repo / ".manna"
-    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek, board_tried)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
 def run_threads(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.focused_repo)
-    board_dir = Path(args.focused_board).expanduser().resolve() if args.focused_board else repo / ".manna"
-    payload = assemble(repo, board_dir, args.since, args.timeout, use_model=False, peek=True)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, use_model=False, peek=True, board_tried=board_tried)
     # A threads view carries no paragraph, so a voice annotation would be
     # noise about a capability nobody asked for here.
     annotations = [a for a in payload["annotations"] if a.get("kind") != "voice"]
@@ -1179,8 +1408,8 @@ def run_threads(args: argparse.Namespace) -> int:
 
 def run_now(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.focused_repo)
-    board_dir = Path(args.focused_board).expanduser().resolve() if args.focused_board else repo / ".manna"
-    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek, board_tried)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1234,7 +1463,7 @@ def run_snooze(args: argparse.Namespace) -> int:
             entry["fingerprint"] = args.fingerprint
         else:
             repo = resolve_repo(args.focused_repo)
-            board_dir = Path(args.focused_board).expanduser().resolve() if args.focused_board else repo / ".manna"
+            board_dir, board_tried = resolve_board(args.focused_board, repo)
             payload = assemble(repo, board_dir, None, args.timeout, use_model=False, peek=True)
             match = next((t for t in payload["threads"] if t["id"] == args.thread), None)
             if match is None:
@@ -1295,6 +1524,7 @@ def run_state(args: argparse.Namespace) -> int:
         "callers": state.get("callers", {}),
         "pins": state.get("pins", {}),
         "snoozes": state.get("snoozes", {}),
+        "calibration": state.get("calibration", {}),
         "journal_observations": len(journal),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1327,8 +1557,12 @@ Context flags (now/threads/ask/holy/snooze):
   --focused-repo <path>    Repo checkout the caller has focused (default: cwd)
   --focused-board <path>   .manna directory (default: <repo>/.manna)
   --since <iso8601>        Delta baseline; otherwise read-state, else first look
-  --timeout <seconds>      Per-source budget (default: the shared read-probe
-                           budget; raise it for a cold gh inbox sweep)
+  --timeout <seconds>      Per-source budget for every source. Default: local
+                           sources get the shared read-probe budget; the GitHub
+                           sweep self-calibrates to twice its last observed
+                           duration (bootstrap: twice the probe budget). One
+                           successful run with an explicit --timeout teaches
+                           the default.
   --no-model               Skip the model voice even when configured
   --peek                   Do not advance read-state
 
@@ -1342,8 +1576,10 @@ def add_context_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--focused-board", help="path to the .manna board directory (default: <repo>/.manna)")
     parser.add_argument("--since", help="ISO8601 delta baseline")
     parser.add_argument(
-        "--timeout", type=float, default=float(READ_PROBE_TIMEOUT_SECONDS),
-        help="per-source budget in seconds (default: shared read-probe budget)",
+        "--timeout", type=float, default=None,
+        help="per-source budget in seconds for every source (default: the shared "
+             "read-probe budget locally; the GitHub sweep self-calibrates from "
+             "its last observed duration, bootstrapping at twice the probe budget)",
     )
     parser.add_argument("--no-model", action="store_true", help="skip the model voice")
     parser.add_argument("--peek", action="store_true", help="do not advance read-state")
