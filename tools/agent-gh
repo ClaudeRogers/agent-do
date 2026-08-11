@@ -526,6 +526,19 @@ def build_inbox(limit: int, *, ceremony_only: bool = False) -> dict[str, Any]:
             if reason not in entry["reasons"]:
                 entry["reasons"].append(reason)
 
+    # One GraphQL round trip replaces the 4 ceremony subprocesses and the
+    # per-repo/per-PR sweep calls (measured 30s -> ~1s). REST remains the
+    # loud fallback; AGENT_GH_INBOX=rest forces it.
+    graphql_error: str | None = None
+    if os.environ.get("AGENT_GH_INBOX") != "rest":
+        try:
+            sweep = build_inbox_graphql(limit, ceremony_only, add)
+            entries = list(items.values())
+            return {"items": entries[:limit], "total": len(entries), "sweep": sweep}
+        except GhError as exc:
+            graphql_error = str(exc)
+            items.clear()
+
     base = argparse.Namespace(
         limit=limit,
         state="open",
@@ -552,6 +565,9 @@ def build_inbox(limit: int, *, ceremony_only: bool = False) -> dict[str, Any]:
     if not ceremony_only:
         viewer = current_user().get("login") or ""
         sweep = maintainer_sweep(viewer, add)
+        sweep["path"] = "rest-fallback" if graphql_error else "rest"
+        if graphql_error:
+            sweep["graphql_error"] = graphql_error
 
     entries = list(items.values())
     return {"items": entries[:limit], "total": len(entries), "sweep": sweep}
@@ -569,6 +585,209 @@ SWEEP_GH_TIMEOUT = 60
 
 def gh_json_pages(path: str) -> list[dict[str, Any]]:
     return flatten_pages(gh_json(["api", "--paginate", "--slurp", path], timeout=SWEEP_GH_TIMEOUT))
+
+
+# ── GraphQL inbox ──────────────────────────────────────────────────────────
+# The REST inbox is N+4 serial round trips (4 ceremony searches, then pulls
+# and reviews per swept repo — measured 30s over 20 active repos). One
+# GraphQL document answers all of it in a single trip: the four ceremony
+# searches AND the maintainer sweep, the latter as an owner-scoped search
+# (viewer.repositories enumeration measured ~4.5s per page server-side, so
+# it is avoided entirely; eligibility comes from the repos cache the REST
+# sweep already trusts). The REST path below remains the loud fallback, and
+# the sweep stats say which path ran.
+
+# GitHub's published per-page ceiling for search connections.
+SWEEP_SEARCH_PAGE = 100
+# Reviews ride nested on each sweep PR. Truncation is never silent: when
+# totalCount exceeds the window and the viewer is not in it, that one PR's
+# reviews are fetched over REST rather than misclassified.
+SWEEP_REVIEW_WINDOW = 30
+
+GRAPHQL_PR_CORE = """
+fragment PrCore on PullRequest {
+  number title state isDraft updatedAt url
+  author { login }
+  repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
+  comments { totalCount }
+}
+"""
+
+CEREMONY_SEARCHES = (
+    ("review_requested", "is:pr state:open review-requested:@me"),
+    ("authored_open", "is:pr state:open author:@me"),
+    ("authored_failed_checks", "is:pr state:open author:@me status:failure"),
+    ("authored_changes_requested", "is:pr state:open author:@me review:changes-requested"),
+)
+
+
+def run_graphql(query: str) -> dict[str, Any]:
+    payload = gh_json(["api", "graphql", "-f", f"query={query}"], timeout=SWEEP_GH_TIMEOUT)
+    if not isinstance(payload, dict):
+        raise GhError("graphql returned no payload")
+    if payload.get("errors"):
+        raise GhError(f"graphql error: {payload['errors'][0].get('message', payload['errors'][0])}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise GhError("graphql returned no data")
+    return data
+
+
+def _graphql_search_alias(name: str, query: str, limit: int) -> str:
+    return f"{name}: search(type: ISSUE, first: {limit}, query: {json.dumps(query)}) {{ nodes {{ ...PrCore }} }}"
+
+
+def _graphql_sweep_alias(query: str, cursor: str | None) -> str:
+    after = f", after: {json.dumps(cursor)}" if cursor else ""
+    return (
+        f"sweep: search(type: ISSUE, first: {SWEEP_SEARCH_PAGE}{after}, query: {json.dumps(query)}) {{ "
+        "pageInfo { hasNextPage endCursor } "
+        "nodes { ...PrCore ... on PullRequest { headRefOid "
+        f"reviews(last: {SWEEP_REVIEW_WINDOW}) {{ totalCount nodes {{ "
+        "state submittedAt author { login } commit { oid } } } } } }"
+    )
+
+
+def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
+    """GraphQL PR node -> the exact dict shape the REST paths emit."""
+    repo = (node.get("repository") or {}).get("nameWithOwner")
+    author = node.get("author") or {}
+    labels = ((node.get("labels") or {}).get("nodes")) or []
+    return {
+        "ref": f"{repo}#{node.get('number')}",
+        "repo": repo,
+        "number": node.get("number"),
+        "title": node.get("title"),
+        "state": str(node.get("state") or "").lower(),
+        "draft": bool(node.get("isDraft")),
+        "author": author.get("login") if isinstance(author, dict) else author,
+        "updated_at": node.get("updatedAt"),
+        "url": node.get("url"),
+        "comments": (node.get("comments") or {}).get("totalCount"),
+        "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+    }
+
+
+def _rest_shaped_reviews(pr_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """GraphQL review nodes -> REST review dicts, so classify_review_state
+    runs unchanged on both paths (zero classifier drift)."""
+    shaped = []
+    for review in ((pr_node.get("reviews") or {}).get("nodes")) or []:
+        if not isinstance(review, dict):
+            continue
+        shaped.append({
+            "user": {"login": ((review.get("author") or {}).get("login"))},
+            "state": review.get("state"),
+            "submitted_at": review.get("submittedAt"),
+            "commit_id": ((review.get("commit") or {}).get("oid")),
+        })
+    return shaped
+
+
+def _classify_sweep_node(
+    node: dict[str, Any],
+    viewer: str,
+    eligible: set[str],
+    add: Callable[[str, list[dict[str, Any]]], None],
+    stats: dict[str, Any],
+) -> None:
+    full = ((node.get("repository") or {}).get("nameWithOwner")) or ""
+    if full not in eligible:
+        # Owner-scoped search sees repos we can only read; the REST sweep
+        # never swept those, so neither does this path.
+        stats["skipped_no_role"] += 1
+        return
+    author = ((node.get("author") or {}).get("login"))
+    if node.get("number") is None or not author or author == viewer:
+        return
+    reviews = _rest_shaped_reviews(node)
+    review_conn = node.get("reviews") or {}
+    if (review_conn.get("totalCount") or 0) > len(reviews) and not any(
+        review["user"]["login"] == viewer for review in reviews
+    ):
+        # The viewer's review may sit outside the window; fetch the full
+        # list for this one PR rather than misclassify it as unreviewed.
+        try:
+            reviews = gh_json_pages(f"repos/{full}/pulls/{node['number']}/reviews?per_page=100")
+        except GhError as exc:
+            stats["unswept"].append({"repo": full, "reason": f"reviews for #{node['number']}: {exc}"})
+            return
+    stats["prs_classified"] += 1
+    token = classify_review_state(reviews, viewer, node.get("headRefOid"))
+    if token is None:
+        stats["waiting_on_author"] += 1
+        return
+    entry = normalize_graphql_pr(node)
+    add(f"maintainer_{token}", [entry])
+    if is_bot_login(author):
+        add("bot_author", [entry])
+
+
+def build_inbox_graphql(
+    limit: int,
+    ceremony_only: bool,
+    add: Callable[[str, list[dict[str, Any]]], None],
+) -> dict[str, Any] | None:
+    """One-document inbox. Returns sweep stats (None when ceremony_only)."""
+    aliases = " ".join(_graphql_search_alias(name, query, limit) for name, query in CEREMONY_SEARCHES)
+    eligible: set[str] = set()
+    sweep_field = ""
+    sweep_query = ""
+    if not ceremony_only:
+        eligible = {repo["full_name"] for repo in repos_for_sweep()}
+        owners = sorted({full.split("/")[0] for full in eligible})
+        if owners:
+            sweep_query = "is:pr is:open archived:false " + " ".join(f"user:{owner}" for owner in owners)
+            sweep_field = _graphql_sweep_alias(sweep_query, None)
+    ceremony_doc = f"query {{ viewer {{ login }} {aliases} }} {GRAPHQL_PR_CORE}"
+    if sweep_field:
+        # Aliased search fields execute serially inside one document, so the
+        # ceremony and sweep documents go over the wire concurrently instead.
+        from concurrent.futures import ThreadPoolExecutor
+
+        sweep_doc = f"query {{ {sweep_field} }} {GRAPHQL_PR_CORE}"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ceremony_future = pool.submit(run_graphql, ceremony_doc)
+            sweep_future = pool.submit(run_graphql, sweep_doc)
+            data = ceremony_future.result()
+            data["sweep"] = (sweep_future.result() or {}).get("sweep")
+    else:
+        data = run_graphql(ceremony_doc)
+    # A response that parses but lacks the requested aliases is a failure,
+    # not an empty inbox — treat it like any other GraphQL error and let the
+    # REST fallback carry the run.
+    missing = [name for name, _ in CEREMONY_SEARCHES if name not in data]
+    if not isinstance(data.get("viewer"), dict) or "login" not in (data.get("viewer") or {}):
+        missing.append("viewer.login")
+    if sweep_field and not isinstance(data.get("sweep"), dict):
+        missing.append("sweep")
+    if missing:
+        raise GhError(f"graphql response missing field(s): {', '.join(missing)}")
+    for name, _ in CEREMONY_SEARCHES:
+        nodes = ((data.get(name) or {}).get("nodes")) or []
+        add(name, [normalize_graphql_pr(node) for node in nodes if isinstance(node, dict)])
+    if ceremony_only:
+        return None
+    viewer = (data.get("viewer") or {}).get("login") or ""
+    stats: dict[str, Any] = {
+        "repos_swept": len(eligible), "prs_classified": 0, "waiting_on_author": 0,
+        "unswept": [], "skipped_no_role": 0, "path": "graphql",
+    }
+    if not eligible:
+        stats["unswept"].append({"repo": "*", "reason": "no sweep-eligible repos in inventory"})
+    connection = data.get("sweep") or {}
+    while sweep_field:
+        for node in connection.get("nodes") or []:
+            if isinstance(node, dict):
+                _classify_sweep_node(node, viewer, eligible, add, stats)
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        follow_up = f"query {{ {_graphql_sweep_alias(sweep_query, page.get('endCursor'))} }} {GRAPHQL_PR_CORE}"
+        connection = run_graphql(follow_up).get("sweep") or {}
+    portfolio_sweep(viewer, add, stats, role_covered=set(eligible))
+    return stats
 
 
 def sweep_eligible(repo: dict[str, Any]) -> bool:
@@ -765,6 +984,17 @@ def maintainer_sweep(viewer: str, add: Callable[[str, list[dict[str, Any]]], Non
             continue
         sweep_repo_pulls(full, viewer, add, stats, stats["unswept"], "maintainer_")
 
+    portfolio_sweep(viewer, add, stats, role_covered)
+    return stats
+
+
+def portfolio_sweep(
+    viewer: str,
+    add: Callable[[str, list[dict[str, Any]]], None],
+    stats: dict[str, Any],
+    role_covered: set[str],
+) -> None:
+    """Declared-portfolio sweep, shared by the REST and GraphQL inbox paths."""
     portfolio_stats: dict[str, Any] = {"patterns": 0, "repos_swept": 0, "prs_classified": 0, "waiting_on_author": 0}
     stats["portfolio"] = portfolio_stats
     try:
@@ -784,7 +1014,6 @@ def maintainer_sweep(viewer: str, add: Callable[[str, list[dict[str, Any]]], Non
                 portfolio_stats["repos_swept"] += 1
                 continue
             sweep_repo_pulls(full, viewer, add, portfolio_stats, stats["unswept"], "portfolio_")
-    return stats
 
 
 def search_candidates_for_awaiting(args: argparse.Namespace) -> list[dict[str, Any]]:

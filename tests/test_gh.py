@@ -812,9 +812,75 @@ else:
     test_merge_gate()
     test_classify_maintainer_state()
     test_portfolio_patterns()
+    test_graphql_inbox()
 
     print("gh tests passed")
     return 0
+
+
+def test_graphql_inbox() -> None:
+    gh = load_agent_gh()
+
+    # Generated documents must balance their braces — an unbalanced sweep
+    # alias cost a live round trip (RCURLY parse error, 2026-08-11).
+    aliases = " ".join(gh._graphql_search_alias(n, q, 30) for n, q in gh.CEREMONY_SEARCHES)
+    sweep = gh._graphql_sweep_alias("is:pr is:open user:someone", "CURSOR")
+    for doc in (
+        f"query {{ viewer {{ login }} {aliases} }} {gh.GRAPHQL_PR_CORE}",
+        f"query {{ {sweep} }} {gh.GRAPHQL_PR_CORE}",
+    ):
+        require(doc.count("{") == doc.count("}"), f"unbalanced braces in document: {doc}")
+
+    node = {
+        "number": 7, "title": "t", "state": "OPEN", "isDraft": False,
+        "updatedAt": "2026-08-11T00:00:00Z", "url": "https://x",
+        "author": {"login": "someone"},
+        "repository": {"nameWithOwner": "o/r"},
+        "labels": {"nodes": [{"name": "bug"}]},
+        "comments": {"totalCount": 2},
+        "headRefOid": "headsha",
+        "reviews": {"totalCount": 1, "nodes": [
+            {"state": "APPROVED", "submittedAt": "2026-08-10T00:00:00Z",
+             "author": {"login": "erik"}, "commit": {"oid": "oldsha"}},
+        ]},
+    }
+    entry = gh.normalize_graphql_pr(node)
+    require(entry["ref"] == "o/r#7" and entry["state"] == "open" and entry["comments"] == 2
+            and entry["labels"] == ["bug"], f"normalize_graphql_pr drifted from REST shape: {entry}")
+
+    added: list[tuple[str, str]] = []
+
+    def add(reason: str, prs: list) -> None:
+        added.extend((reason, pr["ref"]) for pr in prs)
+
+    stats = {"repos_swept": 0, "prs_classified": 0, "waiting_on_author": 0,
+             "unswept": [], "skipped_no_role": 0}
+    # Viewer's review sits on an old sha -> maintainer_review_stale.
+    gh._classify_sweep_node(node, "erik", {"o/r"}, add, stats)
+    require(("maintainer_review_stale", "o/r#7") in added, f"stale review misclassified: {added}")
+    # Changes requested at head -> ball with the author, nothing added.
+    node2 = json.loads(json.dumps(node))
+    node2["reviews"]["nodes"][0].update({"state": "CHANGES_REQUESTED", "commit": {"oid": "headsha"}})
+    before = list(added)
+    gh._classify_sweep_node(node2, "erik", {"o/r"}, add, stats)
+    require(added == before and stats["waiting_on_author"] == 1,
+            f"changes-requested at head must wait on author: {stats}")
+    # A repo outside the eligible set is skipped, mirroring the REST sweep.
+    gh._classify_sweep_node(node, "erik", {"other/repo"}, add, stats)
+    require(stats["skipped_no_role"] == 1, f"non-eligible repo must be skipped: {stats}")
+    # Viewer-authored PRs never enter the sweep.
+    node3 = json.loads(json.dumps(node))
+    node3["author"] = {"login": "erik"}
+    before = list(added)
+    gh._classify_sweep_node(node3, "erik", {"o/r"}, add, stats)
+    require(added == before, "viewer-authored PR must not enter the sweep")
+    # Bot author, no viewer review -> maintainer_unreviewed + bot_author.
+    node4 = json.loads(json.dumps(node))
+    node4["author"] = {"login": "dependabot"}
+    node4["reviews"] = {"totalCount": 0, "nodes": []}
+    gh._classify_sweep_node(node4, "erik", {"o/r"}, add, stats)
+    require(("maintainer_unreviewed", "o/r#7") in added and ("bot_author", "o/r#7") in added,
+            f"bot classification drifted: {added}")
 
 
 if __name__ == "__main__":
