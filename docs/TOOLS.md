@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (95 tools)
+## Summary (96 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -30,6 +30,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [audio](#audio) | Audio processing | mixed | 3 |
 | [auth](#auth) | Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials | mixed | 13 |
 | [bluetooth](#bluetooth) | Bluetooth control | mixed | 3 |
+| [brief](#brief) | Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions, and git into ranked threads, a delta since last look, one-tap suggestions carried as data, and a receipts-grounded paragraph | mixed | 10 |
 | [browse](#browse) | AI-first headless browser automation with @ref element selection, SSO/MFA login handoff, persistent sessions | mixed | 20 |
 | [burp](#burp) | Burp Suite automation | mixed | 4 |
 | [cad](#cad) | CAD file operations | mixed | 4 |
@@ -478,6 +479,63 @@ agent-do bluetooth scan
 
 - Read-only (snapshot/verify; safe to parallelize): `scan`
 - Write (connect/interact/save): `connect`, `disconnect`
+
+### brief
+
+Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions, and git into ranked threads, a delta since last look, one-tap suggestions carried as data, and a receipts-grounded paragraph
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- join gh inbox rows to manna items to live coord sessions to last commits to claim state
+- rank threads with reasons that explain every score (heuristic today, learned as the behavior journal fills)
+- compute the delta since the caller's last look (explicit --since, read-state, or first look)
+- carry manna reconcile desyncs as one-tap suggestions whose commands are data, never executed
+- speak a paragraph grounded in receipts (model voice when configured; deterministic fallback, annotated)
+- answer estate questions with a receipt id on every claim
+- versioned full-shape JSON contract for the Holy panel; consumers fail closed on drift
+- pin, snooze (until a timestamp or until the thread changes), record observed behavior
+- honest degradation — a failed source is an annotation, never a guess and never silence
+
+**Commands**
+
+- `now`: Human-readable estate brief; model voice when configured, deterministic sentence annotated otherwise
+- `threads`: Joined thread objects — gh PR ↔ manna item ↔ live session ↔ last commit ↔ claim state
+- `ask`: Answer a question over the estate (sessions, git log, board, zpc); every claim carries a receipt id
+- `holy`: Full composite contract JSON for the Holy panel — versioned, full shape, honest degradations
+- `pin`: Pin a thread (rank boost, survives restarts)
+- `unpin`: Remove a pin
+- `snooze`: Snooze a thread until a timestamp or until it changes (refuses an unbounded snooze)
+- `unsnooze`: Clear a snooze
+- `observe`: Record observed behavior on a thread (acted|ignored|snoozed|pinned|opened) — feeds the ranker
+- `state`: Show the read-state store and journal size
+
+**Examples**
+
+```bash
+# what needs me right now
+agent-do brief now
+# full contract for the Holy panel
+agent-do brief holy --focused-repo ~/Custom-Coding/holy-ghostty --since 2026-08-11T14:00:00Z
+# joined threads as data
+agent-do brief threads --json
+# ask the estate a question
+agent-do brief ask "who touched the auth flow last week"
+# snooze a thread until it changes
+agent-do brief snooze mn-53da2c --until-changed
+# record that I acted on a thread
+agent-do brief observe ovachiever/agent-do#23 acted
+```
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `state`, `threads`
+- Write (connect/interact/save): `ask`, `holy`, `now`, `observe`, `pin`, `snooze`, `unpin`, `unsnooze`
+- long_running (daemon/stream/session; may never return): `ask`, `holy`, `now`, `threads`
+- polymorphic (beat decided by payload or flag at call time): `now`, `snooze`
+- composite (one call performs several beats internally): `ask`, `holy`
+- own_state (writes only its own cache/state; parallel-safe): `holy`
 
 ### browse
 

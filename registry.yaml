@@ -1,4 +1,91 @@
 tools:
+  brief:
+    description: Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions,
+      and git into ranked threads, a delta since last look, one-tap suggestions carried as data,
+      and a receipts-grounded paragraph
+    capabilities:
+    - join gh inbox rows to manna items to live coord sessions to last commits to claim state
+    - rank threads with reasons that explain every score (heuristic today, learned as the behavior journal fills)
+    - compute the delta since the caller's last look (explicit --since, read-state, or first look)
+    - carry manna reconcile desyncs as one-tap suggestions whose commands are data, never executed
+    - speak a paragraph grounded in receipts (model voice when configured; deterministic fallback, annotated)
+    - answer estate questions with a receipt id on every claim
+    - versioned full-shape JSON contract for the Holy panel; consumers fail closed on drift
+    - pin, snooze (until a timestamp or until the thread changes), record observed behavior
+    - honest degradation — a failed source is an annotation, never a guess and never silence
+    commands:
+      now: Human-readable estate brief; model voice when configured, deterministic sentence annotated otherwise
+      threads: Joined thread objects — gh PR ↔ manna item ↔ live session ↔ last commit ↔ claim state
+      ask: Answer a question over the estate (sessions, git log, board, zpc); every claim carries a receipt id
+      holy: Full composite contract JSON for the Holy panel — versioned, full shape, honest degradations
+      pin: Pin a thread (rank boost, survives restarts)
+      unpin: Remove a pin
+      snooze: Snooze a thread until a timestamp or until it changes (refuses an unbounded snooze)
+      unsnooze: Clear a snooze
+      observe: Record observed behavior on a thread (acted|ignored|snoozed|pinned|opened) — feeds the ranker
+      state: Show the read-state store and journal size
+    examples:
+    - intent: what needs me right now
+      command: agent-brief now
+    - intent: full contract for the Holy panel
+      command: agent-brief holy --focused-repo ~/Custom-Coding/holy-ghostty --since 2026-08-11T14:00:00Z
+    - intent: joined threads as data
+      command: agent-brief threads --json
+    - intent: ask the estate a question
+      command: agent-brief ask "who touched the auth flow last week"
+    - intent: snooze a thread until it changes
+      command: agent-brief snooze mn-53da2c --until-changed
+    - intent: record that I acted on a thread
+      command: agent-brief observe ovachiever/agent-do#23 acted
+    routing:
+      discover_keywords:
+      - brief
+      - briefing
+      - estate brief
+      - what needs me
+      - intelligent inbox
+      prompt_patterns:
+      - '\bbrief\b.*\b(estate|holy|now|threads?)\b'
+      - '\bwhat\s+needs\s+me\b'
+      - '\bestate\s+brief(ing)?\b'
+      recommended_entrypoints:
+      - agent-do brief now
+      - agent-do brief threads
+      - agent-do brief holy --json
+      default_command: now
+    contracts:
+      snapshot:
+      - now
+      - threads
+      - ask
+      - holy
+      - state
+      interact:
+      - now
+      - ask
+      save:
+      - holy
+      - pin
+      - unpin
+      - snooze
+      - unsnooze
+      - observe
+      attributes:
+        now:
+        - long_running
+        - polymorphic
+        threads:
+        - long_running
+        ask:
+        - composite
+        - long_running
+        holy:
+        - composite
+        - long_running
+        - own_state
+        snooze:
+        - polymorphic
+    concurrency: mixed
   context:
     description: Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal).
     capabilities:
