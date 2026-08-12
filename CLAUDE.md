@@ -288,7 +288,7 @@ The second property the contracts machine holds: a command that caps its output 
 - `CLOUDFLARE_ACCOUNT_ID`: Account ID for agent-cloudflare (Workers, Pages, R2)
 - `CLERK_SECRET_KEY`: Secret key for agent-clerk (Clerk, sk_test_... or sk_live_...)
 - `OKTA_API_TOKEN`: SSWS API token for agent-okta (Okta)
-- `OKTA_DOMAIN`: Okta domain for agent-okta (e.g., versova.okta.com)
+- `OKTA_DOMAIN`: Okta domain for agent-okta (e.g., example.okta.com)
 - `NAMECHEAP_API_USER`: API username for agent-namecheap
 - `NAMECHEAP_API_KEY`: API key for agent-namecheap
 - `NAMECHEAP_CLIENT_IP`: Whitelisted IP for agent-namecheap (auto-detected if not set)
