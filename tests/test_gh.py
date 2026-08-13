@@ -813,9 +813,104 @@ else:
     test_classify_maintainer_state()
     test_portfolio_patterns()
     test_graphql_inbox()
+    test_next_action_mapping()
+    test_stage_fixture()
 
     print("gh tests passed")
     return 0
+
+
+def test_stage_fixture() -> None:
+    """The pinned live capture (2026-08-13) carries the stage contract and
+    at least one row in mapping states 1 (Draft), 5 (Merge), 6 (Review),
+    and 7 (Awaiting review) — the work-order verification set."""
+    gh = load_agent_gh()
+    fixture = json.loads((ROOT / "tests" / "fixtures" / "gh-inbox-stage-1.json").read_text())
+    require(fixture["sweep"]["stage_contract"] == 1, "pinned fixture must carry stage_contract 1")
+    verbs = {(item.get("next_action") or {}).get("verb") for item in fixture["items"]}
+    for required in ("Draft", "Merge", "Review", "Awaiting review"):
+        require(required in verbs, f"pinned fixture missing state '{required}': {sorted(v for v in verbs if v)}")
+    for item in fixture["items"]:
+        for key in ("review_decision", "merge_state", "checks", "review_requests", "next_action"):
+            require(key in item, f"fixture row {item['ref']} missing stage key {key}")
+
+    # Derived-reason parity: the two searched-no-more ceremony reasons come
+    # from stage fields.
+    entry = {"reasons": ["authored_open"], "checks": {"failed": 1, "total": 2, "passed": 1, "pending": 0},
+             "review_decision": "CHANGES_REQUESTED"}
+    gh.derive_authored_reasons(entry)
+    require("authored_failed_checks" in entry["reasons"] and "authored_changes_requested" in entry["reasons"],
+            f"derived reasons drifted: {entry['reasons']}")
+    untouched = {"reasons": ["review_requested"], "checks": {"failed": 3, "total": 3, "passed": 0, "pending": 0}}
+    gh.derive_authored_reasons(untouched)
+    require(untouched["reasons"] == ["review_requested"],
+            "derivation must only extend authored rows")
+
+
+def test_next_action_mapping() -> None:
+    gh = load_agent_gh()
+    base = {"number": 9, "author": "other", "draft": False, "merge_state": None,
+            "review_decision": None, "checks": None, "reasons": [], "review_requests": None}
+
+    def item(**kw):
+        merged = dict(base)
+        merged.update(kw)
+        return merged
+
+    # Rule 1, and the draft+approved collision stays Draft.
+    na = gh.next_action_for(item(draft=True, review_decision="APPROVED", merge_state="CLEAN", author="me"), "me")
+    require(na["verb"] == "Draft" and na["yours"] is False and na["command"] is None,
+            f"draft+approved must stay Draft: {na}")
+    # Rule 2, and the DIRTY+approved collision stays Resolve conflicts.
+    na = gh.next_action_for(item(author="me", merge_state="DIRTY", review_decision="APPROVED"), "me")
+    require(na["verb"] == "Resolve conflicts" and na["yours"] is True,
+            f"DIRTY+approved must stay Resolve conflicts: {na}")
+    na = gh.next_action_for(item(merge_state="DIRTY"), "me")
+    require(na["verb"] == "Resolve conflicts" and na["yours"] is False,
+            f"a stranger's conflicts are not your move: {na}")
+    # Rule 3.
+    na = gh.next_action_for(item(author="me", review_decision="CHANGES_REQUESTED"), "me")
+    require(na["verb"] == "Address review" and na["command"] == "agent-do gh pr 9",
+            f"changes-requested mapping drifted: {na}")
+    # Rule 4.
+    na = gh.next_action_for(item(author="me", checks={"passed": 1, "failed": 2, "pending": 0, "total": 3}), "me")
+    require(na["verb"] == "Fix checks" and na["detail"] == "2 of 3 failing"
+            and na["command"] == "agent-do gh checks 9", f"failed-checks mapping drifted: {na}")
+    # Rule 5.
+    na = gh.next_action_for(item(author="me", review_decision="APPROVED", merge_state="CLEAN"), "me")
+    require(na["verb"] == "Merge" and na["yours"] is True and na["command"] == "agent-do gh merge 9",
+            f"merge mapping drifted: {na}")
+    # Rule 6.
+    na = gh.next_action_for(item(reasons=["review_requested"]), "me")
+    require(na["verb"] == "Review" and na["yours"] is True and na["command"] == "agent-do gh pr 9",
+            f"review-requested mapping drifted: {na}")
+    # Rule 7, both details.
+    na = gh.next_action_for(item(author="me"), "me")
+    require(na["verb"] == "Awaiting review" and na["detail"] == "no review yet" and na["yours"] is False,
+            f"awaiting-review mapping drifted: {na}")
+    na = gh.next_action_for(item(author="me", review_requests=2), "me")
+    require(na["detail"] == "2 reviewer(s) pending", f"pending-reviewer detail drifted: {na}")
+    # Rule 8.
+    require(gh.next_action_for(item(reasons=["maintainer_unreviewed"]), "me") is None,
+            "not-authored without review_requested must map to null")
+
+    # Rollup bucketing: counted outcomes, never invented; no rollup -> null.
+    node = {"commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+        "totalCount": 4, "nodes": [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ]}}}}]}}
+    counts = gh.checks_from_rollup(node)
+    require(counts == {"passed": 2, "failed": 1, "pending": 1, "total": 4},
+            f"rollup bucketing drifted: {counts}")
+    require(gh.checks_from_rollup({"commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}}) is None,
+            "no rollup must be null, not zeros")
+    # Stage keys ride every normalized row, even when GraphQL omits them.
+    entry = gh.normalize_graphql_pr({"number": 1, "repository": {"nameWithOwner": "o/r"}})
+    for key in ("review_decision", "merge_state", "checks", "review_requests", "next_action"):
+        require(key in entry, f"stage key {key} missing from normalized row")
 
 
 def test_graphql_inbox() -> None:

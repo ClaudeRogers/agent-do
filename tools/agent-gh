@@ -299,6 +299,13 @@ def normalize_pr(item: dict[str, Any]) -> dict[str, Any]:
         "url": item.get("url"),
         "comments": item.get("commentsCount"),
         "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        # Stage fields exist on every row; REST search cannot see them, and
+        # an honest absence is null, never a guess (stage contract law).
+        "review_decision": None,
+        "merge_state": None,
+        "checks": None,
+        "review_requests": None,
+        "next_action": None,
     }
 
 
@@ -532,7 +539,14 @@ def build_inbox(limit: int, *, ceremony_only: bool = False) -> dict[str, Any]:
     graphql_error: str | None = None
     if os.environ.get("AGENT_GH_INBOX") != "rest":
         try:
-            sweep = build_inbox_graphql(limit, ceremony_only, add)
+            sweep, viewer = build_inbox_graphql(limit, ceremony_only, add)
+            # Post-pass after dedupe: derive the two ceremony reasons the
+            # GraphQL path no longer searches for (the stage fields carry
+            # the same signals authoritatively), then map next_action from
+            # the merged row.
+            for entry in items.values():
+                derive_authored_reasons(entry)
+                entry["next_action"] = next_action_for(entry, viewer)
             entries = list(items.values())
             return {"items": entries[:limit], "total": len(entries), "sweep": sweep}
         except GhError as exc:
@@ -566,6 +580,9 @@ def build_inbox(limit: int, *, ceremony_only: bool = False) -> dict[str, Any]:
         viewer = current_user().get("login") or ""
         sweep = maintainer_sweep(viewer, add)
         sweep["path"] = "rest-fallback" if graphql_error else "rest"
+        # The envelope stamp holds on the REST path too: the keys exist on
+        # every row, their values are honestly null here.
+        sweep["stage_contract"] = 1
         if graphql_error:
             sweep["graphql_error"] = graphql_error
 
@@ -611,8 +628,28 @@ fragment PrCore on PullRequest {
   repository { nameWithOwner }
   labels(first: 20) { nodes { name } }
   comments { totalCount }
+  reviewDecision
+  mergeStateStatus
+  reviewRequests(first: 1) { totalCount }
+  commits(last: 1) { nodes { commit { statusCheckRollup {
+    state
+    contexts(first: 30) { totalCount nodes {
+      __typename
+      ... on CheckRun { status conclusion }
+      ... on StatusContext { state }
+    } }
+  } } } }
 }
 """
+
+# mergeStateStatus rides the merge-info preview accept header; harmless
+# where the field has since gone GA.
+GRAPHQL_ACCEPT_HEADER = "Accept: application/vnd.github.merge-info-preview+json"
+
+# Check-rollup context outcomes, bucketed the way `gh pr checks` buckets
+# them: neutral and skipped count as passed, stale counts as failed.
+CHECK_PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CHECK_FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
 
 CEREMONY_SEARCHES = (
     ("review_requested", "is:pr state:open review-requested:@me"),
@@ -621,9 +658,19 @@ CEREMONY_SEARCHES = (
     ("authored_changes_requested", "is:pr state:open author:@me review:changes-requested"),
 )
 
+# The GraphQL path executes only the first two: with stage enrichment on
+# every row, authored_failed_checks and authored_changes_requested are
+# DERIVED from checks.failed and review_decision — the same signals the
+# search qualifiers filter on, read from the authoritative rollup instead.
+# Two fewer heavy searches per run; the REST fallback still runs all four.
+GRAPHQL_CEREMONY_SEARCHES = CEREMONY_SEARCHES[:2]
+
 
 def run_graphql(query: str) -> dict[str, Any]:
-    payload = gh_json(["api", "graphql", "-f", f"query={query}"], timeout=SWEEP_GH_TIMEOUT)
+    payload = gh_json(
+        ["api", "graphql", "-H", GRAPHQL_ACCEPT_HEADER, "-f", f"query={query}"],
+        timeout=SWEEP_GH_TIMEOUT,
+    )
     if not isinstance(payload, dict):
         raise GhError("graphql returned no payload")
     if payload.get("errors"):
@@ -649,6 +696,39 @@ def _graphql_sweep_alias(query: str, cursor: str | None) -> str:
     )
 
 
+def checks_from_rollup(node: dict[str, Any]) -> dict[str, int] | None:
+    """Bucket the check rollup into counted outcomes.
+
+    A PR with no rollup gets None, never zeros — the counts come from the
+    rollup or they do not exist (bounds discipline). If the context window
+    truncates (totalCount above what arrived), total keeps the true count,
+    so a bucket sum below total reads as truncation, not invention.
+    """
+    commits = ((node.get("commits") or {}).get("nodes")) or []
+    rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup")) if commits else None
+    if not isinstance(rollup, dict):
+        return None
+    contexts = rollup.get("contexts") or {}
+    counts = {"passed": 0, "failed": 0, "pending": 0, "total": contexts.get("totalCount") or 0}
+    for ctx in contexts.get("nodes") or []:
+        if not isinstance(ctx, dict):
+            continue
+        if ctx.get("__typename") == "CheckRun":
+            outcome = str(ctx.get("conclusion") or "").upper()
+            if not outcome and str(ctx.get("status") or "").upper() != "COMPLETED":
+                counts["pending"] += 1
+                continue
+        else:
+            outcome = str(ctx.get("state") or "").upper()
+        if outcome in CHECK_PASSED:
+            counts["passed"] += 1
+        elif outcome in CHECK_FAILED:
+            counts["failed"] += 1
+        else:
+            counts["pending"] += 1
+    return counts
+
+
 def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
     """GraphQL PR node -> the exact dict shape the REST paths emit."""
     repo = (node.get("repository") or {}).get("nameWithOwner")
@@ -666,7 +746,56 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         "url": node.get("url"),
         "comments": (node.get("comments") or {}).get("totalCount"),
         "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        "review_decision": node.get("reviewDecision"),
+        "merge_state": node.get("mergeStateStatus"),
+        "checks": checks_from_rollup(node),
+        "review_requests": (node.get("reviewRequests") or {}).get("totalCount"),
+        "next_action": None,
     }
+
+
+def derive_authored_reasons(entry: dict[str, Any]) -> None:
+    """Reasons the GraphQL path no longer searches for, derived from stage
+    fields carrying the same signals authoritatively (rollup and
+    reviewDecision instead of the status:/review: search qualifiers)."""
+    reasons = entry.setdefault("reasons", [])
+    if "authored_open" not in reasons:
+        return
+    if ((entry.get("checks") or {}).get("failed") or 0) > 0 and "authored_failed_checks" not in reasons:
+        reasons.append("authored_failed_checks")
+    if entry.get("review_decision") == "CHANGES_REQUESTED" and "authored_changes_requested" not in reasons:
+        reasons.append("authored_changes_requested")
+
+
+def next_action_for(item: dict[str, Any], viewer: str) -> dict[str, Any] | None:
+    """The deterministic next-action verb — engine-owned, first match wins
+    (11-GH-STAGE-AWARENESS.md mapping table; consumers never re-derive it).
+    `yours` means exactly: the ball is in the viewing user's court.
+    `command` is data typed behind a human Enter, never executed here."""
+    authored = bool(viewer) and item.get("author") == viewer
+    checks = item.get("checks") or {}
+    number = item.get("number")
+    if item.get("draft"):
+        return {"verb": "Draft", "detail": "still being written", "yours": False, "command": None}
+    if item.get("merge_state") == "DIRTY":
+        return {"verb": "Resolve conflicts", "detail": "branch cannot merge", "yours": authored, "command": None}
+    if authored and item.get("review_decision") == "CHANGES_REQUESTED":
+        return {"verb": "Address review", "detail": "changes requested", "yours": True,
+                "command": f"agent-do gh pr {number}"}
+    if authored and (checks.get("failed") or 0) > 0:
+        return {"verb": "Fix checks", "detail": f"{checks['failed']} of {checks['total']} failing",
+                "yours": True, "command": f"agent-do gh checks {number}"}
+    if authored and item.get("review_decision") == "APPROVED" and item.get("merge_state") == "CLEAN":
+        return {"verb": "Merge", "detail": "approved, checks green", "yours": True,
+                "command": f"agent-do gh merge {number}"}
+    if not authored and "review_requested" in (item.get("reasons") or []):
+        return {"verb": "Review", "detail": "your review requested", "yours": True,
+                "command": f"agent-do gh pr {number}"}
+    if authored:
+        pending = item.get("review_requests")
+        detail = f"{pending} reviewer(s) pending" if pending else "no review yet"
+        return {"verb": "Awaiting review", "detail": detail, "yours": False, "command": None}
+    return None
 
 
 def _rest_shaped_reviews(pr_node: dict[str, Any]) -> list[dict[str, Any]]:
@@ -729,8 +858,7 @@ def build_inbox_graphql(
     ceremony_only: bool,
     add: Callable[[str, list[dict[str, Any]]], None],
 ) -> dict[str, Any] | None:
-    """One-document inbox. Returns sweep stats (None when ceremony_only)."""
-    aliases = " ".join(_graphql_search_alias(name, query, limit) for name, query in CEREMONY_SEARCHES)
+    """Concurrent-document inbox. Returns (sweep stats | None when ceremony_only, viewer login)."""
     eligible: set[str] = set()
     sweep_field = ""
     sweep_query = ""
@@ -740,12 +868,16 @@ def build_inbox_graphql(
         if owners:
             sweep_query = "is:pr is:open archived:false " + " ".join(f"user:{owner}" for owner in owners)
             sweep_field = _graphql_sweep_alias(sweep_query, None)
+    # Aliased search fields execute serially inside one document, so the
+    # ceremony and sweep documents go over the wire concurrently. Wider
+    # fan-out was measured and rejected: five concurrent documents ran
+    # SLOWER than two (GitHub queues concurrent GraphQL per token), so two
+    # is the shape until GitHub changes its economics.
+    from concurrent.futures import ThreadPoolExecutor
+
+    aliases = " ".join(_graphql_search_alias(name, query, limit) for name, query in GRAPHQL_CEREMONY_SEARCHES)
     ceremony_doc = f"query {{ viewer {{ login }} {aliases} }} {GRAPHQL_PR_CORE}"
     if sweep_field:
-        # Aliased search fields execute serially inside one document, so the
-        # ceremony and sweep documents go over the wire concurrently instead.
-        from concurrent.futures import ThreadPoolExecutor
-
         sweep_doc = f"query {{ {sweep_field} }} {GRAPHQL_PR_CORE}"
         with ThreadPoolExecutor(max_workers=2) as pool:
             ceremony_future = pool.submit(run_graphql, ceremony_doc)
@@ -757,22 +889,22 @@ def build_inbox_graphql(
     # A response that parses but lacks the requested aliases is a failure,
     # not an empty inbox — treat it like any other GraphQL error and let the
     # REST fallback carry the run.
-    missing = [name for name, _ in CEREMONY_SEARCHES if name not in data]
+    missing = [name for name, _ in GRAPHQL_CEREMONY_SEARCHES if name not in data]
     if not isinstance(data.get("viewer"), dict) or "login" not in (data.get("viewer") or {}):
         missing.append("viewer.login")
     if sweep_field and not isinstance(data.get("sweep"), dict):
         missing.append("sweep")
     if missing:
         raise GhError(f"graphql response missing field(s): {', '.join(missing)}")
-    for name, _ in CEREMONY_SEARCHES:
+    for name, _ in GRAPHQL_CEREMONY_SEARCHES:
         nodes = ((data.get(name) or {}).get("nodes")) or []
         add(name, [normalize_graphql_pr(node) for node in nodes if isinstance(node, dict)])
-    if ceremony_only:
-        return None
     viewer = (data.get("viewer") or {}).get("login") or ""
+    if ceremony_only:
+        return None, viewer
     stats: dict[str, Any] = {
         "repos_swept": len(eligible), "prs_classified": 0, "waiting_on_author": 0,
-        "unswept": [], "skipped_no_role": 0, "path": "graphql",
+        "unswept": [], "skipped_no_role": 0, "path": "graphql", "stage_contract": 1,
     }
     if not eligible:
         stats["unswept"].append({"repo": "*", "reason": "no sweep-eligible repos in inventory"})
@@ -787,7 +919,7 @@ def build_inbox_graphql(
         follow_up = f"query {{ {_graphql_sweep_alias(sweep_query, page.get('endCursor'))} }} {GRAPHQL_PR_CORE}"
         connection = run_graphql(follow_up).get("sweep") or {}
     portfolio_sweep(viewer, add, stats, role_covered=set(eligible))
-    return stats
+    return stats, viewer
 
 
 def sweep_eligible(repo: dict[str, Any]) -> bool:
@@ -891,6 +1023,11 @@ def normalize_rest_pr(repo_full: str, item: dict[str, Any]) -> dict[str, Any]:
         "url": item.get("html_url"),
         "comments": None,
         "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        "review_decision": None,
+        "merge_state": None,
+        "checks": None,
+        "review_requests": None,
+        "next_action": None,
     }
 
 
