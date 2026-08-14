@@ -1,0 +1,723 @@
+#!/usr/bin/env bash
+# agent-betterstack - Better Stack Uptime monitoring and incident management
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/../lib/json-output.sh" 2>/dev/null || true
+
+_json_mode=false
+_JSON_ARGS=()
+
+_pop_json_flag() {
+    _json_mode=false
+    _JSON_ARGS=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _json_mode=true
+        else
+            _JSON_ARGS+=("$arg")
+        fi
+    done
+}
+
+_emit_json() {
+    printf '%s' "$1" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$1"
+}
+
+BETTERSTACK_API_V2="https://uptime.betterstack.com/api/v2"
+BETTERSTACK_API_V3="https://uptime.betterstack.com/api/v3"
+
+show_help() {
+    cat << 'EOF'
+agent-betterstack - Better Stack Uptime monitoring and incident management
+
+MONITORS
+  monitors / ls                 List all monitors with status
+  show <monitor>                Detailed monitor info (by name or ID)
+  availability <monitor>        Availability summary for a monitor
+  response-times <monitor>      Response time data for a monitor
+  pause <monitor>               Pause a monitor
+  resume <monitor>              Resume a monitor
+
+INCIDENTS
+  incidents [--active]          List incidents (--active = unresolved only)
+  incident <id>                 Detailed incident info
+  ack <id>                      Acknowledge an incident
+  resolve <id>                  Resolve an incident
+
+HEARTBEATS
+  heartbeats                    List all heartbeats with status
+
+STATUS PAGES
+  status-pages                  List all status pages
+
+ON-CALL
+  on-call                       List on-call schedules
+
+ACCOUNT
+  snapshot                      Full account state as JSON
+
+All commands accept --json for structured output.
+
+Monitors can be referenced by pronounceable name or numeric ID.
+
+Environment:
+  BETTERSTACK_API_TOKEN         API token (Bearer auth)
+
+Examples:
+  agent-betterstack monitors
+  agent-betterstack show vms-web
+  agent-betterstack incidents --active
+  agent-betterstack availability versova-chat
+  agent-betterstack pause vms-web
+  agent-betterstack snapshot
+EOF
+}
+
+# --- Helpers ---
+
+bs_token() {
+    local token="${BETTERSTACK_API_TOKEN:-}"
+    if [[ -z "$token" ]]; then
+        echo "Error: BETTERSTACK_API_TOKEN not set" >&2
+        return 1
+    fi
+    printf '%s' "$token"
+}
+
+bs_get() {
+    local url="$1"
+    local token
+    token=$(bs_token) || return 1
+    curl -sS --connect-timeout 10 --max-time 60 \
+        -H "Authorization: Bearer $token" -H "Accept: application/json" "$url"
+}
+
+bs_patch() {
+    local url="$1"
+    local data="$2"
+    local token
+    token=$(bs_token) || return 1
+    curl -sS --connect-timeout 10 --max-time 60 -X PATCH \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d "$data" "$url"
+}
+
+bs_post() {
+    local url="$1"
+    local data="${2:-}"
+    local token
+    token=$(bs_token) || return 1
+    local args=(-sS --connect-timeout 10 --max-time 60 -X POST \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json")
+    if [[ -n "$data" ]]; then
+        args+=(-d "$data")
+    fi
+    curl "${args[@]}" "$url"
+}
+
+resolve_monitor() {
+    local name_or_id="$1"
+
+    # If purely numeric, treat as ID
+    if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+        echo "$name_or_id"
+        return 0
+    fi
+
+    # Resolve by pronounceable_name (URL-encoded)
+    local name_enc
+    name_enc=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$name_or_id")
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors?pronounceable_name=${name_enc}") || return 1
+
+    local monitor_id
+    monitor_id=$(echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if items:
+    print(items[0].get('id', ''))
+else:
+    print('')
+" 2>/dev/null)
+
+    if [[ -z "$monitor_id" ]]; then
+        echo "Error: Monitor '$name_or_id' not found" >&2
+        return 1
+    fi
+
+    echo "$monitor_id"
+}
+
+# --- Commands ---
+
+cmd_monitors() {
+    _pop_json_flag "$@"
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if not items:
+    print('No monitors found.')
+    sys.exit(0)
+fmt = '{:<10} {:<30} {:<12} {:<50}'
+print(fmt.format('ID', 'NAME', 'STATUS', 'URL'))
+print('-' * 102)
+for item in items:
+    a = item.get('attributes', {})
+    print(fmt.format(
+        item.get('id', ''),
+        a.get('pronounceable_name', '')[:30],
+        a.get('status', ''),
+        a.get('url', '')[:50],
+    ))
+"
+}
+
+cmd_show() {
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack show <monitor>}"
+    local monitor_id
+    monitor_id=$(resolve_monitor "$name_or_id") || return 1
+
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+a = d.get('data', {}).get('attributes', {})
+print(json.dumps({
+    'id': d.get('data', {}).get('id', ''),
+    'name': a.get('pronounceable_name', ''),
+    'url': a.get('url', ''),
+    'status': a.get('status', ''),
+    'monitor_type': a.get('monitor_type', ''),
+    'check_frequency': a.get('check_frequency', ''),
+    'regions': a.get('regions', []),
+    'last_checked_at': a.get('last_checked_at', ''),
+    'paused_at': a.get('paused_at'),
+    'verify_ssl': a.get('verify_ssl', ''),
+    'confirmation_period': a.get('confirmation_period', ''),
+    'recovery_period': a.get('recovery_period', ''),
+    'monitor_group_id': a.get('monitor_group_id'),
+    'policy_id': a.get('policy_id'),
+    'created_at': a.get('created_at', ''),
+    'updated_at': a.get('updated_at', ''),
+}, indent=2))
+"
+}
+
+cmd_availability() {
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack availability <monitor>}"
+    local monitor_id
+    monitor_id=$(resolve_monitor "$name_or_id") || return 1
+
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}/sla") || return 1
+    _emit_json "$result"
+}
+
+cmd_response_times() {
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack response-times <monitor>}"
+    local monitor_id
+    monitor_id=$(resolve_monitor "$name_or_id") || return 1
+
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/monitors/${monitor_id}/response-times") || return 1
+    _emit_json "$result"
+}
+
+cmd_incidents() {
+    _pop_json_flag "$@"
+    local url="${BETTERSTACK_API_V3}/incidents"
+    local active_only=false
+
+    local -a args=("${_JSON_ARGS[@]}")
+    while [[ ${#args[@]} -gt 0 ]]; do
+        case "${args[0]}" in
+            --active) active_only=true; args=("${args[@]:1}") ;;
+            *) echo "Unknown option: ${args[0]}" >&2; return 1 ;;
+        esac
+    done
+
+    if [[ "$active_only" == "true" ]]; then
+        url="${url}?resolved=false"
+    fi
+
+    local result
+    result=$(bs_get "$url") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if not items:
+    print('No incidents found.')
+    sys.exit(0)
+fmt = '{:<10} {:<35} {:<12} {:<24} {:<24}'
+print(fmt.format('ID', 'NAME', 'STATUS', 'STARTED', 'RESOLVED'))
+print('-' * 105)
+for item in items:
+    a = item.get('attributes', {})
+    resolved = a.get('resolved_at', '') or '-'
+    print(fmt.format(
+        item.get('id', ''),
+        a.get('name', '')[:35],
+        a.get('status', ''),
+        (a.get('started_at', '') or '')[:24],
+        resolved[:24],
+    ))
+"
+}
+
+cmd_incident() {
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack incident <id>}"
+
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V3}/incidents/${incident_id}") || return 1
+
+    if $_json_mode; then
+        _emit_json "$result"
+        return
+    fi
+
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+a = d.get('data', {}).get('attributes', {})
+monitor = d.get('data', {}).get('relationships', {}).get('monitor', {}).get('data', {})
+print(json.dumps({
+    'id': d.get('data', {}).get('id', ''),
+    'name': a.get('name', ''),
+    'url': a.get('url', ''),
+    'cause': a.get('cause', ''),
+    'status': a.get('status', ''),
+    'started_at': a.get('started_at', ''),
+    'acknowledged_at': a.get('acknowledged_at'),
+    'acknowledged_by': a.get('acknowledged_by'),
+    'resolved_at': a.get('resolved_at'),
+    'resolved_by': a.get('resolved_by'),
+    'monitor_id': monitor.get('id') if monitor else None,
+    'regions': a.get('regions', []),
+    'screenshot_url': a.get('screenshot_url'),
+}, indent=2))
+"
+}
+
+cmd_heartbeats() {
+    _pop_json_flag "$@"
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/heartbeats") || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if not items:
+    print('No heartbeats found.')
+    sys.exit(0)
+fmt = '{:<10} {:<30} {:<12} {:<24}'
+print(fmt.format('ID', 'NAME', 'STATUS', 'LAST PING'))
+print('-' * 76)
+for item in items:
+    a = item.get('attributes', {})
+    print(fmt.format(
+        item.get('id', ''),
+        a.get('name', '')[:30],
+        a.get('status', ''),
+        (a.get('last_pinged_at', '') or '-')[:24],
+    ))
+"
+}
+
+cmd_status_pages() {
+    _pop_json_flag "$@"
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/status-pages") || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if not items:
+    print('No status pages found.')
+    sys.exit(0)
+for item in items:
+    a = item.get('attributes', {})
+    print(json.dumps({
+        'id': item.get('id', ''),
+        'company_name': a.get('company_name', ''),
+        'subdomain': a.get('subdomain', ''),
+        'custom_domain': a.get('custom_domain'),
+        'aggregate_state': a.get('aggregate_state', ''),
+    }, indent=2))
+"
+}
+
+cmd_on_call() {
+    _pop_json_flag "$@"
+    local result
+    result=$(bs_get "${BETTERSTACK_API_V2}/on-calls") || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('data', [])
+if not items:
+    print('No on-call schedules found.')
+    sys.exit(0)
+for item in items:
+    a = item.get('attributes', {})
+    on_call_users = item.get('relationships', {}).get('on_call_users', {}).get('data', [])
+    emails = []
+    for user in on_call_users:
+        meta = user.get('meta', {})
+        emails.append(meta.get('email') or user.get('id', ''))
+    print(json.dumps({
+        'id': item.get('id', ''),
+        'name': a.get('name', ''),
+        'default_calendar': a.get('default_calendar', False),
+        'team_name': a.get('team_name'),
+        'on_call_users': emails,
+    }, indent=2))
+"
+}
+
+cmd_pause() {
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack pause <monitor>}"
+    local monitor_id
+    monitor_id=$(resolve_monitor "$name_or_id") || return 1
+
+    local result
+    result=$(bs_patch "${BETTERSTACK_API_V2}/monitors/${monitor_id}" '{"paused":true}') || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+mid = d.get('data', {}).get('id', '')
+a = d.get('data', {}).get('attributes', {})
+name = a.get('pronounceable_name', '')
+status = a.get('status', '')
+print(f'Monitor \"{name}\" (id: {mid}): status now {status}')
+"
+}
+
+cmd_resume() {
+    _pop_json_flag "$@"
+    local name_or_id="${_JSON_ARGS[0]:?Usage: agent-betterstack resume <monitor>}"
+    local monitor_id
+    monitor_id=$(resolve_monitor "$name_or_id") || return 1
+
+    local result
+    result=$(bs_patch "${BETTERSTACK_API_V2}/monitors/${monitor_id}" '{"paused":false}') || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+mid = d.get('data', {}).get('id', '')
+a = d.get('data', {}).get('attributes', {})
+name = a.get('pronounceable_name', '')
+status = a.get('status', '')
+print(f'Monitor \"{name}\" (id: {mid}): status now {status}')
+"
+}
+
+cmd_ack() {
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack ack <incident_id>}"
+
+    local result
+    result=$(bs_post "${BETTERSTACK_API_V3}/incidents/${incident_id}/acknowledge") || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+a = d.get('data', {}).get('attributes', {})
+print(f'Incident {d.get(\"data\", {}).get(\"id\", \"\")}: acknowledged at {a.get(\"acknowledged_at\", \"\")}')
+"
+}
+
+cmd_resolve() {
+    _pop_json_flag "$@"
+    local incident_id="${_JSON_ARGS[0]:?Usage: agent-betterstack resolve <incident_id>}"
+
+    local result
+    result=$(bs_post "${BETTERSTACK_API_V3}/incidents/${incident_id}/resolve") || return 1
+    if $_json_mode; then _emit_json "$result"; return; fi
+    echo "$result" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+a = d.get('data', {}).get('attributes', {})
+print(f'Incident {d.get(\"data\", {}).get(\"id\", \"\")}: resolved at {a.get(\"resolved_at\", \"\")}')
+"
+}
+
+cmd_snapshot() {
+    _pop_json_flag "$@"
+    local token="${BETTERSTACK_API_TOKEN:-}"
+    if [[ -z "$token" ]]; then
+        echo '{"error": "BETTERSTACK_API_TOKEN not set"}'
+        return 1
+    fi
+
+    BETTERSTACK_API_TOKEN="$token" python3 -c "
+import json, sys, os
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+
+API_V2 = 'https://uptime.betterstack.com/api/v2'
+API_V3 = 'https://uptime.betterstack.com/api/v3'
+TOKEN = os.environ.get('BETTERSTACK_API_TOKEN', '')
+
+def api_get(url):
+    req = Request(url, headers={
+        'Authorization': 'Bearer ' + TOKEN,
+        'Accept': 'application/json',
+    })
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except HTTPError as e:
+        if e.code == 401:
+            return {'error': 'unauthorized'}
+        return {'error': str(e)}
+    except Exception as e:
+        return {'error': str(e)}
+
+def fetch_all(url):
+    \"\"\"Paginate through all pages of a Better Stack API endpoint.\"\"\"
+    all_items = []
+    while url:
+        d = api_get(url)
+        if isinstance(d, dict) and 'error' in d:
+            return d
+        items = d.get('data', [])
+        all_items.extend(items)
+        url = d.get('pagination', {}).get('next')
+    return all_items
+
+token_valid = True
+
+# Monitors
+raw_monitors = fetch_all(API_V2 + '/monitors')
+if isinstance(raw_monitors, dict) and 'error' in raw_monitors:
+    token_valid = False
+    monitors = []
+else:
+    monitors = []
+    by_status = {}
+    for item in raw_monitors:
+        a = item.get('attributes', {})
+        st = a.get('status', '?')
+        by_status[st] = by_status.get(st, 0) + 1
+        monitors.append({
+            'id': item.get('id', ''),
+            'name': a.get('pronounceable_name', ''),
+            'url': a.get('url', ''),
+            'status': st,
+            'monitor_type': a.get('monitor_type', ''),
+            'check_frequency': a.get('check_frequency'),
+            'last_checked_at': a.get('last_checked_at', ''),
+            'paused_at': a.get('paused_at'),
+            'regions': a.get('regions', []),
+        })
+
+# Incidents (v3) — recent and active
+raw_incidents = fetch_all(API_V3 + '/incidents')
+incidents = []
+active_incidents = 0
+if isinstance(raw_incidents, list):
+    for item in raw_incidents:
+        a = item.get('attributes', {})
+        resolved = a.get('resolved_at')
+        if not resolved:
+            active_incidents += 1
+        monitor_rel = item.get('relationships', {}).get('monitor', {}).get('data', {})
+        incidents.append({
+            'id': item.get('id', ''),
+            'name': a.get('name', ''),
+            'cause': a.get('cause', ''),
+            'status': a.get('status', ''),
+            'started_at': a.get('started_at', ''),
+            'resolved_at': resolved,
+            'acknowledged_at': a.get('acknowledged_at'),
+            'monitor_id': monitor_rel.get('id') if monitor_rel else None,
+        })
+
+# Heartbeats
+raw_heartbeats = fetch_all(API_V2 + '/heartbeats')
+heartbeats = []
+if isinstance(raw_heartbeats, list):
+    for item in raw_heartbeats:
+        a = item.get('attributes', {})
+        heartbeats.append({
+            'id': item.get('id', ''),
+            'name': a.get('name', ''),
+            'status': a.get('status', ''),
+            'period': a.get('period'),
+            'grace': a.get('grace'),
+            'last_pinged_at': a.get('last_pinged_at'),
+            'created_at': a.get('created_at', ''),
+        })
+
+# Status pages
+raw_pages = fetch_all(API_V2 + '/status-pages')
+status_pages = []
+if isinstance(raw_pages, list):
+    for item in raw_pages:
+        a = item.get('attributes', {})
+        status_pages.append({
+            'id': item.get('id', ''),
+            'company_name': a.get('company_name', ''),
+            'subdomain': a.get('subdomain', ''),
+            'custom_domain': a.get('custom_domain'),
+            'aggregate_state': a.get('aggregate_state', ''),
+        })
+
+# On-call schedules
+raw_oncall = fetch_all(API_V2 + '/on-calls')
+on_call = []
+if isinstance(raw_oncall, list):
+    for item in raw_oncall:
+        a = item.get('attributes', {})
+        on_call_users = item.get('relationships', {}).get('on_call_users', {}).get('data', [])
+        emails = []
+        for user in on_call_users:
+            meta = user.get('meta', {})
+            emails.append(meta.get('email') or user.get('id', ''))
+        on_call.append({
+            'id': item.get('id', ''),
+            'name': a.get('name', ''),
+            'default_calendar': a.get('default_calendar', False),
+            'team_name': a.get('team_name'),
+            'on_call_users': emails,
+        })
+
+snapshot = {
+    'monitors': {
+        'count': len(monitors),
+        'by_status': by_status if token_valid else {},
+        'items': monitors,
+    },
+    'incidents': {
+        'count': len(incidents),
+        'active': active_incidents,
+        'items': incidents,
+    },
+    'heartbeats': {
+        'count': len(heartbeats),
+        'items': heartbeats,
+    },
+    'status_pages': {
+        'count': len(status_pages),
+        'items': status_pages,
+    },
+    'on_call': {
+        'count': len(on_call),
+        'items': on_call,
+    },
+    'token_valid': token_valid,
+}
+
+print(json.dumps(snapshot, indent=2))
+"
+}
+
+# --- Main ---
+
+case "${1:-help}" in
+    monitors|ls|list)
+        shift || true
+        cmd_monitors "$@"
+        ;;
+    show|get)
+        shift
+        cmd_show "$@"
+        ;;
+    availability)
+        shift
+        cmd_availability "$@"
+        ;;
+    response-times)
+        shift
+        cmd_response_times "$@"
+        ;;
+    incidents)
+        shift || true
+        cmd_incidents "$@"
+        ;;
+    incident)
+        shift
+        cmd_incident "$@"
+        ;;
+    heartbeats)
+        shift || true
+        cmd_heartbeats "$@"
+        ;;
+    status-pages)
+        shift || true
+        cmd_status_pages "$@"
+        ;;
+    on-call)
+        shift || true
+        cmd_on_call "$@"
+        ;;
+    pause)
+        shift
+        cmd_pause "$@"
+        ;;
+    resume)
+        shift
+        cmd_resume "$@"
+        ;;
+    ack|acknowledge)
+        shift
+        cmd_ack "$@"
+        ;;
+    resolve)
+        shift
+        cmd_resolve "$@"
+        ;;
+    snapshot|snap)
+        shift || true
+        cmd_snapshot "$@"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Try: agent-betterstack --help"
+        exit 1
+        ;;
+esac

@@ -5993,3 +5993,96 @@ tools:
         build:
         - own_state
     concurrency: read
+  betterstack:
+    description: Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call
+    capabilities:
+    - list and inspect uptime monitors
+    - view monitor availability and response times
+    - pause and resume monitors
+    - list and manage incidents (acknowledge, resolve)
+    - list heartbeats
+    - list status pages
+    - view on-call schedules
+    - full account snapshot as JSON
+    commands:
+      monitors: List all monitors with status
+      show: Detailed monitor info
+      availability: Monitor availability summary
+      response-times: Monitor response time data
+      pause: Pause a monitor
+      resume: Resume a monitor
+      incidents: List incidents (--active for unresolved)
+      incident: Detailed incident info
+      ack: Acknowledge an incident
+      resolve: Resolve an incident
+      heartbeats: List all heartbeats
+      status-pages: List all status pages
+      on-call: List on-call schedules
+      snapshot: Full account state as JSON
+    examples:
+    - intent: list my betterstack monitors
+      command: agent-betterstack monitors
+    - intent: show betterstack monitor details
+      command: agent-betterstack show vms-web
+    - intent: check active incidents in betterstack
+      command: agent-betterstack incidents --active
+    - intent: check uptime availability
+      command: agent-betterstack availability versova-chat
+    - intent: pause a betterstack monitor
+      command: agent-betterstack pause vms-web
+    - intent: acknowledge a betterstack incident
+      command: agent-betterstack ack 12345
+    - intent: get betterstack account snapshot
+      command: agent-betterstack snapshot
+    credentials:
+      required:
+      - BETTERSTACK_API_TOKEN
+    routing:
+      discover_keywords:
+      - betterstack
+      - better stack
+      - uptime
+      - uptime monitor
+      - incident
+      - status page
+      prompt_patterns:
+      - \bbetter\s*stack\b
+      - \buptime\b.*\bmonitor\b
+      - \bstatus\s+page\b
+      raw_cli_equivalents:
+      - pattern: \bcurl\b.*\buptime\.betterstack\.com/api\b
+        replacement: agent-do betterstack
+        example: agent-do betterstack snapshot
+        reason: agent-do betterstack provides a stable, structured Better Stack surface
+      project_signals:
+      - uptime
+      - monitoring
+      - incident
+      - on-call
+      readiness:
+        check: agent-do betterstack monitors
+        fix: agent-do creds store BETTERSTACK_API_TOKEN --stdin
+        note: Requires BETTERSTACK_API_TOKEN resolved from env or secure storage
+    contracts:
+      snapshot:
+      - monitors
+      - show
+      - availability
+      - response-times
+      - incidents
+      - incident
+      - heartbeats
+      - status-pages
+      - on-call
+      - snapshot
+      interact:
+      - pause
+      - resume
+      - ack
+      - resolve
+      attributes:
+        ack: [composite]
+        pause: [composite]
+        resolve: [composite]
+        resume: [composite]
+    concurrency: mixed
