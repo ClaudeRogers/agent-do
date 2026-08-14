@@ -61,6 +61,7 @@ Commands:
   cancel <run-id>            Cancel running workflow
   artifacts <run-id>         Download artifacts
   secrets                    List secrets (names only)
+  triage <run-id> [--repo R] Classify a failed run and draft a triage summary (dry-run)
 
 Supported platforms:
   - GitHub Actions (auto-detected via gh CLI)
@@ -71,6 +72,7 @@ Examples:
   agent-ci trigger deploy.yml
   agent-ci logs 12345
   agent-ci artifacts 12345
+  agent-ci triage 12345 --repo owner/repo
 EOF
 }
 
@@ -371,6 +373,60 @@ print(json.dumps({"success": True, "run_id": sys.argv[1], "result": sys.argv[2]}
     gh run watch "$run_id" --repo "$repo"
 }
 
+cmd_triage() {
+    check_gh
+    local run_id="" repo="" post=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo)
+                if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                    emit_json_error "--repo requires owner/repo"
+                    return 1
+                fi
+                repo="${2:-}"
+                shift 2
+                ;;
+            --post)
+                post=1
+                shift
+                ;;
+            -*)
+                emit_json_error "Unknown triage option: $1"
+                return 1
+                ;;
+            *)
+                if [[ -n "$run_id" ]]; then
+                    emit_json_error "Only one run ID may be supplied"
+                    return 1
+                fi
+                run_id="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$run_id" ]]; then
+        if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+            emit_json_error "Run ID required (usage: agent-ci triage <run-id> [--repo owner/repo])"
+            return 1
+        fi
+        echo "Error: Run ID required"
+        echo "Usage: agent-ci triage <run-id> [--repo owner/repo]"
+        return 1
+    fi
+
+    [[ -z "$repo" ]] && repo=$(get_repo)
+    if [[ -z "$repo" ]]; then
+        no_repo_error
+        return 1
+    fi
+
+    local py_args=("$REPO_ROOT/lib/ci_triage.py" "$run_id" --repo "$repo")
+    [[ "$OUTPUT_FORMAT" == "json" ]] && py_args+=(--json)
+    [[ "$post" -eq 1 ]] && py_args+=(--post)
+    python3 "${py_args[@]}"
+}
+
 # Strip --json from the argument list (anywhere) so it never leaks to gh, and
 # set OUTPUT_FORMAT. Plain-mode invocations are untouched.
 ARGS=()
@@ -415,6 +471,10 @@ case "${1:-help}" in
     watch|follow)
         shift || true
         cmd_watch "$@"
+        ;;
+    triage)
+        shift
+        cmd_triage "$@"
         ;;
     help|--help|-h)
         show_help

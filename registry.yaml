@@ -3032,13 +3032,17 @@ tools:
       trigger: Trigger build
       status: View status
       logs: View build logs
+      triage: Classify a failed run and draft a triage summary (dry-run)
     examples:
     - intent: trigger deploy pipeline
       command: agent-ci trigger deploy
+    - intent: triage a failed CI run
+      command: agent-ci triage 12345 --repo owner/repo
     contracts:
       snapshot:
       - status
       - logs
+      - triage
       interact:
       - trigger
     concurrency: write
