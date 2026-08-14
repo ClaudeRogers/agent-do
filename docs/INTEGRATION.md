@@ -9,6 +9,14 @@ Everything below is presence-gated: repos without a `.manna/` board or a coord b
 
 ## Installation (install.sh)
 
+GNU Bash 4.4 or newer is a runtime requirement. On macOS, install it with
+`brew install bash`; the system Bash 3.2 is intentionally rejected. The
+installer and public launcher share one runtime selector, so sparse agent
+environments still execute the dispatcher and every child tool under the same
+supported Bash.
+Set `AGENT_DO_BASH=/absolute/path/to/bash` only when the supported interpreter
+lives outside the standard paths searched by the selector.
+
 ```bash
 ./install.sh                # Install; auto-installs Codex hooks if ~/.codex/ exists
 ./install.sh --codex        # Force Codex hook install even without ~/.codex/

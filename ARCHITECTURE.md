@@ -88,6 +88,17 @@ After the route resolves (and strictly after cache writes, so safety data is nev
 
 ## Tool Resolution
 
+### Shell Runtime Invariant
+
+`agent-do`, `install.sh`, `bin/health`, and `test.sh` source
+`lib/bash-runtime.sh` before using the repository's modern Bash surface. The
+bootstrap remains parseable by macOS Bash 3.2, but execution requires GNU Bash
+4.4 or newer. An old shell is replaced with a verified supported interpreter,
+then a private directory containing only a `bash` symlink is prepended to
+`PATH`. Every `#!/usr/bin/env bash` child uses the same runtime without
+reordering Python, GitHub, or other caller-provided shims. Missing or invalid
+runtimes fail before dispatch.
+
 Tools live in `tools/agent-*`. The dispatcher (`resolve_tool_exec()`) checks in order:
 
 1. `tools/agent-<name>/agent-<name>` (directory with nested executable, e.g. agent-browse)
@@ -122,6 +133,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │   ├── cache.py            # Project-aware route memory + fuzzy matching (SQLite)
 │   ├── state.py            # Session state CRUD (~/.agent-do/state.yaml)
 │   ├── telemetry.py        # JSONL telemetry for nudges, routes, tool calls
+│   ├── bash-runtime.sh     # Bash 3.2-safe selector enforcing GNU Bash 4.4+
 │   ├── snapshot.sh         # Shared JSON snapshot helpers for bash tools
 │   ├── json-output.sh      # Shared --json flag support for bash tools
 │   ├── retry.sh            # Shared API retry/backoff for curl-based tools
@@ -451,7 +463,7 @@ Exit 2 tells the orchestrator to answer the question and retry with `--context "
 
 GitHub workflows:
 
-- **ci.yml** (push to main, PRs): bash/python syntax sweep, then the full `./test.sh` suite on macOS 14 with a modern bash shadowed in
+- **ci.yml** (push to main, PRs): bash/python syntax sweep, then the full `./test.sh` suite on macOS 14 with GNU Bash 4.4+ shadowed in
 - **contracts-gate.yml** (push to main, PRs): `tests/test_contracts_gate.py` plus the harness inventory test; a tool without contracts cannot merge
 - **nightly-audit.yml** (daily 08:00 UTC, manual dispatch): `harness contracts audit --schema-check` on macOS, network probing off; any `fail` outcome fails the job, schema drift is surfaced but non-fatal, and the report uploads as an artifact
 
