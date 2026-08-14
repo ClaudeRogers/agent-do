@@ -33,6 +33,7 @@ def run(*args: str, input_text: str | None = None, env: dict[str, str] | None = 
     run_env.setdefault("AGENT_DO_SUGGEST_AI", "0")
     run_env.setdefault("AGENT_DO_HOOK_AI", "0")
     run_env.setdefault("AGENT_DO_HOOK_RUNTIME", "claude")
+    run_env.setdefault("AGENT_DO_BOOTSTRAP_PROMPT_MODE", "disabled")
     return subprocess.run(
         list(args),
         cwd=ROOT,
@@ -325,6 +326,14 @@ def main() -> int:
         )
         require(bootstrap_hook.returncode == 0, f"bootstrap session hook failed: {bootstrap_hook.stderr}")
         require((project / ".zpc").is_dir(), "expected native bootstrap hook to initialize .zpc")
+        require(
+            (project / ".manna" / "workflow.yaml").is_file(),
+            "expected native bootstrap hook to initialize the Manna workflow",
+        )
+        require(
+            (project / ".handoff" / "README.md").is_file(),
+            "expected native bootstrap hook to initialize the handoff root",
+        )
 
         bootstrap_payload = json.loads(bootstrap_hook.stdout)
         bootstrap_context = bootstrap_payload["hookSpecificOutput"]["additionalContext"]

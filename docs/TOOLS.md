@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking and context management for AI agents | write | 16 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 16 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2502,7 +2502,7 @@ agent-do macos tree Finder
 
 ### manna
 
-Git-backed issue tracking and context management for AI agents
+Git-backed issue tracking with generated, bidirectionally linked handoff work orders
 
 Concurrency: `write`
 
@@ -2515,10 +2515,10 @@ Concurrency: `write`
 
 **Commands**
 
-- `init`: Initialize manna repository
+- `init`: Initialize .manna plus the tracked .handoff workflow scaffold
 - `status`: Show current session and claimed issues
-- `create`: Create new issue (--type track|item|dream, --track, --source)
-- `claim`: Claim an issue for the current session (refuses dreams, exit 2, until converted)
+- `create`: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
+- `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
 - `abandon`: Release a claimed issue back to open
 - `block`: Add a blocker dependency
@@ -2529,8 +2529,8 @@ Concurrency: `write`
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
-- `lint`: Check board grammar; findings exit 1
-- `reconcile`: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
+- `lint`: Check board grammar and strict handoff linkage; findings exit 1
+- `reconcile`: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
 
 **Examples**
 
