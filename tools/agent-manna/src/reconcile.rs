@@ -22,6 +22,7 @@ pub enum FindingKind {
     DanglingTrack,
     DocReference,
     PromptPairing,
+    WorkflowSprawl,
     Skipped,
 }
 

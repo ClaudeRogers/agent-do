@@ -296,8 +296,8 @@ check_yaml "$output" "success: false" "empty title returns error"
 # ----------------------------------------------------------------------------
 echo ""
 echo "Test E6: concurrent creates (10 parallel)"
-cd "$TEST_DIR"
-rm -rf .manna
+CONCURRENT_DIR=$(mktemp -d)
+cd "$CONCURRENT_DIR"
 "$MANNA" init >/dev/null 2>&1
 
 # Spawn 10 parallel creates (suppress output)
@@ -322,6 +322,9 @@ if [[ "$lines" -eq 10 ]]; then
 else
     fail "JSONL file has correct line count" "Expected 10 lines, got $lines"
 fi
+
+cd "$TEST_DIR"
+rm -rf "$CONCURRENT_DIR"
 
 # ----------------------------------------------------------------------------
 # Test E7: Block with non-existent blocker
@@ -589,72 +592,107 @@ cd "$TEST_DIR"
 rm -rf "$GRAMMAR_DIR"
 
 # ----------------------------------------------------------------------------
-# Test G7: prompt pairing (--prompt field, lint existence, reconcile pairing)
+# Test G7: strict workflow pairing, claim gate, sprawl detection, legacy compatibility
 # ----------------------------------------------------------------------------
 echo ""
-echo "Test G7: prompt pairing"
+echo "Test G7: strict Manna and handoff workflow"
 PAIR_DIR=$(mktemp -d)
-PAIR_PHYS=$(cd "$PAIR_DIR" && pwd -P)
 cd "$PAIR_DIR"
-"$MANNA" init >/dev/null 2>&1
-mkdir -p .dev/session-prompts
-PROMPT_A="$PAIR_PHYS/.dev/session-prompts/lane-a.md"
-PROMPT_B="$PAIR_PHYS/.dev/session-prompts/lane-b.md"
+git init -q
+printf '.handoff/\n.manna/\n' > .gitignore
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "workflow: strict" "new board enables the strict workflow"
+check_yaml "$output" "gitignore_updated: true" "init repairs a local .handoff ignore rule"
+[[ -f .manna/workflow.yaml ]] && pass "init creates .manna/workflow.yaml" || fail "init creates .manna/workflow.yaml" "File not found"
+[[ -f .handoff/README.md ]] && pass "init creates .handoff/README.md" || fail "init creates .handoff/README.md" "File not found"
+ignore_exit=0
+git check-ignore --quiet -- .handoff/README.md || ignore_exit=$?
+check_exit 1 "$ignore_exit" ".handoff is durable Git-visible state"
+ignore_exit=0
+git check-ignore --quiet -- .manna/workflow.yaml || ignore_exit=$?
+check_exit 1 "$ignore_exit" ".manna is durable Git-visible state"
 
-output=$("$MANNA" create "Paired work" --prompt "$PROMPT_A" 2>&1) || true
-check_yaml "$output" "success: true" "create --prompt succeeds before the file exists"
+output=$("$MANNA" create "Paired work" 2>&1) || true
+check_yaml "$output" "success: true" "create generates a paired item"
 PAIR_ID=$(extract_id "$output")
+PROMPT_A=".handoff/$PAIR_ID-paired-work.md"
 
 output=$("$MANNA" show "$PAIR_ID" 2>&1) || true
 check_yaml "$output" "prompt: $PROMPT_A" "show displays the prompt pointer"
+[[ -f "$PROMPT_A" ]] && pass "create writes the canonical handoff" || fail "create writes the canonical handoff" "File not found"
+claim_count=$(grep -c "agent-do manna claim $PAIR_ID" "$PROMPT_A" || true)
+check_exit 1 "$claim_count" "handoff carries exactly one claim command"
+
+before_rows=$(wc -l < .manna/issues.jsonl | tr -d ' ')
+before_handoffs=$(find .handoff -name 'mn-*.md' -type f | wc -l | tr -d ' ')
+printf '.handoff/mn-*.md\n' >> .gitignore
+create_exit=0
+output=$("$MANNA" create "Ignored handoff" 2>&1) || create_exit=$?
+check_exit 2 "$create_exit" "create fails when a generated handoff would be ignored"
+after_rows=$(wc -l < .manna/issues.jsonl | tr -d ' ')
+after_handoffs=$(find .handoff -name 'mn-*.md' -type f | wc -l | tr -d ' ')
+if [[ "$before_rows" == "$after_rows" && "$before_handoffs" == "$after_handoffs" ]]; then
+    pass "failed create rolls back both sides of the pair"
+else
+    fail "failed create rolls back both sides of the pair" "rows $before_rows->$after_rows, handoffs $before_handoffs->$after_handoffs"
+fi
+printf '!.handoff/mn-*.md\n' >> .gitignore
 
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
-check_exit 1 "$lint_exit" "lint exits 1 on a missing prompt file"
-check_yaml "$output" "prompt_file" "lint names the prompt_file rule"
-check_yaml "$output" "$PAIR_ID" "lint names the pointing issue"
-
-printf '# Lane A work order (%s)\nClaim first: agent-do manna claim %s\n' "$PAIR_ID" "$PAIR_ID" > "$PROMPT_A"
-lint_exit=0
-output=$("$MANNA" lint 2>&1) || lint_exit=$?
-check_exit 0 "$lint_exit" "lint exits 0 once the prompt file exists"
+check_exit 0 "$lint_exit" "lint accepts the generated pair"
 
 rec_exit=0
 output=$("$MANNA" reconcile --json 2>&1) || rec_exit=$?
-check_exit 0 "$rec_exit" "reconcile exits 0 on a paired board"
-if [[ "$output" != *"prompt_pairing"* ]]; then
-    pass "correctly paired board reports no prompt_pairing finding"
+check_exit 0 "$rec_exit" "reconcile remains advisory on a paired board"
+if [[ "$output" != *"prompt_pairing"* && "$output" != *"workflow_sprawl"* ]]; then
+    pass "generated pair reports no linkage or sprawl drift"
 else
-    fail "correctly paired board reports no prompt_pairing finding" "unexpected finding: $output"
+    fail "generated pair reports no linkage or sprawl drift" "unexpected finding: $output"
 fi
 
-output=$("$MANNA" create "Pointerless work" 2>&1) || true
-LONE_ID=$(extract_id "$output")
-# A bare id mention is data, not a pairing promise: no finding without a claim command.
-printf '# Lane B notes: relates to %s\n' "$LONE_ID" > "$PROMPT_B"
-output=$("$MANNA" reconcile --json 2>&1) || true
-if [[ "$output" != *"prompt_pairing"* ]]; then
-    pass "bare id mention without a claim command produces no finding"
-else
-    fail "bare id mention without a claim command produces no finding" "unexpected finding: $output"
-fi
+create_exit=0
+output=$("$MANNA" create "Wrong root" --prompt .handoffs/wrong.md 2>&1) || create_exit=$?
+check_exit 1 "$create_exit" "strict create rejects a parallel handoff root"
 
-printf 'Claim: agent-do manna claim %s\n' "$LONE_ID" >> "$PROMPT_B"
-output=$("$MANNA" reconcile --json 2>&1) || true
-check_yaml "$output" "prompt_pairing" "reconcile flags a claim command whose issue lacks a pointer"
-check_yaml "$output" "$LONE_ID" "reconcile names the pointerless issue"
+sed -i.bak "s/agent-do manna claim $PAIR_ID/agent-do manna claim mn-dead00/" "$PROMPT_A"
+rm -f "$PROMPT_A.bak"
+claim_exit=0
+output=$("$MANNA" claim "$PAIR_ID" 2>&1) || claim_exit=$?
+check_exit 2 "$claim_exit" "claim fails closed on a broken handoff link"
+check_yaml "$output" "Refusing claim" "claim explains the broken handoff contract"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint fails on a mismatched claim command"
+check_yaml "$output" "handoff_contract" "lint names the handoff contract"
+sed -i.bak "s/agent-do manna claim mn-dead00/agent-do manna claim $PAIR_ID/" "$PROMPT_A"
+rm -f "$PROMPT_A.bak"
 
-output=$("$MANNA" update "$LONE_ID" --prompt "$PROMPT_B" 2>&1) || true
-check_yaml "$output" "success: true" "update --prompt succeeds"
+mkdir -p .handoffs
+printf 'agent-do manna claim %s\n' "$PAIR_ID" > .handoffs/shadow.md
 output=$("$MANNA" reconcile --json 2>&1) || true
-if [[ "$output" != *"prompt_pairing"* ]]; then
-    pass "pointer repair clears the pairing finding"
-else
-    fail "pointer repair clears the pairing finding" "finding persisted: $output"
-fi
+check_yaml "$output" "workflow_sprawl" "reconcile detects a shadow handoff root"
+check_yaml "$output" ".handoffs" "sprawl finding names the shadow root"
+
+LEGACY_DIR=$(mktemp -d)
+LEGACY_PHYS=$(cd "$LEGACY_DIR" && pwd -P)
+cd "$LEGACY_DIR"
+"$MANNA" init >/dev/null 2>&1
+rm -f .manna/workflow.yaml
+rm -rf .handoff
+mkdir -p .dev/session-prompts
+LEGACY_PROMPT="$LEGACY_PHYS/.dev/session-prompts/lane-a.md"
+output=$("$MANNA" create "Legacy paired work" --prompt "$LEGACY_PROMPT" 2>&1) || true
+check_yaml "$output" "success: true" "existing legacy boards retain explicit prompt pointers"
+LEGACY_ID=$(extract_id "$output")
+printf 'agent-do manna claim %s\n' "$LEGACY_ID" > "$LEGACY_PROMPT"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "legacy prompt pairing remains valid"
 
 cd "$TEST_DIR"
 rm -rf "$PAIR_DIR"
+rm -rf "$LEGACY_DIR"
 
 # ----------------------------------------------------------------------------
 # Test G8: dreams are visible and inert until converted

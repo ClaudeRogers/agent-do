@@ -32,7 +32,7 @@ Usage:
 What it bootstraps:
   - context: shared docs store in ~/.agent-do/context
   - zpc: project-local .zpc/ when project files indicate ZPC usage
-  - manna: project-local .manna/ when project files indicate Manna usage
+  - workflow: project-local .manna/ plus tracked .handoff/ in every project
 
 Options:
   --recommend   Detect pending bootstrap work without making changes
@@ -87,7 +87,7 @@ find_project_root() {
     local dir="$1"
 
     while [[ "$dir" != "/" && -n "$dir" ]]; do
-        if [[ -d "$dir/.git" ]] \
+        if [[ -e "$dir/.git" ]] \
             || [[ -f "$dir/CLAUDE.md" ]] \
             || [[ -f "$dir/AGENTS.md" ]] \
             || [[ -f "$dir/package.json" ]] \
@@ -141,6 +141,20 @@ fi
 project_root="$(find_project_root "$cwd")"
 project_name="$(basename "$project_root")"
 
+project_detected=false
+if [[ -e "$project_root/.git" ]] \
+    || [[ -f "$project_root/CLAUDE.md" ]] \
+    || [[ -f "$project_root/AGENTS.md" ]] \
+    || [[ -f "$project_root/package.json" ]] \
+    || [[ -f "$project_root/pyproject.toml" ]] \
+    || [[ -f "$project_root/Cargo.toml" ]] \
+    || [[ -f "$project_root/go.mod" ]] \
+    || [[ -f "$project_root/requirements.txt" ]] \
+    || [[ -f "$project_root/pnpm-workspace.yaml" ]] \
+    || [[ -f "$project_root/turbo.json" ]]; then
+    project_detected=true
+fi
+
 doc_files=()
 for file in "$project_root/CLAUDE.md" "$project_root/AGENTS.md" "$project_root/README.md"; do
     [[ -f "$file" ]] && doc_files+=("$file")
@@ -161,7 +175,8 @@ if [[ -d "$project_root/.zpc" ]] \
     || doc_contains ".zpc" "${doc_files[@]}"; then
     wants_zpc=true
 fi
-if [[ -d "$project_root/.manna" ]] \
+if [[ "$project_detected" == true ]] \
+    || [[ -d "$project_root/.manna" ]] \
     || doc_contains "agent-do manna" "${doc_files[@]}" \
     || doc_contains ".manna" "${doc_files[@]}"; then
     wants_manna=true
@@ -196,9 +211,12 @@ if [[ "$wants_zpc" == true ]] && { [[ "$force" == true ]] || [[ ! -d "$project_r
     pending_commands+=("agent-do zpc init")
 fi
 
-if [[ "$wants_manna" == true ]] && { [[ "$force" == true ]] || [[ ! -d "$project_root/.manna" ]]; }; then
+if [[ "$wants_manna" == true ]] \
+    && { [[ "$force" == true ]] \
+        || [[ ! -d "$project_root/.manna" ]] \
+        || { [[ -f "$project_root/.manna/workflow.yaml" ]] && [[ ! -f "$project_root/.handoff/README.md" ]]; }; }; then
     pending_actions+=("manna_init")
-    pending_labels+=("manna")
+    pending_labels+=("manna + handoff workflow")
     pending_commands+=("agent-do manna init")
 fi
 
@@ -289,7 +307,9 @@ fi
 if [[ -d "$project_root/.zpc" ]]; then
     verified+=("zpc")
 fi
-if [[ -d "$project_root/.manna" ]]; then
+if [[ -d "$project_root/.manna" ]] \
+    && { [[ ! -f "$project_root/.manna/workflow.yaml" ]] \
+        || [[ -f "$project_root/.handoff/README.md" ]]; }; then
     verified+=("manna")
 fi
 

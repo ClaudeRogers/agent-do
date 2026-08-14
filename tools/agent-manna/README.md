@@ -2,7 +2,7 @@
 
 > Git-backed issue tracking and context management for AI agents
 
-Manna is a minimal (<5K LOC) issue tracking system designed specifically for AI agent workflows. It provides issue tracking with dependencies, session-based claims for multi-agent coordination, and context injection for AI prompts.
+Manna is a compact issue tracking system designed specifically for AI agent workflows. It provides issue tracking with dependencies, session-based claims for multi-agent coordination, generated handoff work orders, and context injection for AI prompts.
 
 ## Overview
 
@@ -18,9 +18,11 @@ Traditional issue trackers (Jira, Linear, GitHub Issues) are designed for human 
 
 ### Features
 
-- **11 commands** for full issue lifecycle management
+- **Full issue lifecycle commands** for tracks, items, dreams, and dependencies
 - **Dependency tracking** with blockers
 - **Session management** for multi-agent coordination
+- **Generated `.handoff/` work orders** with bidirectional board linkage
+- **Fail-closed claims** when an item's handoff contract drifts
 - **File locking** for concurrent safety
 - **Corruption recovery** for partial writes
 
@@ -74,7 +76,11 @@ agent-do manna context
 
 ### `init`
 
-Initialize a `.manna/` directory in the current location.
+Initialize `.manna/` and the tracked `.handoff/` work-order root in the current
+location. New or empty boards receive strict workflow version 1. Existing
+nonempty legacy boards are left unchanged. Local ignore rules are narrowed so
+the board and work orders remain Git-visible while the runtime lock stays
+ignored.
 
 ```bash
 agent-do manna init
@@ -85,6 +91,10 @@ agent-do manna init
 success: true
 initialized: true
 path: .manna
+workflow: strict
+workflow_version: 1
+handoff_path: .handoff
+gitignore_updated: false
 ```
 
 ### `status`
@@ -105,7 +115,9 @@ claimed_issues:
 
 ### `create <title> [description]`
 
-Create a new issue.
+Create a new issue. On strict boards, each actionable item also creates a
+repository-relative `.handoff/<mn-id>-<slug>.md` work order and stores that
+path in the issue's `prompt` field.
 
 ```bash
 agent-do manna create "Fix login bug"
@@ -299,12 +311,17 @@ context: |
 
 ### Storage
 
-Manna stores all data in `.manna/` directory:
+Manna stores canonical board state in `.manna/` and durable work orders in
+`.handoff/`:
 
 ```
 .manna/
 ├── issues.jsonl     # Issue records (one JSON per line)
-└── sessions.jsonl   # Session event log
+├── sessions.jsonl   # Session event log
+└── workflow.yaml    # Strict workflow version and handoff root
+.handoff/
+├── README.md        # Generated workflow contract
+└── mn-*.md          # One generated work order per actionable item
 ```
 
 **Why JSONL?**
@@ -447,7 +464,7 @@ cargo test
 2. **Git-friendly** - JSONL diffs cleanly
 3. **Agent-first** - YAML output, no colors/spinners
 4. **Robust** - File locking, corruption recovery
-5. **Simple** - No database, no async, no config files
+5. **Simple** - No database or async runtime; one versioned workflow file
 6. **Fast** - <100ms for all operations
 
 ## Troubleshooting

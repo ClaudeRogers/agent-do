@@ -214,12 +214,25 @@ These are the conventions the manna tooling checks mechanically; teams that foll
 
 **Session identity.** Set `MANNA_SESSION_ID` before claiming (the SessionStart hook does this automatically; swarm orchestrators typically pin one id per lane: `MANNA_SESSION_ID=lane6-internals agent-do manna claim mn-133ad6`). Claims made under a session id that coord later reports dead, stale, or stopped surface as `dead_claim` findings, and `reconcile --fix` releases them.
 
-**Prompt pairing.** When an issue has a work-order prompt file, pair them explicitly:
+**Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for every
+detected project. New boards receive `.manna/workflow.yaml` and a tracked
+`.handoff/` root. `manna create` generates one
+`.handoff/<mn-id>-<slug>.md` work order for each actionable item and stores the
+same repository-relative path in the issue's `prompt` field. Tracks and dreams
+remain board-only.
 
-- the issue carries `--prompt /absolute/path/to/prompt.md` (or, as the interim convention, a description whose first line is `PROMPT: <path>`)
-- the prompt file contains the claim command for that issue (`... agent-do manna claim mn-xxxxxx`, any invocation prefix)
+The handoff contains exactly one claim target for its item. `manna claim`
+checks the file, pointer, claim command, canonical root, and Git visibility
+before it writes any state; a broken pair exits 2. `manna lint` checks the same
+contract as a board gate. `manna reconcile` checks both directions under
+`.handoff/` and reports `workflow_sprawl` when active local work appears under
+`.handoffs/`, `.dev/session-prompts/`, or nested `handoff-prompts/` roots. Bare
+id mentions are data, not claims; only `manna claim <id>` command lines bind.
 
-`manna lint` flags pointers that resolve to no file. `manna reconcile` checks both directions: a pointer whose file never mentions the issue id (forward), and a staged prompt file whose claim command targets an issue that does not point back at it (reverse; the reverse scan covers `*.md` in the repo's prompt staging directory, `.dev/session-prompts/`). Bare id mentions in a file are data, not claims; only `manna claim <id>` command lines bind.
+Nonempty boards created before workflow version 1 remain legacy until an
+explicit migration. Their absolute pointers, `PROMPT:` description fallback,
+and `.dev/session-prompts/` reverse scan keep working. This compatibility path
+prevents an agent-do upgrade from rearranging a live campaign silently.
 
 **The loop.** Claim before working, `done` only after verification (done requires the claim), file stray ideas with `agent-do manna dream "<spark>"` (routes to the nearest board walking up from cwd, else the global inbox under `~/.agent-do/inbox`), and let SessionEnd's reconcile write `.manna/drift.yaml` so the next session starts by reconciling the board against reality.
 

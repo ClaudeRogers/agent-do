@@ -144,7 +144,9 @@ agent-do bootstrap
 
 `--health` checks whether the harness is usable. `bootstrap --recommend` shows
 which stateful tools should be initialized for the current machine or
-repository. `bootstrap` initializes the pieces that are actually needed.
+repository. Every detected project gets the paired work-state scaffold:
+`.manna/` for the board and tracked `.handoff/` files for executable work
+orders. `bootstrap` initializes the pieces that are actually needed.
 
 ## Finding The Right Tool
 
@@ -177,9 +179,9 @@ follow-up and retry with `--context`.
 
 ## Work Boards
 
-`agent-do manna` is git-backed issue tracking built for agents: session claims
-prevent two agents from working the same issue, and board state lives in the
-repository under `.manna/`.
+`agent-do manna` is git-backed issue tracking built for agents. Session claims
+prevent two agents from working the same issue. `.manna/` is the only backlog,
+and `.handoff/` holds one portable work order for each actionable item.
 
 Every issue is a **track** (a named grouping with intent), an **item** on a
 track, or a **dream** (raw intake, exempt from tracking, converted or closed
@@ -189,15 +191,24 @@ with a written reason). Commits that advance an item cite it with a
 ```bash
 agent-do manna init
 agent-do manna create "Fix auth redirect" --type item --track mn-a1b2c3 \
-  --source "docs/auth-audit.md" --prompt /abs/path/to/work-order.md
+  --source "docs/auth-audit.md"
 agent-do manna claim mn-d4e5f6
 agent-do manna done mn-d4e5f6
 ```
 
 Beyond title and status, issues carry four schema fields: `type` (track, item,
 dream), `track` (the parent track), `source` (where the work came from), and
-`prompt` (an absolute path to the work-order prompt paired with the issue, so
-the instructions that define done travel with the issue).
+`prompt` (the repository-relative `.handoff/` work order paired with the item).
+On a strict board, `create` writes the handoff and pointer atomically. `claim`
+refuses to proceed if the file is missing, ignored, outside `.handoff/`, or
+does not contain exactly the matching claim command.
+
+`manna init` installs `.manna/workflow.yaml` and `.handoff/README.md` for new
+or empty boards. If a repository ignores `.manna/` or `.handoff/`, init adds
+the narrow unignore rules needed to keep workflow state in Git while leaving
+the runtime lock ignored. Nonempty boards made
+before this contract remain legacy until deliberately migrated, so upgrading
+agent-do never rewrites an active campaign behind the user's back.
 
 Raw ideas enter through `dream`, which files the spark on the nearest board up
 the directory tree, or the global inbox when no board exists:
@@ -217,7 +228,10 @@ agent-do manna reconcile --fix   # safe fixes: abandon dead claims,
 
 `reconcile` is receipts over testimony: it reads git history for `Manna:`
 trailers, probes whether claiming sessions are still alive, and checks blockers
-against actual state instead of trusting what the board says about itself.
+against actual state instead of trusting what the board says about itself. On
+strict boards it also detects active claim commands or prompt pointers living
+in shadow roots such as `.handoffs/`, `.dev/session-prompts/`, or nested
+`handoff-prompts/` directories.
 
 ## The Ambient Loop
 

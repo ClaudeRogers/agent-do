@@ -127,7 +127,9 @@ pub struct Issue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 
-    /// Work-order prompt file paired with this issue (absolute path expected)
+    /// Work-order prompt file paired with this issue. Strict boards use a
+    /// repository-relative `.handoff/` path; legacy boards may carry an
+    /// absolute pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 }

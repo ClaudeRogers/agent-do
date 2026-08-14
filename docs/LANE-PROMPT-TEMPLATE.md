@@ -1,10 +1,13 @@
 # Lane NN: <one line naming the lane's territory and what changes in it>
 
 <!--
-CANONICAL LANE PROMPT. Copy this file to `NN-SLUG.md` (continue the directory's
-numbering) and replace every <ANGLE BRACKET> placeholder. Delete no section: a
-section with nothing to say says "none", because a missing section reads as an
-oversight and an agent will go looking for it.
+CANONICAL LANE WORK-ORDER BODY. First create the Manna item. Manna generates
+`.handoff/<mn-ID>-<slug>.md` and its reverse pointer. Expand THAT file in place
+with this structure, preserving its generated frontmatter and replacing every
+<ANGLE BRACKET> placeholder. Never copy the lane into `.dev/`, `.handoffs/`, or
+a campaign-local prompt tree. Delete no section: a section with nothing to say
+says "none", because a missing section reads as an oversight and an agent will
+go looking for it.
 
 Two rules the whole format exists to enforce:
 
@@ -17,10 +20,9 @@ Two rules the whole format exists to enforce:
      question mid-flight. Anything it needs must be ON this page or reachable
      by a command ON this page.
 
-Pairing (both directions, or the staging is not done):
-  - the issue points here:  agent-do manna update <mn-ID> --prompt <absolute path to this file>
-  - this file opens with the exact claim commands for that issue
-`agent-do manna reconcile` flags either half when it dangles.
+Pairing is generated, not hand-wired. Keep exactly one
+`agent-do manna claim <mn-ID>` target in the resulting handoff. `manna claim`
+fails closed when either side drifts; `manna reconcile` flags shadow roots.
 -->
 
 ## Claim first

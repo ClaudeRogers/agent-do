@@ -299,8 +299,10 @@ Use `agent-do zpc`
 EOF
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
-check_output "bootstrap initializes context and zpc" "Initialized: context, zpc" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap initializes context, zpc, and workflow" "Initialized: context, zpc, manna" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
 check_cmd "bootstrap created project-local .zpc" test -d "$BOOTSTRAP_PROJECT/.zpc"
+check_cmd "bootstrap created project-local .manna workflow" test -f "$BOOTSTRAP_PROJECT/.manna/workflow.yaml"
+check_cmd "bootstrap created tracked handoff root" test -f "$BOOTSTRAP_PROJECT/.handoff/README.md"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

@@ -291,7 +291,8 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 
 ### Storage and locking (src/store.rs)
 
-- `.manna/issues.jsonl` (issue records) and `.manna/sessions.jsonl` (session event log: start/claim/release/done/end)
+- `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log: start/claim/release/done/end), and `.manna/workflow.yaml` (strict workflow version and canonical handoff root)
+- `.handoff/README.md` plus `.handoff/mn-xxxxxx-<slug>.md` work orders. This directory is durable Git state, not scratch space
 - Appends take an exclusive `fs2` file lock; updates and deletes rewrite the whole file to a `.tmp` sibling and atomically rename
 - Malformed lines are skipped with a stderr warning, never fatal
 - Output is YAML by default (`success:` envelope), JSON with `--json`. Exit codes: 0 success, 1 user error, 2 system error (I/O, lock)
@@ -303,7 +304,26 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 - `type`: `track` | `item` (default, omitted on disk so v1 rows round-trip byte-identical) | `dream`
 - `track`: edge to a `type: track` issue; tracks cannot themselves carry a track edge (tracks don't nest)
 - `source`: where the issue came from (vault note, conversation, commit)
-- `prompt`: absolute path of the work-order prompt file paired with the issue
+- `prompt`: repository-relative `.handoff/` path paired with an actionable item on strict boards; legacy boards may retain older absolute pointers
+
+### Workflow scaffold (src/workflow.rs)
+
+`manna init` installs workflow version 1 on new or empty boards. It creates
+`.manna/workflow.yaml` and `.handoff/README.md`, and narrowly unignores the
+durable files in both roots when project-level Git rules would hide them. The
+runtime board lock stays ignored. Existing nonempty
+boards without a workflow file remain in legacy mode and are never silently
+rewritten.
+
+On strict boards, creating an item allocates its id, generates
+`.handoff/<id>-<slug>.md`, writes that relative path into `prompt`, appends the
+board row, and then reads the pair back. A failed board append removes the new
+handoff. Tracks and dreams never receive handoffs. Item pointers are stable:
+agents edit the linked work order instead of repointing the board.
+
+`claim` validates the scaffold and exact pair before changing status. The
+handoff must exist, be Git-visible, stay below `.handoff/`, and contain exactly
+one claim target matching the item. Broken continuity exits 2 with no claim.
 
 ### State machine
 
@@ -322,6 +342,8 @@ Board-grammar gate: findings exit 1, clean exits 0. Rules:
 - `dangling_track`: track edges must point at existing track rows
 - `dream_status`: dreams only carry `open` or `done`
 - `prompt_file`: a prompt pointer on a non-done issue must resolve to a file
+- strict workflow rules: the scaffold exists, each active item has a canonical
+  `.handoff/` pointer, and the handoff carries the exact matching claim command
 
 ### Reconcile (`manna reconcile [--fix] [--write-drift] [--dream-age-days N]`)
 
@@ -333,7 +355,8 @@ Drift detection between the board and reality. Advisory verb: findings alone nev
 4. `stale_dream`: open dreams strictly older than the threshold (default 14 days)
 5. `dangling_track`: track edges to missing or non-track issues
 6. `doc_reference`: `mn-` ids mentioned in `.handoff/`, `.dev/`, `.zpc/`, and the per-project Claude memory directory that do not exist on this board (files ≤ 1MB, symlinks skipped, deduplicated per file+id)
-7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a staged prompt file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. The reverse scan reads `*.md` under `.dev/session-prompts/`; a missing directory is a successful empty scan, and foreign-board ids are ignored
+7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a work-order file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. Strict boards scan `.handoff/**/*.md`; legacy boards retain the `.dev/session-prompts/` scan. A missing directory is a successful empty scan, and foreign-board ids are ignored
+8. `workflow_sprawl` on strict boards: an active local item is claimed from `.handoffs/`, `.dev/session-prompts/`, or a nested `handoff-prompts/` root, or its pointer leaves the canonical `.handoff/` root
 
 The prompt pointer itself comes from the `prompt` field, or as a blessed interim convention, a description whose first line is `PROMPT: <path>`.
 

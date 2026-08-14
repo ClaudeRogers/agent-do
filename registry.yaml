@@ -4638,17 +4638,17 @@ tools:
       - store
     concurrency: mixed
   manna:
-    description: Git-backed issue tracking and context management for AI agents
+    description: Git-backed issue tracking with generated, bidirectionally linked handoff work orders
     capabilities:
     - track issues and dependencies
     - manage session state
     - store context across sessions
     - query issue history
     commands:
-      init: Initialize manna repository
+      init: Initialize .manna plus the tracked .handoff workflow scaffold
       status: Show current session and claimed issues
-      create: Create new issue (--type track|item|dream, --track, --source)
-      claim: Claim an issue for the current session (refuses dreams, exit 2, until converted)
+      create: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
+      claim: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
       done: Mark a claimed issue as done
       abandon: Release a claimed issue back to open
       block: Add a blocker dependency
@@ -4659,8 +4659,8 @@ tools:
       delete: Delete issue
       context: Get session context
       dream: File an idea spark on the nearest board or the global inbox
-      lint: Check board grammar; findings exit 1
-      reconcile: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
+      lint: Check board grammar and strict handoff linkage; findings exit 1
+      reconcile: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
     examples:
     - intent: initialize manna
       command: agent-manna init

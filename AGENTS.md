@@ -52,9 +52,9 @@ Applies to `agent-do/`.
 
 ## Work Tracking
 
-- The manna board (`.manna/`) is the single backlog. Board grammar and this project's vocabulary live in `CLAUDE.md` under "Manna Board Conventions": every issue is a track, an item on a track, or a dream; typed fields are set through the manna CLI, never by editing `.manna/issues.jsonl`.
+- The manna board (`.manna/`) is the single backlog and tracked `.handoff/` is the single work-order root. `agent-do bootstrap` installs both for every detected project. Board grammar and this project's vocabulary live in `CLAUDE.md` under "Manna Board Conventions": every issue is a track, an item on a track, or a dream; typed fields are set through the manna CLI, never by editing `.manna/issues.jsonl`.
 - Commits that advance an item cite it with a `Manna: mn-xxxxxx` trailer.
-- Issues and prompts pair: an issue carries a pointer to its work-order prompt (the `prompt:` field, or a description whose first line is the prompt path), and the prompt opens with the exact claim command. `manna reconcile` verifies the pairing in both directions.
+- Items and handoffs pair automatically: `manna create` writes `.handoff/<mn-id>-<slug>.md` and its board pointer, and the handoff carries the exact claim command. `claim` fails closed when the pair is broken. `manna reconcile` verifies both directions and flags shadow roots as `workflow_sprawl`.
 - Identity is pinned, not inferred: the SessionStart hook pins `MANNA_SESSION_ID` (and `AGENT_DO_COORD_SESSION`) from the session id, so claims anchor to sessions instead of transient CLI pids. Scripted lanes export `MANNA_SESSION_ID` explicitly.
 - Reconcile is the drift net: `manna lint` enforces board grammar; `manna reconcile [--fix]` detects landed-but-open items, dead-session claims, blocker desync, stale dreams, dangling track edges, and doc references to nonexistent issues. The SessionEnd hook runs it advisorily and writes `.manna/drift.yaml`, which the next SessionStart surfaces as a greeting.
 
