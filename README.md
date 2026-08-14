@@ -111,6 +111,15 @@ cd agent-do
 ./install.sh
 ```
 
+`agent-do` requires GNU Bash 4.4 or newer. macOS ships Bash 3.2, so install a
+current Bash first with `brew install bash`. The launcher finds Homebrew Bash
+even when the calling process has a system-only `PATH`, then keeps that same
+interpreter available through a Bash-only runtime shim for every dispatched
+tool without changing any other command precedence. If no supported Bash
+exists, installation and execution stop with an actionable error.
+Set `AGENT_DO_BASH=/absolute/path/to/bash` when a supported Bash lives outside
+the standard Homebrew, Linuxbrew, Nix, or local-bin paths.
+
 `install.sh` is idempotent. It symlinks `agent-do` into `~/.local/bin`, writes
 an install-path breadcrumb under `~/.agent-do/`, generates the discovery index
 from `registry.yaml`, installs Python dependencies, offers optional npm and
@@ -379,6 +388,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system map.
 
 ## Requirements
 
+- GNU Bash 4.4+
 - Python 3.10+
 - Node.js 18+ for browser tooling
 - Rust for `manna`

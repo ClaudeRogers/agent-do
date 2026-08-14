@@ -26,6 +26,10 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/bash-runtime.sh
+source "$REPO_DIR/lib/bash-runtime.sh"
+agent_do_ensure_supported_bash "$REPO_DIR/install.sh" "$@" || exit $?
+
 SYMLINK_DIR="$HOME/.local/bin"
 SYMLINK_PATH="$SYMLINK_DIR/agent-do"
 AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"

@@ -4,6 +4,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/bash-runtime.sh
+source "$SCRIPT_DIR/lib/bash-runtime.sh"
+agent_do_ensure_supported_bash "$SCRIPT_DIR/test.sh" "$@" || exit $?
+
 AGENT_DO="$SCRIPT_DIR/agent-do"
 TEST_HOME="$(mktemp -d)"
 PASS=0
@@ -52,6 +56,26 @@ check_output() {
     fi
 }
 
+find_macos_test_python() {
+    # Dependency tests use the active Python environment. The macOS integration
+    # test must instead use an interpreter that owns the platform frameworks.
+    local candidate=""
+    for candidate in \
+        "${AGENT_DO_MACOS_TEST_PYTHON:-}" \
+        "$(command -v python3 2>/dev/null || true)" \
+        /opt/homebrew/bin/python3 \
+        /usr/local/bin/python3 \
+        /usr/bin/python3
+    do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        if "$candidate" -c 'import AppKit, Foundation' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 echo "Testing agent-do..."
 echo
 
@@ -95,6 +119,7 @@ check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"
 check_cmd "credential tests" python3 "$SCRIPT_DIR/tests/test_creds.py"
 check_cmd "notion tests" python3 "$SCRIPT_DIR/tests/test_notion.py"
+check_cmd "bash runtime tests" python3 "$SCRIPT_DIR/tests/test_bash_runtime.py"
 check_cmd "dispatch tests" python3 "$SCRIPT_DIR/tests/test_dispatch.py"
 check_cmd "auth tests" python3 "$SCRIPT_DIR/tests/test_auth.py"
 check_cmd "auth interactive tests" python3 "$SCRIPT_DIR/tests/test_auth_interactive.py"
@@ -108,7 +133,13 @@ check_cmd "auth probe tests" python3 "$SCRIPT_DIR/tests/test_auth_probe.py"
 check_cmd "auth advance tests" python3 "$SCRIPT_DIR/tests/test_auth_advance.py"
 check_cmd "email tests" python3 "$SCRIPT_DIR/tests/test_email.py"
 check_cmd "sms tests" python3 "$SCRIPT_DIR/tests/test_sms.py"
-check_cmd "live runtime tests" python3 "$SCRIPT_DIR/tests/test_live.py"
+macos_test_python="$(find_macos_test_python || true)"
+if [[ -n "$macos_test_python" ]]; then
+    macos_test_bin="$(dirname "$macos_test_python")"
+    check_cmd "live runtime tests" env PATH="$macos_test_bin:$PATH" "$macos_test_python" "$SCRIPT_DIR/tests/test_live.py"
+else
+    check_cmd "live runtime tests" python3 "$SCRIPT_DIR/tests/test_live.py"
+fi
 check_cmd "appleevents tests" python3 "$SCRIPT_DIR/tests/test_appleevents.py"
 check_cmd "spec tests" python3 "$SCRIPT_DIR/tests/test_spec.py"
 check_cmd "resend tests" python3 "$SCRIPT_DIR/tests/test_resend.py"
