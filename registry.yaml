@@ -6185,3 +6185,89 @@ tools:
         resume: [composite]
         ping: [composite]
     concurrency: mixed
+
+  sentry:
+    description: Sentry error tracking, issue management, alerts, and releases
+    capabilities:
+    - list and inspect projects
+    - search and filter issues with Sentry query syntax
+    - view issue details with assignee, level, and event count
+    - resolve, unresolve, ignore, and assign issues
+    - list alert rules across all projects
+    - list recent releases
+    - full account snapshot as JSON
+    commands:
+      projects: List all projects with platforms
+      project: Detailed project info
+      issues: List issues (--project, --query, --sort, --limit)
+      issue: Detailed issue info by short ID
+      resolve: Resolve an issue
+      unresolve: Reopen a resolved issue
+      ignore: Mark an issue as ignored
+      assign: Assign an issue to a user by email
+      alerts: List alert rules
+      alert: Detailed alert rule info
+      releases: List recent releases (--project)
+      snapshot: Full account state as JSON
+    examples:
+    - intent: list sentry projects
+      command: agent-sentry projects
+    - intent: show unresolved sentry issues
+      command: agent-sentry issues
+    - intent: show sentry issues for versova-chat
+      command: agent-sentry issues --project versova-chat
+    - intent: get sentry issue details
+      command: agent-sentry issue VERSOVA-CHAT-B
+    - intent: resolve a sentry issue
+      command: agent-sentry resolve VERSOVA-CHAT-B
+    - intent: list sentry alert rules
+      command: agent-sentry alerts
+    - intent: get sentry account snapshot
+      command: agent-sentry snapshot
+    credentials:
+      required:
+      - SENTRY_AUTH_TOKEN
+    routing:
+      discover_keywords:
+      - sentry
+      - error tracking
+      - error monitoring
+      - application error
+      prompt_patterns:
+      - \bsentry\b
+      - \berror\s+tracking\b
+      - \bapplication\s+error\b
+      raw_cli_equivalents:
+      - pattern: \bcurl\b.*\bsentry\.io/api\b
+        replacement: agent-do sentry
+        example: agent-do sentry snapshot
+        reason: agent-do sentry provides a stable, structured Sentry surface
+      project_signals:
+      - sentry
+      - error tracking
+      - dsn
+      readiness:
+        check: agent-do sentry projects
+        fix: agent-do creds store SENTRY_AUTH_TOKEN --stdin
+        note: 'Requires SENTRY_AUTH_TOKEN resolved from env or secure storage. Minimum token scopes by capability: org:read (project listing), project:read (project detail), event:read (issue searches and details), event:write (resolve/unresolve/ignore/assign)'
+    contracts:
+      snapshot:
+      - projects
+      - project
+      - issues
+      - issue
+      - alerts
+      - alert
+      - releases
+      - snapshot
+      interact:
+      - resolve
+      - unresolve
+      - ignore
+      - assign
+      attributes:
+        assign: [composite]
+        ignore: [composite]
+        resolve: [composite]
+        unresolve: [composite]
+    concurrency: mixed

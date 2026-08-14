@@ -52,6 +52,19 @@ check_output() {
     fi
 }
 
+check_error_output() {
+    local desc="$1"
+    local pattern="$2"
+    shift 2
+    local output rc
+    output=$("$@" 2>&1); rc=$?
+    if [[ $rc -eq 1 ]] && echo "$output" | grep -q "$pattern"; then
+        pass "$desc"
+    else
+        fail "$desc" "expected exit 1 and pattern '$pattern', rc=$rc, got: $(echo "$output" | head -3)"
+    fi
+}
+
 echo "Testing agent-do..."
 echo
 
@@ -266,6 +279,11 @@ cat > "$BOOTSTRAP_PROJECT/CLAUDE.md" <<'EOF'
 Use `agent-do context`
 Use `agent-do zpc`
 EOF
+
+# --- agent-sentry ---
+check_output "sentry help includes PROJECTS header" "PROJECTS" "$AGENT_DO" sentry --help
+check_output "sentry help lists snapshot command" "snapshot" "$AGENT_DO" sentry --help
+check_error_output "sentry unknown command exits with error" "Unknown command" "$AGENT_DO" sentry bogus-command-xyz
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
 check_output "bootstrap initializes context and zpc" "Initialized: context, zpc" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
