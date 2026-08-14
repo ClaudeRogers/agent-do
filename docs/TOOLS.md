@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (96 tools)
+## Summary (99 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
