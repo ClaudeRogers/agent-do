@@ -45,6 +45,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
 | [coord](#coord) | Project-local agent state and interrupt broker | mixed | 22 |
 | [creds](#creds) | Secure credential storage and resolution for agent-do tools | mixed | 8 |
+| [cronitor](#cronitor) | Cronitor scheduled job and uptime monitoring | mixed | 11 |
 | [db](#db) | Control database clients | mixed | 5 |
 | [debug](#debug) | Control debuggers | read | 5 |
 | [discord](#discord) | Control Discord | mixed | 2 |
@@ -1255,6 +1256,69 @@ agent-do creds check --tool vercel
 - Write (connect/interact/save): `delete`, `export`, `store`
 - destructive (irreversible data loss; confirm before auto-running): `delete`
 - sensitive (emits or persists secret material; guard output): `delete`, `store`
+
+### cronitor
+
+Cronitor scheduled job and uptime monitoring
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect monitors (jobs, heartbeats, checks)
+- view monitor details including schedule and assertions
+- create and delete monitors
+- pause and resume monitors for maintenance windows
+- send telemetry events (run, complete, fail, ok)
+- list and inspect issues (incidents)
+- list notification lists
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info by key
+- `create`: Create a monitor (JSON from stdin)
+- `delete`: Delete a monitor by key
+- `pause`: Pause a monitor (indefinitely or for N hours)
+- `resume`: Resume a paused monitor
+- `issues`: List issues (--open for unresolved only)
+- `issue`: Detailed issue info by key
+- `ping`: Send telemetry event (--state run|complete|fail|ok)
+- `notifications`: List notification lists
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my cronitor monitors
+agent-do cronitor monitors
+# show cronitor monitor details
+agent-do cronitor show TuoCU3
+# check open cronitor issues
+agent-do cronitor issues --open
+# send a cronitor telemetry ping
+agent-do cronitor ping my-job --state complete
+# pause a cronitor monitor for maintenance
+agent-do cronitor pause my-job 4
+# resume a paused cronitor monitor
+agent-do cronitor resume my-job
+# get cronitor account snapshot
+agent-do cronitor snapshot
+# create a new cronitor monitor
+echo '{"type":"job","key":"my-job","schedules":["0 * * * *"]}' | agent-do cronitor create
+```
+
+**Credentials**
+
+- Required: `CRONITOR_API_KEY`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `issue`, `issues`, `monitors`, `notifications`, `show`, `snapshot`
+- Write (connect/interact/save): `create`, `delete`, `pause`, `ping`, `resume`
+- destructive (irreversible data loss; confirm before auto-running): `delete`
+- composite (one call performs several beats internally): `create`, `pause`, `ping`, `resume`
 
 ### db
 
