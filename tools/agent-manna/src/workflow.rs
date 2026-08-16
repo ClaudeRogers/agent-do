@@ -5,15 +5,17 @@
 //! journal closes the small crash window between those two filesystems.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use chrono::Utc;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::issue::{Issue, IssueStatus, IssueType};
+use crate::error::MannaError;
+use crate::issue::{Issue, IssueStatus, IssueType, SessionIdentity};
 use crate::store::MannaStore;
 
 pub const WORKFLOW_VERSION: u32 = 2;
@@ -141,7 +143,7 @@ struct HandoffFrontmatter {
     binding: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PairAction {
     Create,
@@ -151,7 +153,7 @@ enum PairAction {
     Delete,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairTransaction {
     version: u32,
@@ -162,19 +164,22 @@ struct PairTransaction {
     handoff: String,
     archive: Option<String>,
     document: Option<String>,
+    integrity: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TransactionOutcome {
+    Applied,
+    DiscardedConflict(String),
 }
 
 pub fn workflow_path(base: &Path) -> PathBuf {
     base.join(WORKFLOW_FILE)
 }
 
-fn board_path(base: &Path) -> PathBuf {
-    base.join(BOARD_FILE)
-}
-
 fn load_board_config(base: &Path) -> Result<Option<BoardConfig>, String> {
-    let path = board_path(base);
-    reject_symlink(&path, "board identity")?;
+    let relative = safe_relative_path(base, Path::new(BOARD_FILE), true)?;
+    let path = base.join(relative);
     if !path.is_file() {
         return Ok(None);
     }
@@ -194,7 +199,8 @@ fn load_board_config(base: &Path) -> Result<Option<BoardConfig>, String> {
 fn write_board_config(base: &Path, config: &BoardConfig) -> Result<(), String> {
     let yaml = serde_yaml::to_string(config)
         .map_err(|error| format!("failed to serialize board identity: {}", error))?;
-    atomic_write_replace(&board_path(base), &yaml)
+    let relative = safe_relative_path(base, Path::new(BOARD_FILE), true)?;
+    atomic_write_replace(&base.join(relative), &yaml)
 }
 
 fn path_exists(path: &Path) -> bool {
@@ -325,12 +331,6 @@ fn sync_parent(path: &Path) -> Result<(), String> {
 
 fn atomic_write(path: &Path, contents: &[u8], replace: bool) -> Result<(), String> {
     reject_symlink(path, "workflow file")?;
-    if !replace && path_exists(path) {
-        return Err(format!(
-            "refusing to overwrite existing file {}",
-            path.display()
-        ));
-    }
     let parent = path
         .parent()
         .ok_or_else(|| format!("path has no parent: {}", path.display()))?;
@@ -355,9 +355,23 @@ fn atomic_write(path: &Path, contents: &[u8], replace: bool) -> Result<(), Strin
         return Err(format!("failed to write {}: {}", temp.display(), error));
     }
     drop(file);
-    if let Err(error) = fs::rename(&temp, path) {
+    let install = if replace {
+        fs::rename(&temp, path)
+    } else {
+        // A hard link is an atomic create-if-absent operation when source and
+        // destination share a directory. Unlike an existence check followed
+        // by rename, it cannot overwrite a transaction another process won.
+        fs::hard_link(&temp, path).and_then(|_| fs::remove_file(&temp))
+    };
+    if let Err(error) = install {
         let _ = fs::remove_file(&temp);
-        return Err(format!("failed to install {}: {}", path.display(), error));
+        return Err(
+            if !replace && error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("refusing to overwrite existing file {}", path.display())
+            } else {
+                format!("failed to install {}: {}", path.display(), error)
+            },
+        );
     }
     sync_parent(path)
 }
@@ -367,8 +381,8 @@ fn atomic_write_replace(path: &Path, contents: &str) -> Result<(), String> {
 }
 
 pub fn load_workflow(base: &Path) -> Result<Option<WorkflowConfig>, String> {
-    let path = workflow_path(base);
-    reject_symlink(&path, "workflow config")?;
+    let relative = safe_relative_path(base, Path::new(WORKFLOW_FILE), true)?;
+    let path = base.join(relative);
     if !path.is_file() {
         return Ok(None);
     }
@@ -404,8 +418,8 @@ pub fn load_workflow_for_board(
     match board.workflow {
         BoardMode::Strict => match load_workflow(base)? {
             Some(config) => {
-            config.validate()?;
-            Ok(Some(config))
+                config.validate()?;
+                Ok(Some(config))
             }
             None => Err(format!(
                 "strict Manna board identity exists but {} is missing; run `agent-do manna init` to restore it",
@@ -425,7 +439,12 @@ pub fn load_workflow_for_board(
 }
 
 fn git_path_ignored(base: &Path, relative: &Path) -> Result<bool, String> {
-    if !base.join(".git").exists() {
+    let inside = Command::new("git")
+        .current_dir(base)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|error| format!("git rev-parse unavailable: {}", error))?;
+    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
         return Ok(false);
     }
     let output = Command::new("git")
@@ -668,6 +687,321 @@ fn calculate_binding(text: &str) -> Result<String, String> {
     Ok(format!("sha256:{:x}", digest))
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut normalized = [0_u8; BLOCK];
+    if key.len() > BLOCK {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36_u8; BLOCK];
+    let mut outer_pad = [0x5c_u8; BLOCK];
+    for index in 0..BLOCK {
+        inner_pad[index] ^= normalized[index];
+        outer_pad[index] ^= normalized[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+fn transaction_material(base: &Path, transaction: &PairTransaction) -> Result<Vec<u8>, String> {
+    let mut unsigned = transaction.clone();
+    unsigned.integrity.clear();
+    let project = base.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve project root {}: {}",
+            base.display(),
+            error
+        )
+    })?;
+    let payload = serde_json::to_vec(&unsigned).map_err(|error| {
+        format!(
+            "failed to serialize transaction integrity material: {}",
+            error
+        )
+    })?;
+    let mut material = b"agent-do/manna/pair/v2\0".to_vec();
+    material.extend_from_slice(project.to_string_lossy().as_bytes());
+    material.push(0);
+    material.extend_from_slice(&payload);
+    Ok(material)
+}
+
+fn transaction_signature(
+    base: &Path,
+    key: &[u8],
+    transaction: &PairTransaction,
+) -> Result<String, String> {
+    let digest = hmac_sha256(key, &transaction_material(base, transaction)?);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    Ok(format!("hmac-sha256:{}", hex))
+}
+
+fn resolve_missing_leaf(path: PathBuf) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("path has no file name: {}", path.display()))?
+        .to_os_string();
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("path has no parent: {}", path.display()))?;
+    let existing = parent
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| format!("path has no existing ancestor: {}", path.display()))?;
+    let canonical = existing
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {}", existing.display(), error))?;
+    let remainder = parent
+        .strip_prefix(existing)
+        .map_err(|_| format!("failed to normalize {}", path.display()))?;
+    Ok(canonical.join(remainder).join(name))
+}
+
+fn recovery_key_path(base: &Path) -> Result<PathBuf, String> {
+    let git = Command::new("git")
+        .current_dir(base)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()
+        .map_err(|error| format!("failed to locate Git metadata: {}", error))?;
+    if git.status.success() {
+        let root = String::from_utf8_lossy(&git.stdout).trim().to_string();
+        if root.is_empty() {
+            return Err("Git returned an empty metadata directory".to_string());
+        }
+        return resolve_missing_leaf(
+            PathBuf::from(root)
+                .join("agent-do")
+                .join("manna-recovery.key"),
+        );
+    }
+
+    let home = std::env::var_os("AGENT_DO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".agent-do")))
+        .ok_or_else(|| {
+            "cannot protect Manna recovery journals outside Git without AGENT_DO_HOME or HOME"
+                .to_string()
+        })?;
+    let canonical = base
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root: {}", error))?;
+    let project = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    resolve_missing_leaf(
+        home.join("manna")
+            .join("recovery-keys")
+            .join(format!("{:x}.key", project)),
+    )
+}
+
+fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        cursor.push(component.as_os_str());
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing {} through symlink {}",
+                    label,
+                    cursor.display()
+                ))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("failed to inspect {}: {}", cursor.display(), error)),
+        }
+    }
+    Ok(())
+}
+
+fn read_private_key(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    reject_symlink_components(path, label)?;
+    let mut key = Vec::new();
+    File::open(path)
+        .and_then(|mut file| file.read_to_end(&mut key))
+        .map_err(|error| format!("failed to read {} {}: {}", label, path.display(), error))?;
+    if key.len() != 32 {
+        return Err(format!(
+            "{} {} has invalid length {}; expected 32 bytes",
+            label,
+            path.display(),
+            key.len()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)
+            .map_err(|error| format!("failed to inspect {}: {}", label, error))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} {} must not be readable by group or others",
+                label,
+                path.display()
+            ));
+        }
+    }
+    Ok(key)
+}
+
+fn load_private_key(path: &Path, create: bool, label: &str) -> Result<Vec<u8>, String> {
+    if path.is_file() {
+        return read_private_key(path, label);
+    }
+    if path_exists(path) {
+        return Err(format!(
+            "{} path is not a regular file: {}",
+            label,
+            path.display()
+        ));
+    }
+    if !create {
+        return Err(format!("{} {} is missing", label, path.display()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent: {}", label, path.display()))?;
+    reject_symlink_components(parent, &format!("{} directory", label))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {}", parent.display(), error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("failed to protect {}: {}", parent.display(), error))?;
+    }
+
+    let mut key = [0_u8; 32];
+    OsRng.fill_bytes(&mut key);
+    let mut nonce = [0_u8; 16];
+    OsRng.fill_bytes(&mut nonce);
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    let temp = parent.join(format!(".manna-key.{}.{}.tmp", std::process::id(), nonce));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .map_err(|error| format!("failed to create {}: {}", temp.display(), error))?;
+    if let Err(error) = file.write_all(&key).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("failed to write {}: {}", temp.display(), error));
+    }
+    drop(file);
+    match fs::hard_link(&temp, path) {
+        Ok(()) => {
+            fs::remove_file(&temp)
+                .map_err(|error| format!("failed to remove {}: {}", temp.display(), error))?;
+            sync_parent(path)?;
+            Ok(key.to_vec())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&temp);
+            read_private_key(path, label)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(format!(
+                "failed to install {} {}: {}",
+                label,
+                path.display(),
+                error
+            ))
+        }
+    }
+}
+
+fn load_recovery_key(base: &Path, create: bool) -> Result<Vec<u8>, String> {
+    let path = recovery_key_path(base)?;
+    load_private_key(&path, create, "Manna recovery key").map_err(|error| {
+        if !create && error.ends_with(" is missing") {
+            format!(
+                "pending Manna transaction cannot be authenticated because {}",
+                error
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn session_identity_key_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("AGENT_DO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".agent-do")))
+        .ok_or_else(|| {
+            "cannot derive host session ownership without AGENT_DO_HOME or HOME".to_string()
+        })?;
+    resolve_missing_leaf(home.join("manna").join("session-identity.key"))
+}
+
+fn compact_runtime_id(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .take(16)
+        .collect()
+}
+
+pub fn runtime_session_label(runtime: &str, opaque_id: &str) -> Result<String, String> {
+    let compact = compact_runtime_id(opaque_id);
+    if compact.is_empty() {
+        return Err(format!(
+            "{} session identity is empty after normalization",
+            runtime
+        ));
+    }
+    Ok(format!("{}-{}", runtime, compact))
+}
+
+/// Derive an authenticated Manna identity from an opaque host-owned session
+/// identifier. The public label matches agent-do coord, while the ownership
+/// proof is an HMAC under a machine-local key outside the repository. Knowing
+/// the visible label is therefore insufficient to forge lifecycle authority.
+pub fn runtime_session_identity(runtime: &str, opaque_id: &str) -> Result<SessionIdentity, String> {
+    let label = runtime_session_label(runtime, opaque_id)?;
+    let key_path = session_identity_key_path()?;
+    let key = load_private_key(&key_path, true, "Manna session identity key")?;
+    let material = format!("agent-do/manna/session/v1\0{}\0{}", runtime, opaque_id);
+    let proof = hmac_sha256(&key, material.as_bytes())
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    SessionIdentity::from_token(&label, &proof)
+}
+
 fn render_document(frontmatter: &HandoffFrontmatter, body: &str) -> Result<String, String> {
     let mut unsigned = frontmatter.clone();
     unsigned.binding.clear();
@@ -744,6 +1078,9 @@ fn validate_document(issue: &Issue, text: &str) -> Result<String, String> {
     if frontmatter.source != issue.source {
         return Err("handoff source does not match the Manna item".to_string());
     }
+    if frontmatter.inputs != issue.source.iter().cloned().collect::<Vec<_>>() {
+        return Err("handoff inputs do not match the Manna item source".to_string());
+    }
     if frontmatter.scope != issue.title {
         return Err("handoff scope does not match the Manna item title".to_string());
     }
@@ -793,31 +1130,224 @@ fn transaction_path(base: &Path, issue_id: &str) -> PathBuf {
         .join(format!("{}.yaml", issue_id))
 }
 
-fn write_transaction(base: &Path, transaction: &PairTransaction) -> Result<(), String> {
-    safe_create_dir_all(base, Path::new(TRANSACTION_DIR))?;
-    let path = transaction_path(base, &transaction.issue_id);
-    if path_exists(&path) {
+fn same_lifecycle(before: &Issue, after: &Issue) -> bool {
+    before.id == after.id
+        && before.created_at == after.created_at
+        && before.status == after.status
+        && before.blocked_by == after.blocked_by
+        && before.claimed_by == after.claimed_by
+        && before.claimed_at == after.claimed_at
+        && before.claim_token_hash == after.claim_token_hash
+}
+
+fn validate_transaction(
+    base: &Path,
+    config: &WorkflowConfig,
+    path: &Path,
+    transaction: &PairTransaction,
+    key: &[u8],
+) -> Result<(), String> {
+    if transaction.version != WORKFLOW_VERSION {
         return Err(format!(
-            "pending Manna pair transaction already exists for {}; run `agent-do manna init`",
+            "unsupported pair transaction version {}",
+            transaction.version
+        ));
+    }
+    let expected_path = transaction_path(base, &transaction.issue_id);
+    if path != expected_path {
+        return Err(format!(
+            "transaction filename {} does not match authenticated issue {}",
+            path.display(),
             transaction.issue_id
         ));
     }
-    let yaml = serde_yaml::to_string(transaction)
-        .map_err(|error| format!("failed to serialize pair transaction: {}", error))?;
-    atomic_write(&path, yaml.as_bytes(), false)
-}
+    let expected_signature = transaction_signature(base, key, transaction)?;
+    if !constant_time_eq(
+        transaction.integrity.as_bytes(),
+        expected_signature.as_bytes(),
+    ) {
+        return Err(format!(
+            "transaction {} failed HMAC authentication",
+            path.display()
+        ));
+    }
+    for row in [&transaction.before, &transaction.after]
+        .into_iter()
+        .flatten()
+    {
+        row.validate()
+            .map_err(|error| format!("invalid transaction row {}: {}", row.id, error))?;
+        if row.id != transaction.issue_id {
+            return Err(format!(
+                "transaction issue {} contains row {}",
+                transaction.issue_id, row.id
+            ));
+        }
+    }
 
-fn remove_transaction(base: &Path, issue_id: &str) -> Result<(), String> {
-    let path = transaction_path(base, issue_id);
-    reject_symlink(&path, "transaction")?;
-    if path.exists() {
-        match fs::remove_file(&path) {
-            Ok(()) => sync_parent(&path)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("failed to remove {}: {}", path.display(), error)),
+    let (path_issue, document_expected, archive_expected) = match transaction.action {
+        PairAction::Create => {
+            if transaction.before.is_some()
+                || transaction.after.is_none()
+                || transaction.document.is_none()
+                || transaction.archive.is_some()
+                || transaction.after.as_ref().unwrap().issue_type != IssueType::Item
+            {
+                return Err("create transaction has an invalid shape".to_string());
+            }
+            (transaction.after.as_ref().unwrap(), true, false)
+        }
+        PairAction::Attach => {
+            let (Some(before), Some(after)) = (&transaction.before, &transaction.after) else {
+                return Err("attach transaction is missing a board row".to_string());
+            };
+            if transaction.document.is_none()
+                || transaction.archive.is_some()
+                || before.issue_type == IssueType::Item
+                || after.issue_type != IssueType::Item
+                || !same_lifecycle(before, after)
+            {
+                return Err(
+                    "attach transaction has an invalid shape or lifecycle delta".to_string()
+                );
+            }
+            (after, true, false)
+        }
+        PairAction::Rebind => {
+            let (Some(before), Some(after)) = (&transaction.before, &transaction.after) else {
+                return Err("rebind transaction is missing a board row".to_string());
+            };
+            if transaction.document.is_none()
+                || transaction.archive.is_some()
+                || before.issue_type != IssueType::Item
+                || after.issue_type != IssueType::Item
+                || before.prompt != after.prompt
+                || !same_lifecycle(before, after)
+            {
+                return Err(
+                    "rebind transaction has an invalid shape or lifecycle delta".to_string()
+                );
+            }
+            (after, true, false)
+        }
+        PairAction::Detach => {
+            let (Some(before), Some(after)) = (&transaction.before, &transaction.after) else {
+                return Err("detach transaction is missing a board row".to_string());
+            };
+            if transaction.document.is_some()
+                || transaction.archive.is_none()
+                || before.issue_type != IssueType::Item
+                || after.issue_type == IssueType::Item
+                || after.prompt.is_some()
+                || after.handoff_digest.is_some()
+                || !same_lifecycle(before, after)
+            {
+                return Err(
+                    "detach transaction has an invalid shape or lifecycle delta".to_string()
+                );
+            }
+            (before, false, true)
+        }
+        PairAction::Delete => {
+            let Some(before) = transaction.before.as_ref() else {
+                return Err("delete transaction has no before row".to_string());
+            };
+            if transaction.after.is_some()
+                || transaction.document.is_some()
+                || transaction.archive.is_none()
+                || before.issue_type != IssueType::Item
+            {
+                return Err("delete transaction has an invalid shape".to_string());
+            }
+            (before, false, true)
+        }
+    };
+
+    let canonical = canonical_handoff_path(base, config, path_issue, path_issue.prompt.as_deref())?;
+    let supplied = normalize_relative(Path::new(&transaction.handoff))?;
+    if supplied != canonical {
+        return Err(format!(
+            "transaction handoff {} is not the authoritative path {}",
+            supplied.display(),
+            canonical.display()
+        ));
+    }
+    if document_expected {
+        let after = transaction.after.as_ref().unwrap();
+        let document = transaction.document.as_deref().unwrap();
+        validate_document(after, document)?;
+    }
+    if archive_expected {
+        let before = transaction.before.as_ref().unwrap();
+        let expected = archive_path(before);
+        let actual = normalize_relative(Path::new(transaction.archive.as_deref().unwrap()))?;
+        if actual != expected {
+            return Err(format!(
+                "transaction archive {} is not the authoritative path {}",
+                actual.display(),
+                expected.display()
+            ));
         }
     }
     Ok(())
+}
+
+fn write_transaction(
+    base: &Path,
+    config: &WorkflowConfig,
+    transaction: &PairTransaction,
+) -> Result<PathBuf, String> {
+    safe_create_dir_all(base, Path::new(TRANSACTION_DIR))?;
+    let path = transaction_path(base, &transaction.issue_id);
+    let key = load_recovery_key(base, true)?;
+    let mut signed = transaction.clone();
+    signed.integrity = transaction_signature(base, &key, &signed)?;
+    validate_transaction(base, config, &path, &signed, &key)?;
+    let yaml = serde_yaml::to_string(&signed)
+        .map_err(|error| format!("failed to serialize pair transaction: {}", error))?;
+    atomic_write(&path, yaml.as_bytes(), false).map_err(|error| {
+        format!(
+            "{}; pending Manna pair transaction already exists for {}; run `agent-do manna init`",
+            error, transaction.issue_id
+        )
+    })?;
+    Ok(path)
+}
+
+fn remove_transaction_if_unchanged(
+    path: &Path,
+    opened_metadata: &fs::Metadata,
+    opened_text: &str,
+) -> Result<(), String> {
+    reject_symlink(path, "transaction")?;
+    let current_metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to recheck {}: {}", path.display(), error)),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened_metadata.dev() != current_metadata.dev()
+            || opened_metadata.ino() != current_metadata.ino()
+        {
+            return Err(format!(
+                "transaction {} changed during recovery and was left in place",
+                path.display()
+            ));
+        }
+    }
+    let current = fs::read_to_string(path)
+        .map_err(|error| format!("failed to recheck {}: {}", path.display(), error))?;
+    if current != opened_text {
+        return Err(format!(
+            "transaction {} changed during recovery and was left in place",
+            path.display()
+        ));
+    }
+    fs::remove_file(path)
+        .map_err(|error| format!("failed to remove {}: {}", path.display(), error))?;
+    sync_parent(path)
 }
 
 fn install_transaction_document(
@@ -826,6 +1356,15 @@ fn install_transaction_document(
     document: &str,
 ) -> Result<(), String> {
     let relative = safe_relative_path(base, relative, true)?;
+    if !relative.starts_with(HANDOFF_DIR)
+        || relative.starts_with(HANDOFF_ARCHIVE_DIR)
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("md")
+    {
+        return Err("transaction document target is outside canonical .handoff/".to_string());
+    }
     let parent = relative
         .parent()
         .ok_or_else(|| format!("handoff has no parent: {}", relative.display()))?;
@@ -879,108 +1418,149 @@ fn archive_handoff(base: &Path, handoff: &Path, archive: &Path) -> Result<(), St
     sync_parent(&target)
 }
 
-fn complete_transaction(
+fn execute_transaction(
     base: &Path,
     store: &MannaStore,
     transaction: &PairTransaction,
-) -> Result<(), String> {
-    if transaction.version != WORKFLOW_VERSION {
-        return Err(format!(
-            "unsupported pair transaction version {}",
-            transaction.version
-        ));
-    }
+) -> Result<(), MannaError> {
     let handoff = Path::new(&transaction.handoff);
     match transaction.action {
         PairAction::Create => {
-            let after = transaction
-                .after
-                .as_ref()
-                .ok_or_else(|| "create transaction has no after row".to_string())?;
-            let document = transaction
-                .document
-                .as_deref()
-                .ok_or_else(|| "create transaction has no handoff document".to_string())?;
-            store
-                .recover_issue_with(after, || {
-                    install_transaction_document(base, handoff, document)
-                })
-                .map_err(|error| error.to_string())?;
+            let after = transaction.after.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected("create transaction has no after row".to_string())
+            })?;
+            let document = transaction.document.as_deref().ok_or_else(|| {
+                MannaError::MutationRejected(
+                    "create transaction has no handoff document".to_string(),
+                )
+            })?;
+            store.recover_issue_with(after, || {
+                install_transaction_document(base, handoff, document)
+            })?;
         }
         PairAction::Attach | PairAction::Rebind => {
-            let before = transaction
-                .before
-                .as_ref()
-                .ok_or_else(|| "pair update transaction has no before row".to_string())?;
-            let after = transaction
-                .after
-                .as_ref()
-                .ok_or_else(|| "pair update transaction has no after row".to_string())?;
-            let document = transaction
-                .document
-                .as_deref()
-                .ok_or_else(|| "pair update transaction has no handoff document".to_string())?;
-            store
-                .recover_replace_issue_with(before, after, || {
-                    install_transaction_document(base, handoff, document)
-                })
-                .map_err(|error| error.to_string())?;
+            let before = transaction.before.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected(
+                    "pair update transaction has no before row".to_string(),
+                )
+            })?;
+            let after = transaction.after.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected("pair update transaction has no after row".to_string())
+            })?;
+            let document = transaction.document.as_deref().ok_or_else(|| {
+                MannaError::MutationRejected(
+                    "pair update transaction has no handoff document".to_string(),
+                )
+            })?;
+            store.recover_replace_issue_with(before, after, || {
+                install_transaction_document(base, handoff, document)
+            })?;
         }
         PairAction::Detach => {
-            let before = transaction
-                .before
-                .as_ref()
-                .ok_or_else(|| "detach transaction has no before row".to_string())?;
-            let after = transaction
-                .after
-                .as_ref()
-                .ok_or_else(|| "detach transaction has no after row".to_string())?;
-            let archive = transaction
-                .archive
-                .as_deref()
-                .ok_or_else(|| "detach transaction has no archive path".to_string())?;
-            store
-                .recover_replace_issue_with(before, after, || {
-                    archive_handoff(base, handoff, Path::new(archive))
-                })
-                .map_err(|error| error.to_string())?;
+            let before = transaction.before.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected("detach transaction has no before row".to_string())
+            })?;
+            let after = transaction.after.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected("detach transaction has no after row".to_string())
+            })?;
+            let archive = transaction.archive.as_deref().ok_or_else(|| {
+                MannaError::MutationRejected("detach transaction has no archive path".to_string())
+            })?;
+            store.recover_replace_issue_with(before, after, || {
+                archive_handoff(base, handoff, Path::new(archive))
+            })?;
         }
         PairAction::Delete => {
-            let before = transaction
-                .before
-                .as_ref()
-                .ok_or_else(|| "delete transaction has no before row".to_string())?;
-            let archive = transaction
-                .archive
-                .as_deref()
-                .ok_or_else(|| "delete transaction has no archive path".to_string())?;
-            store
-                .recover_delete_issue_with(before, || {
-                    archive_handoff(base, handoff, Path::new(archive))
-                })
-                .map_err(|error| error.to_string())?;
+            let before = transaction.before.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected("delete transaction has no before row".to_string())
+            })?;
+            let archive = transaction.archive.as_deref().ok_or_else(|| {
+                MannaError::MutationRejected("delete transaction has no archive path".to_string())
+            })?;
+            store.recover_delete_issue_with(before, || {
+                archive_handoff(base, handoff, Path::new(archive))
+            })?;
         }
     }
-    remove_transaction(base, &transaction.issue_id)
+    Ok(())
+}
+
+fn complete_transaction_path(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+    path: &Path,
+    key: &[u8],
+) -> Result<TransactionOutcome, String> {
+    safe_relative_path(
+        base,
+        path.strip_prefix(base)
+            .map_err(|_| format!("transaction path is outside project: {}", path.display()))?,
+        false,
+    )?;
+    reject_symlink(path, "transaction")?;
+    let mut file = File::open(path)
+        .map_err(|error| format!("failed to open {}: {}", path.display(), error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {}", path.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "transaction is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    let transaction: PairTransaction = serde_yaml::from_str(&text)
+        .map_err(|error| format!("invalid pair transaction {}: {}", path.display(), error))?;
+    validate_transaction(base, config, path, &transaction, key)?;
+    match execute_transaction(base, store, &transaction) {
+        Ok(()) => {
+            remove_transaction_if_unchanged(path, &metadata, &text)?;
+            Ok(TransactionOutcome::Applied)
+        }
+        Err(MannaError::RecoveryConflict(reason)) => {
+            // Store recovery checks the complete row before touching the file
+            // half of a pair. A conflict therefore proves this authenticated
+            // intent is obsolete, not partially applied. Remove it so one
+            // losing optimistic writer cannot poison every later command.
+            remove_transaction_if_unchanged(path, &metadata, &text)?;
+            Ok(TransactionOutcome::DiscardedConflict(reason))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn run_transaction(
     base: &Path,
     store: &MannaStore,
+    config: &WorkflowConfig,
     transaction: PairTransaction,
 ) -> Result<(), String> {
-    write_transaction(base, &transaction)?;
-    complete_transaction(base, store, &transaction).map_err(|error| {
-        format!(
+    let path = write_transaction(base, config, &transaction)?;
+    let key = load_recovery_key(base, false)?;
+    match complete_transaction_path(base, store, config, &path, &key) {
+        Ok(TransactionOutcome::Applied) => Ok(()),
+        Ok(TransactionOutcome::DiscardedConflict(reason)) => Err(format!(
+            "Manna pair transaction for {} lost a concurrent update and was discarded safely: {}. Reload the item and retry.",
+            transaction.issue_id, reason
+        )),
+        Err(error) => Err(format!(
             "Manna pair transaction for {} is pending recovery: {}. Run `agent-do manna init`.",
             transaction.issue_id, error
-        )
-    })
+        )),
+    }
 }
 
-pub fn recover_pair_transactions(base: &Path, store: &MannaStore) -> Result<usize, String> {
-    let directory = base.join(TRANSACTION_DIR);
-    reject_symlink(&directory, "transaction directory")?;
+pub fn recover_pair_transactions(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+) -> Result<usize, String> {
+    let relative = safe_relative_path(base, Path::new(TRANSACTION_DIR), true)?;
+    let directory = base.join(relative);
     if !directory.exists() {
         return Ok(0);
     }
@@ -991,15 +1571,25 @@ pub fn recover_pair_transactions(base: &Path, store: &MannaStore) -> Result<usiz
         .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("yaml"))
         .collect::<Vec<_>>();
     paths.sort();
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    // A journal is published only after its key. The directory itself may be
+    // visible earlier because writers create it before generating the key, so
+    // an empty directory carries no authentication prerequisite.
+    let key = load_recovery_key(base, false)?;
     let mut recovered = 0;
     for path in paths {
-        reject_symlink(&path, "transaction")?;
-        let text = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
-        let transaction: PairTransaction = serde_yaml::from_str(&text)
-            .map_err(|error| format!("invalid pair transaction {}: {}", path.display(), error))?;
-        complete_transaction(base, store, &transaction)?;
-        recovered += 1;
+        match complete_transaction_path(base, store, config, &path, &key) {
+            Ok(_) => recovered += 1,
+            // Recovery scans are cooperative. Another process may complete
+            // and unlink an authenticated journal after this process lists
+            // the directory but before it opens or rechecks that path. An
+            // absent path has no remaining intent to execute; the initiating
+            // writer still uses run_transaction, which does not suppress it.
+            Err(_) if !path.exists() => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(recovered)
 }
@@ -1048,8 +1638,9 @@ pub fn create_paired_issue(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)?;
+    run_transaction(base, store, config, transaction)?;
     Ok(paired)
 }
 
@@ -1079,8 +1670,9 @@ pub fn attach_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)?;
+    run_transaction(base, store, config, transaction)?;
     Ok(after)
 }
 
@@ -1114,8 +1706,9 @@ pub fn detach_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: Some(archive.to_string_lossy().into_owned()),
         document: None,
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)?;
+    run_transaction(base, store, config, transaction)?;
     Ok(after)
 }
 
@@ -1136,8 +1729,9 @@ pub fn delete_paired_issue(
         handoff: relative.to_string_lossy().into_owned(),
         archive: Some(archive.to_string_lossy().into_owned()),
         document: None,
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)
+    run_transaction(base, store, config, transaction)
 }
 
 fn update_frontmatter_for_issue(text: &str, issue: &Issue) -> Result<String, String> {
@@ -1146,28 +1740,21 @@ fn update_frontmatter_for_issue(text: &str, issue: &Issue) -> Result<String, Str
     frontmatter.manna = issue.id.clone();
     frontmatter.track = issue.track.clone();
     frontmatter.source = issue.source.clone();
+    frontmatter.inputs = issue.source.iter().cloned().collect();
     frontmatter.scope = issue.title.clone();
     render_document(&frontmatter, body)
 }
 
-pub fn rebind_handoff(
+fn commit_rebind(
     base: &Path,
     store: &MannaStore,
     config: &WorkflowConfig,
     before: &Issue,
     after_metadata: &Issue,
-    use_file_contents: bool,
+    document: String,
 ) -> Result<Issue, String> {
     let relative = canonical_handoff_path(base, config, before, before.prompt.as_deref())?;
     preflight_handoff(base, &relative)?;
-    let path = base.join(&relative);
-    let existing = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read {}: {}", relative.display(), error))?;
-    let document = if use_file_contents {
-        update_frontmatter_for_issue(&existing, after_metadata)?
-    } else {
-        render_handoff(base, after_metadata)?
-    };
     let (mut after, document) = prepare_bound_issue(after_metadata, document)?;
     after.prompt = before.prompt.clone();
     validate_document(&after, &document)?;
@@ -1180,9 +1767,50 @@ pub fn rebind_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)?;
+    run_transaction(base, store, config, transaction)?;
     Ok(after)
+}
+
+/// Explicitly approve the current handoff contents and bind them to the row.
+/// This is the only operation allowed to consume an unsealed document.
+pub fn seal_handoff(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+    issue: &Issue,
+) -> Result<Issue, String> {
+    let relative = canonical_handoff_path(base, config, issue, issue.prompt.as_deref())?;
+    preflight_handoff(base, &relative)?;
+    let existing = fs::read_to_string(base.join(&relative))
+        .map_err(|error| format!("failed to read {}: {}", relative.display(), error))?;
+    let document = update_frontmatter_for_issue(&existing, issue)?;
+    commit_rebind(base, store, config, issue, issue, document)
+}
+
+/// Propagate authoritative row metadata into a handoff only after proving the
+/// existing body is still sealed. Ordinary updates cannot bless hand-edited
+/// scope merely because some unrelated title or source field changed.
+pub fn rebind_handoff_metadata(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+    before: &Issue,
+    after_metadata: &Issue,
+) -> Result<Issue, String> {
+    let relative = canonical_handoff_path(base, config, before, before.prompt.as_deref())?;
+    preflight_handoff(base, &relative)?;
+    let existing = fs::read_to_string(base.join(&relative))
+        .map_err(|error| format!("failed to read {}: {}", relative.display(), error))?;
+    validate_document(before, &existing).map_err(|error| {
+        format!(
+            "cannot update Manna metadata while the handoff is unsealed: {}. Seal it explicitly first with `agent-do manna handoff seal {}`",
+            error, before.id
+        )
+    })?;
+    let document = update_frontmatter_for_issue(&existing, after_metadata)?;
+    commit_rebind(base, store, config, before, after_metadata, document)
 }
 
 fn upgrade_legacy_handoff(
@@ -1212,8 +1840,9 @@ fn upgrade_legacy_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        integrity: String::new(),
     };
-    run_transaction(base, store, transaction)?;
+    run_transaction(base, store, config, transaction)?;
     Ok(after)
 }
 
@@ -1221,13 +1850,15 @@ pub fn initialize_workflow(
     base: &Path,
     store: &MannaStore,
 ) -> Result<Option<WorkflowInit>, String> {
-    let recovered_transactions = recover_pair_transactions(base, store)?;
-    let issues = store.load_issues().map_err(|error| error.to_string())?;
+    store
+        .validate_storage_root()
+        .map_err(|error| error.to_string())?;
+    let initial_issues = store.load_issues().map_err(|error| error.to_string())?;
     let existing = load_workflow(base)?;
-    let strict_markers = workflow_markers_present(base, &issues);
+    let strict_markers = workflow_markers_present(base, &initial_issues);
     let board = match load_board_config(base)? {
         Some(board) => board,
-        None if strict_markers || issues.is_empty() => {
+        None if strict_markers || initial_issues.is_empty() => {
             let board = BoardConfig::strict();
             write_board_config(base, &board)?;
             board
@@ -1262,24 +1893,56 @@ pub fn initialize_workflow(
     let config = WorkflowConfig::default();
     let yaml = serde_yaml::to_string(&config)
         .map_err(|error| format!("failed to serialize workflow config: {}", error))?;
+    // A missing strict config is repairable only by restoring the current
+    // version. A real v1 config stays v1 until every item migration finishes,
+    // so interruption cannot strand a partially upgraded board behind a v2
+    // marker that suppresses the remaining work on the next init.
+    if restored_config {
+        atomic_write_replace(&workflow_path(base), &yaml)?;
+    }
+    validate_scaffold(base, &config)?;
 
-    let requires_upgrade = existing
+    // Recovery begins only after board identity, scaffold paths, Git
+    // visibility, and journal authentication can all be checked. A planted
+    // journal is never the input that decides where validation occurs.
+    let recovered_transactions = recover_pair_transactions(base, store, &config)?;
+    let issues = store.load_issues().map_err(|error| error.to_string())?;
+
+    let old_workflow = existing
         .as_ref()
-        .is_some_and(|workflow| workflow.version < WORKFLOW_VERSION)
-        || restored_config;
+        .is_some_and(|workflow| workflow.version < WORKFLOW_VERSION);
     let mut upgraded_items = 0;
-    if requires_upgrade {
+    if old_workflow {
         for issue in issues.iter().filter(|issue| {
             issue.issue_type == IssueType::Item
                 && issue.status != IssueStatus::Done
                 && issue.prompt.is_some()
+                && issue.handoff_digest.is_none()
         }) {
             upgrade_legacy_handoff(base, store, &config, issue)?;
             upgraded_items += 1;
         }
+        atomic_write_replace(&workflow_path(base), &yaml)?;
     }
-    atomic_write_replace(&workflow_path(base), &yaml)?;
-    validate_scaffold(base, &config)?;
+
+    let current = store.load_issues().map_err(|error| error.to_string())?;
+    for issue in current
+        .iter()
+        .filter(|issue| issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done)
+    {
+        if issue.prompt.is_none() || issue.handoff_digest.is_none() {
+            return Err(format!(
+                "strict workflow item {} is missing its authoritative handoff pair",
+                issue.id
+            ));
+        }
+        validate_handoff(base, &config, issue).map_err(|error| {
+            format!(
+                "strict workflow item {} has an invalid handoff: {}",
+                issue.id, error
+            )
+        })?;
+    }
     Ok(Some(WorkflowInit {
         config,
         gitignore_updated,
@@ -1400,10 +2063,31 @@ pub fn find_orphan_handoffs(base: &Path, issues: &[Issue]) -> Vec<(PathBuf, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use tempfile::TempDir;
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_case_one() {
+        let key = [0x0b_u8; 20];
+        let digest = hmac_sha256(&key, b"Hi There");
+        let actual = digest
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<String>();
+        assert_eq!(
+            actual,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
 
     fn setup() -> (TempDir, MannaStore, WorkflowConfig) {
         let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
         let store = MannaStore::new(temp.path());
         store.init().unwrap();
         let init = initialize_workflow(temp.path(), &store).unwrap().unwrap();
@@ -1468,6 +2152,284 @@ mod tests {
     }
 
     #[test]
+    fn metadata_update_cannot_silently_seal_a_body_edit() {
+        let (temp, store, config) = setup();
+        let item = issue("mn-abc123", "Bound work");
+        let paired = create_paired_issue(temp.path(), &store, &config, &item, None).unwrap();
+        let path = temp.path().join(paired.prompt.as_deref().unwrap());
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("\nUnapproved scope expansion.\n");
+        fs::write(&path, text).unwrap();
+
+        let mut renamed = paired.clone();
+        renamed.title = "Unrelated metadata update".to_string();
+        renamed.updated_at = Utc::now();
+        let error =
+            rebind_handoff_metadata(temp.path(), &store, &config, &paired, &renamed).unwrap_err();
+        assert!(error.contains("unsealed"));
+        assert_eq!(store.load_issues().unwrap()[0], paired);
+
+        let sealed = seal_handoff(temp.path(), &store, &config, &paired).unwrap();
+        assert!(validate_handoff(temp.path(), &config, &sealed).is_ok());
+    }
+
+    #[test]
+    fn restoring_config_does_not_bless_an_unsealed_handoff() {
+        let (temp, store, config) = setup();
+        let item = issue("mn-abc123", "Bound work");
+        let paired = create_paired_issue(temp.path(), &store, &config, &item, None).unwrap();
+        let digest = paired.handoff_digest.clone();
+        let handoff = temp.path().join(paired.prompt.as_deref().unwrap());
+        let mut text = fs::read_to_string(&handoff).unwrap();
+        text.push_str("\nUnsealed after config deletion.\n");
+        fs::write(&handoff, text).unwrap();
+        fs::remove_file(temp.path().join(WORKFLOW_FILE)).unwrap();
+
+        let error = initialize_workflow(temp.path(), &store).unwrap_err();
+        assert!(error.contains("invalid handoff"));
+        assert!(temp.path().join(WORKFLOW_FILE).is_file());
+        assert_eq!(store.load_issues().unwrap()[0].handoff_digest, digest);
+    }
+
+    #[test]
+    fn workflow_version_downgrade_does_not_reopen_the_seal() {
+        let (temp, store, config) = setup();
+        let item = issue("mn-abc123", "Bound work");
+        let paired = create_paired_issue(temp.path(), &store, &config, &item, None).unwrap();
+        let digest = paired.handoff_digest.clone();
+        let handoff = temp.path().join(paired.prompt.as_deref().unwrap());
+        let mut text = fs::read_to_string(&handoff).unwrap();
+        text.push_str("\nAttempted downgrade reseal.\n");
+        fs::write(&handoff, text).unwrap();
+        fs::write(
+            temp.path().join(WORKFLOW_FILE),
+            "version: 1\nhandoff_dir: .handoff\n",
+        )
+        .unwrap();
+
+        let error = initialize_workflow(temp.path(), &store).unwrap_err();
+        assert!(error.contains("invalid handoff"));
+        assert_eq!(store.load_issues().unwrap()[0].handoff_digest, digest);
+        assert_eq!(load_workflow(temp.path()).unwrap().unwrap().version, 2);
+    }
+
+    #[test]
+    fn interrupted_v1_migration_finishes_only_unbound_items() {
+        let (temp, store, config) = setup();
+        let first = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-abc123", "Already migrated"),
+            None,
+        )
+        .unwrap();
+        let second = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-def456", "Still legacy"),
+            None,
+        )
+        .unwrap();
+        let first_document =
+            fs::read_to_string(temp.path().join(first.prompt.as_deref().unwrap())).unwrap();
+        let mut legacy_second = second.clone();
+        legacy_second.handoff_digest = None;
+        store
+            .recover_replace_issue(&second, &legacy_second)
+            .unwrap();
+        fs::write(
+            temp.path().join(WORKFLOW_FILE),
+            "version: 1\nhandoff_dir: .handoff\n",
+        )
+        .unwrap();
+
+        let initialized = initialize_workflow(temp.path(), &store).unwrap().unwrap();
+        assert_eq!(initialized.upgraded_items, 1);
+        let rows = store.load_issues().unwrap();
+        let current_first = rows.iter().find(|row| row.id == first.id).unwrap();
+        let current_second = rows.iter().find(|row| row.id == second.id).unwrap();
+        assert_eq!(current_first.handoff_digest, first.handoff_digest);
+        assert_eq!(
+            fs::read_to_string(temp.path().join(first.prompt.as_deref().unwrap())).unwrap(),
+            first_document
+        );
+        assert!(current_second.handoff_digest.is_some());
+        validate_handoff(temp.path(), &config, current_second).unwrap();
+        assert_eq!(load_workflow(temp.path()).unwrap().unwrap().version, 2);
+    }
+
+    #[test]
+    fn authenticated_journal_still_cannot_target_outside_handoff() {
+        let (temp, store, config) = setup();
+        let mut item = issue("mn-abc123", "Forged destination");
+        item.prompt = Some("victim.md".to_string());
+        let document = render_handoff(temp.path(), &item).unwrap();
+        let (item, document) = prepare_bound_issue(&item, document).unwrap();
+        let mut transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Create,
+            issue_id: item.id.clone(),
+            before: None,
+            after: Some(item),
+            handoff: "victim.md".to_string(),
+            archive: None,
+            document: Some(document),
+            integrity: String::new(),
+        };
+        let key = load_recovery_key(temp.path(), true).unwrap();
+        transaction.integrity = transaction_signature(temp.path(), &key, &transaction).unwrap();
+        safe_create_dir_all(temp.path(), Path::new(TRANSACTION_DIR)).unwrap();
+        let path = transaction_path(temp.path(), &transaction.issue_id);
+        fs::write(&path, serde_yaml::to_string(&transaction).unwrap()).unwrap();
+
+        let error = recover_pair_transactions(temp.path(), &store, &config).unwrap_err();
+        assert!(error.contains("under .handoff") || error.contains("must live under"));
+        assert!(!temp.path().join("victim.md").exists());
+        assert!(store.load_issues().unwrap().is_empty());
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn journal_signature_is_bound_to_the_project_root() {
+        let (temp, _store, _config) = setup();
+        let other = TempDir::new().unwrap();
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Delete,
+            issue_id: "mn-abc123".to_string(),
+            before: Some(issue("mn-abc123", "Bound project")),
+            after: None,
+            handoff: ".handoff/mn-abc123-bound-project.md".to_string(),
+            archive: Some(".handoff/.archive/mn-abc123-bound-project.md".to_string()),
+            document: None,
+            integrity: String::new(),
+        };
+        let key = [7_u8; 32];
+        let original = transaction_signature(temp.path(), &key, &transaction).unwrap();
+        let copied = transaction_signature(other.path(), &key, &transaction).unwrap();
+        assert_ne!(original, copied);
+    }
+
+    #[test]
+    fn planted_unsigned_journal_is_never_executed() {
+        let (temp, store, config) = setup();
+        load_recovery_key(temp.path(), true).unwrap();
+        safe_create_dir_all(temp.path(), Path::new(TRANSACTION_DIR)).unwrap();
+        let path = transaction_path(temp.path(), "mn-abc123");
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Delete,
+            issue_id: "mn-abc123".to_string(),
+            before: Some(issue("mn-abc123", "Planted")),
+            after: None,
+            handoff: ".handoff/mn-abc123-planted.md".to_string(),
+            archive: Some(".handoff/.archive/mn-abc123-forged.md".to_string()),
+            document: None,
+            integrity: "hmac-sha256:00".to_string(),
+        };
+        fs::write(&path, serde_yaml::to_string(&transaction).unwrap()).unwrap();
+        let error = recover_pair_transactions(temp.path(), &store, &config).unwrap_err();
+        assert!(error.contains("failed HMAC authentication"), "{error}");
+        assert!(store.load_issues().unwrap().is_empty());
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn no_replace_install_has_exactly_one_concurrent_winner() {
+        let temp = TempDir::new().unwrap();
+        let target = Arc::new(temp.path().join("journal.yaml"));
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+        for contender in 0..12 {
+            let target = Arc::clone(&target);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let payload = format!("writer:{}", contender);
+                barrier.wait();
+                (
+                    payload.clone(),
+                    atomic_write(&target, payload.as_bytes(), false),
+                )
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        let winners = outcomes
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .collect::<Vec<_>>();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(fs::read_to_string(&*target).unwrap(), winners[0].0);
+    }
+
+    #[test]
+    fn empty_transaction_directory_does_not_require_a_recovery_key() {
+        let (temp, store, config) = setup();
+        safe_create_dir_all(temp.path(), Path::new(TRANSACTION_DIR)).unwrap();
+        let key = recovery_key_path(temp.path()).unwrap();
+        assert!(!key.exists());
+        assert_eq!(
+            recover_pair_transactions(temp.path(), &store, &config).unwrap(),
+            0
+        );
+        assert!(!key.exists());
+    }
+
+    #[test]
+    fn obsolete_authenticated_intent_is_discarded_without_applying_it() {
+        let (temp, store, config) = setup();
+        let before = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-abc123", "Original"),
+            None,
+        )
+        .unwrap();
+        let handoff = Path::new(before.prompt.as_deref().unwrap());
+        let original_document = fs::read_to_string(temp.path().join(handoff)).unwrap();
+
+        let mut stale_metadata = before.clone();
+        stale_metadata.title = "Stale writer".to_string();
+        stale_metadata.updated_at = Utc::now();
+        let stale_document =
+            update_frontmatter_for_issue(&original_document, &stale_metadata).unwrap();
+        let (stale_after, stale_document) =
+            prepare_bound_issue(&stale_metadata, stale_document).unwrap();
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Rebind,
+            issue_id: before.id.clone(),
+            before: Some(before.clone()),
+            after: Some(stale_after),
+            handoff: handoff.to_string_lossy().into_owned(),
+            archive: None,
+            document: Some(stale_document),
+            integrity: String::new(),
+        };
+        let path = write_transaction(temp.path(), &config, &transaction).unwrap();
+
+        let mut winner = before.clone();
+        winner.description = Some("A different writer won".to_string());
+        winner.updated_at = Utc::now();
+        store.recover_replace_issue(&before, &winner).unwrap();
+
+        let key = load_recovery_key(temp.path(), false).unwrap();
+        let outcome = complete_transaction_path(temp.path(), &store, &config, &path, &key).unwrap();
+        assert!(matches!(outcome, TransactionOutcome::DiscardedConflict(_)));
+        assert!(!path.exists());
+        assert_eq!(store.load_issues().unwrap()[0], winner);
+        assert_eq!(
+            fs::read_to_string(temp.path().join(handoff)).unwrap(),
+            original_document
+        );
+    }
+
+    #[test]
     fn pending_create_transaction_recovers_both_sides() {
         let (temp, store, config) = setup();
         let mut item = issue("mn-abc123", "Interrupted create");
@@ -1484,13 +2446,58 @@ mod tests {
             handoff: relative.to_string_lossy().into_owned(),
             archive: None,
             document: Some(document),
+            integrity: String::new(),
         };
-        write_transaction(temp.path(), &transaction).unwrap();
+        write_transaction(temp.path(), &config, &transaction).unwrap();
 
         assert!(store.load_issues().unwrap().is_empty());
         assert!(!temp.path().join(&relative).exists());
-        assert_eq!(recover_pair_transactions(temp.path(), &store).unwrap(), 1);
+        assert_eq!(
+            recover_pair_transactions(temp.path(), &store, &config).unwrap(),
+            1
+        );
         assert_eq!(store.load_issues().unwrap().len(), 1);
+        assert!(validate_handoff(temp.path(), &config, &item).is_ok());
+        assert!(!transaction_path(temp.path(), &item.id).exists());
+    }
+
+    #[test]
+    fn concurrent_recovery_tolerates_a_peer_removing_the_same_journal() {
+        let (temp, store, config) = setup();
+        let mut item = issue("mn-abc123", "Concurrent recovery");
+        let relative = canonical_handoff_path(temp.path(), &config, &item, None).unwrap();
+        item.prompt = Some(relative.to_string_lossy().into_owned());
+        let document = render_handoff(temp.path(), &item).unwrap();
+        let (item, document) = prepare_bound_issue(&item, document).unwrap();
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Create,
+            issue_id: item.id.clone(),
+            before: None,
+            after: Some(item.clone()),
+            handoff: relative.to_string_lossy().into_owned(),
+            archive: None,
+            document: Some(document),
+            integrity: String::new(),
+        };
+        write_transaction(temp.path(), &config, &transaction).unwrap();
+
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+        for _ in 0..12 {
+            let base = temp.path().to_path_buf();
+            let store = store.clone();
+            let config = config.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                recover_pair_transactions(&base, &store, &config)
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(store.load_issues().unwrap(), vec![item.clone()]);
         assert!(validate_handoff(temp.path(), &config, &item).is_ok());
         assert!(!transaction_path(temp.path(), &item.id).exists());
     }
@@ -1528,6 +2535,23 @@ mod tests {
         assert!(validate_scaffold(temp.path(), &config)
             .unwrap_err()
             .contains("issues.jsonl is ignored"));
+    }
+
+    #[test]
+    fn ancestor_repository_ignore_rules_are_enforced() {
+        let parent = TempDir::new().unwrap();
+        Command::new("git")
+            .current_dir(parent.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        fs::write(parent.path().join(".gitignore"), "/nested/\n").unwrap();
+        let nested = parent.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let store = MannaStore::new(&nested);
+        store.init().unwrap();
+        let error = initialize_workflow(&nested, &store).unwrap_err();
+        assert!(error.contains("still ignored by Git"));
     }
 
     #[test]

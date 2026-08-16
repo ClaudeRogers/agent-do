@@ -72,16 +72,15 @@ This allows recovery from partial writes.
 
 ## Session Identity
 
-Sessions are identified by `$MANNA_SESSION_ID` environment variable.
+Sessions present `$MANNA_SESSION_ID` plus a private `$MANNA_SESSION_TOKEN`.
+The board stores the public ID and only the token's SHA-256 digest. Lifecycle
+commands fail closed when an explicit pair is incomplete. Agent hosts with an
+opaque runtime identity may derive the private proof under a machine-local key
+outside the repository. Plain shells have no pid fallback and must export both
+values explicitly.
 
-**Default format** (if env var not set):
-```
-ses_pid{pid}_{timestamp}
-```
-
-Example: `ses_pid12345_1706544000`
-
-**Why**: Allows multiple concurrent sessions without conflicts.
+This keeps separate CLI invocations on one agent identity without turning the
+visible `claimed_by` label into a credential.
 
 ## CLI Design
 
@@ -222,12 +221,13 @@ manna-core context
 
 ## Security Considerations
 
-### No Authentication
+### Local Authentication
 
-Manna has **no authentication** - it trusts the filesystem:
-- Anyone with write access to `.manna/` can modify issues
-- Session IDs are not secret
-- Suitable for single-user or trusted environments only
+Manna has no remote user-account system. Local lifecycle authority is still
+authenticated: claimed rows require a session bearer-token proof, and recovery
+journals require an HMAC key stored outside the worktree. Filesystem and Git
+visibility checks fail closed on symlink or ignore-rule ambiguity. It remains a
+local development tool, not a multi-user authorization service.
 
 ### No Encryption
 

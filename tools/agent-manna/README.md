@@ -123,7 +123,9 @@ claimed_issues:
 Create a new issue. On strict boards, each actionable item also creates a
 repository-relative `.handoff/<mn-id>-<slug>.md` work order and stores that
 path in the issue's `prompt` field. A write-ahead transaction makes the row and
-file recover as one pair after interruption.
+file recover as one pair after interruption. The transaction is HMAC-bound to
+the canonical project root, complete rows, filename, canonical paths, and
+payload, then installed with atomic no-clobber semantics.
 
 ```bash
 agent-do manna create "Fix login bug"
@@ -314,7 +316,8 @@ command is never a handoff.
 ### `update <id> [metadata]`
 
 Update title, description, type, track, source, or a legacy prompt pointer.
-Strict item metadata updates rebind their handoff. Item conversion attaches or
+Strict item metadata updates first verify the existing seal, then propagate
+authoritative frontmatter without approving body edits. Item conversion attaches or
 archives the handoff transactionally. `update --status` is rejected; use the
 lifecycle verbs `claim`, `done`, `abandon`, `block`, and `unblock`.
 
@@ -388,14 +391,17 @@ IDs automatically extend (7, 8, ... chars) on collision.
 
 ### Session Management
 
-Sessions are identified by `$MANNA_SESSION_ID` environment variable.
+Claim ownership uses two pinned environment variables:
 
-**Default format** (if not set):
-```
-ses_pid{pid}_{timestamp}
-```
+- `MANNA_SESSION_ID`: public session label stored as `claimed_by`
+- `MANNA_SESSION_TOKEN`: private bearer token of at least 32 characters; only
+  its SHA-256 digest is stored in the board
 
-This allows multiple agents to work concurrently without conflicts.
+Lifecycle mutations fail closed when either value is absent. Session hooks pin
+both across shell invocations. Codex and other hosts that expose an opaque
+runtime identity derive the proof under a machine-local key outside the
+repository. Scripted lanes and plain shells must export both explicitly. A
+visible owner label alone cannot complete, abandon, or edit its claim.
 
 ### Exit Codes
 
@@ -409,7 +415,8 @@ This allows multiple agents to work concurrently without conflicts.
 
 All write operations use file locking (`fs2` crate):
 - Exclusive locks prevent concurrent writes
-- Atomic updates via temp file + rename
+- Unique no-follow temp files plus atomic rename for board updates
+- Atomic create-if-absent installation for pair journals and private keys
 - Safe for parallel agent execution
 
 ## Integration
@@ -429,6 +436,7 @@ Use with agent-do hooks for automatic session tracking:
 **SessionStart hook:**
 ```bash
 export MANNA_SESSION_ID="ses_$(uuidgen)"
+export MANNA_SESSION_TOKEN="$(openssl rand -hex 32)"
 ```
 
 **PreCompact hook:**

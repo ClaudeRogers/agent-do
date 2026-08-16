@@ -122,15 +122,21 @@ Codex supports `hookSpecificOutput.additionalContext` on PreToolUse (May 2026 ho
 
 ## Environment the hooks establish
 
-SessionStart writes three exports to `CLAUDE_ENV_FILE`, which Claude Code sources for every subsequent Bash call in the session:
+SessionStart writes four exports to `CLAUDE_ENV_FILE`, which Claude Code sources for every subsequent Bash call in the session:
 
 | Export | Purpose |
 |--------|---------|
 | `PATH=<agent-do dir>:$PATH` | Every Bash call can invoke `agent-do` without installation assumptions |
 | `AGENT_DO_COORD_SESSION=<session_id>` | Coord identity anchors to the Claude session; every Bash call derives the same agent id, and SessionEnd retires exactly that identity |
 | `MANNA_SESSION_ID=<session_id>` | Manna claims carry the session id rather than a transient pid, so `manna reconcile` can probe them meaningfully (via coord peer status) instead of always finding a dead pid |
+| `MANNA_SESSION_TOKEN=<random 256-bit token>` | Separate shell invocations prove lifecycle ownership without making the public session id a credential; only its digest enters the board |
 
-Both identity pins respect pre-existing values: an orchestrator that sets its own `AGENT_DO_COORD_SESSION` or `MANNA_SESSION_ID` (for example, one id per lane in a swarm) wins over the hook.
+Coord identity and a complete pre-existing Manna identity pair are respected.
+An incomplete Manna pair is replaced atomically. An orchestrator that pins one
+identity per lane must set both Manna variables. Codex has no hook environment
+export channel, so Manna derives the same private proof on each invocation from
+`CODEX_THREAD_ID` and a mode-0600 key under `$AGENT_DO_HOME/manna/`; plain
+shells without a host identity fail closed.
 
 ## Presence gating
 
@@ -212,7 +218,13 @@ These are the conventions the manna tooling checks mechanically; teams that foll
 
 **Commit trailers.** A trailer is a commit-body line that is exactly `Manna: mn-xxxxxx` (key case-sensitive, one id per line, multiple lines allowed). `manna reconcile` scans the last 500 commits for trailers and reports issues that landed but are still open (`landed_open`).
 
-**Session identity.** Set `MANNA_SESSION_ID` before claiming (the SessionStart hook does this automatically; swarm orchestrators typically pin one id per lane: `MANNA_SESSION_ID=lane6-internals agent-do manna claim mn-133ad6`). Claims made under a session id that coord later reports dead, stale, or stopped surface as `dead_claim` findings, and `reconcile --fix` releases them.
+**Session identity.** Claude and Cursor SessionStart hooks establish ownership;
+Codex uses its opaque thread id plus a machine-local secret. Scripted lanes set
+both values, for example:
+`MANNA_SESSION_ID=lane6-internals MANNA_SESSION_TOKEN=<32+-character-secret> agent-do manna claim mn-133ad6`.
+Claims made under an identity that coord later reports dead, stale, or stopped
+surface as `dead_claim` findings, and `reconcile --fix` releases only when the
+complete inspected row still matches.
 
 **Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for every
 detected project. New boards receive `.manna/workflow.yaml` and a tracked

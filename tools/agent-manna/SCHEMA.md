@@ -39,6 +39,7 @@ Each line is a complete JSON object representing one issue.
 | `blocked_by` | Array | Yes | Array of issue IDs (strings) | Issues blocking this one |
 | `claimed_by` | String or null | No | Session ID or null | Who is working on this |
 | `claimed_at` | String or null | No | ISO8601 timestamp or null | When it was claimed |
+| `claim_token_hash` | String or null | No | `sha256:<64 lowercase hex>`; present exactly when `claimed_by` is present | Proof digest for the owning session's private bearer token |
 | `type` | String | No | Enum: `track`, `item`, `dream`; omitted when `item` (default) | Issue type: umbrella track, work item, or intake spark |
 | `track` | String or null | No | ID of an existing `type: track` issue; tracks don't nest | Track this issue belongs to |
 | `source` | String or null | No | Free text (note path, URL, conversation) | Where this issue came from |
@@ -46,7 +47,7 @@ Each line is a complete JSON object representing one issue.
 | `handoff_digest` | String or null | No | `sha256:<64 lowercase hex>` | Board-side binding for the canonical handoff with its binding field normalized |
 
 v1 rows carry none of the new optional fields (`type`, `track`, `source`,
-`prompt`, `handoff_digest`); they deserialize as `type: item` and re-serialize unchanged (lazy
+`prompt`, `handoff_digest`, `claim_token_hash`); they deserialize as `type: item` and re-serialize unchanged (lazy
 upgrade — the file is never rewritten just to add defaults).
 
 ### Workflow and handoff pairing
@@ -54,7 +55,8 @@ upgrade — the file is never rewritten just to add defaults).
 New or empty boards initialized by Manna are strict workflow version 2.
 `.manna/board.yaml` pins that decision independently, so removing
 `.manna/workflow.yaml` is corruption, never a downgrade. `manna init` restores
-the strict config and upgrades version-1 pairs. A pre-workflow nonempty board
+the strict config. A version-2 digest prevents re-entry into the binding-creating
+version-1 migration path, so restoration cannot bless edited contents. A pre-workflow nonempty board
 is classified once as `legacy` in `board.yaml`; later commands read that
 identity instead of inferring mode from missing files.
 
@@ -83,8 +85,9 @@ board unchanged. `lint` applies the same contract, and
   mentions elsewhere in a prompt file are data, not pairing promises.
   Foreign-board ids are ignored (cross-repo prompts are legal).
 
-Strict reconcile reports `workflow_sprawl` for structured handoffs anywhere
-outside `.handoff/`, including nested or symlinked legacy roots, and
+Strict reconcile reports `workflow_sprawl` for live claim-bearing Markdown
+anywhere outside `.handoff/`. Internal directory aliases are scanned; external
+and handoff-like symlink roots fail closed. It reports
 `orphan_handoff` for canonical files with no live actionable item. These
 integrity findings make reconcile exit 1; informational drift remains
 advisory.
@@ -110,13 +113,22 @@ open dream → done (via done, without a claim)
 
 Claim, done, abandon, block, unblock, metadata updates, and deletion re-read
 and mutate under one board lock. Exactly one concurrent claimant can win.
-Once claimed, only `claimed_by` may mutate the row. `update --status` is
+`done` revalidates the strict handoff seal and shadow-workflow scan before the
+status transition, so an edit made after claim cannot disappear into history.
+Once claimed, mutation requires both `claimed_by` and the bearer token whose
+digest is stored in `claim_token_hash`. The public owner label alone is not a
+credential. Host runtimes may derive that proof from an opaque thread identity
+and a machine-local key outside the repository. Plain shells and scripted lanes
+provide both `MANNA_SESSION_ID` and `MANNA_SESSION_TOKEN`. `update --status` is
 rejected; lifecycle state moves only through the named lifecycle verbs.
 
-Strict pair create, delete, seal, attach, and detach write a transaction intent
-before touching either side. The next Manna command completes an interrupted
-intent idempotently. Delete and item-to-non-item conversion archive the handoff
-before removing its live pointer.
+Strict pair create, delete, seal, attach, and detach write an HMAC-authenticated
+transaction intent before touching either side. The key lives outside the
+worktree. Atomic no-clobber installation prevents concurrent intent overwrite;
+the signature binds the canonical project root, filename issue, complete rows,
+canonical `.handoff/` path, archive path, and document. The next Manna command validates the full
+scaffold and completes an interrupted intent idempotently. Delete and
+item-to-non-item conversion archive the handoff before removing its live pointer.
 
 ### The dream gate
 
@@ -176,7 +188,7 @@ Written atomically (temp + rename) by `reconcile --write-drift`. Shape:
 
 ```yaml
 generated_at: "<ISO8601 UTC>"
-session: "<session id or null>"   # MANNA_SESSION_ID if pinned, else null
+session: "<session id or null>"   # explicit or host-derived identity, else null
 findings:
   - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|workflow_sprawl|orphan_handoff|skipped
     issue_id: "mn-xxxxxx"   # optional

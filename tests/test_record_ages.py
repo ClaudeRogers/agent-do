@@ -304,6 +304,7 @@ def manna_board(tmp: Path, offsets: list[int]) -> tuple[Path, dict[str, str]]:
     env = os.environ.copy()
     env["AGENT_DO_HOME"] = str(tmp / "agent-home")
     env["MANNA_SESSION_ID"] = "ages-test"
+    env["MANNA_SESSION_TOKEN"] = "ages-test-token-0123456789abcdef0123456789abcdef"
     board = tmp / "board"
     board.mkdir()
     run(["manna", "init"], board, env)

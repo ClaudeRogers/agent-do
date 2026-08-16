@@ -27,6 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLAUDE_HOOK = REPO / "hooks" / "claude" / "agent-do-session-start.sh"
+CURSOR_HOOK = REPO / "hooks" / "cursor" / "agent-do-session-start.py"
 
 FAILURES: list[str] = []
 
@@ -155,7 +156,15 @@ def build_stub(root: Path, *, direct_coord: bool, interrupts: dict) -> tuple[Pat
     return bindir, fixtures, root / "stub.log"
 
 
-def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> subprocess.CompletedProcess:
+def run_hook(
+    root: Path,
+    bindir: Path,
+    fixtures: Path,
+    log: Path,
+    mode: str,
+    env_file: Path | None = None,
+    identity_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     project = root / "project"
     (project / ".manna").mkdir(parents=True, exist_ok=True)
     home = root / "home"
@@ -177,7 +186,13 @@ def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> 
             "AGENT_DO_ZPC_AUTOINIT": "0",
         }
     )
-    env.pop("CLAUDE_ENV_FILE", None)
+    for variable in ("AGENT_DO_COORD_SESSION", "MANNA_SESSION_ID", "MANNA_SESSION_TOKEN"):
+        env.pop(variable, None)
+    env.update(identity_env or {})
+    if env_file is None:
+        env.pop("CLAUDE_ENV_FILE", None)
+    else:
+        env["CLAUDE_ENV_FILE"] = str(env_file)
 
     return subprocess.run(
         ["bash", str(CLAUDE_HOOK)],
@@ -187,6 +202,147 @@ def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> 
         check=False,
         env=env,
     )
+
+
+def test_session_identity_exports_are_complete_and_private() -> None:
+    print("session identity exports:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bindir, fixtures, log = build_stub(root, direct_coord=True, interrupts=INTERRUPTS_NONE)
+        env_file = root / "session.env"
+        env_file.write_text("", encoding="utf-8")
+        proc = run_hook(root, bindir, fixtures, log, "valid", env_file)
+
+        check("identity hook exits 0", proc.returncode == 0, proc.stderr)
+        exports = env_file.read_text(encoding="utf-8")
+        check(
+            "coord identity is pinned",
+            'export AGENT_DO_COORD_SESSION="stub-session"' in exports,
+            exports,
+        )
+        check(
+            "Manna public identity is pinned",
+            'export MANNA_SESSION_ID="stub-session"' in exports,
+            exports,
+        )
+        token_lines = [
+            line for line in exports.splitlines() if line.startswith("export MANNA_SESSION_TOKEN=")
+        ]
+        check("Manna private token is pinned exactly once", len(token_lines) == 1, exports)
+        token = token_lines[0].split('"', 2)[1] if token_lines else ""
+        check(
+            "Manna private token has 256-bit hex shape",
+            len(token) == 64 and all(character in "0123456789abcdef" for character in token),
+            token,
+        )
+        check(
+            "Manna private token is not emitted in hook output",
+            bool(token) and token not in proc.stdout and token not in proc.stderr,
+        )
+
+        partial_file = root / "partial.env"
+        partial_file.write_text("", encoding="utf-8")
+        run_hook(
+            root,
+            bindir,
+            fixtures,
+            log,
+            "valid",
+            partial_file,
+            {"MANNA_SESSION_ID": "stale-partial-owner"},
+        )
+        partial_exports = partial_file.read_text(encoding="utf-8")
+        check(
+            "incomplete inherited identity is replaced as one pair",
+            'export MANNA_SESSION_ID="stub-session"' in partial_exports
+            and "export MANNA_SESSION_TOKEN=" in partial_exports
+            and "stale-partial-owner" not in partial_exports,
+            partial_exports,
+        )
+
+        complete_file = root / "complete.env"
+        complete_file.write_text("", encoding="utf-8")
+        run_hook(
+            root,
+            bindir,
+            fixtures,
+            log,
+            "valid",
+            complete_file,
+            {
+                "MANNA_SESSION_ID": "pinned-lane",
+                "MANNA_SESSION_TOKEN": "a" * 64,
+            },
+        )
+        complete_exports = complete_file.read_text(encoding="utf-8")
+        check(
+            "complete inherited identity pair is preserved",
+            "MANNA_SESSION_ID" not in complete_exports
+            and "MANNA_SESSION_TOKEN" not in complete_exports,
+            complete_exports,
+        )
+
+
+def test_cursor_session_identity_exports_are_complete() -> None:
+    print("Cursor session identity exports:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        project.mkdir()
+        env = dict(os.environ)
+        env.update(
+            {
+                "AGENT_DO_REPO": str(REPO),
+                "AGENT_DO_HOME": str(root / "agent-do-home"),
+                "HOME": str(root / "home"),
+                "AGENT_DO_BOOTSTRAP_PROMPT_MODE": "disabled",
+                "AGENT_DO_ZPC_INJECT": "0",
+                "AGENT_DO_ZPC_AUTOINIT": "0",
+            }
+        )
+        for variable in (
+            "AGENT_DO_COORD_SESSION",
+            "MANNA_SESSION_ID",
+            "MANNA_SESSION_TOKEN",
+        ):
+            env.pop(variable, None)
+        proc = subprocess.run(
+            ["python3", str(CURSOR_HOOK)],
+            input=json.dumps(
+                {
+                    "cwd": str(project),
+                    "conversation_id": "cursor-conversation-123",
+                }
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        check("Cursor identity hook exits 0", proc.returncode == 0, proc.stderr)
+        try:
+            payload = json.loads(proc.stdout)
+            exports = payload["env"]
+        except Exception as exc:  # noqa: BLE001
+            check("Cursor identity hook emits environment", False, f"{exc}: {proc.stdout!r}")
+            return
+        check("Cursor identity hook emits environment", True)
+        check(
+            "Cursor coord identity is pinned",
+            exports.get("AGENT_DO_COORD_SESSION") == "cursor-conversation-123",
+            repr(exports),
+        )
+        check(
+            "Cursor Manna public identity is pinned",
+            exports.get("MANNA_SESSION_ID") == "cursor-conversation-123",
+            repr(exports),
+        )
+        token = exports.get("MANNA_SESSION_TOKEN", "")
+        check(
+            "Cursor Manna private token has 256-bit hex shape",
+            len(token) == 64 and all(character in "0123456789abcdef" for character in token),
+            token,
+        )
 
 
 def context_of(proc: subprocess.CompletedProcess) -> str:
@@ -306,6 +462,8 @@ def main() -> int:
     test_wellformed_reads_render_identically()
     test_interrupts_take_precedence()
     test_unreadable_answers_degrade_quietly()
+    test_session_identity_exports_are_complete_and_private()
+    test_cursor_session_identity_exports_are_complete()
 
     print()
     if FAILURES:

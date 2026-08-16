@@ -14,7 +14,8 @@ use manna_core::age::{age_of, dated};
 use manna_core::error::MannaError;
 use manna_core::id::generate_unique_id;
 use manna_core::issue::{
-    dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, DREAM_INERT_MARKER,
+    dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, SessionIdentity,
+    DREAM_INERT_MARKER,
 };
 use manna_core::reconcile::{
     check_blocker_desync, check_dangling_track, check_landed_open, check_stale_dream,
@@ -25,7 +26,8 @@ use manna_core::store::MannaStore;
 use manna_core::workflow::{
     attach_handoff, canonical_handoff_path, create_paired_issue, delete_paired_issue,
     detach_handoff, find_orphan_handoffs, handoff_manna_id, initialize_workflow,
-    load_workflow_for_board, rebind_handoff, recover_pair_transactions, validate_handoff,
+    load_workflow_for_board, rebind_handoff_metadata, recover_pair_transactions,
+    runtime_session_identity, runtime_session_label, seal_handoff, validate_handoff,
     validate_scaffold, WorkflowConfig, HANDOFF_DIR,
 };
 
@@ -406,10 +408,80 @@ struct DriftReport {
 // Helper Functions
 // ============================================================================
 
-/// Get session ID from environment or generate default.
-fn get_session_id() -> String {
-    std::env::var("MANNA_SESSION_ID")
-        .unwrap_or_else(|_| format!("ses_pid{}_{}", std::process::id(), Utc::now().timestamp()))
+/// Load the pinned, authenticated session identity used for ownership.
+///
+/// Per-process fallbacks make separate `claim` and `done` invocations appear
+/// to be different sessions. They also turn a visible owner label into a
+/// forgeable credential. Mutations therefore fail closed unless both values
+/// were pinned explicitly or an agent host supplies an opaque runtime identity
+/// whose proof can be derived under the machine-local Manna key.
+fn get_session_identity() -> Result<SessionIdentity, String> {
+    let id = std::env::var("MANNA_SESSION_ID").ok();
+    let token = std::env::var("MANNA_SESSION_TOKEN").ok();
+    match (id, token) {
+        (Some(id), Some(token)) => return SessionIdentity::from_token(&id, &token),
+        (Some(_), None) => {
+            return Err(
+                "MANNA_SESSION_ID is pinned but MANNA_SESSION_TOKEN is missing; ownership requires both values"
+                    .to_string(),
+            )
+        }
+        (None, Some(_)) => {
+            return Err(
+                "MANNA_SESSION_TOKEN is pinned but MANNA_SESSION_ID is missing; ownership requires both values"
+                    .to_string(),
+            )
+        }
+        (None, None) => {}
+    }
+
+    // Codex cannot persist arbitrary environment returned by SessionStart,
+    // but it does pin one opaque thread identifier across every shell. Derive
+    // a private proof under a machine-local key while exposing only coord's
+    // compact public label. The same pattern covers hosts that provide their
+    // own opaque Claude identity when the Claude env-file hook is unavailable.
+    for (runtime, variable) in [
+        ("codex", "CODEX_THREAD_ID"),
+        ("claude", "CLAUDE_THREAD_ID"),
+        ("claude", "CLAUDE_SESSION_ID"),
+        ("claude", "CLAUDE_AGENT_ID"),
+    ] {
+        if let Ok(opaque_id) = std::env::var(variable) {
+            if !opaque_id.trim().is_empty() {
+                return runtime_session_identity(runtime, &opaque_id);
+            }
+        }
+    }
+
+    Err(
+        "Manna session identity is not pinned; start through an agent-do session hook or export both MANNA_SESSION_ID and a secret MANNA_SESSION_TOKEN"
+            .to_string(),
+    )
+}
+
+fn require_session_identity() -> SessionIdentity {
+    get_session_identity().unwrap_or_else(|error| output_error(&error, EXIT_NEEDS_AUTHORIZATION))
+}
+
+fn current_session_label() -> Option<String> {
+    if let Ok(id) = std::env::var("MANNA_SESSION_ID") {
+        if !id.trim().is_empty() {
+            return Some(id);
+        }
+    }
+    for (runtime, variable) in [
+        ("codex", "CODEX_THREAD_ID"),
+        ("claude", "CLAUDE_THREAD_ID"),
+        ("claude", "CLAUDE_SESSION_ID"),
+        ("claude", "CLAUDE_AGENT_ID"),
+    ] {
+        if let Ok(opaque_id) = std::env::var(variable) {
+            if let Ok(label) = runtime_session_label(runtime, &opaque_id) {
+                return Some(label);
+            }
+        }
+    }
+    None
 }
 
 /// Output success response as YAML and exit with success code.
@@ -498,6 +570,7 @@ fn error_to_exit_code(err: &MannaError) -> i32 {
         MannaError::InvalidStatusTransition { .. } => EXIT_USER_ERROR,
         MannaError::InvalidId(_) => EXIT_USER_ERROR,
         MannaError::MutationRejected(_) => EXIT_USER_ERROR,
+        MannaError::RecoveryConflict(_) => EXIT_USER_ERROR,
         MannaError::Io(_) => EXIT_SYSTEM_ERROR,
         MannaError::Json(_) => EXIT_SYSTEM_ERROR,
         MannaError::NotInitialized => EXIT_USER_ERROR,
@@ -561,29 +634,33 @@ fn find_issue(issues: &[Issue], id: &str) -> Issue {
         })
 }
 
-fn recover_transactions(store: &MannaStore) {
-    if let Err(error) = recover_pair_transactions(Path::new("."), store) {
-        output_error(
-            &format!("Cannot recover Manna workflow transaction: {}", error),
-            EXIT_SYSTEM_ERROR,
-        );
+fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig>) {
+    if let Err(error) = store.validate_storage_root() {
+        handle_manna_error(error);
     }
-}
-
-fn load_board(store: &MannaStore) -> Vec<Issue> {
-    recover_transactions(store);
-    match store.load_issues() {
+    let mut issues = match store.load_issues() {
         Ok(issues) => issues,
         Err(error) => handle_manna_error(error),
-    }
-}
-
-fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig>) {
-    let issues = load_board(store);
+    };
     let workflow = match load_workflow_for_board(Path::new("."), &issues) {
         Ok(config) => config,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
     };
+    if let Some(config) = workflow.as_ref() {
+        if let Err(error) = validate_scaffold(Path::new("."), config) {
+            output_error(&error, EXIT_SYSTEM_ERROR);
+        }
+        if let Err(error) = recover_pair_transactions(Path::new("."), store, config) {
+            output_error(
+                &format!("Cannot recover Manna workflow transaction: {}", error),
+                EXIT_SYSTEM_ERROR,
+            );
+        }
+        issues = match store.load_issues() {
+            Ok(issues) => issues,
+            Err(error) => handle_manna_error(error),
+        };
+    }
     (issues, workflow)
 }
 
@@ -633,7 +710,7 @@ fn cmd_status() -> ! {
         );
     }
 
-    let session_id = get_session_id();
+    let session_id = current_session_label().unwrap_or_else(|| "unbound".to_string());
 
     let (issues, workflow) = load_board_workflow(&store);
     let claimed_issues: Vec<String> = issues
@@ -758,7 +835,7 @@ fn cmd_claim(id: String) -> ! {
         );
     }
 
-    let session_id = get_session_id();
+    let session = require_session_identity();
 
     let (issues, workflow) = load_board_workflow(&store);
 
@@ -771,7 +848,7 @@ fn cmd_claim(id: String) -> ! {
         output_error(&dream_claim_refusal(&issue.id), EXIT_NEEDS_AUTHORIZATION);
     }
 
-    let claimed = match store.claim_issue_checked(&id, &session_id, |current, current_board| {
+    let claimed = match store.claim_issue_checked(&id, &session, |current, current_board| {
         if current.issue_type == IssueType::Dream {
             return Err(dream_claim_refusal(&current.id));
         }
@@ -780,7 +857,8 @@ fn cmd_claim(id: String) -> ! {
             .filter(|_| current.issue_type == IssueType::Item)
         {
             validate_handoff(Path::new("."), config, current)?;
-            let shadows = check_workflow_sprawl_for_issue(current_board, config, &current.id);
+            let shadows =
+                check_workflow_sprawl_for_issue(Path::new("."), current_board, config, &current.id);
             if !shadows.is_empty() {
                 return Err(format!(
                     "shadow handoff workflow detected for {}: {}",
@@ -818,9 +896,26 @@ fn cmd_done(id: String) -> ! {
         );
     }
 
-    let _ = load_board_workflow(&store);
-    let session_id = get_session_id();
-    let issue = match store.complete_issue(&id, &session_id) {
+    let (_, workflow) = load_board_workflow(&store);
+    let session = require_session_identity();
+    let issue = match store.complete_issue_checked(&id, &session, |current, current_board| {
+        if let Some(config) = workflow
+            .as_ref()
+            .filter(|_| current.issue_type == IssueType::Item)
+        {
+            validate_handoff(Path::new("."), config, current)?;
+            let shadows =
+                check_workflow_sprawl_for_issue(Path::new("."), current_board, config, &current.id);
+            if !shadows.is_empty() {
+                return Err(format!(
+                    "shadow handoff workflow detected for {}: {}",
+                    current.id,
+                    shadows.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }) {
         Ok(issue) => issue,
         Err(error) => handle_manna_error(error),
     };
@@ -842,8 +937,8 @@ fn cmd_abandon(id: String) -> ! {
     }
 
     let _ = load_board_workflow(&store);
-    let session_id = get_session_id();
-    let issue = match store.release_issue(&id, &session_id) {
+    let session = require_session_identity();
+    let issue = match store.release_issue(&id, &session) {
         Ok(issue) => issue,
         Err(error) => handle_manna_error(error),
     };
@@ -862,7 +957,7 @@ fn cmd_handoff_seal(id: String) -> ! {
             EXIT_USER_ERROR,
         );
     }
-    let session_id = get_session_id();
+    let session = require_session_identity();
     let (issues, workflow) = load_board_workflow(&store);
     let config = workflow.as_ref().unwrap_or_else(|| {
         output_error(
@@ -877,10 +972,10 @@ fn cmd_handoff_seal(id: String) -> ! {
             EXIT_USER_ERROR,
         );
     }
-    if let Err(error) = issue.require_owner(&session_id) {
+    if let Err(error) = issue.require_owner(&session) {
         output_error(&error, EXIT_USER_ERROR);
     }
-    let sealed = match rebind_handoff(Path::new("."), &store, config, &issue, &issue, true) {
+    let sealed = match seal_handoff(Path::new("."), &store, config, &issue) {
         Ok(issue) => issue,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
     };
@@ -901,8 +996,8 @@ fn cmd_block(id: String, blocker_id: String) -> ! {
     }
 
     let _ = load_board_workflow(&store);
-    let session_id = get_session_id();
-    let issue = match store.add_blocker(&id, &blocker_id, &session_id) {
+    let session = require_session_identity();
+    let issue = match store.add_blocker(&id, &blocker_id, &session) {
         Ok(issue) => issue,
         Err(error) => handle_manna_error(error),
     };
@@ -924,8 +1019,8 @@ fn cmd_unblock(id: String, blocker_id: String) -> ! {
     }
 
     let _ = load_board_workflow(&store);
-    let session_id = get_session_id();
-    let issue = match store.remove_blocker(&id, &blocker_id, &session_id) {
+    let session = require_session_identity();
+    let issue = match store.remove_blocker(&id, &blocker_id, &session) {
         Ok(issue) => issue,
         Err(error) => handle_manna_error(error),
     };
@@ -1063,10 +1158,10 @@ fn cmd_update(request: UpdateRequest) -> ! {
             EXIT_USER_ERROR,
         );
     }
-    let session_id = get_session_id();
+    let session = require_session_identity();
     let (issues, workflow) = load_board_workflow(&store);
     let before = find_issue(&issues, &id);
-    if let Err(error) = before.require_owner(&session_id) {
+    if let Err(error) = before.require_owner(&session) {
         output_error(&error, EXIT_USER_ERROR);
     }
     let type_before = before.issue_type;
@@ -1157,7 +1252,7 @@ fn cmd_update(request: UpdateRequest) -> ! {
                     }
                 }
                 issue.prompt = prompt_before.clone();
-                match rebind_handoff(Path::new("."), &store, config, &before, &issue, true) {
+                match rebind_handoff_metadata(Path::new("."), &store, config, &before, &issue) {
                     Ok(issue) => issue,
                     Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
                 }
@@ -1206,7 +1301,7 @@ fn cmd_update(request: UpdateRequest) -> ! {
                 }
                 issue.prompt = None;
                 issue.handoff_digest = None;
-                replace_metadata_atomically(&store, &before, &issue, &session_id)
+                replace_metadata_atomically(&store, &before, &issue, &session)
             }
         }
     } else {
@@ -1214,7 +1309,7 @@ fn cmd_update(request: UpdateRequest) -> ! {
             let trimmed = new_prompt.trim();
             issue.prompt = (!trimmed.is_empty()).then(|| trimmed.to_string());
         }
-        replace_metadata_atomically(&store, &before, &issue, &session_id)
+        replace_metadata_atomically(&store, &before, &issue, &session)
     };
     output_success(UpdateData {
         issue: updated,
@@ -1226,12 +1321,12 @@ fn replace_metadata_atomically(
     store: &MannaStore,
     before: &Issue,
     after: &Issue,
-    session_id: &str,
+    session: &SessionIdentity,
 ) -> Issue {
-    let expected_updated = before.updated_at;
+    let expected = before.clone();
     let replacement = after.clone();
-    match store.mutate_issue_metadata(&before.id, session_id, move |current, issues| {
-        if current.updated_at != expected_updated {
+    match store.mutate_issue_metadata(&before.id, session, move |current, issues| {
+        if current != &expected {
             return Err(format!(
                 "{} changed concurrently; retry the update",
                 current.id
@@ -1275,10 +1370,10 @@ fn cmd_delete(id: String) -> ! {
             EXIT_USER_ERROR,
         );
     }
-    let session_id = get_session_id();
+    let session = require_session_identity();
     let (issues, workflow) = load_board_workflow(&store);
     let issue = find_issue(&issues, &id);
-    if let Err(error) = issue.require_owner(&session_id) {
+    if let Err(error) = issue.require_owner(&session) {
         output_error(&error, EXIT_USER_ERROR);
     }
     if let Some(config) = workflow
@@ -1288,7 +1383,7 @@ fn cmd_delete(id: String) -> ! {
         if let Err(error) = delete_paired_issue(Path::new("."), &store, config, &issue) {
             output_error(&error, EXIT_SYSTEM_ERROR);
         }
-    } else if let Err(error) = store.delete_issue_owned(&issue.id, &session_id) {
+    } else if let Err(error) = store.delete_issue_owned(&issue.id, &session) {
         handle_manna_error(error);
     }
     output_success(IssueData {
@@ -1590,7 +1685,7 @@ fn cmd_lint(json: bool) -> ! {
     if let Some(config) = workflow.as_ref() {
         findings.extend(lint_strict_workflow(&issues, config));
         findings.extend(
-            check_workflow_sprawl(&issues, config)
+            check_workflow_sprawl(Path::new("."), &issues, config)
                 .into_iter()
                 .map(|finding| LintFinding {
                     issue_id: finding.issue_id.unwrap_or_else(|| "board".to_string()),
@@ -1789,9 +1884,26 @@ fn coord_peer_statuses() -> Result<HashMap<String, String>, String> {
     Ok(statuses)
 }
 
+fn coord_status_for_owner<'a>(
+    statuses: &'a HashMap<String, String>,
+    claimed_by: &str,
+) -> Option<&'a String> {
+    statuses.get(claimed_by).or_else(|| {
+        let compact = claimed_by
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .take(16)
+            .collect::<String>();
+        (!compact.is_empty())
+            .then(|| format!("session-{}", compact))
+            .and_then(|label| statuses.get(&label))
+    })
+}
+
 /// dead_claim: claims held by sessions that are provably gone.
 ///
-/// Default-format sessions are probed by pid; other formats are matched
+/// Legacy pid-format sessions are probed by pid; other formats are matched
 /// against coord peer statuses (finding only when coord reports the agent
 /// dead/stale/stopped — absent from coord is inconclusive, not dead).
 fn check_dead_claims(issues: &[Issue]) -> Vec<Finding> {
@@ -1824,7 +1936,7 @@ fn check_dead_claims(issues: &[Issue]) -> Vec<Finding> {
             Ok(statuses) => {
                 for issue in coord_lookups {
                     let claimed_by = issue.claimed_by.as_ref().unwrap();
-                    if let Some(status) = statuses.get(claimed_by) {
+                    if let Some(status) = coord_status_for_owner(&statuses, claimed_by) {
                         if matches!(status.as_str(), "dead" | "stale" | "stopped") {
                             findings.push(Finding {
                                 kind: FindingKind::DeadClaim,
@@ -2083,9 +2195,16 @@ fn path_is_legacy_handoff_root(path: &Path) -> bool {
 }
 
 fn collect_shadow_handoffs(root: &Path, files: &mut Vec<PathBuf>, unsafe_links: &mut Vec<PathBuf>) {
-    let canonical_handoff = Path::new(".").join(HANDOFF_DIR).canonicalize().ok();
+    let canonical_project = root.canonicalize().ok();
+    let canonical_handoff = root.join(HANDOFF_DIR).canonicalize().ok();
     let mut pending = vec![root.to_path_buf()];
+    let mut visited_directories = HashSet::new();
     while let Some(dir) = pending.pop() {
+        if let Ok(canonical) = dir.canonicalize() {
+            if !visited_directories.insert(canonical) {
+                continue;
+            }
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -2111,6 +2230,27 @@ fn collect_shadow_handoffs(root: &Path, files: &mut Vec<PathBuf>, unsafe_links: 
                     // structured frontmatter, not the link name, decides
                     // whether it is a shadow work order.
                     files.push(path);
+                } else if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    if target
+                        .as_ref()
+                        .zip(canonical_project.as_ref())
+                        .is_none_or(|(target, project)| !target.starts_with(project))
+                    {
+                        // External directory aliases can hide an arbitrarily
+                        // named second prompt tree and cannot be bounded by
+                        // the repository walk. Strict workflow rejects them.
+                        unsafe_links.push(path);
+                    } else if path_is_legacy_handoff_root(&path)
+                        || name.contains("handoff")
+                        || targets_canonical_handoff
+                    {
+                        unsafe_links.push(path);
+                    } else {
+                        // A neutral internal alias is safe to inspect, but it
+                        // is not safe to skip: claim-bearing Markdown behind
+                        // it is still a second work-order surface.
+                        pending.push(path);
+                    }
                 } else if path_is_legacy_handoff_root(&path)
                     || name.contains("handoff")
                     || targets_canonical_handoff
@@ -2134,17 +2274,17 @@ fn collect_shadow_handoffs(root: &Path, files: &mut Vec<PathBuf>, unsafe_links: 
     }
 }
 
-/// Strict boards have one durable work-order root. Claim commands in known
-/// legacy roots are shadow workflows even if their board pointer happens to
-/// be valid somewhere else.
-fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Finding> {
+/// Strict boards have one durable work-order root. Any claim-bearing Markdown
+/// outside it is a shadow workflow, regardless of the surrounding directory
+/// name or whether its board pointer happens to be valid somewhere else.
+fn check_workflow_sprawl(base: &Path, issues: &[Issue], config: &WorkflowConfig) -> Vec<Finding> {
     let by_id: HashMap<&str, &Issue> = issues
         .iter()
         .map(|issue| (issue.id.as_str(), issue))
         .collect();
     let mut files = Vec::new();
     let mut unsafe_links = Vec::new();
-    collect_shadow_handoffs(Path::new("."), &mut files, &mut unsafe_links);
+    collect_shadow_handoffs(base, &mut files, &mut unsafe_links);
     files.sort();
     files.dedup();
 
@@ -2167,9 +2307,10 @@ fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Findi
             Err(_) => continue,
         };
         let mut ids = handoff_manna_id(&text).into_iter().collect::<Vec<_>>();
-        if path_is_legacy_handoff_root(&file) {
-            ids.extend(claim_command_ids(&text));
-        }
+        // A live claim command is authoritative workflow language regardless
+        // of the surrounding directory name. Restricting this to a list of
+        // historical roots merely invites a new neutral shadow root.
+        ids.extend(claim_command_ids(&text));
         ids.sort();
         ids.dedup();
         for id in ids {
@@ -2204,7 +2345,7 @@ fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Findi
             Some(pointer) => pointer,
             None => continue,
         };
-        if canonical_handoff_path(Path::new("."), config, issue, Some(pointer)).is_err() {
+        if canonical_handoff_path(base, config, issue, Some(pointer)).is_err() {
             findings.push(Finding {
                 kind: FindingKind::WorkflowSprawl,
                 issue_id: Some(issue.id.clone()),
@@ -2224,11 +2365,12 @@ fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Findi
 }
 
 fn check_workflow_sprawl_for_issue(
+    base: &Path,
     issues: &[Issue],
     config: &WorkflowConfig,
     issue_id: &str,
 ) -> Vec<String> {
-    check_workflow_sprawl(issues, config)
+    check_workflow_sprawl(base, issues, config)
         .into_iter()
         .filter(|finding| {
             finding
@@ -2242,11 +2384,13 @@ fn check_workflow_sprawl_for_issue(
 
 /// Write findings to `.manna/drift.yaml` atomically (temp + rename).
 fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
+    use std::io::Write;
+
     let report = DriftReport {
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-        // The pid-based fallback id would be this transient CLI invocation,
-        // not a real session; only a caller-pinned session id is meaningful.
-        session: std::env::var("MANNA_SESSION_ID").ok(),
+        // Explicit pins and host-owned opaque thread identities are stable
+        // across CLI invocations; transient pid fallbacks do not exist.
+        session: current_session_label(),
         findings: findings.to_vec(),
     };
     let yaml = serde_yaml::to_string(&report).map_err(|e| e.to_string())?;
@@ -2258,9 +2402,34 @@ fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
         1,
     );
     let path = Path::new(".manna").join("drift.yaml");
-    let temp_path = Path::new(".manna").join("drift.yaml.tmp");
-    std::fs::write(&temp_path, yaml).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp_path, &path).map_err(|e| e.to_string())?;
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("refusing symlinked .manna/drift.yaml".to_string());
+    }
+    let temp_path = Path::new(".manna").join(format!(
+        ".drift.yaml.{}.{}.tmp",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = temp
+        .write_all(yaml.as_bytes())
+        .and_then(|_| temp.sync_all())
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+    drop(temp);
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+    std::fs::File::open(".manna")
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| error.to_string())?;
     Ok(path.display().to_string())
 }
 
@@ -2268,7 +2437,7 @@ fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
 /// existing state machine. Returns (fixed issue ids, failure messages).
 fn apply_reconcile_fixes(
     store: &MannaStore,
-    _issues: &[Issue],
+    issues: &[Issue],
     findings: &[Finding],
 ) -> (Vec<String>, Vec<String>) {
     let mut fixed = Vec::new();
@@ -2285,13 +2454,35 @@ fn apply_reconcile_fixes(
         }
         match finding.kind {
             FindingKind::DeadClaim => {
-                match store.repair_issue(&id, |issue, _| issue.release_dead_claim()) {
+                let Some(expected) = issues.iter().find(|issue| issue.id == id).cloned() else {
+                    failures.push(format!("{}: stale reconcile evidence: row disappeared", id));
+                    continue;
+                };
+                match store.repair_issue(&id, move |issue, _| {
+                    if issue != &expected {
+                        return Err(
+                            "stale reconcile evidence: claim changed after inspection; no claim was released"
+                                .to_string(),
+                        );
+                    }
+                    issue.release_dead_claim()
+                }) {
                     Ok(_) => fixed.push(id),
                     Err(error) => failures.push(format!("{}: {}", id, error)),
                 }
             }
             FindingKind::BlockerDesync => {
-                match store.repair_issue(&id, |issue, current| {
+                let Some(expected) = issues.iter().find(|issue| issue.id == id).cloned() else {
+                    failures.push(format!("{}: stale reconcile evidence: row disappeared", id));
+                    continue;
+                };
+                match store.repair_issue(&id, move |issue, current| {
+                    if issue != &expected {
+                        return Err(
+                            "stale reconcile evidence: blocker row changed after inspection"
+                                .to_string(),
+                        );
+                    }
                     let resolved = issue
                         .blocked_by
                         .iter()
@@ -2364,7 +2555,7 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
             &issues,
             Path::new(&config.handoff_dir),
         ));
-        findings.extend(check_workflow_sprawl(&issues, config));
+        findings.extend(check_workflow_sprawl(Path::new("."), &issues, config));
         findings.extend(
             find_orphan_handoffs(Path::new("."), &issues)
                 .into_iter()
@@ -2512,6 +2703,11 @@ mod tests {
     // Mutex to serialize tests that modify MANNA_SESSION_ID env var
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    fn session(id: &str) -> SessionIdentity {
+        SessionIdentity::from_token(id, &format!("{}-0123456789abcdef0123456789abcdef", id))
+            .unwrap()
+    }
+
     fn setup_store() -> (TempDir, MannaStore) {
         let temp_dir = TempDir::new().unwrap();
         let store = MannaStore::new(temp_dir.path());
@@ -2520,22 +2716,57 @@ mod tests {
     }
 
     #[test]
-    fn test_get_session_id_default() {
+    fn test_session_identity_fails_closed_without_pins() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        // Clear env var if set
+        let runtime_variables = [
+            "CODEX_THREAD_ID",
+            "CLAUDE_THREAD_ID",
+            "CLAUDE_SESSION_ID",
+            "CLAUDE_AGENT_ID",
+        ];
+        let saved = runtime_variables.map(|name| (name, std::env::var(name).ok()));
         std::env::remove_var("MANNA_SESSION_ID");
-
-        let session_id = get_session_id();
-        assert!(session_id.starts_with("ses_pid"));
+        std::env::remove_var("MANNA_SESSION_TOKEN");
+        for variable in runtime_variables {
+            std::env::remove_var(variable);
+        }
+        assert!(get_session_identity().is_err());
+        for (variable, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(variable, value);
+            }
+        }
     }
 
     #[test]
-    fn test_get_session_id_from_env() {
+    fn test_session_identity_from_env() {
         let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MANNA_SESSION_ID", "ses_test_123");
-        let session_id = get_session_id();
-        assert_eq!(session_id, "ses_test_123");
+        std::env::set_var(
+            "MANNA_SESSION_TOKEN",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let session = get_session_identity().unwrap();
+        assert_eq!(session.id(), "ses_test_123");
         std::env::remove_var("MANNA_SESSION_ID");
+        std::env::remove_var("MANNA_SESSION_TOKEN");
+    }
+
+    #[test]
+    fn coord_status_matches_raw_explicit_session_labels() {
+        let statuses = HashMap::from([
+            ("session-019d79125a477c01".to_string(), "dead".to_string()),
+            ("codex-aaaaaaaa11114222".to_string(), "active".to_string()),
+        ]);
+        assert_eq!(
+            coord_status_for_owner(&statuses, "019d7912-5a47-7c01-b9ae-90ac2060a27e")
+                .map(String::as_str),
+            Some("dead")
+        );
+        assert_eq!(
+            coord_status_for_owner(&statuses, "codex-aaaaaaaa11114222").map(String::as_str),
+            Some("active")
+        );
     }
 
     #[test]
@@ -2954,14 +3185,18 @@ mod tests {
         store.append_issue(&issue).unwrap();
 
         // Claim
-        store.claim_issue("mn-claim1", "ses_test").unwrap();
+        store
+            .claim_issue("mn-claim1", &session("ses_test"))
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::InProgress);
         assert_eq!(issues[0].claimed_by, Some("ses_test".to_string()));
 
         // Release
-        store.release_issue("mn-claim1", "ses_test").unwrap();
+        store
+            .release_issue("mn-claim1", &session("ses_test"))
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::Open);
@@ -2975,8 +3210,12 @@ mod tests {
         let issue = Issue::new("mn-done01".to_string(), "Complete Test".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
-        store.claim_issue("mn-done01", "ses_test").unwrap();
-        store.complete_issue("mn-done01", "ses_test").unwrap();
+        store
+            .claim_issue("mn-done01", &session("ses_test"))
+            .unwrap();
+        store
+            .complete_issue("mn-done01", &session("ses_test"))
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::Done);
@@ -2993,7 +3232,7 @@ mod tests {
         store.append_issue(&issue).unwrap();
 
         store
-            .add_blocker("mn-block2", "mn-block1", "ses_test")
+            .add_blocker("mn-block2", "mn-block1", &session("ses_test"))
             .unwrap();
 
         let issues = store.load_issues().unwrap();
@@ -3014,7 +3253,7 @@ mod tests {
         store.append_issue(&issue).unwrap();
 
         store
-            .remove_blocker("mn-unblk2", "mn-unblk1", "ses_test")
+            .remove_blocker("mn-unblk2", "mn-unblk1", &session("ses_test"))
             .unwrap();
 
         let issues = store.load_issues().unwrap();
@@ -3029,7 +3268,7 @@ mod tests {
             Issue::new("mn-ctx001".to_string(), "Open Issue".to_string()).unwrap(),
             {
                 let mut i = Issue::new("mn-ctx002".to_string(), "In Progress".to_string()).unwrap();
-                i.claim("ses_test".to_string()).unwrap();
+                i.claim(&session("ses_test")).unwrap();
                 i
             },
             {
@@ -3066,8 +3305,8 @@ mod tests {
             Issue::new("mn-flt002".to_string(), "Open 2".to_string()).unwrap(),
             {
                 let mut i = Issue::new("mn-flt003".to_string(), "Done".to_string()).unwrap();
-                i.claim("ses".to_string()).unwrap();
-                i.complete("ses").unwrap();
+                i.claim(&session("ses")).unwrap();
+                i.complete(&session("ses")).unwrap();
                 i
             },
         ];
@@ -3094,8 +3333,8 @@ mod tests {
     }
 
     fn done_issue(mut issue: Issue) -> Issue {
-        issue.claim("ses_x".to_string()).unwrap();
-        issue.complete("ses_x").unwrap();
+        issue.claim(&session("ses_x")).unwrap();
+        issue.complete(&session("ses_x")).unwrap();
         issue
     }
 
@@ -3214,5 +3453,102 @@ mod tests {
         let issue = Issue::new("mn-aaa111".to_string(), "Any".to_string()).unwrap();
         let findings = check_prompt_pairing_reverse(&[issue], &temp.path().join("absent"));
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn generic_markdown_claim_is_detected_as_shadow_workflow() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(HANDOFF_DIR)).unwrap();
+        std::fs::write(
+            temp.path().join("innocent-notes.md"),
+            "Pick this up with `agent-do manna claim mn-abc123`.\n",
+        )
+        .unwrap();
+        let issue = Issue::new("mn-abc123".to_string(), "Live work".to_string()).unwrap();
+        let findings = check_workflow_sprawl(temp.path(), &[issue], &WorkflowConfig::default());
+        assert!(findings.iter().any(|finding| {
+            finding.issue_id.as_deref() == Some("mn-abc123")
+                && finding
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("innocent-notes.md"))
+        }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neutral_external_symlink_directory_is_detected_as_shadow_root() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(
+            outside.path().join("work.md"),
+            "agent-do manna claim mn-abc123\n",
+        )
+        .unwrap();
+        symlink(outside.path(), project.path().join("notes")).unwrap();
+        let issue = Issue::new("mn-abc123".to_string(), "Live work".to_string()).unwrap();
+        let findings = check_workflow_sprawl(project.path(), &[issue], &WorkflowConfig::default());
+        assert!(findings.iter().any(|finding| {
+            finding.kind == FindingKind::WorkflowSprawl
+                && finding
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("notes"))
+        }));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn neutral_internal_symlink_directory_is_scanned_for_claims() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(HANDOFF_DIR)).unwrap();
+        // The real target sits under a normally skipped build directory, so
+        // the only way to see the claim is to follow the neutral alias.
+        let hidden = project.path().join("target");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("work.md"), "agent-do manna claim mn-abc123\n").unwrap();
+        symlink(&hidden, project.path().join("notes")).unwrap();
+        let issue = Issue::new("mn-abc123".to_string(), "Live work".to_string()).unwrap();
+        let findings = check_workflow_sprawl(project.path(), &[issue], &WorkflowConfig::default());
+        assert!(findings.iter().any(|finding| {
+            finding.issue_id.as_deref() == Some("mn-abc123")
+                && finding
+                    .evidence
+                    .as_deref()
+                    .is_some_and(|path| path.ends_with("notes/work.md"))
+        }));
+    }
+
+    #[test]
+    fn stale_dead_claim_fix_cannot_release_a_new_claim() {
+        let (_temp, store) = setup_store();
+        let issue = Issue::new("mn-stale1".to_string(), "Claim race".to_string()).unwrap();
+        store.append_issue(&issue).unwrap();
+        let old = session("ses_old");
+        store.claim_issue(&issue.id, &old).unwrap();
+        let snapshot = store.load_issues().unwrap();
+        let findings = vec![Finding {
+            kind: FindingKind::DeadClaim,
+            issue_id: Some(issue.id.clone()),
+            detail: "old owner is dead".to_string(),
+            evidence: Some("ses_old".to_string()),
+            proposed_fix: Some("release dead claim".to_string()),
+        }];
+
+        store.release_issue(&issue.id, &old).unwrap();
+        let new_owner = session("ses_new");
+        store.claim_issue(&issue.id, &new_owner).unwrap();
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        assert!(fixed.is_empty());
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("stale reconcile evidence")));
+        let current = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(current.claimed_by.as_deref(), Some("ses_new"));
+        current.require_owner(&new_owner).unwrap();
     }
 }

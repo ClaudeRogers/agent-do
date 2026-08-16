@@ -2,6 +2,55 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// A pinned session plus a bearer-token proof that is safe to persist.
+///
+/// The raw token never enters the board or command output. Claims store only
+/// its SHA-256 digest, so knowing a visible `claimed_by` value is insufficient
+/// to impersonate the owning session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIdentity {
+    id: String,
+    token_hash: String,
+}
+
+impl SessionIdentity {
+    pub fn from_token(id: &str, token: &str) -> Result<Self, String> {
+        if id.trim().is_empty() {
+            return Err("MANNA_SESSION_ID must not be empty".to_string());
+        }
+        if token.len() < 32 {
+            return Err("MANNA_SESSION_TOKEN must contain at least 32 characters".to_string());
+        }
+        let digest = Sha256::digest(token.as_bytes());
+        Ok(Self {
+            id: id.to_string(),
+            token_hash: format!("sha256:{:x}", digest),
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn token_hash(&self) -> &str {
+        &self.token_hash
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
 
 /// Issue status enum matching SCHEMA.md
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +121,7 @@ pub fn dream_claim_refusal(id: &str) -> String {
 /// An issue in Manna.
 ///
 /// See SCHEMA.md for field definitions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     /// Unique identifier (format: mn-{6-hex})
     pub id: String,
@@ -104,6 +153,11 @@ pub struct Issue {
     /// When it was claimed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at: Option<DateTime<Utc>>,
+
+    /// Digest of the owning session's bearer token. This is deliberately
+    /// distinct from `claimed_by`: the public owner label is not authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_token_hash: Option<String>,
 
     /// Issue type: track, item (default), or dream
     #[serde(rename = "type", default, skip_serializing_if = "is_default_type")]
@@ -158,6 +212,7 @@ impl Issue {
             blocked_by: Vec::new(),
             claimed_by: None,
             claimed_at: None,
+            claim_token_hash: None,
             issue_type: IssueType::default(),
             track: None,
             source: None,
@@ -173,7 +228,7 @@ impl Issue {
     ///
     /// # Returns
     /// Result indicating success or error if already claimed
-    pub fn claim(&mut self, session_id: String) -> Result<(), String> {
+    pub fn claim(&mut self, session: &SessionIdentity) -> Result<(), String> {
         // The gate lives on the model so no caller can claim a dream, whatever
         // path it arrives by. The CLI checks first to exit 2 with the same text.
         if self.issue_type == IssueType::Dream {
@@ -192,8 +247,9 @@ impl Issue {
         }
 
         let now = Utc::now();
-        self.claimed_by = Some(session_id);
+        self.claimed_by = Some(session.id().to_string());
         self.claimed_at = Some(now);
+        self.claim_token_hash = Some(session.token_hash().to_string());
         self.status = IssueStatus::InProgress;
         self.updated_at = now;
 
@@ -204,12 +260,12 @@ impl Issue {
     ///
     /// # Returns
     /// Result indicating success or error if not claimed
-    pub fn release(&mut self, session_id: &str) -> Result<(), String> {
+    pub fn release(&mut self, session: &SessionIdentity) -> Result<(), String> {
         if self.claimed_by.is_none() {
             return Err("Issue is not claimed".to_string());
         }
 
-        self.require_owner(session_id)?;
+        self.require_owner(session)?;
 
         if self.status != IssueStatus::InProgress {
             return Err(format!(
@@ -220,6 +276,7 @@ impl Issue {
 
         self.claimed_by = None;
         self.claimed_at = None;
+        self.claim_token_hash = None;
         self.status = IssueStatus::Open;
         self.updated_at = Utc::now();
 
@@ -230,7 +287,7 @@ impl Issue {
     ///
     /// # Returns
     /// Result indicating success or error if not in progress
-    pub fn complete(&mut self, session_id: &str) -> Result<(), String> {
+    pub fn complete(&mut self, session: &SessionIdentity) -> Result<(), String> {
         if self.status != IssueStatus::InProgress {
             return Err(format!(
                 "Cannot complete issue with status '{}', must be 'in_progress'",
@@ -238,7 +295,7 @@ impl Issue {
             ));
         }
 
-        self.require_owner(session_id)?;
+        self.require_owner(session)?;
 
         self.status = IssueStatus::Done;
         self.updated_at = Utc::now();
@@ -249,11 +306,11 @@ impl Issue {
     /// Close an unworked dream through an explicit lifecycle verb. Dreams are
     /// intentionally unclaimable, so requiring `in_progress` would make them
     /// impossible to retire without reviving the raw `update --status` bypass.
-    pub fn close_dream(&mut self, session_id: &str) -> Result<(), String> {
+    pub fn close_dream(&mut self, session: &SessionIdentity) -> Result<(), String> {
         if self.issue_type != IssueType::Dream {
             return Err("Only dreams use the unclaimed close transition".to_string());
         }
-        self.require_owner(session_id)?;
+        self.require_owner(session)?;
         if !matches!(self.status, IssueStatus::Open | IssueStatus::Blocked) {
             return Err(format!(
                 "Cannot close dream with status '{}', must be 'open' or 'blocked'",
@@ -269,12 +326,27 @@ impl Issue {
     ///
     /// Unclaimed rows remain editable. Once a claim exists, every lifecycle
     /// and metadata mutation must present the same pinned session identity.
-    pub fn require_owner(&self, session_id: &str) -> Result<(), String> {
+    pub fn require_owner(&self, session: &SessionIdentity) -> Result<(), String> {
         if let Some(owner) = self.claimed_by.as_deref() {
-            if owner != session_id {
+            if owner != session.id() {
                 return Err(format!(
                     "Issue {} is claimed by session {}; current session {} cannot mutate it",
-                    self.id, owner, session_id
+                    self.id,
+                    owner,
+                    session.id()
+                ));
+            }
+            let expected = self.claim_token_hash.as_deref().ok_or_else(|| {
+                format!(
+                    "Issue {} has a legacy claim without an ownership proof; release it through verified reconcile before continuing",
+                    self.id
+                )
+            })?;
+            if !constant_time_eq(expected, session.token_hash()) {
+                return Err(format!(
+                    "Issue {} ownership proof does not match session {}; the visible owner label is not sufficient authority",
+                    self.id,
+                    session.id()
                 ));
             }
         }
@@ -289,6 +361,7 @@ impl Issue {
         }
         self.claimed_by = None;
         self.claimed_at = None;
+        self.claim_token_hash = None;
         if self.status != IssueStatus::Done {
             self.status = if self.blocked_by.is_empty() {
                 IssueStatus::Open
@@ -360,6 +433,29 @@ impl Issue {
 
         if self.claimed_by.is_none() && self.claimed_at.is_some() {
             return Err("Issue without claimed_by cannot have claimed_at set".to_string());
+        }
+
+        if self.claimed_by.is_some() && self.claim_token_hash.is_none() {
+            return Err("Issue with claimed_by must have claim_token_hash set".to_string());
+        }
+
+        if self.claimed_by.is_none() && self.claim_token_hash.is_some() {
+            return Err("Issue without claimed_by cannot have claim_token_hash set".to_string());
+        }
+
+        if let Some(proof) = self.claim_token_hash.as_deref() {
+            let hex = proof.strip_prefix("sha256:").ok_or_else(|| {
+                "claim_token_hash must use the sha256:<64 lowercase hex> format".to_string()
+            })?;
+            if hex.len() != 64
+                || !hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            {
+                return Err(
+                    "claim_token_hash must use the sha256:<64 lowercase hex> format".to_string(),
+                );
+            }
         }
 
         if self.issue_type == IssueType::Track && self.track.is_some() {
@@ -495,6 +591,11 @@ impl SessionEvent {
 mod tests {
     use super::*;
 
+    fn session(id: &str) -> SessionIdentity {
+        SessionIdentity::from_token(id, &format!("{}-0123456789abcdef0123456789abcdef", id))
+            .unwrap()
+    }
+
     #[test]
     fn test_new_issue_valid() {
         let issue = Issue::new("mn-abc123".to_string(), "Test issue".to_string()).unwrap();
@@ -525,7 +626,7 @@ mod tests {
     #[test]
     fn test_claim_issue() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        let result = issue.claim("ses_123".to_string());
+        let result = issue.claim(&session("ses_123"));
         assert!(result.is_ok());
         assert_eq!(issue.status, IssueStatus::InProgress);
         assert_eq!(issue.claimed_by, Some("ses_123".to_string()));
@@ -535,8 +636,8 @@ mod tests {
     #[test]
     fn test_claim_already_claimed() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_123".to_string()).unwrap();
-        let result = issue.claim("ses_456".to_string());
+        issue.claim(&session("ses_123")).unwrap();
+        let result = issue.claim(&session("ses_456"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must be 'open'"));
     }
@@ -545,7 +646,7 @@ mod tests {
     fn test_claim_wrong_status() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
         issue.status = IssueStatus::Done;
-        let result = issue.claim("ses_123".to_string());
+        let result = issue.claim(&session("ses_123"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must be 'open'"));
     }
@@ -553,8 +654,8 @@ mod tests {
     #[test]
     fn test_release_issue() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_123".to_string()).unwrap();
-        let result = issue.release("ses_123");
+        issue.claim(&session("ses_123")).unwrap();
+        let result = issue.release(&session("ses_123"));
         assert!(result.is_ok());
         assert_eq!(issue.status, IssueStatus::Open);
         assert!(issue.claimed_by.is_none());
@@ -564,7 +665,7 @@ mod tests {
     #[test]
     fn test_release_not_claimed() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        let result = issue.release("ses_123");
+        let result = issue.release(&session("ses_123"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not claimed"));
     }
@@ -572,9 +673,9 @@ mod tests {
     #[test]
     fn test_release_rejects_non_owner_without_mutation() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_owner".to_string()).unwrap();
+        issue.claim(&session("ses_owner")).unwrap();
         let before = serde_json::to_string(&issue).unwrap();
-        let error = issue.release("ses_intruder").unwrap_err();
+        let error = issue.release(&session("ses_intruder")).unwrap_err();
         assert!(error.contains("claimed by session ses_owner"));
         assert_eq!(serde_json::to_string(&issue).unwrap(), before);
     }
@@ -582,8 +683,8 @@ mod tests {
     #[test]
     fn test_complete_issue() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_123".to_string()).unwrap();
-        let result = issue.complete("ses_123");
+        issue.claim(&session("ses_123")).unwrap();
+        let result = issue.complete(&session("ses_123"));
         assert!(result.is_ok());
         assert_eq!(issue.status, IssueStatus::Done);
     }
@@ -591,7 +692,7 @@ mod tests {
     #[test]
     fn test_complete_not_in_progress() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        let result = issue.complete("ses_123");
+        let result = issue.complete(&session("ses_123"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must be 'in_progress'"));
     }
@@ -599,18 +700,38 @@ mod tests {
     #[test]
     fn test_complete_rejects_non_owner_without_mutation() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_owner".to_string()).unwrap();
+        issue.claim(&session("ses_owner")).unwrap();
         let before = serde_json::to_string(&issue).unwrap();
-        let error = issue.complete("ses_intruder").unwrap_err();
+        let error = issue.complete(&session("ses_intruder")).unwrap_err();
         assert!(error.contains("claimed by session ses_owner"));
         assert_eq!(serde_json::to_string(&issue).unwrap(), before);
+    }
+
+    #[test]
+    fn visible_owner_id_cannot_impersonate_without_the_token() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Owned".to_string()).unwrap();
+        let owner = SessionIdentity::from_token(
+            "ses_owner",
+            "owner-secret-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let impersonator = SessionIdentity::from_token(
+            "ses_owner",
+            "other-secret-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        issue.claim(&owner).unwrap();
+        let before = issue.clone();
+        let error = issue.complete(&impersonator).unwrap_err();
+        assert!(error.contains("ownership proof does not match"));
+        assert_eq!(issue, before);
     }
 
     #[test]
     fn test_close_dream_uses_explicit_unclaimed_transition() {
         let mut dream = Issue::new("mn-abc123".to_string(), "Parked".to_string()).unwrap();
         dream.issue_type = IssueType::Dream;
-        dream.close_dream("ses_curator").unwrap();
+        dream.close_dream(&session("ses_curator")).unwrap();
         assert_eq!(dream.status, IssueStatus::Done);
         assert!(dream.claimed_by.is_none());
     }
@@ -643,7 +764,7 @@ mod tests {
     #[test]
     fn test_blocked_status_with_claim() {
         let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
-        issue.claim("ses_123".to_string()).unwrap();
+        issue.claim(&session("ses_123")).unwrap();
         assert_eq!(issue.status, IssueStatus::InProgress);
 
         issue.add_blocker("mn-def456".to_string());
@@ -772,7 +893,7 @@ mod tests {
         let mut spark = Issue::new("mn-abc123".to_string(), "Parked spark".to_string()).unwrap();
         spark.issue_type = IssueType::Dream;
 
-        let result = spark.claim("ses_123".to_string());
+        let result = spark.claim(&session("ses_123"));
 
         assert!(result.is_err());
         assert_eq!(spark.status, IssueStatus::Open);
@@ -797,7 +918,7 @@ mod tests {
         spark.issue_type = IssueType::Dream;
         spark.status = IssueStatus::Done;
 
-        let err = spark.claim("ses_123".to_string()).unwrap_err();
+        let err = spark.claim(&session("ses_123")).unwrap_err();
         assert!(err.contains("not claimable work"));
         assert!(!err.contains("must be 'open'"));
     }
@@ -806,10 +927,10 @@ mod tests {
     fn test_claim_after_conversion_to_item_succeeds() {
         let mut spark = Issue::new("mn-abc123".to_string(), "Parked spark".to_string()).unwrap();
         spark.issue_type = IssueType::Dream;
-        assert!(spark.claim("ses_123".to_string()).is_err());
+        assert!(spark.claim(&session("ses_123")).is_err());
 
         spark.issue_type = IssueType::Item;
-        assert!(spark.claim("ses_123".to_string()).is_ok());
+        assert!(spark.claim(&session("ses_123")).is_ok());
         assert_eq!(spark.status, IssueStatus::InProgress);
     }
 
@@ -818,6 +939,6 @@ mod tests {
         // Only dreams are gated; tracks and items keep their v1 claim path.
         let mut umbrella = Issue::new("mn-abc123".to_string(), "Umbrella".to_string()).unwrap();
         umbrella.issue_type = IssueType::Track;
-        assert!(umbrella.claim("ses_123".to_string()).is_ok());
+        assert!(umbrella.claim(&session("ses_123")).is_ok());
     }
 }

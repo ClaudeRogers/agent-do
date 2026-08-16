@@ -31,6 +31,12 @@ pub enum MannaError {
 
     #[error("Mutation rejected: {0}")]
     MutationRejected(String),
+
+    /// An authenticated recovery intent no longer matches either the exact
+    /// before or after row. The caller may discard that intent, but must not
+    /// report its requested mutation as applied.
+    #[error("Recovery conflict: {0}")]
+    RecoveryConflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, MannaError>;
