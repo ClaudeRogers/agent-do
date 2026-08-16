@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 16 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 17 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2521,11 +2521,12 @@ Concurrency: `write`
 - `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
 - `abandon`: Release a claimed issue back to open
+- `handoff`: Seal and bind an intentional canonical handoff edit
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
 - `show`: Show issue details
-- `update`: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
+- `update`: Update issue metadata; lifecycle state changes require claim, done, abandon, block, or unblock
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
@@ -2554,7 +2555,7 @@ agent-do manna reconcile --write-drift
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `init`, `reconcile`, `unblock`, `update`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `reconcile`, `unblock`, `update`
 - destructive (irreversible data loss; confirm before auto-running): `delete`
 - polymorphic (beat decided by payload or flag at call time): `reconcile`
 

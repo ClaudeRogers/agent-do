@@ -4655,11 +4655,12 @@ tools:
       claim: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
       done: Mark a claimed issue as done
       abandon: Release a claimed issue back to open
+      handoff: Seal and bind an intentional canonical handoff edit
       block: Add a blocker dependency
       unblock: Remove a blocker dependency
       list: List issues (--status, --type, --track filters)
       show: Show issue details
-      update: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
+      update: Update issue metadata; lifecycle state changes require claim, done, abandon, block, or unblock
       delete: Delete issue
       context: Get session context
       dream: File an idea spark on the nearest board or the global inbox
@@ -4695,6 +4696,7 @@ tools:
       - claim
       - done
       - abandon
+      - handoff
       - block
       - unblock
       - dream

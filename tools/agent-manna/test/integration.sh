@@ -323,6 +323,38 @@ else
     fail "JSONL file has correct line count" "Expected 10 lines, got $lines"
 fi
 
+# Exactly one session may win a claim, and only that session may mutate it.
+output=$("$MANNA" create "Atomic claim target" 2>&1)
+RACE_ID=$(extract_id "$output")
+for i in {1..10}; do
+    (
+        set +e
+        MANNA_SESSION_ID="ses_racer_$i" "$MANNA" claim "$RACE_ID" >"claim.$i.out" 2>&1
+        echo $? >"claim.$i.rc"
+        exit 0
+    ) &
+done
+wait
+claim_winners=0
+for i in {1..10}; do
+    if [[ "$(cat "claim.$i.rc")" -eq 0 ]]; then
+        claim_winners=$((claim_winners + 1))
+    fi
+done
+check_exit 1 "$claim_winners" "concurrent claim has exactly one winner"
+output=$("$MANNA" show "$RACE_ID" 2>&1)
+RACE_OWNER=$(echo "$output" | awk '/claimed_by:/ {print $2; exit}')
+intruder_exit=0
+MANNA_SESSION_ID="ses_intruder" "$MANNA" done "$RACE_ID" >/dev/null 2>&1 || intruder_exit=$?
+check_exit 1 "$intruder_exit" "non-owner cannot complete claimed work"
+intruder_exit=0
+MANNA_SESSION_ID="ses_intruder" "$MANNA" abandon "$RACE_ID" >/dev/null 2>&1 || intruder_exit=$?
+check_exit 1 "$intruder_exit" "non-owner cannot abandon claimed work"
+status_exit=0
+MANNA_SESSION_ID="$RACE_OWNER" "$MANNA" update "$RACE_ID" --status done >/dev/null 2>&1 || status_exit=$?
+check_exit 1 "$status_exit" "update --status cannot bypass lifecycle verbs"
+MANNA_SESSION_ID="$RACE_OWNER" "$MANNA" abandon "$RACE_ID" >/dev/null 2>&1
+
 cd "$TEST_DIR"
 rm -rf "$CONCURRENT_DIR"
 
@@ -604,6 +636,7 @@ output=$("$MANNA" init 2>&1) || true
 check_yaml "$output" "workflow: strict" "new board enables the strict workflow"
 check_yaml "$output" "gitignore_updated: true" "init repairs a local .handoff ignore rule"
 [[ -f .manna/workflow.yaml ]] && pass "init creates .manna/workflow.yaml" || fail "init creates .manna/workflow.yaml" "File not found"
+[[ -f .manna/board.yaml ]] && pass "init pins strict board identity separately" || fail "init pins strict board identity separately" "File not found"
 [[ -f .handoff/README.md ]] && pass "init creates .handoff/README.md" || fail "init creates .handoff/README.md" "File not found"
 ignore_exit=0
 git check-ignore --quiet -- .handoff/README.md || ignore_exit=$?
@@ -611,6 +644,9 @@ check_exit 1 "$ignore_exit" ".handoff is durable Git-visible state"
 ignore_exit=0
 git check-ignore --quiet -- .manna/workflow.yaml || ignore_exit=$?
 check_exit 1 "$ignore_exit" ".manna is durable Git-visible state"
+ignore_exit=0
+git check-ignore --quiet -- .manna/issues.jsonl || ignore_exit=$?
+check_exit 1 "$ignore_exit" "issues.jsonl is durable Git-visible state"
 
 output=$("$MANNA" create "Paired work" 2>&1) || true
 check_yaml "$output" "success: true" "create generates a paired item"
@@ -622,6 +658,44 @@ check_yaml "$output" "prompt: $PROMPT_A" "show displays the prompt pointer"
 [[ -f "$PROMPT_A" ]] && pass "create writes the canonical handoff" || fail "create writes the canonical handoff" "File not found"
 claim_count=$(grep -c "agent-do manna claim $PAIR_ID" "$PROMPT_A" || true)
 check_exit 1 "$claim_count" "handoff carries exactly one claim command"
+check_yaml "$(sed -n '1,14p' "$PROMPT_A")" "base_commit:" "handoff binds its base commit"
+check_yaml "$(sed -n '1,14p' "$PROMPT_A")" "binding: sha256:" "handoff carries its content binding"
+
+rm -f .manna/workflow.yaml
+claim_exit=0
+output=$("$MANNA" claim "$PAIR_ID" 2>&1) || claim_exit=$?
+check_exit 2 "$claim_exit" "deleting workflow.yaml cannot downgrade a strict board"
+check_yaml "$output" "strict Manna board identity exists" "claim names the missing strict config"
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "restored_config: true" "init restores the independently pinned strict config"
+[[ -f .manna/workflow.yaml ]] && pass "restored strict config exists" || fail "restored strict config exists" "File not found"
+
+printf '.manna/issues.jsonl\n' >> .gitignore
+claim_exit=0
+output=$("$MANNA" claim "$PAIR_ID" 2>&1) || claim_exit=$?
+check_exit 2 "$claim_exit" "claim fails when issues.jsonl is hidden from Git"
+check_yaml "$output" "issues.jsonl is ignored" "claim names the hidden board file"
+printf '!.manna/issues.jsonl\n' >> .gitignore
+
+OUTSIDE_HANDOFF=$(mktemp -d)
+ln -s "$OUTSIDE_HANDOFF" .handoff/escape
+create_exit=0
+output=$("$MANNA" create "Symlink escape" --prompt .handoff/escape/work.md 2>&1) || create_exit=$?
+check_exit 1 "$create_exit" "strict create rejects a symlink escape"
+check_yaml "$output" "crosses a symlink" "symlink refusal names the filesystem boundary"
+rm -f .handoff/escape
+rm -rf "$OUTSIDE_HANDOFF"
+
+printf '\nSealed continuation context.\n' >> "$PROMPT_A"
+claim_exit=0
+"$MANNA" claim "$PAIR_ID" >/dev/null 2>&1 || claim_exit=$?
+check_exit 2 "$claim_exit" "unsealed handoff edits block claim"
+output=$("$MANNA" handoff seal "$PAIR_ID" 2>&1) || true
+check_yaml "$output" "success: true" "handoff seal binds an intentional edit"
+claim_exit=0
+"$MANNA" claim "$PAIR_ID" >/dev/null 2>&1 || claim_exit=$?
+check_exit 0 "$claim_exit" "sealed handoff becomes claimable"
+"$MANNA" abandon "$PAIR_ID" >/dev/null 2>&1
 
 before_rows=$(wc -l < .manna/issues.jsonl | tr -d ' ')
 before_handoffs=$(find .handoff -name 'mn-*.md' -type f | wc -l | tr -d ' ')
@@ -667,19 +741,40 @@ check_exit 1 "$lint_exit" "lint fails on a mismatched claim command"
 check_yaml "$output" "handoff_contract" "lint names the handoff contract"
 sed -i.bak "s/agent-do manna claim mn-dead00/agent-do manna claim $PAIR_ID/" "$PROMPT_A"
 rm -f "$PROMPT_A.bak"
+"$MANNA" handoff seal "$PAIR_ID" >/dev/null 2>&1
 
 mkdir -p .handoffs
 printf 'agent-do manna claim %s\n' "$PAIR_ID" > .handoffs/shadow.md
 output=$("$MANNA" reconcile --json 2>&1) || true
 check_yaml "$output" "workflow_sprawl" "reconcile detects a shadow handoff root"
 check_yaml "$output" ".handoffs" "sprawl finding names the shadow root"
+sprawl_exit=0
+"$MANNA" reconcile --json >/dev/null 2>&1 || sprawl_exit=$?
+check_exit 1 "$sprawl_exit" "shadow handoff roots make reconcile fail"
+
+DEEP_SHADOW=.dev/one/two/three/four/five/six/seven/eight/nine/ten/eleven/twelve
+mkdir -p "$DEEP_SHADOW"
+cp "$PROMPT_A" "$DEEP_SHADOW/deep-shadow.md"
+output=$("$MANNA" reconcile --json 2>&1) || true
+check_yaml "$output" "deep-shadow.md" "sprawl scan has no nesting ceiling"
+
+LINK_TARGET=$(mktemp)
+cp "$PROMPT_A" "$LINK_TARGET"
+mkdir -p .dev/linked
+ln -s "$LINK_TARGET" .dev/linked/shadow.md
+output=$("$MANNA" reconcile --json 2>&1) || true
+check_yaml "$output" ".dev/linked/shadow.md" "sprawl scan reads symlinked work-order content"
+rm -f "$LINK_TARGET"
 
 LEGACY_DIR=$(mktemp -d)
 LEGACY_PHYS=$(cd "$LEGACY_DIR" && pwd -P)
 cd "$LEGACY_DIR"
-"$MANNA" init >/dev/null 2>&1
-rm -f .manna/workflow.yaml
-rm -rf .handoff
+mkdir -p .manna
+touch .manna/sessions.jsonl
+printf '%s\n' '{"id":"mn-a1b2c3","title":"Existing legacy row","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}' > .manna/issues.jsonl
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "workflow: legacy" "init classifies a real pre-workflow board explicitly"
+check_yaml "$(cat .manna/board.yaml)" "workflow: legacy" "legacy mode is pinned instead of inferred"
 mkdir -p .dev/session-prompts
 LEGACY_PROMPT="$LEGACY_PHYS/.dev/session-prompts/lane-a.md"
 output=$("$MANNA" create "Legacy paired work" --prompt "$LEGACY_PROMPT" 2>&1) || true
@@ -780,6 +875,8 @@ check_yaml "$output" "no longer claimable" "inverse line says the row is not cla
 claim_exit=0
 "$MANNA" claim "$G_DREAM" >/dev/null 2>&1 || claim_exit=$?
 check_exit 2 "$claim_exit" "re-parked dream refuses claim again"
+output=$("$MANNA" done "$G_DREAM" 2>&1) || true
+check_yaml "$output" "status: done" "done explicitly closes an unclaimed dream"
 
 # A non-crossing edit stays silent.
 output=$("$MANNA" update "$G_ITEM" --title "Real work, renamed" 2>&1) || true

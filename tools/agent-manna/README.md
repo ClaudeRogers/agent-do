@@ -77,8 +77,10 @@ agent-do manna context
 ### `init`
 
 Initialize `.manna/` and the tracked `.handoff/` work-order root in the current
-location. New or empty boards receive strict workflow version 1. Existing
-nonempty legacy boards are left unchanged. Local ignore rules are narrowed so
+location. New or empty boards receive strict workflow version 2. Existing
+nonempty legacy boards are classified explicitly and left unchanged. Strict
+mode is pinned independently in `.manna/board.yaml`; deleting the workflow
+config cannot turn validation off. Local ignore rules are narrowed so
 the board and work orders remain Git-visible while the runtime lock stays
 ignored.
 
@@ -92,9 +94,12 @@ success: true
 initialized: true
 path: .manna
 workflow: strict
-workflow_version: 1
+workflow_version: 2
 handoff_path: .handoff
 gitignore_updated: false
+recovered_transactions: 0
+upgraded_items: 0
+restored_config: false
 ```
 
 ### `status`
@@ -117,7 +122,8 @@ claimed_issues:
 
 Create a new issue. On strict boards, each actionable item also creates a
 repository-relative `.handoff/<mn-id>-<slug>.md` work order and stores that
-path in the issue's `prompt` field.
+path in the issue's `prompt` field. A write-ahead transaction makes the row and
+file recover as one pair after interruption.
 
 ```bash
 agent-do manna create "Fix login bug"
@@ -159,8 +165,13 @@ issue:
 ```
 
 **Notes:**
-- An issue can only be claimed by one session at a time
+- Claim validation and the status change happen under one board lock, so one
+  issue has exactly one winner under contention
 - Attempting to claim an already-claimed issue returns an error
+- Strict claims verify the board identity, Git visibility, symlink-safe path,
+  structured frontmatter, exact Claim section, and whole-document SHA-256
+  binding
+- After claim, only the pinned `claimed_by` session may mutate or close the row
 
 ### `done <id>`
 
@@ -186,6 +197,10 @@ Release a claimed issue without completing it. Sets status back to `open`.
 ```bash
 agent-do manna abandon mn-abc123
 ```
+
+`done` and `abandon` reject every session except the current owner. `done` also
+provides the explicit unclaimed close transition for a parked dream, because a
+dream cannot be claimed.
 
 **Output:**
 ```yaml
@@ -282,6 +297,32 @@ issue:
   claimed_at: null
 ```
 
+### `handoff seal <id>`
+
+Bind an intentional edit to the board. The command preserves the handoff body,
+normalizes authoritative frontmatter, computes the canonical document SHA-256
+with the self-referential binding field normalized,
+and updates the paired `handoff_digest` transactionally.
+
+```bash
+agent-do manna handoff seal mn-abc123
+```
+
+Until sealing succeeds, `claim` fails closed. A comment containing a claim
+command is never a handoff.
+
+### `update <id> [metadata]`
+
+Update title, description, type, track, source, or a legacy prompt pointer.
+Strict item metadata updates rebind their handoff. Item conversion attaches or
+archives the handoff transactionally. `update --status` is rejected; use the
+lifecycle verbs `claim`, `done`, `abandon`, `block`, and `unblock`.
+
+### `delete <id>`
+
+Delete a row. On a strict board, Manna archives the paired handoff under
+`.handoff/.archive/` and removes the row through one recoverable transaction.
+
 ### `context [--max-tokens <n>]`
 
 Generate a context blob for AI agent prompts. Default max tokens: 8000.
@@ -318,10 +359,13 @@ Manna stores canonical board state in `.manna/` and durable work orders in
 .manna/
 ├── issues.jsonl     # Issue records (one JSON per line)
 ├── sessions.jsonl   # Session event log
-└── workflow.yaml    # Strict workflow version and handoff root
+├── board.yaml       # Independent strict or legacy identity
+├── workflow.yaml    # Strict workflow version and handoff root
+└── transactions/    # Ignored crash-recovery journal
 .handoff/
 ├── README.md        # Generated workflow contract
-└── mn-*.md          # One generated work order per actionable item
+├── mn-*.md          # One bound work order per actionable item
+└── .archive/        # Retired work orders
 ```
 
 **Why JSONL?**
@@ -463,8 +507,8 @@ cargo test
 1. **Minimal** - <5K LOC total
 2. **Git-friendly** - JSONL diffs cleanly
 3. **Agent-first** - YAML output, no colors/spinners
-4. **Robust** - File locking, corruption recovery
-5. **Simple** - No database or async runtime; one versioned workflow file
+4. **Robust** - Atomic lifecycle mutations plus recoverable row/file transactions
+5. **Simple** - No database or async runtime; explicit board and workflow identities
 6. **Fast** - <100ms for all operations
 
 ## Troubleshooting
@@ -490,11 +534,9 @@ Another session has claimed this issue. Check who:
 agent-do manna show mn-abc123
 ```
 
-To release from another session, use that session's ID:
-```bash
-export MANNA_SESSION_ID="ses_other"
-agent-do manna abandon mn-abc123
-```
+Only the owning pinned session can finish, abandon, update, block, unblock, or
+delete claimed work. If that session is provably dead, use `manna reconcile
+--fix`; do not impersonate its ID.
 
 ### Binary not found
 

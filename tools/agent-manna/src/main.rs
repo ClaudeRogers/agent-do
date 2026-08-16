@@ -23,8 +23,10 @@ use manna_core::reconcile::{
 };
 use manna_core::store::MannaStore;
 use manna_core::workflow::{
-    canonical_handoff_path, create_handoff, initialize_workflow, load_workflow,
-    remove_created_handoff, validate_handoff, validate_scaffold, WorkflowConfig, HANDOFF_DIR,
+    attach_handoff, canonical_handoff_path, create_paired_issue, delete_paired_issue,
+    detach_handoff, find_orphan_handoffs, handoff_manna_id, initialize_workflow,
+    load_workflow_for_board, rebind_handoff, recover_pair_transactions, validate_handoff,
+    validate_scaffold, WorkflowConfig, HANDOFF_DIR,
 };
 
 /// Exit codes
@@ -95,6 +97,12 @@ enum Commands {
         id: String,
     },
 
+    /// Validate and bind an edited canonical handoff
+    Handoff {
+        #[command(subcommand)]
+        command: HandoffCommands,
+    },
+
     /// Add a blocker dependency
     Block {
         /// Issue ID to mark as blocked
@@ -138,7 +146,7 @@ enum Commands {
         id: String,
     },
 
-    /// Update an issue's title, description, status, type, track, source, or prompt
+    /// Update issue metadata; lifecycle state changes use dedicated verbs
     Update {
         /// Issue ID (e.g., mn-abc123)
         id: String,
@@ -151,7 +159,7 @@ enum Commands {
         #[arg(long)]
         description: Option<String>,
 
-        /// New status (open, in_progress, blocked, done)
+        /// Rejected compatibility flag; use claim, done, abandon, block, or unblock
         #[arg(long)]
         status: Option<String>,
 
@@ -228,6 +236,26 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum HandoffCommands {
+    /// Seal the complete handoff contents to its Manna item
+    Seal {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+    },
+}
+
+struct UpdateRequest {
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    issue_type: Option<String>,
+    track: Option<String>,
+    source: Option<String>,
+    prompt: Option<String>,
 }
 
 // ============================================================================
@@ -335,6 +363,9 @@ struct InitData {
     #[serde(skip_serializing_if = "Option::is_none")]
     handoff_path: Option<String>,
     gitignore_updated: bool,
+    recovered_transactions: usize,
+    upgraded_items: usize,
+    restored_config: bool,
 }
 
 #[derive(Serialize)]
@@ -466,6 +497,7 @@ fn error_to_exit_code(err: &MannaError) -> i32 {
         MannaError::IssueAlreadyExists(_) => EXIT_USER_ERROR,
         MannaError::InvalidStatusTransition { .. } => EXIT_USER_ERROR,
         MannaError::InvalidId(_) => EXIT_USER_ERROR,
+        MannaError::MutationRejected(_) => EXIT_USER_ERROR,
         MannaError::Io(_) => EXIT_SYSTEM_ERROR,
         MannaError::Json(_) => EXIT_SYSTEM_ERROR,
         MannaError::NotInitialized => EXIT_USER_ERROR,
@@ -529,6 +561,32 @@ fn find_issue(issues: &[Issue], id: &str) -> Issue {
         })
 }
 
+fn recover_transactions(store: &MannaStore) {
+    if let Err(error) = recover_pair_transactions(Path::new("."), store) {
+        output_error(
+            &format!("Cannot recover Manna workflow transaction: {}", error),
+            EXIT_SYSTEM_ERROR,
+        );
+    }
+}
+
+fn load_board(store: &MannaStore) -> Vec<Issue> {
+    recover_transactions(store);
+    match store.load_issues() {
+        Ok(issues) => issues,
+        Err(error) => handle_manna_error(error),
+    }
+}
+
+fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig>) {
+    let issues = load_board(store);
+    let workflow = match load_workflow_for_board(Path::new("."), &issues) {
+        Ok(config) => config,
+        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+    };
+    (issues, workflow)
+}
+
 // ============================================================================
 // Command Implementations
 // ============================================================================
@@ -539,21 +597,9 @@ fn cmd_init() -> ! {
         handle_manna_error(err);
     }
 
-    let issues = match store.load_issues() {
-        Ok(issues) => issues,
-        Err(err) => handle_manna_error(err),
-    };
-    let existing_workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
+    let workflow = match initialize_workflow(Path::new("."), &store) {
+        Ok(initialized) => initialized,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
-    let workflow = if existing_workflow.is_some() || issues.is_empty() {
-        match initialize_workflow(Path::new(".")) {
-            Ok(initialized) => Some(initialized),
-            Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-        }
-    } else {
-        None
     };
 
     output_success(InitData {
@@ -569,6 +615,11 @@ fn cmd_init() -> ! {
         gitignore_updated: workflow
             .as_ref()
             .is_some_and(|state| state.gitignore_updated),
+        recovered_transactions: workflow
+            .as_ref()
+            .map_or(0, |state| state.recovered_transactions),
+        upgraded_items: workflow.as_ref().map_or(0, |state| state.upgraded_items),
+        restored_config: workflow.as_ref().is_some_and(|state| state.restored_config),
     });
 }
 
@@ -584,19 +635,12 @@ fn cmd_status() -> ! {
 
     let session_id = get_session_id();
 
-    let claimed_issues: Vec<String> = match store.load_issues() {
-        Ok(issues) => issues
-            .iter()
-            .filter(|i| i.claimed_by.as_ref() == Some(&session_id))
-            .map(|i| i.id.clone())
-            .collect(),
-        Err(err) => handle_manna_error(err),
-    };
-
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
+    let (issues, workflow) = load_board_workflow(&store);
+    let claimed_issues: Vec<String> = issues
+        .iter()
+        .filter(|issue| issue.claimed_by.as_ref() == Some(&session_id))
+        .map(|issue| issue.id.clone())
+        .collect();
 
     output_success(StatusData {
         session_id,
@@ -644,10 +688,7 @@ fn cmd_create(
         );
     }
 
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
+    let (existing_issues, workflow) = load_board_workflow(&store);
     if workflow.is_some() && parsed_type != IssueType::Item && prompt.is_some() {
         output_error(
             "Strict workflow boards pair handoffs only with actionable items",
@@ -655,19 +696,13 @@ fn cmd_create(
         );
     }
 
-    // Load existing issues for track validation and unique ID generation
-    let existing_issues = match store.load_issues() {
-        Ok(issues) => issues,
-        Err(err) => handle_manna_error(err),
-    };
-
     if let Some(track_id) = &track {
         if let Err(e) = validate_track_target(&existing_issues, track_id) {
             output_error(&e, EXIT_USER_ERROR);
         }
     }
 
-    let existing_ids: HashSet<String> = existing_issues.into_iter().map(|i| i.id).collect();
+    let existing_ids: HashSet<String> = existing_issues.into_iter().map(|issue| issue.id).collect();
 
     // Generate unique ID
     let id = generate_unique_id(&existing_ids);
@@ -683,18 +718,17 @@ fn cmd_create(
     issue.issue_type = parsed_type;
     issue.track = track;
     issue.source = source;
-    let mut created_handoff: Option<PathBuf> = None;
     if let Some(config) = workflow.as_ref().filter(|_| parsed_type == IssueType::Item) {
-        let relative =
-            match canonical_handoff_path(Path::new("."), config, &issue, prompt.as_deref()) {
-                Ok(path) => path,
-                Err(error) => output_error(&error, EXIT_USER_ERROR),
-            };
-        issue.prompt = Some(relative.to_string_lossy().into_owned());
-        if let Err(error) = create_handoff(Path::new("."), &relative, &issue) {
-            output_error(&error, EXIT_SYSTEM_ERROR);
+        if let Err(error) =
+            canonical_handoff_path(Path::new("."), config, &issue, prompt.as_deref())
+        {
+            output_error(&error, EXIT_USER_ERROR);
         }
-        created_handoff = Some(relative);
+        issue = match create_paired_issue(Path::new("."), &store, config, &issue, prompt.as_deref())
+        {
+            Ok(issue) => issue,
+            Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+        };
     } else {
         // Legacy boards retain the permissive pointer behavior until they are
         // explicitly migrated to `.manna/workflow.yaml`.
@@ -703,38 +737,8 @@ fn cmd_create(
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .map(String::from);
-    }
-
-    // Append to store
-    if let Err(err) = store.append_issue(&issue) {
-        if let Some(relative) = created_handoff.as_deref() {
-            remove_created_handoff(Path::new("."), relative);
-        }
-        handle_manna_error(err);
-    }
-
-    if let Some(config) = workflow.as_ref().filter(|_| parsed_type == IssueType::Item) {
-        if let Err(error) = validate_handoff(Path::new("."), config, &issue) {
-            let rollback_error = store.delete_issue(&issue.id).err();
-            if let Some(relative) = created_handoff.as_deref() {
-                remove_created_handoff(Path::new("."), relative);
-            }
-            if let Some(rollback_error) = rollback_error {
-                output_error(
-                    &format!(
-                        "created item failed handoff verification: {}; board rollback also failed: {}",
-                        error, rollback_error
-                    ),
-                    EXIT_SYSTEM_ERROR,
-                );
-            }
-            output_error(
-                &format!(
-                    "created item failed handoff read-back verification and was rolled back: {}",
-                    error
-                ),
-                EXIT_SYSTEM_ERROR,
-            );
+        if let Err(error) = store.append_issue(&issue) {
+            handle_manna_error(error);
         }
     }
 
@@ -756,18 +760,10 @@ fn cmd_claim(id: String) -> ! {
 
     let session_id = get_session_id();
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
+    let (issues, workflow) = load_board_workflow(&store);
 
     // Find issue
-    let mut issue = find_issue(&issues, &id);
+    let issue = find_issue(&issues, &id);
 
     // Dreams are visible but inert: refuse before the store is ever touched,
     // and exit 2 so an orchestrator reads "escalate", not "retry differently".
@@ -775,34 +771,40 @@ fn cmd_claim(id: String) -> ! {
         output_error(&dream_claim_refusal(&issue.id), EXIT_NEEDS_AUTHORIZATION);
     }
 
-    if let Some(config) = workflow
-        .as_ref()
-        .filter(|_| issue.issue_type == IssueType::Item)
-    {
-        if let Err(error) = validate_handoff(Path::new("."), config, &issue) {
-            output_error(
-                &format!(
-                    "Refusing claim: {}. Repair the Manna and handoff link, then retry.",
-                    error
-                ),
-                EXIT_NEEDS_AUTHORIZATION,
-            );
+    let claimed = match store.claim_issue_checked(&id, &session_id, |current, current_board| {
+        if current.issue_type == IssueType::Dream {
+            return Err(dream_claim_refusal(&current.id));
         }
-    }
-
-    // Claim it
-    if let Err(e) = issue.claim(session_id) {
-        output_error(&e, EXIT_USER_ERROR);
-    }
-
-    // Update store
-    if let Err(err) = store.update_issue(&issue) {
-        handle_manna_error(err);
-    }
+        if let Some(config) = workflow
+            .as_ref()
+            .filter(|_| current.issue_type == IssueType::Item)
+        {
+            validate_handoff(Path::new("."), config, current)?;
+            let shadows = check_workflow_sprawl_for_issue(current_board, config, &current.id);
+            if !shadows.is_empty() {
+                return Err(format!(
+                    "shadow handoff workflow detected for {}: {}",
+                    current.id,
+                    shadows.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }) {
+        Ok(issue) => issue,
+        Err(MannaError::MutationRejected(error)) => output_error(
+            &format!(
+                "Refusing claim: {}. Repair the Manna and handoff link, then retry.",
+                error
+            ),
+            EXIT_NEEDS_AUTHORIZATION,
+        ),
+        Err(error) => handle_manna_error(error),
+    };
 
     output_success(IssueData {
-        age: (&issue).into(),
-        issue,
+        age: (&claimed).into(),
+        issue: claimed,
     });
 }
 
@@ -816,24 +818,12 @@ fn cmd_done(id: String) -> ! {
         );
     }
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
+    let _ = load_board_workflow(&store);
+    let session_id = get_session_id();
+    let issue = match store.complete_issue(&id, &session_id) {
+        Ok(issue) => issue,
+        Err(error) => handle_manna_error(error),
     };
-
-    // Find issue
-    let mut issue = find_issue(&issues, &id);
-
-    // Complete it
-    if let Err(e) = issue.complete() {
-        output_error(&e, EXIT_USER_ERROR);
-    }
-
-    // Update store
-    if let Err(err) = store.update_issue(&issue) {
-        handle_manna_error(err);
-    }
 
     output_success(IssueData {
         age: (&issue).into(),
@@ -851,28 +841,52 @@ fn cmd_abandon(id: String) -> ! {
         );
     }
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
+    let _ = load_board_workflow(&store);
+    let session_id = get_session_id();
+    let issue = match store.release_issue(&id, &session_id) {
+        Ok(issue) => issue,
+        Err(error) => handle_manna_error(error),
     };
-
-    // Find issue
-    let mut issue = find_issue(&issues, &id);
-
-    // Release it
-    if let Err(e) = issue.release() {
-        output_error(&e, EXIT_USER_ERROR);
-    }
-
-    // Update store
-    if let Err(err) = store.update_issue(&issue) {
-        handle_manna_error(err);
-    }
 
     output_success(IssueData {
         age: (&issue).into(),
         issue,
+    });
+}
+
+fn cmd_handoff_seal(id: String) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let session_id = get_session_id();
+    let (issues, workflow) = load_board_workflow(&store);
+    let config = workflow.as_ref().unwrap_or_else(|| {
+        output_error(
+            "Legacy boards do not have canonical handoffs to seal",
+            EXIT_USER_ERROR,
+        )
+    });
+    let issue = find_issue(&issues, &id);
+    if issue.issue_type != IssueType::Item {
+        output_error(
+            "Only actionable items own canonical handoffs",
+            EXIT_USER_ERROR,
+        );
+    }
+    if let Err(error) = issue.require_owner(&session_id) {
+        output_error(&error, EXIT_USER_ERROR);
+    }
+    let sealed = match rebind_handoff(Path::new("."), &store, config, &issue, &issue, true) {
+        Ok(issue) => issue,
+        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+    };
+    output_success(IssueData {
+        age: (&sealed).into(),
+        issue: sealed,
     });
 }
 
@@ -886,30 +900,12 @@ fn cmd_block(id: String, blocker_id: String) -> ! {
         );
     }
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
+    let _ = load_board_workflow(&store);
+    let session_id = get_session_id();
+    let issue = match store.add_blocker(&id, &blocker_id, &session_id) {
+        Ok(issue) => issue,
+        Err(error) => handle_manna_error(error),
     };
-
-    // Verify blocker exists
-    if !issues.iter().any(|i| i.id == blocker_id) {
-        output_error(
-            &format!("Blocker issue {} not found", blocker_id),
-            EXIT_USER_ERROR,
-        );
-    }
-
-    // Find issue
-    let mut issue = find_issue(&issues, &id);
-
-    // Add blocker
-    issue.add_blocker(blocker_id);
-
-    // Update store
-    if let Err(err) = store.update_issue(&issue) {
-        handle_manna_error(err);
-    }
 
     output_success(IssueData {
         age: (&issue).into(),
@@ -927,22 +923,12 @@ fn cmd_unblock(id: String, blocker_id: String) -> ! {
         );
     }
 
-    // Load issues
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
+    let _ = load_board_workflow(&store);
+    let session_id = get_session_id();
+    let issue = match store.remove_blocker(&id, &blocker_id, &session_id) {
+        Ok(issue) => issue,
+        Err(error) => handle_manna_error(error),
     };
-
-    // Find issue
-    let mut issue = find_issue(&issues, &id);
-
-    // Remove blocker
-    issue.remove_blocker(&blocker_id);
-
-    // Update store
-    if let Err(err) = store.update_issue(&issue) {
-        handle_manna_error(err);
-    }
 
     output_success(IssueData {
         age: (&issue).into(),
@@ -990,12 +976,12 @@ fn cmd_list(
     // Filter and map to summaries
     let summaries: Vec<IssueSummary> = issues
         .into_iter()
-        .filter(|i| filter.as_ref().map_or(true, |f| &i.status == f))
-        .filter(|i| type_filter.map_or(true, |f| i.issue_type == f))
+        .filter(|i| filter.as_ref().is_none_or(|f| &i.status == f))
+        .filter(|i| type_filter.is_none_or(|f| i.issue_type == f))
         .filter(|i| {
             track_filter
                 .as_ref()
-                .map_or(true, |f| i.track.as_ref() == Some(f))
+                .is_none_or(|f| i.track.as_ref() == Some(f))
         })
         .map(|i| IssueSummary {
             gate: (i.issue_type == IssueType::Dream).then(|| DREAM_INERT_MARKER.to_string()),
@@ -1040,16 +1026,17 @@ fn cmd_show(id: String) -> ! {
     });
 }
 
-fn cmd_update(
-    id: String,
-    title: Option<String>,
-    description: Option<String>,
-    status: Option<String>,
-    issue_type: Option<String>,
-    track: Option<String>,
-    source: Option<String>,
-    prompt: Option<String>,
-) -> ! {
+fn cmd_update(request: UpdateRequest) -> ! {
+    let UpdateRequest {
+        id,
+        title,
+        description,
+        status,
+        issue_type,
+        track,
+        source,
+        prompt,
+    } = request;
     let store = MannaStore::new(Path::new("."));
     if !store.is_initialized() {
         output_error(
@@ -1070,18 +1057,22 @@ fn cmd_update(
             EXIT_USER_ERROR,
         );
     }
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
-    let mut issue = find_issue(&issues, &id);
-    let type_before = issue.issue_type;
-    let prompt_before = issue.prompt.clone();
+    if status.is_some() {
+        output_error(
+            "update --status is disabled because it bypasses lifecycle ownership. Use claim, done, abandon, block, or unblock.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let session_id = get_session_id();
+    let (issues, workflow) = load_board_workflow(&store);
+    let before = find_issue(&issues, &id);
+    if let Err(error) = before.require_owner(&session_id) {
+        output_error(&error, EXIT_USER_ERROR);
+    }
+    let type_before = before.issue_type;
+    let prompt_before = before.prompt.clone();
     let prompt_request = prompt.clone();
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
+    let mut issue = before.clone();
     if let Some(new_title) = title {
         if new_title.is_empty() || new_title.len() > 500 {
             output_error("Title must be 1-500 characters", EXIT_USER_ERROR);
@@ -1093,21 +1084,6 @@ fn cmd_update(
             None
         } else {
             Some(new_description)
-        };
-    }
-    if let Some(new_status) = status {
-        issue.status = match new_status.as_str() {
-            "open" => IssueStatus::Open,
-            "in_progress" => IssueStatus::InProgress,
-            "blocked" => IssueStatus::Blocked,
-            "done" => IssueStatus::Done,
-            other => output_error(
-                &format!(
-                    "Invalid status '{}': use open, in_progress, blocked, or done",
-                    other
-                ),
-                EXIT_USER_ERROR,
-            ),
         };
     }
     if let Some(new_type) = issue_type {
@@ -1153,69 +1129,123 @@ fn cmd_update(
             EXIT_USER_ERROR,
         );
     }
+    if issue.issue_type != type_before && before.claimed_by.is_some() {
+        output_error(
+            "Cannot convert a claimed issue. Finish or abandon the claim first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    issue.updated_at = Utc::now();
+    let authorization = conversion_authorization(&issue.id, type_before, issue.issue_type);
 
-    let mut created_handoff: Option<PathBuf> = None;
-    if let Some(config) = workflow.as_ref() {
-        if issue.issue_type == IssueType::Item {
-            if let (Some(before), Some(requested)) = (
-                prompt_before.as_deref(),
-                prompt_request
+    let updated = if let Some(config) = workflow.as_ref() {
+        match (
+            type_before == IssueType::Item,
+            issue.issue_type == IssueType::Item,
+        ) {
+            (true, true) => {
+                if let Some(requested) = prompt_request
                     .as_deref()
                     .map(str::trim)
-                    .filter(|p| !p.is_empty()),
-            ) {
-                if before != requested {
+                    .filter(|value| !value.is_empty())
+                {
+                    if prompt_before.as_deref() != Some(requested) {
+                        output_error(
+                            "Strict workflow handoff pointers are stable; edit and seal the linked file instead of repointing the item",
+                            EXIT_USER_ERROR,
+                        );
+                    }
+                }
+                issue.prompt = prompt_before.clone();
+                match rebind_handoff(Path::new("."), &store, config, &before, &issue, true) {
+                    Ok(issue) => issue,
+                    Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+                }
+            }
+            (false, true) => {
+                issue.prompt = None;
+                issue.handoff_digest = None;
+                match attach_handoff(
+                    Path::new("."),
+                    &store,
+                    config,
+                    &before,
+                    &issue,
+                    prompt_request.as_deref(),
+                ) {
+                    Ok(issue) => issue,
+                    Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+                }
+            }
+            (true, false) => {
+                if prompt_request
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+                {
                     output_error(
-                        "Strict workflow handoff pointers are stable; edit the linked file instead of repointing the item",
+                        "Non-item rows cannot retain a strict handoff pointer",
                         EXIT_USER_ERROR,
                     );
                 }
-            }
-            let relative = match canonical_handoff_path(
-                Path::new("."),
-                config,
-                &issue,
-                issue.prompt.as_deref(),
-            ) {
-                Ok(path) => path,
-                Err(error) => output_error(&error, EXIT_USER_ERROR),
-            };
-            issue.prompt = Some(relative.to_string_lossy().into_owned());
-            if !Path::new(".").join(&relative).is_file() {
-                if let Err(error) = create_handoff(Path::new("."), &relative, &issue) {
-                    output_error(&error, EXIT_SYSTEM_ERROR);
+                match detach_handoff(Path::new("."), &store, config, &before, &issue) {
+                    Ok(issue) => issue,
+                    Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
                 }
-                created_handoff = Some(relative.clone());
             }
-            if let Err(error) = validate_handoff(Path::new("."), config, &issue) {
-                if let Some(created) = created_handoff.as_deref() {
-                    remove_created_handoff(Path::new("."), created);
+            (false, false) => {
+                if prompt_request
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    output_error(
+                        "Strict workflow boards pair handoffs only with actionable items",
+                        EXIT_USER_ERROR,
+                    );
                 }
-                output_error(&error, EXIT_USER_ERROR);
+                issue.prompt = None;
+                issue.handoff_digest = None;
+                replace_metadata_atomically(&store, &before, &issue, &session_id)
             }
-        } else if prompt_request
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        {
-            output_error(
-                "Strict workflow boards pair handoffs only with actionable items",
-                EXIT_USER_ERROR,
-            );
         }
-    }
-    issue.updated_at = chrono::Utc::now();
-    let authorization = conversion_authorization(&issue.id, type_before, issue.issue_type);
-    if let Err(err) = store.update_issue(&issue) {
-        if let Some(relative) = created_handoff.as_deref() {
-            remove_created_handoff(Path::new("."), relative);
+    } else {
+        if let Some(new_prompt) = prompt_request {
+            let trimmed = new_prompt.trim();
+            issue.prompt = (!trimmed.is_empty()).then(|| trimmed.to_string());
         }
-        handle_manna_error(err);
-    }
+        replace_metadata_atomically(&store, &before, &issue, &session_id)
+    };
     output_success(UpdateData {
-        issue,
+        issue: updated,
         authorization,
     });
+}
+
+fn replace_metadata_atomically(
+    store: &MannaStore,
+    before: &Issue,
+    after: &Issue,
+    session_id: &str,
+) -> Issue {
+    let expected_updated = before.updated_at;
+    let replacement = after.clone();
+    match store.mutate_issue_metadata(&before.id, session_id, move |current, issues| {
+        if current.updated_at != expected_updated {
+            return Err(format!(
+                "{} changed concurrently; retry the update",
+                current.id
+            ));
+        }
+        if let Some(track_id) = replacement.track.as_deref() {
+            validate_track_target(issues, track_id)?;
+        }
+        *current = replacement;
+        Ok(())
+    }) {
+        Ok(issue) => issue,
+        Err(error) => handle_manna_error(error),
+    }
 }
 
 /// The line `update` prints when a type change crosses the dream boundary.
@@ -1245,13 +1275,21 @@ fn cmd_delete(id: String) -> ! {
             EXIT_USER_ERROR,
         );
     }
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
+    let session_id = get_session_id();
+    let (issues, workflow) = load_board_workflow(&store);
     let issue = find_issue(&issues, &id);
-    if let Err(err) = store.delete_issue(&issue.id) {
-        handle_manna_error(err);
+    if let Err(error) = issue.require_owner(&session_id) {
+        output_error(&error, EXIT_USER_ERROR);
+    }
+    if let Some(config) = workflow
+        .as_ref()
+        .filter(|_| issue.issue_type == IssueType::Item)
+    {
+        if let Err(error) = delete_paired_issue(Path::new("."), &store, config, &issue) {
+            output_error(&error, EXIT_SYSTEM_ERROR);
+        }
+    } else if let Err(error) = store.delete_issue_owned(&issue.id, &session_id) {
+        handle_manna_error(error);
     }
     output_success(IssueData {
         age: (&issue).into(),
@@ -1335,7 +1373,7 @@ fn build_context(issues: &[Issue]) -> String {
             .filter(|i| {
                 i.issue_type == IssueType::Item
                     && i.status != IssueStatus::Done
-                    && i.track.as_deref().map_or(true, |t| !track_ids.contains(t))
+                    && i.track.as_deref().is_none_or(|t| !track_ids.contains(t))
             })
             .collect();
         if !untracked.is_empty() {
@@ -1499,6 +1537,10 @@ fn cmd_dream(spark: String, track: Option<String>, source: Option<String>) -> ! 
         handle_manna_error(err);
     }
 
+    if let Err(error) = initialize_workflow(&board_dir, &store) {
+        output_error(&error, EXIT_SYSTEM_ERROR);
+    }
+
     let existing_issues = match store.load_issues() {
         Ok(issues) => issues,
         Err(err) => handle_manna_error(err),
@@ -1542,19 +1584,29 @@ fn cmd_lint(json: bool) -> ! {
         );
     }
 
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
-
+    let (issues, workflow) = load_board_workflow(&store);
     let mut findings = lint_board(&issues);
     findings.extend(lint_prompt_files(&issues));
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
     if let Some(config) = workflow.as_ref() {
         findings.extend(lint_strict_workflow(&issues, config));
+        findings.extend(
+            check_workflow_sprawl(&issues, config)
+                .into_iter()
+                .map(|finding| LintFinding {
+                    issue_id: finding.issue_id.unwrap_or_else(|| "board".to_string()),
+                    rule: "workflow_sprawl".to_string(),
+                    detail: finding.detail,
+                }),
+        );
+        findings.extend(
+            find_orphan_handoffs(Path::new("."), &issues)
+                .into_iter()
+                .map(|(path, detail)| LintFinding {
+                    issue_id: "board".to_string(),
+                    rule: "orphan_handoff".to_string(),
+                    detail: format!("{}: {}", path.display(), detail),
+                }),
+        );
     }
     let clean = findings.is_empty();
     let exit_code = if clean { EXIT_SUCCESS } else { EXIT_USER_ERROR };
@@ -2017,36 +2069,68 @@ fn check_prompt_pairing_reverse(issues: &[Issue], dir: &Path) -> Vec<Finding> {
     findings
 }
 
-fn find_named_prompt_roots(dir: &Path, depth: usize, roots: &mut Vec<PathBuf>) {
-    if depth > 4 {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
+fn path_is_legacy_handoff_root(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    components
+        .iter()
+        .any(|name| matches!(*name, ".handoffs" | "handoff-prompts" | "session-prompts"))
+}
+
+fn collect_shadow_handoffs(root: &Path, files: &mut Vec<PathBuf>, unsafe_links: &mut Vec<PathBuf>) {
+    let canonical_handoff = Path::new(".").join(HANDOFF_DIR).canonicalize().ok();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
             Err(_) => continue,
         };
-        if !file_type.is_dir() || file_type.is_symlink() {
-            continue;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if file_type.is_symlink() {
+                let target = path.canonicalize().ok();
+                let targets_canonical_handoff = target
+                    .as_ref()
+                    .zip(canonical_handoff.as_ref())
+                    .is_some_and(|(target, handoff)| target.starts_with(handoff));
+                if path.extension().and_then(|extension| extension.to_str()) == Some("md")
+                    && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())
+                {
+                    // Reading the logical path follows exactly one file link;
+                    // structured frontmatter, not the link name, decides
+                    // whether it is a shadow work order.
+                    files.push(path);
+                } else if path_is_legacy_handoff_root(&path)
+                    || name.contains("handoff")
+                    || targets_canonical_handoff
+                {
+                    unsafe_links.push(path);
+                }
+                continue;
+            }
+            if matches!(
+                name.as_ref(),
+                ".git" | ".manna" | ".handoff" | "node_modules" | "target"
+            ) {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
+                files.push(path);
+            }
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if matches!(
-            name.as_ref(),
-            ".git" | ".manna" | ".handoff" | "node_modules" | "target"
-        ) {
-            continue;
-        }
-        if name == "handoff-prompts" {
-            roots.push(path);
-            continue;
-        }
-        find_named_prompt_roots(&path, depth + 1, roots);
     }
 }
 
@@ -2058,29 +2142,37 @@ fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Findi
         .iter()
         .map(|issue| (issue.id.as_str(), issue))
         .collect();
-    let mut roots = vec![
-        PathBuf::from(".handoffs"),
-        Path::new(".dev").join("session-prompts"),
-    ];
-    find_named_prompt_roots(Path::new("."), 0, &mut roots);
-    roots.sort();
-    roots.dedup();
-
     let mut files = Vec::new();
-    for root in roots {
-        collect_markdown_files(&root, &mut files);
-    }
+    let mut unsafe_links = Vec::new();
+    collect_shadow_handoffs(Path::new("."), &mut files, &mut unsafe_links);
     files.sort();
     files.dedup();
 
     let mut findings = Vec::new();
     let mut seen = HashSet::new();
+    for path in unsafe_links {
+        findings.push(Finding {
+            kind: FindingKind::WorkflowSprawl,
+            issue_id: None,
+            detail: "symlinked shadow handoff root is forbidden".to_string(),
+            evidence: Some(path.display().to_string()),
+            proposed_fix: Some(
+                "archive the symlinked shadow root outside the release tree".to_string(),
+            ),
+        });
+    }
     for file in files {
         let text = match std::fs::read_to_string(&file) {
             Ok(text) => text,
             Err(_) => continue,
         };
-        for id in claim_command_ids(&text) {
+        let mut ids = handoff_manna_id(&text).into_iter().collect::<Vec<_>>();
+        if path_is_legacy_handoff_root(&file) {
+            ids.extend(claim_command_ids(&text));
+        }
+        ids.sort();
+        ids.dedup();
+        for id in ids {
             let issue = match by_id.get(id.as_str()) {
                 Some(issue) if issue.status != IssueStatus::Done => *issue,
                 _ => continue,
@@ -2131,6 +2223,23 @@ fn check_workflow_sprawl(issues: &[Issue], config: &WorkflowConfig) -> Vec<Findi
     findings
 }
 
+fn check_workflow_sprawl_for_issue(
+    issues: &[Issue],
+    config: &WorkflowConfig,
+    issue_id: &str,
+) -> Vec<String> {
+    check_workflow_sprawl(issues, config)
+        .into_iter()
+        .filter(|finding| {
+            finding
+                .issue_id
+                .as_deref()
+                .is_none_or(|candidate| candidate == issue_id)
+        })
+        .filter_map(|finding| finding.evidence)
+        .collect()
+}
+
 /// Write findings to `.manna/drift.yaml` atomically (temp + rename).
 fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
     let report = DriftReport {
@@ -2159,77 +2268,57 @@ fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
 /// existing state machine. Returns (fixed issue ids, failure messages).
 fn apply_reconcile_fixes(
     store: &MannaStore,
-    issues: &[Issue],
+    _issues: &[Issue],
     findings: &[Finding],
 ) -> (Vec<String>, Vec<String>) {
-    let mut working: HashMap<String, Issue> =
-        issues.iter().map(|i| (i.id.clone(), i.clone())).collect();
-    let by_id_status: HashMap<String, IssueStatus> = issues
-        .iter()
-        .map(|i| (i.id.clone(), i.status.clone()))
-        .collect();
-    let mut touched: Vec<String> = Vec::new();
+    let mut fixed = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
 
     for finding in findings {
         let id = match &finding.issue_id {
             Some(id) => id.clone(),
             None => continue,
         };
-        let issue = match working.get_mut(&id) {
-            Some(i) => i,
-            None => continue,
-        };
+        if !seen.insert((id.clone(), finding.kind)) {
+            continue;
+        }
         match finding.kind {
             FindingKind::DeadClaim => {
-                if issue.status == IssueStatus::InProgress {
-                    match issue.release() {
-                        Ok(()) => touched.push(id),
-                        Err(e) => failures.push(format!("{}: {}", id, e)),
-                    }
-                } else {
-                    // Blocked-but-claimed: release() requires in_progress, so
-                    // clear the claim directly; blocked status stays derived.
-                    issue.claimed_by = None;
-                    issue.claimed_at = None;
-                    issue.updated_at = Utc::now();
-                    touched.push(id);
+                match store.repair_issue(&id, |issue, _| issue.release_dead_claim()) {
+                    Ok(_) => fixed.push(id),
+                    Err(error) => failures.push(format!("{}: {}", id, error)),
                 }
             }
             FindingKind::BlockerDesync => {
-                let resolved: Vec<String> = issue
-                    .blocked_by
-                    .iter()
-                    .filter(|b| {
-                        by_id_status
-                            .get(*b)
-                            .map_or(true, |status| *status == IssueStatus::Done)
-                    })
-                    .cloned()
-                    .collect();
-                for blocker in &resolved {
-                    issue.remove_blocker(blocker);
-                }
-                if issue.status == IssueStatus::Blocked && issue.blocked_by.is_empty() {
+                match store.repair_issue(&id, |issue, current| {
+                    let resolved = issue
+                        .blocked_by
+                        .iter()
+                        .filter(|blocker| {
+                            current
+                                .iter()
+                                .find(|candidate| candidate.id.as_str() == (*blocker).as_str())
+                                .is_none_or(|candidate| candidate.status == IssueStatus::Done)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for blocker in resolved {
+                        issue.remove_blocker(&blocker);
+                    }
                     issue.update_blocked_status();
                     issue.updated_at = Utc::now();
+                    Ok(())
+                }) {
+                    Ok(_) => fixed.push(id),
+                    Err(error) => failures.push(format!("{}: {}", id, error)),
                 }
-                touched.push(id);
             }
             _ => {}
         }
     }
-
-    let mut fixed = Vec::new();
-    touched.sort();
-    touched.dedup();
-    for id in touched {
-        let issue = &working[&id];
-        match store.update_issue(issue) {
-            Ok(()) => fixed.push(id),
-            Err(e) => failures.push(format!("{}: {}", id, e)),
-        }
-    }
+    fixed.sort();
+    fixed.dedup();
     (fixed, failures)
 }
 
@@ -2243,14 +2332,7 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
         );
     }
 
-    let issues = match store.load_issues() {
-        Ok(i) => i,
-        Err(err) => handle_manna_error(err),
-    };
-    let workflow = match load_workflow(Path::new(".")) {
-        Ok(config) => config,
-        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
-    };
+    let (issues, workflow) = load_board_workflow(&store);
 
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -2283,6 +2365,19 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
             Path::new(&config.handoff_dir),
         ));
         findings.extend(check_workflow_sprawl(&issues, config));
+        findings.extend(
+            find_orphan_handoffs(Path::new("."), &issues)
+                .into_iter()
+                .map(|(path, detail)| Finding {
+                    kind: FindingKind::OrphanHandoff,
+                    issue_id: None,
+                    detail,
+                    evidence: Some(path.display().to_string()),
+                    proposed_fix: Some(
+                        "archive the orphan or recreate its Manna pair transactionally".to_string(),
+                    ),
+                }),
+        );
     } else {
         findings.extend(check_prompt_pairing_reverse(
             &issues,
@@ -2309,11 +2404,19 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
         None
     };
 
-    // Advisory verb: findings alone never fail the run; --fix failures do.
-    let exit_code = if fix_failures.is_empty() {
-        EXIT_SUCCESS
-    } else {
+    // Informational drift stays advisory. Workflow integrity findings are
+    // enforcing because a shadow or orphan changes which work order an agent
+    // may execute.
+    let integrity_failure = findings.iter().any(|finding| {
+        matches!(
+            finding.kind,
+            FindingKind::WorkflowSprawl | FindingKind::OrphanHandoff | FindingKind::PromptPairing
+        )
+    });
+    let exit_code = if !fix_failures.is_empty() || integrity_failure {
         EXIT_USER_ERROR
+    } else {
+        EXIT_SUCCESS
     };
     output_with_exit(
         ReconcileData {
@@ -2348,6 +2451,9 @@ fn main() {
         Commands::Claim { id } => cmd_claim(id),
         Commands::Done { id } => cmd_done(id),
         Commands::Abandon { id } => cmd_abandon(id),
+        Commands::Handoff { command } => match command {
+            HandoffCommands::Seal { id } => cmd_handoff_seal(id),
+        },
         Commands::Block { id, blocker_id } => cmd_block(id, blocker_id),
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
         Commands::List {
@@ -2366,7 +2472,7 @@ fn main() {
             track,
             source,
             prompt,
-        } => cmd_update(
+        } => cmd_update(UpdateRequest {
             id,
             title,
             description,
@@ -2375,7 +2481,7 @@ fn main() {
             track,
             source,
             prompt,
-        ),
+        }),
         Commands::Delete { id } => cmd_delete(id),
         Commands::Context { max_tokens, json } => cmd_context(max_tokens, json),
         Commands::Dream {
@@ -2486,7 +2592,7 @@ mod tests {
 
     #[test]
     fn test_find_issue_found() {
-        let issues = vec![
+        let issues = [
             Issue::new("mn-abc123".to_string(), "Test 1".to_string()).unwrap(),
             Issue::new("mn-def456".to_string(), "Test 2".to_string()).unwrap(),
         ];
@@ -2790,9 +2896,12 @@ mod tests {
                 initialized: true,
                 path: ".manna".to_string(),
                 workflow: "strict".to_string(),
-                workflow_version: Some(1),
+                workflow_version: Some(2),
                 handoff_path: Some(".handoff".to_string()),
                 gitignore_updated: false,
+                recovered_transactions: 0,
+                upgraded_items: 0,
+                restored_config: false,
             },
         };
 
@@ -2841,20 +2950,18 @@ mod tests {
     fn test_claim_and_release_workflow() {
         let (_temp_dir, store) = setup_store();
 
-        let mut issue = Issue::new("mn-claim1".to_string(), "Claim Test".to_string()).unwrap();
+        let issue = Issue::new("mn-claim1".to_string(), "Claim Test".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
         // Claim
-        issue.claim("ses_test".to_string()).unwrap();
-        store.update_issue(&issue).unwrap();
+        store.claim_issue("mn-claim1", "ses_test").unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::InProgress);
         assert_eq!(issues[0].claimed_by, Some("ses_test".to_string()));
 
         // Release
-        issue.release().unwrap();
-        store.update_issue(&issue).unwrap();
+        store.release_issue("mn-claim1", "ses_test").unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::Open);
@@ -2865,14 +2972,11 @@ mod tests {
     fn test_complete_workflow() {
         let (_temp_dir, store) = setup_store();
 
-        let mut issue = Issue::new("mn-done01".to_string(), "Complete Test".to_string()).unwrap();
+        let issue = Issue::new("mn-done01".to_string(), "Complete Test".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
-        issue.claim("ses_test".to_string()).unwrap();
-        store.update_issue(&issue).unwrap();
-
-        issue.complete().unwrap();
-        store.update_issue(&issue).unwrap();
+        store.claim_issue("mn-done01", "ses_test").unwrap();
+        store.complete_issue("mn-done01", "ses_test").unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues[0].status, IssueStatus::Done);
@@ -2885,11 +2989,12 @@ mod tests {
         let blocker = Issue::new("mn-block1".to_string(), "Blocker".to_string()).unwrap();
         store.append_issue(&blocker).unwrap();
 
-        let mut issue = Issue::new("mn-block2".to_string(), "Blocked Issue".to_string()).unwrap();
+        let issue = Issue::new("mn-block2".to_string(), "Blocked Issue".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
-        issue.add_blocker("mn-block1".to_string());
-        store.update_issue(&issue).unwrap();
+        store
+            .add_blocker("mn-block2", "mn-block1", "ses_test")
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         let blocked_issue = issues.iter().find(|i| i.id == "mn-block2").unwrap();
@@ -2908,8 +3013,9 @@ mod tests {
         issue.add_blocker("mn-unblk1".to_string());
         store.append_issue(&issue).unwrap();
 
-        issue.remove_blocker("mn-unblk1");
-        store.update_issue(&issue).unwrap();
+        store
+            .remove_blocker("mn-unblk2", "mn-unblk1", "ses_test")
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         let unblocked = issues.iter().find(|i| i.id == "mn-unblk2").unwrap();
@@ -2919,7 +3025,7 @@ mod tests {
 
     #[test]
     fn test_context_generation() {
-        let issues = vec![
+        let issues = [
             Issue::new("mn-ctx001".to_string(), "Open Issue".to_string()).unwrap(),
             {
                 let mut i = Issue::new("mn-ctx002".to_string(), "In Progress".to_string()).unwrap();
@@ -2955,13 +3061,13 @@ mod tests {
 
     #[test]
     fn test_list_filtering() {
-        let issues = vec![
+        let issues = [
             Issue::new("mn-flt001".to_string(), "Open 1".to_string()).unwrap(),
             Issue::new("mn-flt002".to_string(), "Open 2".to_string()).unwrap(),
             {
                 let mut i = Issue::new("mn-flt003".to_string(), "Done".to_string()).unwrap();
                 i.claim("ses".to_string()).unwrap();
-                i.complete().unwrap();
+                i.complete("ses").unwrap();
                 i
             },
         ];
@@ -2989,7 +3095,7 @@ mod tests {
 
     fn done_issue(mut issue: Issue) -> Issue {
         issue.claim("ses_x".to_string()).unwrap();
-        issue.complete().unwrap();
+        issue.complete("ses_x").unwrap();
         issue
     }
 

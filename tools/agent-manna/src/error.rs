@@ -28,6 +28,9 @@ pub enum MannaError {
 
     #[error("Invalid ID format: {0}")]
     InvalidId(String),
+
+    #[error("Mutation rejected: {0}")]
+    MutationRejected(String),
 }
 
 pub type Result<T> = std::result::Result<T, MannaError>;

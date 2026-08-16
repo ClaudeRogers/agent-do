@@ -150,6 +150,7 @@ impl MannaStore {
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock_file
             .lock_exclusive()
@@ -164,6 +165,11 @@ impl MannaStore {
         }
 
         let _board_lock = self.lock_board()?;
+        let issues = self.load_issues()?;
+        if issues.iter().any(|existing| existing.id == issue.id) {
+            return Err(MannaError::IssueAlreadyExists(issue.id.clone()));
+        }
+
         let file = OpenOptions::new().append(true).open(&path)?;
 
         // Acquire exclusive lock
@@ -180,40 +186,15 @@ impl MannaStore {
         Ok(())
     }
 
-    /// Update an existing issue by rewriting the entire file atomically.
-    ///
-    /// Writes to a temp file then renames to prevent corruption.
-    pub fn update_issue(&self, updated_issue: &Issue) -> Result<()> {
+    fn write_issues_locked(&self, issues: &[Issue]) -> Result<()> {
         let path = self.issues_path();
-        if !path.exists() {
-            return Err(MannaError::NotInitialized);
-        }
-
-        // Hold the board lock across load, mutate, write, and rename — a
-        // stale load otherwise reverts concurrent writers at rename time.
-        let _board_lock = self.lock_board()?;
-
-        // Load all issues
-        let mut issues = self.load_issues()?;
-
-        // Find and update the issue
-        let mut found = false;
-        for issue in &mut issues {
-            if issue.id == updated_issue.id {
-                *issue = updated_issue.clone();
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            return Err(MannaError::IssueNotFound(updated_issue.id.clone()));
-        }
-
-        // Write to temp file
         let temp_path = path.with_extension("jsonl.tmp");
         {
-            let temp_file = File::create(&temp_path)?;
+            let temp_file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&temp_path)?;
 
             // Acquire exclusive lock on temp file
             temp_file
@@ -221,53 +202,274 @@ impl MannaStore {
                 .map_err(|e| MannaError::LockFailed(e.to_string()))?;
 
             let mut writer = std::io::BufWriter::new(&temp_file);
-            for issue in &issues {
+            for issue in issues {
                 serde_json::to_writer(&mut writer, issue)?;
                 writeln!(writer)?;
             }
             writer.flush()?;
+            temp_file.sync_all()?;
         }
 
-        // Atomic rename
         fs::rename(&temp_path, &path)?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
 
         Ok(())
     }
 
-    /// Delete an issue by ID, rewriting issues.jsonl atomically.
-    pub fn delete_issue(&self, id: &str) -> Result<()> {
+    fn mutate_issue_locked<F>(&self, id: &str, mutation: F) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
         let path = self.issues_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
         }
 
-        // Same full-span board lock as update_issue: rewrite paths must not
-        // race each other or appends.
         let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let snapshot = issues.clone();
+        let issue = issues
+            .iter_mut()
+            .find(|issue| issue.id == id)
+            .ok_or_else(|| MannaError::IssueNotFound(id.to_string()))?;
+        mutation(issue, &snapshot).map_err(MannaError::MutationRejected)?;
+        issue.validate().map_err(MannaError::MutationRejected)?;
+        let updated = issue.clone();
+        self.write_issues_locked(&issues)?;
+        Ok(updated)
+    }
 
-        let issues = self.load_issues()?;
-        let remaining: Vec<Issue> = issues.into_iter().filter(|i| i.id != id).collect();
+    /// Claim an issue under one board lock. The row is reloaded only after
+    /// the lock is held, so exactly one contender can observe `open`.
+    pub fn claim_issue(&self, id: &str, session_id: &str) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| issue.claim(session_id.to_string()))
+    }
 
-        // load_issues succeeded, so a missing id means it never existed.
-        let before = self.load_issues()?.len();
-        if remaining.len() == before {
-            return Err(MannaError::IssueNotFound(id.to_string()));
-        }
+    /// Claim with an integrity precondition evaluated after acquiring the
+    /// board lock and reloading the row. This closes the validate-then-claim
+    /// race as well as the open-then-write race.
+    pub fn claim_issue_checked<F>(
+        &self,
+        id: &str,
+        session_id: &str,
+        precondition: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce(&Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, |issue, issues| {
+            precondition(issue, issues)?;
+            issue.claim(session_id.to_string())
+        })
+    }
 
-        let temp_path = path.with_extension("jsonl.tmp");
-        {
-            let temp_file = File::create(&temp_path)?;
-            temp_file
-                .lock_exclusive()
-                .map_err(|e| MannaError::LockFailed(e.to_string()))?;
-            let mut writer = std::io::BufWriter::new(&temp_file);
-            for issue in &remaining {
-                serde_json::to_writer(&mut writer, issue)?;
-                writeln!(writer)?;
+    /// Complete a claimed issue only for the session that owns it.
+    pub fn complete_issue(&self, id: &str, session_id: &str) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| {
+            if issue.issue_type == crate::issue::IssueType::Dream {
+                issue.close_dream(session_id)
+            } else {
+                issue.complete(session_id)
             }
-            writer.flush()?;
+        })
+    }
+
+    /// Release a claimed issue only for the session that owns it.
+    pub fn release_issue(&self, id: &str, session_id: &str) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| issue.release(session_id))
+    }
+
+    /// Mutate metadata without allowing a caller to smuggle a lifecycle
+    /// transition through an update path.
+    pub fn mutate_issue_metadata<F>(&self, id: &str, session_id: &str, mutation: F) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, |issue, issues| {
+            issue.require_owner(session_id)?;
+            let lifecycle = (
+                issue.status.clone(),
+                issue.claimed_by.clone(),
+                issue.claimed_at,
+                issue.blocked_by.clone(),
+            );
+            mutation(issue, issues)?;
+            if lifecycle
+                != (
+                    issue.status.clone(),
+                    issue.claimed_by.clone(),
+                    issue.claimed_at,
+                    issue.blocked_by.clone(),
+                )
+            {
+                return Err(
+                    "metadata update attempted to bypass a lifecycle transition".to_string()
+                );
+            }
+            Ok(())
+        })
+    }
+
+    pub fn add_blocker(&self, id: &str, blocker_id: &str, session_id: &str) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, issues| {
+            issue.require_owner(session_id)?;
+            if !issues.iter().any(|candidate| candidate.id == blocker_id) {
+                return Err(format!("Blocker issue {} not found", blocker_id));
+            }
+            issue.add_blocker(blocker_id.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn remove_blocker(&self, id: &str, blocker_id: &str, session_id: &str) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| {
+            issue.require_owner(session_id)?;
+            issue.remove_blocker(blocker_id);
+            Ok(())
+        })
+    }
+
+    /// Reconcile-only mutation path. Callers must first prove the repair from
+    /// external evidence, such as a dead pinned session or a resolved blocker.
+    pub fn repair_issue<F>(&self, id: &str, mutation: F) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, mutation)
+    }
+
+    /// Replace a row only when recovery can prove the existing record has the
+    /// same identity. Used by the pair transaction journal.
+    pub fn recover_issue(&self, expected: &Issue) -> Result<Issue> {
+        self.recover_issue_with(expected, || Ok(()))
+    }
+
+    pub fn recover_issue_with<F>(&self, expected: &Issue, commit_pair: F) -> Result<Issue>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
         }
-        fs::rename(&temp_path, &path)?;
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        if let Some(existing) = issues.iter().find(|issue| issue.id == expected.id) {
+            if existing.prompt == expected.prompt
+                && existing.handoff_digest == expected.handoff_digest
+            {
+                commit_pair().map_err(MannaError::MutationRejected)?;
+                return Ok(existing.clone());
+            }
+            return Err(MannaError::MutationRejected(format!(
+                "transaction recovery found a conflicting row for {}",
+                expected.id
+            )));
+        }
+        expected.validate().map_err(MannaError::MutationRejected)?;
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        issues.push(expected.clone());
+        self.write_issues_locked(&issues)?;
+        Ok(expected.clone())
+    }
+
+    /// Replace one row during a recoverable pair attach/detach operation.
+    pub fn recover_replace_issue(&self, expected_before: &Issue, after: &Issue) -> Result<Issue> {
+        self.recover_replace_issue_with(expected_before, after, || Ok(()))
+    }
+
+    pub fn recover_replace_issue_with<F>(
+        &self,
+        expected_before: &Issue,
+        after: &Issue,
+        commit_pair: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let row = issues
+            .iter_mut()
+            .find(|issue| issue.id == expected_before.id)
+            .ok_or_else(|| MannaError::IssueNotFound(expected_before.id.clone()))?;
+        if row.updated_at != expected_before.updated_at {
+            if row.prompt == after.prompt
+                && row.handoff_digest == after.handoff_digest
+                && row.issue_type == after.issue_type
+            {
+                commit_pair().map_err(MannaError::MutationRejected)?;
+                return Ok(row.clone());
+            }
+            return Err(MannaError::MutationRejected(format!(
+                "transaction recovery found concurrent changes to {}",
+                expected_before.id
+            )));
+        }
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        *row = after.clone();
+        row.validate().map_err(MannaError::MutationRejected)?;
+        self.write_issues_locked(&issues)?;
+        Ok(after.clone())
+    }
+
+    /// Delete an issue under the board lock after enforcing current-session
+    /// ownership. Pair-aware callers archive the handoff first through the
+    /// workflow transaction journal.
+    pub fn delete_issue_owned(&self, id: &str, session_id: &str) -> Result<Issue> {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let index = issues
+            .iter()
+            .position(|issue| issue.id == id)
+            .ok_or_else(|| MannaError::IssueNotFound(id.to_string()))?;
+        issues[index]
+            .require_owner(session_id)
+            .map_err(MannaError::MutationRejected)?;
+        let removed = issues.remove(index);
+        self.write_issues_locked(&issues)?;
+        Ok(removed)
+    }
+
+    /// Delete an exact transaction row idempotently.
+    pub fn recover_delete_issue(&self, expected: &Issue) -> Result<()> {
+        self.recover_delete_issue_with(expected, || Ok(()))
+    }
+
+    pub fn recover_delete_issue_with<F>(&self, expected: &Issue, commit_pair: F) -> Result<()>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let Some(index) = issues.iter().position(|issue| issue.id == expected.id) else {
+            commit_pair().map_err(MannaError::MutationRejected)?;
+            return Ok(());
+        };
+        let current = &issues[index];
+        if current.updated_at != expected.updated_at
+            || current.prompt != expected.prompt
+            || current.handoff_digest != expected.handoff_digest
+        {
+            return Err(MannaError::MutationRejected(format!(
+                "transaction recovery found a conflicting row for {}",
+                expected.id
+            )));
+        }
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        issues.remove(index);
+        self.write_issues_locked(&issues)?;
+
         Ok(())
     }
 
@@ -346,7 +548,7 @@ impl MannaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
 
@@ -422,11 +624,15 @@ mod tests {
     fn test_update_issue() {
         let (_temp_dir, store) = setup_store();
 
-        let mut issue = Issue::new("mn-update".to_string(), "Original".to_string()).unwrap();
+        let issue = Issue::new("mn-update".to_string(), "Original".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
-        issue.title = "Updated".to_string();
-        store.update_issue(&issue).unwrap();
+        store
+            .mutate_issue_metadata("mn-update", "ses-test", |issue, _| {
+                issue.title = "Updated".to_string();
+                Ok(())
+            })
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues.len(), 1);
@@ -437,9 +643,7 @@ mod tests {
     fn test_update_nonexistent_issue_fails() {
         let (_temp_dir, store) = setup_store();
 
-        let issue = Issue::new("mn-ghost".to_string(), "Ghost".to_string()).unwrap();
-
-        let result = store.update_issue(&issue);
+        let result = store.mutate_issue_metadata("mn-ghost", "ses-test", |_, _| Ok(()));
         assert!(matches!(result, Err(MannaError::IssueNotFound(_))));
     }
 
@@ -525,6 +729,52 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_claims_have_exactly_one_winner() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MannaStore::new(temp_dir.path()));
+        store.init().unwrap();
+        store
+            .append_issue(&Issue::new("mn-race01".to_string(), "Race".to_string()).unwrap())
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+        for contender in 0..12 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                store
+                    .claim_issue("mn-race01", &format!("ses_{}", contender))
+                    .is_ok()
+            }));
+        }
+        let wins = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1);
+        let issue = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(issue.status, crate::issue::IssueStatus::InProgress);
+        assert!(issue.claimed_by.is_some());
+    }
+
+    #[test]
+    fn test_metadata_update_rejects_non_owner() {
+        let (_temp_dir, store) = setup_store();
+        store
+            .append_issue(&Issue::new("mn-owner1".to_string(), "Owned".to_string()).unwrap())
+            .unwrap();
+        store.claim_issue("mn-owner1", "ses_owner").unwrap();
+        let result = store.mutate_issue_metadata("mn-owner1", "ses_intruder", |issue, _| {
+            issue.title = "Hijacked".to_string();
+            Ok(())
+        });
+        assert!(matches!(result, Err(MannaError::MutationRejected(_))));
+        assert_eq!(store.load_issues().unwrap()[0].title, "Owned");
+    }
+
+    #[test]
     fn test_concurrent_mutations_lose_no_writes() {
         // The 2026-07-22 incident class: rewrite paths (update/delete) built
         // from a stale load used to revert concurrent writers at rename time.
@@ -545,14 +795,13 @@ mod tests {
             let store_clone = Arc::clone(&store);
             handles.push(thread::spawn(move || {
                 for round in 1..=20 {
-                    let mut issue = store_clone
-                        .load_issues()
-                        .unwrap()
-                        .into_iter()
-                        .find(|i| i.id == format!("mn-mut{:03}", t))
+                    let id = format!("mn-mut{:03}", t);
+                    store_clone
+                        .mutate_issue_metadata(&id, "ses-test", |issue, _| {
+                            issue.title = format!("Mutator {} round {}", t, round);
+                            Ok(())
+                        })
                         .unwrap();
-                    issue.title = format!("Mutator {} round {}", t, round);
-                    store_clone.update_issue(&issue).unwrap();
                 }
             }));
         }
@@ -575,7 +824,12 @@ mod tests {
         }
 
         let issues = store.load_issues().unwrap();
-        assert_eq!(issues.len(), 30, "lost rows: expected 30, got {}", issues.len());
+        assert_eq!(
+            issues.len(),
+            30,
+            "lost rows: expected 30, got {}",
+            issues.len()
+        );
         for t in 0..10 {
             let issue = issues
                 .iter()

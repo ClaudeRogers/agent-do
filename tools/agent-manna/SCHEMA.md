@@ -7,12 +7,15 @@ This document defines the exact JSONL (JSON Lines) format for Manna's storage fi
 All data is stored in `.manna/` directory:
 - `.manna/issues.jsonl` - Issue records (one JSON object per line)
 - `.manna/sessions.jsonl` - Session event log (one JSON object per line)
+- `.manna/board.yaml` - Independent board identity (`strict` or `legacy`)
 - `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 - `.manna/workflow.yaml` - Strict workflow version and canonical handoff root
+- `.manna/transactions/` - Ignored write-ahead journal for interrupted pair changes
 
 Durable work orders live in tracked `.handoff/`:
 - `.handoff/README.md` - Generated ownership and usage contract
 - `.handoff/mn-xxxxxx-<slug>.md` - One generated work order per actionable item
+- `.handoff/.archive/` - Retired handoffs preserved by delete and item conversion
 
 ## issues.jsonl
 
@@ -40,22 +43,34 @@ Each line is a complete JSON object representing one issue.
 | `track` | String or null | No | ID of an existing `type: track` issue; tracks don't nest | Track this issue belongs to |
 | `source` | String or null | No | Free text (note path, URL, conversation) | Where this issue came from |
 | `prompt` | String or null | No | Strict boards require repository-relative Markdown below `.handoff/` | Work-order file paired with this item |
+| `handoff_digest` | String or null | No | `sha256:<64 lowercase hex>` | Board-side binding for the canonical handoff with its binding field normalized |
 
 v1 rows carry none of the new optional fields (`type`, `track`, `source`,
-`prompt`); they deserialize as `type: item` and re-serialize unchanged (lazy
+`prompt`, `handoff_digest`); they deserialize as `type: item` and re-serialize unchanged (lazy
 upgrade — the file is never rewritten just to add defaults).
 
 ### Workflow and handoff pairing
 
-New or empty boards initialized by Manna are strict workflow version 1.
+New or empty boards initialized by Manna are strict workflow version 2.
+`.manna/board.yaml` pins that decision independently, so removing
+`.manna/workflow.yaml` is corruption, never a downgrade. `manna init` restores
+the strict config and upgrades version-1 pairs. A pre-workflow nonempty board
+is classified once as `legacy` in `board.yaml`; later commands read that
+identity instead of inferring mode from missing files.
+
 `create` generates the item handoff and writes its path into `prompt`; neither
-side is optional for an active item. The handoff contains the item's scope and
-exactly one `agent-do manna claim <id>` target. Tracks and dreams do not carry
-handoffs. A strict pointer cannot be repointed or cleared through `update`.
+side is optional for an active item. Structured frontmatter binds workflow
+version, item, track, source, base commit, scope, inputs, and the SHA-256 of
+the canonical document with its self-referential binding field normalized. The same digest is stored in `handoff_digest`. Tracks
+and dreams do not carry handoffs. A strict pointer cannot be repointed or
+cleared through `update`; after editing the document, run
+`manna handoff seal <id>` to update the binding deliberately.
 
 `claim` enforces the pair before state changes. The file must exist, be
-Git-visible, remain below `.handoff/`, and claim only its own item. A violation
-exits 2 and leaves the board unchanged. `lint` applies the same contract, and
+Git-visible, remain below `.handoff/` without crossing a symlink, carry exact
+structured metadata, and match the board-side content binding. A loose comment
+or claim-like string has no authority. A violation exits 2 and leaves the
+board unchanged. `lint` applies the same contract, and
 `reconcile` (kind `prompt_pairing`) checks both directions:
 
 - **Forward**: an issue's pointer resolves to an existing file that never
@@ -68,12 +83,13 @@ exits 2 and leaves the board unchanged. `lint` applies the same contract, and
   mentions elsewhere in a prompt file are data, not pairing promises.
   Foreign-board ids are ignored (cross-repo prompts are legal).
 
-Strict reconcile also reports `workflow_sprawl` when an active local id is
-claimed from `.handoffs/`, `.dev/session-prompts/`, or a nested
-`handoff-prompts/` directory, or when an active item points outside
-`.handoff/`.
+Strict reconcile reports `workflow_sprawl` for structured handoffs anywhere
+outside `.handoff/`, including nested or symlinked legacy roots, and
+`orphan_handoff` for canonical files with no live actionable item. These
+integrity findings make reconcile exit 1; informational drift remains
+advisory.
 
-Nonempty boards without `.manna/workflow.yaml` stay in legacy mode. They keep
+Boards explicitly classified as legacy keep
 the prior absolute-pointer behavior, the description-first-line
 `PROMPT: <path>` fallback, and the `.dev/session-prompts/` reverse scan. Init
 does not rearrange those boards implicitly.
@@ -89,7 +105,18 @@ in_progress → done (via done)
 in_progress → open (via abandon)
 * → blocked (when blocked_by is non-empty)
 blocked → * (when blocked_by becomes empty)
+open dream → done (via done, without a claim)
 ```
+
+Claim, done, abandon, block, unblock, metadata updates, and deletion re-read
+and mutate under one board lock. Exactly one concurrent claimant can win.
+Once claimed, only `claimed_by` may mutate the row. `update --status` is
+rejected; lifecycle state moves only through the named lifecycle verbs.
+
+Strict pair create, delete, seal, attach, and detach write a transaction intent
+before touching either side. The next Manna command completes an interrupted
+intent idempotently. Delete and item-to-non-item conversion archive the handoff
+before removing its live pointer.
 
 ### The dream gate
 
@@ -102,7 +129,7 @@ un-actionable status in the same glance.
 `update <id> --type item` is the authorization act (Erik's to make) and prints
 an explicit `AUTHORIZED:` line saying the row is now claimable work; the
 reverse prints `PARKED:`. Every other verb still works on a dream, and
-`update --status done` remains the way a dream is closed with a reason.
+`done <id>` is the explicit unclaimed lifecycle transition for closing a dream.
 
 ### ID Format
 
@@ -151,7 +178,7 @@ Written atomically (temp + rename) by `reconcile --write-drift`. Shape:
 generated_at: "<ISO8601 UTC>"
 session: "<session id or null>"   # MANNA_SESSION_ID if pinned, else null
 findings:
-  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|skipped
+  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|workflow_sprawl|orphan_handoff|skipped
     issue_id: "mn-xxxxxx"   # optional
     detail: "one line"
     evidence: "sha / file:line / pid"   # optional
@@ -164,8 +191,8 @@ Commit trailers feeding the `landed_open` check are body lines of exactly
 ## File Format Rules
 
 1. **One JSON object per line** - No pretty printing, no multi-line JSON
-2. **Append-only** - New records are always appended to the end
-3. **No deletion** - Records are never removed (issues can be marked `done`)
+2. **Append-first** - New records append; atomic lifecycle rewrites preserve valid JSONL
+3. **Explicit deletion** - `manna delete` removes a row and archives a strict handoff
 4. **UTF-8 encoding** - All files must be UTF-8
 5. **Newline terminated** - Each line ends with `\n`
 
