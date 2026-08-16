@@ -1,0 +1,25 @@
+{
+  "_comment": "Cursor hook registration template for agent-do. Copy to ~/.cursor/hooks.json and merge with existing entries if you already have any. Paths are relative to ~/.cursor/ because Cursor runs user hooks from that directory. Requires \"version\": 1. Restart Cursor (or start a new Agent chat) after changes. See docs/INTEGRATION.md for Composer/Agent setup and troubleshooting.",
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "python3 ./hooks/agent-do-session-start.py",
+        "timeout": 15
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "python3 ./hooks/agent-do-prompt-router.py",
+        "timeout": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "matcher": "Shell",
+        "command": "python3 ./hooks/agent-do-pretooluse-check.py",
+        "timeout": 10
+      }
+    ]
+  }
+}
