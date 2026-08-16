@@ -19,6 +19,8 @@ from registry import (  # noqa: E402
     get_default_command,
     get_recommended_entrypoints,
     get_tool_readiness,
+    get_tool_contracts,
+    get_tool_contract_attributes,
     rank_tools_for_project_signals,
 )
 from ai_router import call_json_model  # noqa: E402
@@ -187,6 +189,27 @@ def build_item(tool: str, info: dict, query: str, source: str, score: int | floa
     }
 
 
+def _candidate_safety(info: dict) -> dict:
+    """Per-verb safety surface from contracts: what the reranker must weigh
+    before recommending an action (a read is cheaper/safer than a delete)."""
+    contracts = get_tool_contracts(info)
+    attributes = get_tool_contract_attributes(info)
+    write_verbs = sorted({
+        verb for beat in ("connect", "interact", "save")
+        for verb in contracts.get(beat, [])
+    })
+    read_verbs = sorted({
+        verb for beat in ("snapshot", "verify")
+        for verb in contracts.get(beat, [])
+    } - set(write_verbs))
+    surface = {"read_only": read_verbs, "write": write_verbs}
+    for attr in ("destructive", "sensitive"):
+        flagged = sorted(v for v, attrs in attributes.items() if attr in attrs)
+        if flagged:
+            surface[attr] = flagged
+    return surface
+
+
 def compact_candidate(item: dict) -> dict:
     info = item.get("_info") or {}
     commands = list((info.get("commands") or {}).keys())
@@ -204,6 +227,7 @@ def compact_candidate(item: dict) -> dict:
         "recommended_entrypoints": get_recommended_entrypoints(info),
         "current_primary": item.get("primary"),
         "examples": examples,
+        "safety": _candidate_safety(info),
     }
 
 

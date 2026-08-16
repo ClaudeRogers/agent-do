@@ -70,6 +70,36 @@ def _validate_base_url(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
+def _reject_unknown_flags(
+    argv: list[str],
+    *,
+    bool_flags: set[str] | None = None,
+    value_flags: set[str] | None = None,
+) -> None:
+    """Reject unknown or valueless flags before a typo can turn into a write."""
+    bool_flags = bool_flags or set()
+    value_flags = value_flags or set()
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if not token.startswith("--"):
+            i += 1
+            continue
+        if token in value_flags:
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                _err(f"{token} requires a value")
+            i += 2
+        elif token in bool_flags:
+            i += 1
+        else:
+            _err(f"Unknown flag: {token}")
+
+
+def _jql_quote(value: str) -> str:
+    """Quote a JQL string literal, preserving backslashes and quotes."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 # ── credential storage ─────────────────────────────────────────────────────────
 
 def _creds_dir() -> Path:
@@ -169,8 +199,11 @@ class JiraClient:
         self.token = token
         self.server = server
         self.api_version = "2" if server else "3"
-        raw = f"{email}:{token}".encode()
-        self._auth = "Basic " + base64.b64encode(raw).decode()
+        if server:
+            self._auth = "Bearer " + token
+        else:
+            raw = f"{email}:{token}".encode()
+            self._auth = "Basic " + base64.b64encode(raw).decode()
 
     def _api(self, path: str) -> str:
         return f"{self.base}/rest/api/{self.api_version}/{path.lstrip('/')}"
@@ -218,6 +251,15 @@ class JiraClient:
                 _err(f"Jira API {exc.code} {exc.reason}: {msg}")
         except urllib.error.URLError as exc:
             _err(f"Could not connect to Jira: {exc.reason}")
+
+    def search(self, jql: str, *, max_results: int, fields: str | None = None,
+               suppress_errors: bool = False) -> Any:
+        params: dict[str, Any] = {"jql": jql, "maxResults": max_results}
+        if fields is not None:
+            params["fields"] = fields
+        if self.server:
+            return self.get(self._search(), params=params, suppress_errors=suppress_errors)
+        return self.post(self._search(), params, suppress_errors=suppress_errors)
 
     def get(self, path: str, *, params: dict[str, Any] | None = None, agile: bool = False,
             suppress_errors: bool = False) -> Any:
@@ -306,7 +348,7 @@ def _get_client(connection: str | None) -> JiraClient:
 
     _err(
         "No Jira connection configured.\n"
-        "  agent-do jira connections add <name> --url <url> --email <email> --token <token>\n"
+        "  agent-do jira connections add <name> --url <url> --email <email> --token-stdin\n"
         "Or set JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN environment variables."
     )
 
@@ -404,7 +446,7 @@ def cmd_connections(argv: list[str]) -> None:
         default = data.get("default")
         if not profiles:
             print("No Jira connection profiles saved.")
-            print("  agent-do jira connections add <name> --url <url> --email <email> --token <token>")
+            print("  agent-do jira connections add <name> --url <url> --email <email> --token-stdin")
             return
         for name, p in profiles.items():
             marker = " *" if name == default else ""
@@ -416,10 +458,16 @@ def cmd_connections(argv: list[str]) -> None:
     elif sub == "add":
         name = rest[0] if rest else None
         if not name:
-            _err("Usage: connections add <name> --url <url> --email <email> --token <token>")
+            _err("Usage: connections add <name> --url <url> --email <email> --token-stdin")
         _validate_profile_name(name)
         url = email = token = ""
         is_server = is_default = False
+        token_from_stdin = False
+        _reject_unknown_flags(
+            rest[1:],
+            bool_flags={"--server", "--default", "--token-stdin"},
+            value_flags={"--url", "--email", "--token"},
+        )
         i = 1
         while i < len(rest):
             if rest[i] == "--url" and i + 1 < len(rest):
@@ -431,6 +479,9 @@ def cmd_connections(argv: list[str]) -> None:
             elif rest[i] == "--token" and i + 1 < len(rest):
                 token = rest[i + 1].strip()
                 i += 2
+            elif rest[i] == "--token-stdin":
+                token_from_stdin = True
+                i += 1
             elif rest[i] == "--server":
                 is_server = True
                 i += 1
@@ -443,8 +494,12 @@ def cmd_connections(argv: list[str]) -> None:
             _err("--url is required")
         if not email:
             _err("--email is required")
+        if token and token_from_stdin:
+            _err("Use only one of --token or --token-stdin")
+        if token_from_stdin:
+            token = sys.stdin.read().strip()
         if not token:
-            _err("--token is required")
+            _err("--token-stdin is required (or --token for legacy interactive use)")
         url = _validate_base_url(url)
 
         data = _load_profiles()
@@ -497,6 +552,7 @@ def cmd_connections(argv: list[str]) -> None:
 def cmd_whoami(argv: list[str]) -> None:
     connection = None
     json_mode = False
+    _reject_unknown_flags(argv, bool_flags={"--json"}, value_flags={"--connection"})
     i = 0
     while i < len(argv):
         if argv[i] == "--connection" and i + 1 < len(argv):
@@ -522,6 +578,7 @@ def cmd_whoami(argv: list[str]) -> None:
 def cmd_snapshot(argv: list[str]) -> None:
     connection = None
     json_mode = False
+    _reject_unknown_flags(argv, bool_flags={"--json"}, value_flags={"--connection"})
     i = 0
     while i < len(argv):
         if argv[i] == "--connection" and i + 1 < len(argv):
@@ -537,11 +594,17 @@ def cmd_snapshot(argv: list[str]) -> None:
     projects = []
     for p in (projects_data or []):
         try:
-            result = client.get(client._search(), params={
-                "jql": f"project = {p['key']} AND statusCategory != Done",
-                "maxResults": 0,
-            }, suppress_errors=True)
-            open_count = -1 if isinstance(result, dict) and result.get("_error") else result.get("total", 0)
+            result = client.search(
+                f"project = {p['key']} AND statusCategory != Done",
+                max_results=100,
+                fields="key",
+                suppress_errors=True,
+            )
+            if isinstance(result, dict) and result.get("_error"):
+                open_count = -1
+            else:
+                issues = (result or {}).get("issues") or []
+                open_count = (result or {}).get("total", len(issues))
         except Exception:
             open_count = -1
         projects.append({
@@ -580,6 +643,7 @@ def cmd_user(argv: list[str]) -> None:
     if not rest:
         _err("Usage: user find <query>  (name, email, or account ID fragment)")
 
+    _reject_unknown_flags(rest, bool_flags={"--json"}, value_flags={"--email", "--query", "--connection"})
     query = None
     i = 0
     while i < len(rest):
@@ -668,6 +732,7 @@ def _parse_common(argv: list[str], *, start: int = 0) -> tuple[str | None, bool,
 def _issue_view(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue view <ISSUE-KEY> [--comments] [--json] [--connection <name>]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--comments", "--json"}, value_flags={"--connection"})
     key = argv[0]
     show_comments = "--comments" in argv
     connection, json_mode, _ = _parse_common(argv, start=1)
@@ -706,6 +771,11 @@ def _issue_view(argv: list[str]) -> None:
 def _issue_list(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue list <PROJECT-KEY> [--status <name>] [--assignee <user>] [--mine] [--limit N] [--json]")
+    _reject_unknown_flags(
+        argv[1:],
+        bool_flags={"--mine", "--json"},
+        value_flags={"--status", "--assignee", "--type", "--priority", "--label", "--limit", "--connection"},
+    )
     project = argv[0]
     status = assignee = issue_type = priority = label = None
     limit = 50
@@ -739,24 +809,24 @@ def _issue_list(argv: list[str]) -> None:
 
     jql_parts = [f"project = {project}"]
     if status:
-        jql_parts.append(f'status = "{status}"')
+        jql_parts.append(f"status = {_jql_quote(status)}")
     if assignee:
         # Don't quote JQL functions (e.g. currentUser(), membersOf())
         if "(" in assignee:
             jql_parts.append(f"assignee = {assignee}")
         else:
-            jql_parts.append(f'assignee = "{assignee}"')
+            jql_parts.append(f"assignee = {_jql_quote(assignee)}")
     if issue_type:
-        jql_parts.append(f'issuetype = "{issue_type}"')
+        jql_parts.append(f"issuetype = {_jql_quote(issue_type)}")
     if priority:
-        jql_parts.append(f'priority = "{priority}"')
+        jql_parts.append(f"priority = {_jql_quote(priority)}")
     if label:
-        jql_parts.append(f'labels = "{label}"')
+        jql_parts.append(f"labels = {_jql_quote(label)}")
     jql_parts.append("ORDER BY updated DESC")
     jql = " AND ".join(jql_parts[:-1]) + " " + jql_parts[-1]
 
-    result = client.get(client._search(), params={"jql": jql, "maxResults": limit,
-                                                  "fields": "summary,status,issuetype,priority,assignee,labels,created,updated"})
+    result = client.search(jql, max_results=limit,
+                           fields="summary,status,issuetype,priority,assignee,labels,created,updated")
     issues = [_fmt_issue(i, client) for i in (result.get("issues") or [])]
     total = result.get("total", len(issues))
 
@@ -773,8 +843,17 @@ def _issue_list(argv: list[str]) -> None:
 def _issue_create(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue create <PROJECT-KEY> --summary <text> [options]")
+    _reject_unknown_flags(
+        argv[1:],
+        bool_flags={"--dry-run", "--json"},
+        value_flags={
+            "--summary", "--description", "--type", "--assignee", "--priority",
+            "--label", "--parent", "--sprint", "--sprint-field", "--connection",
+        },
+    )
     project = argv[0]
     summary = description = assignee = parent = sprint_id = None
+    sprint_field = os.environ.get("JIRA_SPRINT_FIELD", "customfield_10020")
     issue_type = "Task"
     priority = None
     labels: list[str] = []
@@ -804,6 +883,9 @@ def _issue_create(argv: list[str]) -> None:
             i += 2
         elif argv[i] == "--sprint" and i + 1 < len(argv):
             sprint_id = argv[i + 1]
+            i += 2
+        elif argv[i] == "--sprint-field" and i + 1 < len(argv):
+            sprint_field = argv[i + 1]
             i += 2
         elif argv[i] == "--dry-run":
             dry_run = True
@@ -836,8 +918,10 @@ def _issue_create(argv: list[str]) -> None:
     if parent:
         fields["parent"] = {"key": parent}
     if sprint_id is not None:
+        if not sprint_field.startswith("customfield_"):
+            _err(f"--sprint-field must be a Jira custom field id like customfield_10020, got: {sprint_field!r}")
         try:
-            fields["customfield_10020"] = {"id": int(sprint_id)}
+            fields[sprint_field] = {"id": int(sprint_id)}
         except ValueError:
             _err(f"--sprint must be a numeric sprint ID, got: {sprint_id!r}")
 
@@ -865,26 +949,36 @@ def _issue_create(argv: list[str]) -> None:
         sys.exit(DRY_RUN_EXIT_CODE)
 
     result = client.post("issue", body, suppress_errors=True)
+    fallback_note = None
     if isinstance(result, dict) and result.get("_error"):
         message = str(result.get("_error", "")).lower()
         if issue_type.lower() != "task" and ("issuetype" in message or "issue type" in message):
             fields["issuetype"] = {"name": "Task"}
             body = {"fields": fields}
             result = client.post("issue", body)
+            fallback_note = f"Requested issue type {issue_type!r} was rejected; created Task instead."
         else:
             _err(str(result["_error"]))
     key = result.get("key", "?")
     url = f"{client.base}/browse/{key}"
     if json_mode:
-        _print_json({"key": key, "url": url})
+        payload = {"key": key, "url": url}
+        if fallback_note:
+            payload["warning"] = fallback_note
+            payload["requested_issue_type"] = issue_type
+            payload["created_issue_type"] = "Task"
+        _print_json(payload)
     else:
         print(f"Created {key}: {summary}")
+        if fallback_note:
+            print(f"  Warning: {fallback_note}")
         print(f"  {url}")
 
 
 def _issue_link(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue link <ISSUE-KEY> --to <ISSUE-KEY> --type <blocks|is blocked by|clones|is cloned by|duplicates|is duplicated by|relates to>")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--to", "--type", "--connection"})
     key = argv[0]
     target = None
     link_type = "relates to"
@@ -970,6 +1064,7 @@ def _issue_link(argv: list[str]) -> None:
 def _issue_delete(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue delete <ISSUE-KEY> [--dry-run] [--confirm]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--confirm", "--json"}, value_flags={"--connection"})
     key = argv[0]
     dry_run = False
     confirm = False
@@ -1006,6 +1101,7 @@ def _issue_delete(argv: list[str]) -> None:
 def _issue_comment(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue comment <ISSUE-KEY> --body <text> [--dry-run]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--body", "--connection"})
     key = argv[0]
     body_text = None
     dry_run = False
@@ -1043,6 +1139,7 @@ def _issue_comment(argv: list[str]) -> None:
 def _issue_assign(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue assign <ISSUE-KEY> --to <account-id-or-email>")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--to", "--connection"})
     key = argv[0]
     to = None
     dry_run = False
@@ -1086,6 +1183,7 @@ def _issue_assign(argv: list[str]) -> None:
 def _issue_transition(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue transition <ISSUE-KEY> --to <status-name>")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--to", "--connection"})
     key = argv[0]
     to_status = None
     dry_run = False
@@ -1133,6 +1231,7 @@ def _issue_transition(argv: list[str]) -> None:
 def _issue_label(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue label <ISSUE-KEY> [--add <label>] [--remove <label>]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--add", "--remove", "--connection"})
     key = argv[0]
     add_labels: list[str] = []
     remove_labels: list[str] = []
@@ -1184,6 +1283,7 @@ def _issue_label(argv: list[str]) -> None:
 def _issue_edit(argv: list[str]) -> None:
     if not argv:
         _err("Usage: issue edit <ISSUE-KEY> [--summary <text>] [--description <text>] [--priority <p>]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--summary", "--description", "--priority", "--connection"})
     key = argv[0]
     summary = description = priority = None
     dry_run = False
@@ -1237,6 +1337,7 @@ def _issue_edit(argv: list[str]) -> None:
 def cmd_transitions(argv: list[str]) -> None:
     if not argv:
         _err("Usage: transitions <ISSUE-KEY> [--connection <name>] [--json]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--json"}, value_flags={"--connection"})
     key = argv[0]
     connection, json_mode, _ = _parse_common(argv, start=1)
     client = _get_client(connection)
@@ -1257,6 +1358,7 @@ def cmd_transitions(argv: list[str]) -> None:
 def cmd_search(argv: list[str]) -> None:
     if not argv or argv[0].startswith("-"):
         _err("Usage: search '<JQL>' [--limit N] [--fields <fields>] [--json]")
+    _reject_unknown_flags(argv[1:], bool_flags={"--json"}, value_flags={"--limit", "--fields", "--connection"})
     jql = argv[0]
     limit = 50
     fields = "summary,status,issuetype,priority,assignee,labels,created,updated"
@@ -1273,7 +1375,7 @@ def cmd_search(argv: list[str]) -> None:
     connection, json_mode, _ = _parse_common(argv[1:])
     client = _get_client(connection)
 
-    result = client.get(client._search(), params={"jql": jql, "maxResults": limit, "fields": fields})
+    result = client.search(jql, max_results=limit, fields=fields)
     issues = [_fmt_issue(iss, client) for iss in (result.get("issues") or [])]
     total = result.get("total", len(issues))
 
@@ -1292,6 +1394,7 @@ def cmd_board(argv: list[str]) -> None:
     sub = argv[0] if argv else "list"
     rest = argv[1:]
     if sub == "list":
+        _reject_unknown_flags(rest, bool_flags={"--json"}, value_flags={"--project", "--connection"})
         project = None
         i = 0
         while i < len(rest):
@@ -1325,6 +1428,7 @@ def cmd_sprint(argv: list[str]) -> None:
     if sub == "list":
         if not rest or rest[0].startswith("-"):
             _err("Usage: sprint list <BOARD-ID>")
+        _reject_unknown_flags(rest[1:], bool_flags={"--json"}, value_flags={"--state", "--connection"})
         board_id = rest[0]
         state = "active"
         i = 1
@@ -1349,6 +1453,7 @@ def cmd_sprint(argv: list[str]) -> None:
     elif sub == "active":
         if not rest or rest[0].startswith("-"):
             _err("Usage: sprint active <BOARD-ID>")
+        _reject_unknown_flags(rest[1:], bool_flags={"--json"}, value_flags={"--connection"})
         board_id = rest[0]
         connection, json_mode, _ = _parse_common(rest[1:])
         client = _get_client(connection)
@@ -1377,6 +1482,7 @@ def cmd_sprint(argv: list[str]) -> None:
     elif sub == "add":
         if not rest or rest[0].startswith("-"):
             _err("Usage: sprint add <ISSUE-KEY> --sprint <id>")
+        _reject_unknown_flags(rest[1:], bool_flags={"--dry-run", "--json"}, value_flags={"--sprint", "--connection"})
         key = rest[0]
         sprint_id = None
         dry_run = False

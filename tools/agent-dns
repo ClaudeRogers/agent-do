@@ -10,6 +10,7 @@ agent-dns - DNS lookup and management
 Commands:
   lookup <domain> [type]     DNS lookup (A, AAAA, MX, TXT, NS, CNAME, SOA)
   all <domain>               Show all common record types
+  list <domain>              List common DNS records (alias of all)
   reverse <ip>               Reverse DNS lookup
   trace <domain>             Trace DNS resolution path
   flush                      Flush local DNS cache (macOS)
@@ -177,7 +178,7 @@ case "${1:-help}" in
         shift
         cmd_lookup "$@"
         ;;
-    all|full)
+    all|full|list)
         shift
         cmd_all "$@"
         ;;

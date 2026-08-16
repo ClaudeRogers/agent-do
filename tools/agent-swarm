@@ -6,6 +6,19 @@ set -euo pipefail
 SWARM_DIR="${AGENT_DO_HOME:-$HOME/.agent-do}/swarm"
 mkdir -p "$SWARM_DIR"
 
+# Parse a global --json flag (accepted anywhere, including as a trailing arg)
+# and strip it from the argument list so command handlers see only their args.
+JSON_OUTPUT=0
+_filtered_args=()
+for _arg in "$@"; do
+    if [[ "$_arg" == "--json" ]]; then
+        JSON_OUTPUT=1
+    else
+        _filtered_args+=("$_arg")
+    fi
+done
+set -- ${_filtered_args+"${_filtered_args[@]}"}
+
 show_help() {
     cat << 'EOF'
 agent-swarm - Multi-agent orchestration
@@ -243,6 +256,37 @@ cmd_pipeline() {
 }
 
 cmd_status() {
+    if [[ "$JSON_OUTPUT" == "1" ]]; then
+        SWARM_DIR="$SWARM_DIR" python3 << 'PYTHON'
+import json
+import os
+import glob
+
+swarm_dir = os.environ['SWARM_DIR']
+swarms = []
+for f in sorted(glob.glob(os.path.join(swarm_dir, '*.json'))):
+    try:
+        with open(f) as file:
+            swarm = json.load(file)
+    except (ValueError, OSError):
+        continue
+    agents = swarm.get('agents', [])
+    completed = sum(1 for a in agents if a.get('status') == 'completed')
+    swarms.append({
+        'id': swarm.get('id'),
+        'task': swarm.get('task'),
+        'status': swarm.get('status'),
+        'agents_total': len(agents),
+        'agents_completed': completed,
+        'started': swarm.get('started'),
+        'completed': swarm.get('completed'),
+    })
+
+print(json.dumps({'count': len(swarms), 'swarms': swarms}))
+PYTHON
+        return
+    fi
+
     echo "Swarm Status"
     echo "============"
 

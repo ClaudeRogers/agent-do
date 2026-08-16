@@ -3,17 +3,8 @@
  * Phase 7: Goal execution, page exploration, smart recovery.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { captureForVision, describePage, findByVisual, analyzePattern } from './vision.js';
-
-let anthropicClient = null;
-
-function getAnthropicClient() {
-    if (!anthropicClient) {
-        anthropicClient = new Anthropic();
-    }
-    return anthropicClient;
-}
+import { callModel } from './model-resolver.js';
 
 /**
  * Execute a high-level goal through planning and action loop
@@ -78,9 +69,7 @@ ${history.map((h, i) => `${i + 1}. ${h.action}(${h.args?.join(', ') || ''}) -> $
 Analyze the screenshot and page state. What action should I take next to achieve the goal?`;
 
         try {
-            const client = getAnthropicClient();
-            const response = await client.messages.create({
-                model: 'claude-sonnet-4-20250514',
+            const response = await callModel('vision', {
                 max_tokens: 1024,
                 system: systemPrompt,
                 messages: [{
@@ -103,7 +92,7 @@ Analyze the screenshot and page state. What action should I take next to achieve
             });
 
             // Parse response
-            const text = response.content[0].text;
+            const text = response.text;
             const jsonMatch = text.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
                 error = 'Failed to parse agent response';

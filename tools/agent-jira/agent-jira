@@ -15,7 +15,8 @@ CONNECTION MANAGEMENT
   connections add <name>                    Save a connection profile
     --url <jira-url>                        Base URL (e.g. https://company.atlassian.net)
     --email <email>                         Email (Cloud) or username (Server)
-    --token <api-token>                     API token (Cloud) or password/PAT (Server)
+    --token-stdin                           Read API token/PAT from stdin
+    [--token <api-token>]                   Legacy interactive use only; visible in ps/history
     [--server]                              Flag as Server/Data Center (uses API v2)
     [--default]                             Set as default connection
   connections remove <name>                 Remove a profile
@@ -46,6 +47,7 @@ ISSUES
     [--label <label>]                       Add label (repeatable)
     [--parent <ISSUE-KEY>]                  Set parent issue/epic
     [--sprint <id>]                         Add to sprint by ID at creation
+    [--sprint-field <customfield_N>]        Sprint custom field (default: JIRA_SPRINT_FIELD or customfield_10020)
     [--dry-run] [--json] [--connection <name>]
   issue link <ISSUE-KEY>                    Create a linked work item relationship
     --to <ISSUE-KEY>                        Other issue to link to (required)
@@ -112,7 +114,7 @@ EXIT CODES
 
 EXAMPLES
   agent-do jira connections add work \
-    --url https://company.atlassian.net --email me@company.com --token <token> --default
+    --url https://company.atlassian.net --email me@company.com --token-stdin --default
 
   agent-do jira snapshot
   agent-do jira issue list PROJ --status "In Progress" --json

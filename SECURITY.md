@@ -6,7 +6,7 @@ If you discover a security vulnerability in agent-do, please report it responsib
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Instead, email the maintainer directly or use GitHub's private vulnerability reporting feature on the repository's Security tab.
+Use GitHub's private vulnerability reporting on the repository's Security tab.
 
 Include:
 
@@ -16,6 +16,15 @@ Include:
 - Any suggested fixes, if you have them
 
 You should receive a response within 48 hours. We will work with you to understand the issue and coordinate a fix before any public disclosure.
+
+## How agent-do Handles Secrets
+
+- **Secure storage.** `agent-do creds` keeps secrets in OS-level secure storage (macOS Keychain, Linux Secret Service). Resolution order is environment variable first, then the secure store. The dispatcher, intent router, and health checker resolve a tool's declared secrets automatically, so keys never need to live in shell profiles or command arguments.
+- **No secrets in argv or output.** `creds store <KEY> --stdin` reads values from stdin instead of the command line, and `creds get` prints status, not values, unless `--reveal` is passed explicitly.
+- **Staged-diff secret scan.** `agent-do git commit` scans staged additions for secret-shaped values before committing. Findings are reported redacted and the commit is blocked; `--no-scan` is an explicit bypass that warns and records telemetry.
+- **Live gates.** Direct control of the visible machine (desktop clicks, screen control, Messenger delivery, live browser control) requires an explicit `+live(...)` runtime modifier with scope, app, and TTL. Tools cannot drive the user's desktop silently.
+- **Bounded network calls.** HTTP requests across the cloud tools carry connection and request timeouts, so a dead endpoint degrades to a structured error instead of a hang.
+- **Sandboxed behavioral audit.** `agent-do harness contracts audit` probes only declared read-only, attribute-free verbs, runs each probe with a scratch temporary directory as its working directory so stray file writes land in the scratch rather than the repository, and touches the network only with `--include-network`.
 
 ## Scope
 

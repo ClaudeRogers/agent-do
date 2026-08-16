@@ -144,6 +144,8 @@ Commands:
       Workspace state as JSON (channels and unread counts).
   channels
       List public/private channels visible to the token.
+  read <channel|#name> [--limit N]
+      Read recent channel messages (oldest first).
 
 Environment:
   SLACK_USER_TOKEN       User OAuth token (xoxp-...) for sending as you.
@@ -417,6 +419,44 @@ def cmd_channels(args: argparse.Namespace) -> None:
             print(f"{prefix}{channel['name']}  ({channel.get('num_members', 0)} members)")
 
 
+def cmd_read(args: argparse.Namespace) -> None:
+    token = token_from_env(as_user=args.as_user, as_bot=args.as_bot)
+    client = SlackClient(token)
+    channel = args.channel
+    if channel.startswith("#"):
+        name = channel.lstrip("#")
+        cursor = ""
+        channel_id = None
+        while True:
+            payload = client.get(
+                "conversations.list",
+                {"types": "public_channel,private_channel", "limit": 200, "cursor": cursor},
+            )
+            for item in payload.get("channels", []):
+                if item.get("name") == name:
+                    channel_id = item["id"]
+                    break
+            cursor = str((payload.get("response_metadata") or {}).get("next_cursor") or "")
+            if channel_id or not cursor:
+                break
+        if not channel_id:
+            raise SlackError(f"channel not found: {channel}")
+        channel = channel_id
+    payload = client.get(
+        "conversations.history",
+        {"channel": channel, "limit": args.limit},
+    )
+    messages = payload.get("messages", [])
+    if args.json:
+        print(json.dumps({"ok": True, "channel": channel, "messages": messages}, indent=2))
+        return
+    for message in reversed(messages):
+        author = message.get("user") or message.get("bot_id") or "?"
+        stamp = message.get("ts", "").split(".")[0]
+        text = (message.get("text") or "").replace("\n", " ")
+        print(f"[{stamp}] {author}: {text}")
+
+
 def cmd_snapshot(args: argparse.Namespace) -> None:
     token = token_from_env(as_user=args.as_user, as_bot=args.as_bot)
     client = SlackClient(token)
@@ -505,6 +545,12 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_parser = subparsers.add_parser("snapshot", help="Workspace snapshot")
     add_identity_flags(snapshot_parser)
     snapshot_parser.set_defaults(handler=cmd_snapshot)
+
+    read_parser = subparsers.add_parser("read", help="Read channel messages")
+    read_parser.add_argument("channel", help="Channel ID or #name")
+    read_parser.add_argument("--limit", type=int, default=20)
+    add_identity_flags(read_parser)
+    read_parser.set_defaults(handler=cmd_read)
 
     return parser
 

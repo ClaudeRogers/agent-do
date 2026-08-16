@@ -75,7 +75,7 @@ cf_request() {
     local endpoint="$2"
     local data="${3:-}"
 
-    local args=(-s -X "$method" "${CF_API}${endpoint}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${CF_API}${endpoint}" \
         -H "Content-Type: application/json")
 
     # Auth: prefer API token, fall back to email+key
@@ -97,7 +97,7 @@ cf_request() {
 
 cf_graphql() {
     local query="$1"
-    local args=(-s -X POST "https://api.cloudflare.com/client/v4/graphql" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X POST "https://api.cloudflare.com/client/v4/graphql" \
         -H "Content-Type: application/json")
 
     if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
@@ -191,8 +191,18 @@ json_escape() {
 # --- Zone Commands ---
 
 cmd_zones() {
+    local json_output=0
+    for arg in "$@"; do
+        [[ "$arg" == "--json" ]] && json_output=1
+    done
+
     local result
     result=$(cf_request GET "/zones?per_page=50")
+
+    if [[ "$json_output" == "1" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -665,12 +675,22 @@ else:
 # --- Workers Commands ---
 
 cmd_workers() {
+    local json_output=0
+    for arg in "$@"; do
+        [[ "$arg" == "--json" ]] && json_output=1
+    done
+
     local acct_id
     acct_id=$(get_account_id)
     [[ -z "$acct_id" ]] && { echo "Error: Could not determine account ID. Set CLOUDFLARE_ACCOUNT_ID" >&2; return 1; }
 
     local result
     result=$(cf_request GET "/accounts/$acct_id/workers/scripts")
+
+    if [[ "$json_output" == "1" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -702,12 +722,22 @@ cmd_worker() {
 # --- Pages Commands ---
 
 cmd_pages() {
+    local json_output=0
+    for arg in "$@"; do
+        [[ "$arg" == "--json" ]] && json_output=1
+    done
+
     local acct_id
     acct_id=$(get_account_id)
     [[ -z "$acct_id" ]] && { echo "Error: Set CLOUDFLARE_ACCOUNT_ID" >&2; return 1; }
 
     local result
     result=$(cf_request GET "/accounts/$acct_id/pages/projects")
+
+    if [[ "$json_output" == "1" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json

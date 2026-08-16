@@ -14,7 +14,9 @@ Commands:
   open <notebook>            Open notebook in browser
   run <notebook>             Execute notebook
   convert <notebook> <fmt>   Convert notebook (html, pdf, py, md)
+  export <notebook> <fmt>    Convert notebook (alias of convert)
   create <name>              Create new notebook
+  kernel [list|restart <id>] Manage kernels (list specs, restart via server API)
   snapshot [notebook]        Jupyter state as JSON (servers, kernels, notebook cells)
 
 Options:
@@ -212,6 +214,48 @@ EOF
     echo "Created: $name"
 }
 
+cmd_kernel() {
+    local action="${1:-list}"
+    shift || true
+    case "$action" in
+        list|ls)
+            cmd_kernels
+            ;;
+        restart)
+            local kernel_id="${1:-}"
+            if [[ -z "$kernel_id" ]]; then
+                echo "Usage: agent-jupyter kernel restart <kernel-id>"
+                echo "Running kernels (from server API):"
+            fi
+            # Resolve a running server URL + token from jupyter's own listing.
+            local server_line
+            server_line=$(jupyter notebook list 2>/dev/null | grep -m1 "^http") || true
+            if [[ -z "$server_line" ]]; then
+                server_line=$(jupyter server list 2>/dev/null | grep -m1 "^http") || true
+            fi
+            if [[ -z "$server_line" ]]; then
+                echo "Error: no running Jupyter server (start one: agent-jupyter start)"
+                return 1
+            fi
+            local base="${server_line%% *}"
+            base="${base%/}"
+            if [[ -z "$kernel_id" ]]; then
+                curl -s --max-time 10 "${base%\?*}/api/kernels?token=${base#*token=}" | python3 -m json.tool
+                return 0
+            fi
+            local url token
+            url="${base%%\?*}"
+            token="${base#*token=}"
+            curl -s --max-time 10 -X POST "${url}/api/kernels/${kernel_id}/restart?token=${token}" \
+                | python3 -m json.tool && echo "Kernel restarted: $kernel_id"
+            ;;
+        *)
+            echo "Usage: agent-jupyter kernel [list|restart <kernel-id>]"
+            return 1
+            ;;
+    esac
+}
+
 cmd_kernels() {
     if command -v jupyter &> /dev/null; then
         jupyter kernelspec list
@@ -346,6 +390,10 @@ case "${1:-help}" in
         ;;
     kernels)
         cmd_kernels
+        ;;
+    kernel)
+        shift || true
+        cmd_kernel "$@"
         ;;
     snapshot|snap)
         shift || true

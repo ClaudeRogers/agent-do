@@ -1,24 +1,35 @@
 //! Manna CLI - Issue tracking for AI agents.
 //!
 //! All output is YAML format for machine parsing.
-//! Exit codes: 0=success, 1=user error, 2=system error.
+//! Exit codes: 0=success, 1=user error, 2=system error or needs authorization.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use manna_core::age::{age_of, dated};
 use manna_core::error::MannaError;
 use manna_core::id::generate_unique_id;
-use manna_core::issue::{Issue, IssueStatus};
+use manna_core::issue::{
+    dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, DREAM_INERT_MARKER,
+};
+use manna_core::reconcile::{
+    check_blocker_desync, check_dangling_track, check_landed_open, check_stale_dream,
+    claim_command_ids, extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid,
+    prompt_pointer, Finding, FindingKind, LintFinding,
+};
 use manna_core::store::MannaStore;
 
 /// Exit codes
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USER_ERROR: i32 = 1;
 const EXIT_SYSTEM_ERROR: i32 = 2;
+/// A refusal awaiting a human decision, not a typo: shares the 2 the ecosystem
+/// already reads as "stop and escalate" rather than "fix your arguments".
+const EXIT_NEEDS_AUTHORIZATION: i32 = 2;
 
 #[derive(Parser)]
 #[command(name = "manna-core")]
@@ -44,6 +55,22 @@ enum Commands {
 
         /// Optional description
         description: Option<String>,
+
+        /// Issue type (track, item, dream)
+        #[arg(long = "type", value_name = "TYPE")]
+        issue_type: Option<String>,
+
+        /// Track to attach to (must be an existing issue with type track)
+        #[arg(long)]
+        track: Option<String>,
+
+        /// Where this issue came from (note path, URL, conversation)
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Work-order prompt file paired with this issue (absolute path expected)
+        #[arg(long)]
+        prompt: Option<String>,
     },
 
     /// Claim an issue for the current session
@@ -87,10 +114,62 @@ enum Commands {
         /// Filter by status (open, in_progress, blocked, done)
         #[arg(long)]
         status: Option<String>,
+
+        /// Filter by issue type (track, item, dream)
+        #[arg(long = "type", value_name = "TYPE")]
+        issue_type: Option<String>,
+
+        /// Filter by track membership
+        #[arg(long)]
+        track: Option<String>,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show issue details
     Show {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+    },
+
+    /// Update an issue's title, description, status, type, track, source, or prompt
+    Update {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// New description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// New status (open, in_progress, blocked, done)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// New issue type (track, item, dream)
+        #[arg(long = "type", value_name = "TYPE")]
+        issue_type: Option<String>,
+
+        /// New track edge (empty string clears it)
+        #[arg(long)]
+        track: Option<String>,
+
+        /// New source citation (empty string clears it)
+        #[arg(long)]
+        source: Option<String>,
+
+        /// New work-order prompt file pointer (empty string clears it)
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+
+    /// Delete an issue permanently
+    Delete {
         /// Issue ID (e.g., mn-abc123)
         id: String,
     },
@@ -100,6 +179,50 @@ enum Commands {
         /// Maximum tokens for context (default 8000)
         #[arg(long, default_value = "8000")]
         max_tokens: usize,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// File a dream (idea spark) on the nearest board or the global inbox
+    Dream {
+        /// The spark (issue title)
+        spark: String,
+
+        /// Track to attach to (must be an existing issue with type track)
+        #[arg(long)]
+        track: Option<String>,
+
+        /// Where the spark came from (note path, URL, conversation)
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Check board grammar; findings exit 1, clean exits 0
+    Lint {
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Detect drift between the board and reality (git, claims, blockers, docs)
+    Reconcile {
+        /// Apply safe fixes (abandon dead claims, unblock resolved blockers)
+        #[arg(long)]
+        fix: bool,
+
+        /// Write findings to .manna/drift.yaml
+        #[arg(long)]
+        write_drift: bool,
+
+        /// Days before an open dream counts as stale
+        #[arg(long, default_value = "14")]
+        dream_age_days: i64,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -123,6 +246,40 @@ struct ErrorResponse {
 #[derive(Serialize)]
 struct IssueData {
     issue: Issue,
+    /// How old the timestamps above are, rendered rather than stored.
+    ///
+    /// A sibling rather than a suffix on `created_at`/`updated_at`: those two
+    /// are RFC 3339 fields that `--json` consumers parse, and an age glued
+    /// inside them would break every parser to save a reader one line. The
+    /// exact timestamps stay exact, and the distance sits next to them.
+    age: IssueAge,
+}
+
+/// The two distances a reader of one issue actually asks about: how long ago
+/// it was filed, and how long since anything happened to it.
+#[derive(Serialize)]
+struct IssueAge {
+    created: String,
+    updated: String,
+}
+
+impl From<&Issue> for IssueAge {
+    fn from(issue: &Issue) -> Self {
+        IssueAge {
+            created: age_of(issue.created_at),
+            updated: age_of(issue.updated_at),
+        }
+    }
+}
+
+/// `update` result. The authorization line appears only when a type change
+/// crossed the dream boundary, because that crossing is the act that decides
+/// whether an agent may work the row.
+#[derive(Serialize)]
+struct UpdateData {
+    issue: Issue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -137,6 +294,16 @@ struct IssueSummary {
     status: IssueStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     claimed_by: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "is_default_type")]
+    issue_type: IssueType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    track: Option<String>,
+    /// When the row last moved, and how long ago that was: `2026-07-27 (7d
+    /// ago)`. A list is where a stale row hides, so every row says its age.
+    updated: String,
+    /// Present only on dreams: the row is visible but not workable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -154,6 +321,40 @@ struct ContextData {
 struct InitData {
     initialized: bool,
     path: String,
+}
+
+#[derive(Serialize)]
+struct DreamData {
+    issue: Issue,
+    /// Which board received the dream (directory containing .manna/)
+    board: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LintData {
+    clean: bool,
+    findings: Vec<LintFinding>,
+}
+
+#[derive(Serialize)]
+struct ReconcileData {
+    findings: Vec<Finding>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fixed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fix_failures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drift_written: Option<String>,
+}
+
+/// Shape pinned by the drift.yaml integration contract.
+#[derive(Serialize)]
+struct DriftReport {
+    generated_at: String,
+    session: Option<String>,
+    findings: Vec<Finding>,
 }
 
 // ============================================================================
@@ -179,6 +380,48 @@ fn output_success<T: Serialize>(data: T) -> ! {
         })
     );
     std::process::exit(EXIT_SUCCESS);
+}
+
+/// Output success response as JSON and exit with success code.
+fn output_success_json<T: Serialize>(data: T) -> ! {
+    let response = SuccessResponse {
+        success: true,
+        data,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&response).unwrap_or_else(|e| {
+            format!("{{\"success\":false,\"error\":\"JSON serialization error: {}\"}}", e)
+        })
+    );
+    std::process::exit(EXIT_SUCCESS);
+}
+
+/// Print a success-shaped response and exit with the given code.
+///
+/// Lint and reconcile are gates: the body reports findings, the exit code
+/// carries the verdict, so they cannot use output_success (always 0).
+fn output_with_exit<T: Serialize>(data: T, json: bool, exit_code: i32) -> ! {
+    let response = SuccessResponse {
+        success: true,
+        data,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&response).unwrap_or_else(|e| {
+                format!("{{\"success\":false,\"error\":\"JSON serialization error: {}\"}}", e)
+            })
+        );
+    } else {
+        println!(
+            "{}",
+            serde_yaml::to_string(&response).unwrap_or_else(|e| {
+                format!("success: false\nerror: \"YAML serialization error: {}\"", e)
+            })
+        );
+    }
+    std::process::exit(exit_code);
 }
 
 /// Output error response as YAML and exit with specified code.
@@ -227,6 +470,31 @@ fn parse_status(s: &str) -> Result<IssueStatus, String> {
             "Invalid status '{}'. Valid options: open, in_progress, blocked, done",
             s
         )),
+    }
+}
+
+/// Parse issue type string to IssueType.
+fn parse_issue_type(s: &str) -> Result<IssueType, String> {
+    match s.to_lowercase().as_str() {
+        "track" => Ok(IssueType::Track),
+        "item" => Ok(IssueType::Item),
+        "dream" => Ok(IssueType::Dream),
+        _ => Err(format!(
+            "Invalid type '{}'. Valid options: track, item, dream",
+            s
+        )),
+    }
+}
+
+/// Validate that a --track target exists on the board and is a track.
+fn validate_track_target(issues: &[Issue], track_id: &str) -> Result<(), String> {
+    match issues.iter().find(|i| i.id == track_id) {
+        None => Err(format!("Track {} not found", track_id)),
+        Some(target) if target.issue_type != IssueType::Track => Err(format!(
+            "Issue {} is not a track (type: {})",
+            track_id, target.issue_type
+        )),
+        Some(_) => Ok(()),
     }
 }
 
@@ -283,7 +551,14 @@ fn cmd_status() -> ! {
     });
 }
 
-fn cmd_create(title: String, description: Option<String>) -> ! {
+fn cmd_create(
+    title: String,
+    description: Option<String>,
+    issue_type: Option<String>,
+    track: Option<String>,
+    source: Option<String>,
+    prompt: Option<String>,
+) -> ! {
     let store = MannaStore::new(Path::new("."));
 
     if !store.is_initialized() {
@@ -301,11 +576,32 @@ fn cmd_create(title: String, description: Option<String>) -> ! {
         );
     }
 
-    // Get existing IDs for unique generation
-    let existing_ids: HashSet<String> = match store.load_issues() {
-        Ok(issues) => issues.into_iter().map(|i| i.id).collect(),
+    // Parse type before touching the store
+    let parsed_type = match issue_type.as_deref().map(parse_issue_type).transpose() {
+        Ok(t) => t.unwrap_or_default(),
+        Err(e) => output_error(&e, EXIT_USER_ERROR),
+    };
+
+    if parsed_type == IssueType::Track && track.is_some() {
+        output_error(
+            "Track issues cannot have a track edge (tracks don't nest)",
+            EXIT_USER_ERROR,
+        );
+    }
+
+    // Load existing issues for track validation and unique ID generation
+    let existing_issues = match store.load_issues() {
+        Ok(issues) => issues,
         Err(err) => handle_manna_error(err),
     };
+
+    if let Some(track_id) = &track {
+        if let Err(e) = validate_track_target(&existing_issues, track_id) {
+            output_error(&e, EXIT_USER_ERROR);
+        }
+    }
+
+    let existing_ids: HashSet<String> = existing_issues.into_iter().map(|i| i.id).collect();
 
     // Generate unique ID
     let id = generate_unique_id(&existing_ids);
@@ -316,15 +612,21 @@ fn cmd_create(title: String, description: Option<String>) -> ! {
         Err(e) => output_error(&e, EXIT_USER_ERROR),
     };
 
-    // Set description if provided
+    // Set optional fields if provided
     issue.description = description;
+    issue.issue_type = parsed_type;
+    issue.track = track;
+    issue.source = source;
+    // No path validation beyond non-empty trim: lint/reconcile are the gate,
+    // so create stays usable mid-staging before the prompt file exists.
+    issue.prompt = prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(String::from);
 
     // Append to store
     if let Err(err) = store.append_issue(&issue) {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_claim(id: String) -> ! {
@@ -348,6 +650,12 @@ fn cmd_claim(id: String) -> ! {
     // Find issue
     let mut issue = find_issue(&issues, &id);
 
+    // Dreams are visible but inert: refuse before the store is ever touched,
+    // and exit 2 so an orchestrator reads "escalate", not "retry differently".
+    if issue.issue_type == IssueType::Dream {
+        output_error(&dream_claim_refusal(&issue.id), EXIT_NEEDS_AUTHORIZATION);
+    }
+
     // Claim it
     if let Err(e) = issue.claim(session_id) {
         output_error(&e, EXIT_USER_ERROR);
@@ -358,7 +666,7 @@ fn cmd_claim(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_done(id: String) -> ! {
@@ -390,7 +698,7 @@ fn cmd_done(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_abandon(id: String) -> ! {
@@ -422,7 +730,7 @@ fn cmd_abandon(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_block(id: String, blocker_id: String) -> ! {
@@ -460,7 +768,7 @@ fn cmd_block(id: String, blocker_id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_unblock(id: String, blocker_id: String) -> ! {
@@ -490,10 +798,15 @@ fn cmd_unblock(id: String, blocker_id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
-fn cmd_list(status_filter: Option<String>) -> ! {
+fn cmd_list(
+    status_filter: Option<String>,
+    type_filter: Option<String>,
+    track_filter: Option<String>,
+    json: bool,
+) -> ! {
     let store = MannaStore::new(Path::new("."));
 
     if !store.is_initialized() {
@@ -509,10 +822,17 @@ fn cmd_list(status_filter: Option<String>) -> ! {
         Err(err) => handle_manna_error(err),
     };
 
-    // Parse filter if provided
+    // Parse filters if provided
     let filter: Option<IssueStatus> = match status_filter {
         Some(s) => match parse_status(&s) {
             Ok(status) => Some(status),
+            Err(e) => output_error(&e, EXIT_USER_ERROR),
+        },
+        None => None,
+    };
+    let type_filter: Option<IssueType> = match type_filter {
+        Some(s) => match parse_issue_type(&s) {
+            Ok(t) => Some(t),
             Err(e) => output_error(&e, EXIT_USER_ERROR),
         },
         None => None,
@@ -522,14 +842,28 @@ fn cmd_list(status_filter: Option<String>) -> ! {
     let summaries: Vec<IssueSummary> = issues
         .into_iter()
         .filter(|i| filter.as_ref().map_or(true, |f| &i.status == f))
+        .filter(|i| type_filter.map_or(true, |f| i.issue_type == f))
+        .filter(|i| {
+            track_filter
+                .as_ref()
+                .map_or(true, |f| i.track.as_ref() == Some(f))
+        })
         .map(|i| IssueSummary {
+            gate: (i.issue_type == IssueType::Dream)
+                .then(|| DREAM_INERT_MARKER.to_string()),
+            updated: dated(i.updated_at),
             id: i.id,
             title: i.title,
             status: i.status,
             claimed_by: i.claimed_by,
+            issue_type: i.issue_type,
+            track: i.track,
         })
         .collect();
 
+    if json {
+        output_success_json(IssueListData { issues: summaries });
+    }
     output_success(IssueListData { issues: summaries });
 }
 
@@ -552,30 +886,243 @@ fn cmd_show(id: String) -> ! {
     // Find issue
     let issue = find_issue(&issues, &id);
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
-fn cmd_context(max_tokens: usize) -> ! {
+fn cmd_update(
+    id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    issue_type: Option<String>,
+    track: Option<String>,
+    source: Option<String>,
+    prompt: Option<String>,
+) -> ! {
     let store = MannaStore::new(Path::new("."));
-
     if !store.is_initialized() {
         output_error(
             "Storage not initialized. Run 'manna-core init' first.",
             EXIT_USER_ERROR,
         );
     }
-
-    // Load issues
+    if title.is_none()
+        && description.is_none()
+        && status.is_none()
+        && issue_type.is_none()
+        && track.is_none()
+        && source.is_none()
+        && prompt.is_none()
+    {
+        output_error(
+            "Nothing to update: pass --title, --description, --status, --type, --track, --source, or --prompt",
+            EXIT_USER_ERROR,
+        );
+    }
     let issues = match store.load_issues() {
         Ok(i) => i,
         Err(err) => handle_manna_error(err),
     };
+    let mut issue = find_issue(&issues, &id);
+    let type_before = issue.issue_type;
+    if let Some(new_title) = title {
+        if new_title.is_empty() || new_title.len() > 500 {
+            output_error("Title must be 1-500 characters", EXIT_USER_ERROR);
+        }
+        issue.title = new_title;
+    }
+    if let Some(new_description) = description {
+        issue.description = if new_description.is_empty() { None } else { Some(new_description) };
+    }
+    if let Some(new_status) = status {
+        issue.status = match new_status.as_str() {
+            "open" => IssueStatus::Open,
+            "in_progress" => IssueStatus::InProgress,
+            "blocked" => IssueStatus::Blocked,
+            "done" => IssueStatus::Done,
+            other => output_error(
+                &format!("Invalid status '{}': use open, in_progress, blocked, or done", other),
+                EXIT_USER_ERROR,
+            ),
+        };
+    }
+    if let Some(new_type) = issue_type {
+        issue.issue_type = match parse_issue_type(&new_type) {
+            Ok(t) => t,
+            Err(e) => output_error(&e, EXIT_USER_ERROR),
+        };
+    }
+    if let Some(new_track) = track {
+        if new_track.is_empty() {
+            issue.track = None;
+        } else {
+            if let Err(e) = validate_track_target(&issues, &new_track) {
+                output_error(&e, EXIT_USER_ERROR);
+            }
+            issue.track = Some(new_track);
+        }
+    }
+    if let Some(new_source) = source {
+        issue.source = if new_source.is_empty() { None } else { Some(new_source) };
+    }
+    if let Some(new_prompt) = prompt {
+        let trimmed = new_prompt.trim();
+        issue.prompt = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    }
+    if issue.issue_type == IssueType::Track && issue.track.is_some() {
+        output_error(
+            "Track issues cannot have a track edge (tracks don't nest)",
+            EXIT_USER_ERROR,
+        );
+    }
+    issue.updated_at = chrono::Utc::now();
+    let authorization = conversion_authorization(&issue.id, type_before, issue.issue_type);
+    if let Err(err) = store.update_issue(&issue) {
+        handle_manna_error(err);
+    }
+    output_success(UpdateData { issue, authorization });
+}
 
-    // Build context blob
+/// The line `update` prints when a type change crosses the dream boundary.
+///
+/// Conversion is the authorization act, so it is stated out loud in both
+/// directions rather than left to be inferred from a changed field.
+fn conversion_authorization(id: &str, before: IssueType, after: IssueType) -> Option<String> {
+    match (before, after) {
+        (IssueType::Dream, IssueType::Item) | (IssueType::Dream, IssueType::Track) => Some(format!(
+            "AUTHORIZED: {} converted dream -> {}. It is now claimable work: agent-do manna claim {}",
+            id, after, id
+        )),
+        (_, IssueType::Dream) if before != IssueType::Dream => Some(format!(
+            "PARKED: {} converted {} -> dream. It is no longer claimable; convert it back with \
+             agent-do manna update {} --type item before any agent works it.",
+            id, before, id
+        )),
+        _ => None,
+    }
+}
+
+fn cmd_delete(id: String) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+    let issue = find_issue(&issues, &id);
+    if let Err(err) = store.delete_issue(&issue.id) {
+        handle_manna_error(err);
+    }
+    output_success(IssueData { age: (&issue).into(), issue });
+}
+
+/// One context line for an issue, matching the v1 per-status format.
+///
+/// Dream rows carry the inert marker: they stay in every list an agent reads,
+/// so the line itself has to say the idea is not workable yet. Every row also
+/// carries when it last moved and how long ago that was — this blob is pasted
+/// straight into an agent's context, which is precisely where a six-week-old
+/// row gets read as current work.
+fn context_line(issue: &Issue) -> String {
+    let body = match issue.status {
+        IssueStatus::InProgress => {
+            let claimed = issue
+                .claimed_by
+                .as_ref()
+                .map_or("".to_string(), |s| format!(", claimed by {}", s));
+            format!("- {}: {} [in_progress{}]", issue.id, issue.title, claimed)
+        }
+        IssueStatus::Blocked => format!(
+            "- {}: {} [blocked by: {}]",
+            issue.id,
+            issue.title,
+            issue.blocked_by.join(", ")
+        ),
+        _ => format!("- {}: {} [{}]", issue.id, issue.title, issue.status),
+    };
+
+    let body = format!("{} updated {}", body, dated(issue.updated_at));
+
+    if issue.issue_type == IssueType::Dream {
+        format!("{} {}\n", body, DREAM_INERT_MARKER)
+    } else {
+        format!("{}\n", body)
+    }
+}
+
+/// The conversion instruction, printed once wherever dreams are rendered: the
+/// per-row marker stays short, so the command is spelled out per section
+/// instead of per line.
+const DREAMS_SECTION_NOTE: &str =
+    "Dreams are parked sparks, not work. `claim` refuses them; Erik converts one \
+     with `agent-do manna update <id> --type item` before any agent builds it.\n";
+
+/// Build the context blob. Boards with track rows render a track tree
+/// (per-track sections, then Untracked, then Dreams); boards with zero
+/// tracks keep the v1 by-status render byte for byte.
+fn build_context(issues: &[Issue]) -> String {
     let mut context = String::new();
     context.push_str("# Manna Context\n\n");
 
-    // Separate issues by status
+    let tracks: Vec<&Issue> = issues
+        .iter()
+        .filter(|i| i.issue_type == IssueType::Track)
+        .collect();
+
+    if !tracks.is_empty() {
+        // Track tree: sections for every track (any status; tracks are
+        // structure, not work lines), done items excluded as always.
+        let track_ids: HashSet<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        for track in &tracks {
+            context.push_str(&format!("## {} ({})\n", track.title, track.id));
+            for issue in issues.iter().filter(|i| {
+                i.issue_type == IssueType::Item
+                    && i.status != IssueStatus::Done
+                    && i.track.as_deref() == Some(track.id.as_str())
+            }) {
+                context.push_str(&context_line(issue));
+            }
+            context.push('\n');
+        }
+
+        // Untracked: trackless items, plus items whose track edge dangles
+        // (pointing at no known track) so no work line ever vanishes.
+        let untracked: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| {
+                i.issue_type == IssueType::Item
+                    && i.status != IssueStatus::Done
+                    && i.track.as_deref().map_or(true, |t| !track_ids.contains(t))
+            })
+            .collect();
+        if !untracked.is_empty() {
+            context.push_str("## Untracked\n");
+            for issue in &untracked {
+                context.push_str(&context_line(issue));
+            }
+            context.push('\n');
+        }
+
+        let dreams: Vec<&Issue> = issues
+            .iter()
+            .filter(|i| i.issue_type == IssueType::Dream && i.status != IssueStatus::Done)
+            .collect();
+        if !dreams.is_empty() {
+            context.push_str("## Dreams\n");
+            context.push_str(DREAMS_SECTION_NOTE);
+            for dream in &dreams {
+                context.push_str(&context_line(dream));
+            }
+        }
+        return context;
+    }
+
+    // Zero-track board: v1 by-status render, unchanged.
     let open: Vec<_> = issues
         .iter()
         .filter(|i| i.status == IssueStatus::Open)
@@ -592,33 +1139,55 @@ fn cmd_context(max_tokens: usize) -> ! {
     // Open issues
     context.push_str(&format!("## Open Issues ({})\n", open.len()));
     for issue in &open {
-        context.push_str(&format!("- {}: {} [open]\n", issue.id, issue.title));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // In-progress issues
     context.push_str(&format!("## In Progress Issues ({})\n", in_progress.len()));
     for issue in &in_progress {
-        let claimed = issue
-            .claimed_by
-            .as_ref()
-            .map_or("".to_string(), |s| format!(", claimed by {}", s));
-        context.push_str(&format!(
-            "- {}: {} [in_progress{}]\n",
-            issue.id, issue.title, claimed
-        ));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // Blocked issues
     context.push_str(&format!("## Blocked Issues ({})\n", blocked.len()));
     for issue in &blocked {
-        let blockers = issue.blocked_by.join(", ");
-        context.push_str(&format!(
-            "- {}: {} [blocked by: {}]\n",
-            issue.id, issue.title, blockers
-        ));
+        context.push_str(&context_line(issue));
     }
+
+    // Trackless boards (the global dream inbox, above all) render dreams inside
+    // the by-status sections, so the conversion instruction trails the render.
+    let renders_dream = open
+        .iter()
+        .chain(in_progress.iter())
+        .chain(blocked.iter())
+        .any(|i| i.issue_type == IssueType::Dream);
+    if renders_dream {
+        context.push('\n');
+        context.push_str(DREAMS_SECTION_NOTE);
+    }
+
+    context
+}
+
+fn cmd_context(max_tokens: usize, json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+
+    // Load issues
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+
+    let mut context = build_context(&issues);
 
     // Truncate if needed (rough estimate: 1 token ≈ 4 chars)
     let max_chars = max_tokens * 4;
@@ -627,7 +1196,681 @@ fn cmd_context(max_tokens: usize) -> ! {
         context.push_str("\n\n[truncated]");
     }
 
+    if json {
+        output_success_json(ContextData { context });
+    }
     output_success(ContextData { context });
+}
+
+// ============================================================================
+// Dream / Lint / Reconcile
+// ============================================================================
+
+/// Resolve the board for `dream`: walk up from cwd to the first directory
+/// containing `.manna/`; fall back to the global inbox under AGENT_DO_HOME.
+///
+/// Returns (board directory, is_global_inbox).
+fn resolve_dream_board() -> (PathBuf, bool) {
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        loop {
+            if dir.join(".manna").is_dir() {
+                return (dir.to_path_buf(), false);
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
+    }
+    let home = std::env::var("AGENT_DO_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Path::new(&home).join(".agent-do")
+    });
+    (home.join("inbox"), true)
+}
+
+fn cmd_dream(spark: String, track: Option<String>, source: Option<String>) -> ! {
+    if spark.is_empty() || spark.len() > 500 {
+        output_error(
+            &format!("Title must be 1-500 characters, got {}", spark.len()),
+            EXIT_USER_ERROR,
+        );
+    }
+
+    let (board_dir, is_inbox) = resolve_dream_board();
+    let store = MannaStore::new(&board_dir);
+
+    // Auto-init: creates the inbox board on first use, heals missing files
+    // on a local board found by the walk-up (init is idempotent).
+    if is_inbox {
+        if let Err(e) = std::fs::create_dir_all(&board_dir) {
+            output_error(
+                &format!("Cannot create global inbox at {}: {}", board_dir.display(), e),
+                EXIT_SYSTEM_ERROR,
+            );
+        }
+    }
+    if let Err(err) = store.init() {
+        handle_manna_error(err);
+    }
+
+    let existing_issues = match store.load_issues() {
+        Ok(issues) => issues,
+        Err(err) => handle_manna_error(err),
+    };
+
+    if let Some(track_id) = &track {
+        if let Err(e) = validate_track_target(&existing_issues, track_id) {
+            output_error(&e, EXIT_USER_ERROR);
+        }
+    }
+
+    let existing_ids: HashSet<String> = existing_issues.into_iter().map(|i| i.id).collect();
+    let id = generate_unique_id(&existing_ids);
+
+    let mut issue = match Issue::new(id, spark) {
+        Ok(i) => i,
+        Err(e) => output_error(&e, EXIT_USER_ERROR),
+    };
+    issue.issue_type = IssueType::Dream;
+    issue.track = track;
+    issue.source = source;
+
+    if let Err(err) = store.append_issue(&issue) {
+        handle_manna_error(err);
+    }
+
+    output_success(DreamData {
+        issue,
+        board: board_dir.display().to_string(),
+        note: is_inbox.then(|| "filed to global inbox".to_string()),
+    });
+}
+
+fn cmd_lint(json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+
+    let mut findings = lint_board(&issues);
+    findings.extend(lint_prompt_files(&issues));
+    let clean = findings.is_empty();
+    let exit_code = if clean { EXIT_SUCCESS } else { EXIT_USER_ERROR };
+    output_with_exit(LintData { clean, findings }, json, exit_code);
+}
+
+/// prompt_file lint rule: a prompt pointer that does not resolve to a file.
+///
+/// Skips done issues: archived or renamed prompts must not nag history.
+fn lint_prompt_files(issues: &[Issue]) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    for issue in issues {
+        if issue.status == IssueStatus::Done {
+            continue;
+        }
+        if let Some(pointer) = prompt_pointer(issue) {
+            if !Path::new(&pointer).is_file() {
+                findings.push(LintFinding {
+                    issue_id: issue.id.clone(),
+                    rule: "prompt_file".to_string(),
+                    detail: format!("prompt pointer {} does not resolve to a file", pointer),
+                });
+            }
+        }
+    }
+    findings
+}
+
+/// Collect `Manna: mn-xxxxxx` trailers from recent git history.
+///
+/// Bounded to the last 500 commits: trailers reference recently landed work,
+/// and the bound keeps reconcile fast on deep histories.
+fn collect_landed_trailers() -> Result<HashMap<String, Vec<String>>, String> {
+    let out = std::process::Command::new("git")
+        .args(["log", "-z", "-n", "500", "--format=%H%n%B"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("git unavailable: {}", e))?;
+    if !out.status.success() {
+        return Err("git log failed (not a git repository?)".to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut landed: HashMap<String, Vec<String>> = HashMap::new();
+    for record in text.split('\0') {
+        let mut lines = record.splitn(2, '\n');
+        let sha = match lines.next() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => continue,
+        };
+        let body = lines.next().unwrap_or("");
+        for id in manna_trailer_ids(body) {
+            landed.entry(id).or_default().push(sha.clone());
+        }
+    }
+    Ok(landed)
+}
+
+/// True when a process with this pid is alive (`kill -0` semantics).
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        // If the probe itself cannot run, assume alive: no false dead-claims.
+        .unwrap_or(true)
+}
+
+/// Run `agent-do coord peers --json` bounded to ~2s; map agent_id -> status.
+fn coord_peer_statuses() -> Result<HashMap<String, String>, String> {
+    use std::io::Read;
+
+    let mut child = std::process::Command::new("agent-do")
+        .args(["coord", "peers", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("agent-do unavailable: {}", e))?;
+
+    // Drain stdout on a thread so a large peers list cannot deadlock the pipe.
+    let mut stdout = child.stdout.take().ok_or("no stdout handle")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = stdout.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err("coord peers exited nonzero".to_string());
+                }
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("coord peers timed out after 2s".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("coord peers failed: {}", e)),
+        }
+    }
+
+    let raw = rx
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .map_err(|_| "coord peers produced no output".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("coord peers JSON invalid: {}", e))?;
+    let mut statuses = HashMap::new();
+    if let Some(peers) = value.get("peers").and_then(|p| p.as_array()) {
+        for peer in peers {
+            if let (Some(agent_id), Some(status)) = (
+                peer.get("agent_id").and_then(|v| v.as_str()),
+                peer.get("status").and_then(|v| v.as_str()),
+            ) {
+                statuses.insert(agent_id.to_string(), status.to_string());
+            }
+        }
+    }
+    Ok(statuses)
+}
+
+/// dead_claim: claims held by sessions that are provably gone.
+///
+/// Default-format sessions are probed by pid; other formats are matched
+/// against coord peer statuses (finding only when coord reports the agent
+/// dead/stale/stopped — absent from coord is inconclusive, not dead).
+fn check_dead_claims(issues: &[Issue]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut coord_lookups: Vec<&Issue> = Vec::new();
+
+    for issue in issues {
+        let claimed_by = match &issue.claimed_by {
+            Some(s) if issue.status != IssueStatus::Done => s,
+            _ => continue,
+        };
+        match parse_session_pid(claimed_by) {
+            Some(pid) => {
+                if !pid_alive(pid) {
+                    findings.push(Finding {
+                        kind: FindingKind::DeadClaim,
+                        issue_id: Some(issue.id.clone()),
+                        detail: format!("claimed by dead session {}", claimed_by),
+                        evidence: Some(format!("pid {} not running", pid)),
+                        proposed_fix: Some("abandon the claim".to_string()),
+                    });
+                }
+            }
+            None => coord_lookups.push(issue),
+        }
+    }
+
+    if !coord_lookups.is_empty() {
+        match coord_peer_statuses() {
+            Ok(statuses) => {
+                for issue in coord_lookups {
+                    let claimed_by = issue.claimed_by.as_ref().unwrap();
+                    if let Some(status) = statuses.get(claimed_by) {
+                        if matches!(status.as_str(), "dead" | "stale" | "stopped") {
+                            findings.push(Finding {
+                                kind: FindingKind::DeadClaim,
+                                issue_id: Some(issue.id.clone()),
+                                detail: format!("claimed by {} session {}", status, claimed_by),
+                                evidence: Some(format!("coord status: {}", status)),
+                                proposed_fix: Some("abandon the claim".to_string()),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(reason) => findings.push(Finding::skipped("dead_claim", &reason)),
+        }
+    }
+
+    findings
+}
+
+/// Directories scanned for doc references: repo-local handoff/dev/zpc plus
+/// the Claude memory directory derived from cwd (`/` -> `-`).
+fn doc_reference_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![
+        PathBuf::from(".handoff"),
+        PathBuf::from(".dev"),
+        PathBuf::from(".zpc"),
+    ];
+    if let (Ok(cwd), Ok(home)) = (std::env::current_dir(), std::env::var("HOME")) {
+        let flat = cwd.to_string_lossy().replace('/', "-");
+        dirs.push(
+            Path::new(&home)
+                .join(".claude")
+                .join("projects")
+                .join(flat)
+                .join("memory"),
+        );
+    }
+    dirs
+}
+
+/// Recursively collect (file, line, id) references under a directory.
+///
+/// Skips symlinks and files over 1MB; tolerates non-UTF8 content. A missing
+/// directory is a successful empty scan, not a skipped check.
+fn scan_dir_for_ids(dir: &Path, refs: &mut Vec<(PathBuf, usize, String)>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            scan_dir_for_ids(&path, refs);
+            continue;
+        }
+        if entry.metadata().map_or(true, |m| m.len() > 1_000_000) {
+            continue;
+        }
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        for (line_no, line) in text.lines().enumerate() {
+            for id in extract_manna_ids(line) {
+                refs.push((path.clone(), line_no + 1, id));
+            }
+        }
+    }
+}
+
+/// doc_reference: IDs referenced in docs that do not exist on this board.
+///
+/// Deduplicated per (file, id) with the first line as evidence.
+fn check_doc_references(issues: &[Issue]) -> Vec<Finding> {
+    let board_ids: HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let mut refs = Vec::new();
+    for dir in doc_reference_dirs() {
+        scan_dir_for_ids(&dir, &mut refs);
+    }
+
+    let mut seen: HashSet<(PathBuf, String)> = HashSet::new();
+    let mut findings = Vec::new();
+    for (file, line_no, id) in refs {
+        if board_ids.contains(id.as_str()) {
+            continue;
+        }
+        if !seen.insert((file.clone(), id.clone())) {
+            continue;
+        }
+        findings.push(Finding {
+            kind: FindingKind::DocReference,
+            issue_id: Some(id.clone()),
+            detail: "referenced id does not exist on this board".to_string(),
+            evidence: Some(format!("{}:{}", file.display(), line_no)),
+            proposed_fix: None,
+        });
+    }
+    findings
+}
+
+/// True when two paths name the same file: canonicalize both sides, falling
+/// back to a plain path compare when canonicalization fails.
+fn same_file(pointer: &str, file: &Path) -> bool {
+    match (Path::new(pointer).canonicalize(), file.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => Path::new(pointer) == file,
+    }
+}
+
+/// prompt_pairing forward: an issue's prompt pointer resolves to an existing
+/// file whose content never mentions the issue's id.
+///
+/// Skips done issues; a missing file stays lint's job (`prompt_file`), never
+/// double-reported here.
+fn check_prompt_pairing_forward(issues: &[Issue]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for issue in issues {
+        if issue.status == IssueStatus::Done {
+            continue;
+        }
+        let pointer = match prompt_pointer(issue) {
+            Some(p) => p,
+            None => continue,
+        };
+        let path = Path::new(&pointer);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if !String::from_utf8_lossy(&bytes).contains(&issue.id) {
+            findings.push(Finding {
+                kind: FindingKind::PromptPairing,
+                issue_id: Some(issue.id.clone()),
+                detail: format!("prompt file {} does not reference this issue", pointer),
+                evidence: Some(pointer.clone()),
+                proposed_fix: Some(format!(
+                    "add {} to the prompt file, or repoint --prompt",
+                    issue.id
+                )),
+            });
+        }
+    }
+    findings
+}
+
+/// prompt_pairing reverse: every board id a staged prompt file CLAIMS must
+/// carry a pointer that resolves back to that file.
+///
+/// The claim relationship is the signal: only `manna claim <id>` command
+/// lines bind (any invocation prefix); bare id mentions are data, not
+/// pairing promises. `dir` is the staging directory (`.dev/session-prompts`
+/// at cwd in the CLI); a missing directory is a successful empty scan.
+/// Foreign-board ids are ignored (cross-repo prompts are legal), as are
+/// done issues.
+fn check_prompt_pairing_reverse(issues: &[Issue], dir: &Path) -> Vec<Finding> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md") && p.is_file())
+        .collect();
+    files.sort();
+
+    let by_id: HashMap<&str, &Issue> = issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let mut findings = Vec::new();
+    for file in files {
+        let bytes = match std::fs::read(&file) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let mut ids = claim_command_ids(&text);
+        ids.sort();
+        ids.dedup();
+        for id in ids {
+            let issue = match by_id.get(id.as_str()) {
+                Some(i) => *i,
+                None => continue,
+            };
+            if issue.status == IssueStatus::Done {
+                continue;
+            }
+            match prompt_pointer(issue) {
+                None => findings.push(Finding {
+                    kind: FindingKind::PromptPairing,
+                    issue_id: Some(issue.id.clone()),
+                    detail: format!(
+                        "claimed by prompt file {} but has no prompt pointer",
+                        file.display()
+                    ),
+                    evidence: Some(file.display().to_string()),
+                    proposed_fix: Some(format!(
+                        "manna update {} --prompt {}",
+                        issue.id,
+                        file.display()
+                    )),
+                }),
+                Some(pointer) if !same_file(&pointer, &file) => findings.push(Finding {
+                    kind: FindingKind::PromptPairing,
+                    issue_id: Some(issue.id.clone()),
+                    detail: format!(
+                        "prompt pointer {} does not resolve to claiming file {}",
+                        pointer,
+                        file.display()
+                    ),
+                    evidence: Some(file.display().to_string()),
+                    proposed_fix: Some("repoint --prompt or drop the stale claim".to_string()),
+                }),
+                Some(_) => {}
+            }
+        }
+    }
+    findings
+}
+
+/// Write findings to `.manna/drift.yaml` atomically (temp + rename).
+fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
+    let report = DriftReport {
+        generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        // The pid-based fallback id would be this transient CLI invocation,
+        // not a real session; only a caller-pinned session id is meaningful.
+        session: std::env::var("MANNA_SESSION_ID").ok(),
+        findings: findings.to_vec(),
+    };
+    let yaml = serde_yaml::to_string(&report).map_err(|e| e.to_string())?;
+    // Pinned contract: generated_at is a quoted string. Unquoted, YAML 1.1
+    // parsers (pyyaml) would resolve the timestamp scalar to a datetime.
+    let yaml = yaml.replacen(
+        &format!("generated_at: {}", report.generated_at),
+        &format!("generated_at: \"{}\"", report.generated_at),
+        1,
+    );
+    let path = Path::new(".manna").join("drift.yaml");
+    let temp_path = Path::new(".manna").join("drift.yaml.tmp");
+    std::fs::write(&temp_path, yaml).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp_path, &path).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
+/// Apply --fix for dead_claim and blocker_desync findings through the
+/// existing state machine. Returns (fixed issue ids, failure messages).
+fn apply_reconcile_fixes(
+    store: &MannaStore,
+    issues: &[Issue],
+    findings: &[Finding],
+) -> (Vec<String>, Vec<String>) {
+    let mut working: HashMap<String, Issue> =
+        issues.iter().map(|i| (i.id.clone(), i.clone())).collect();
+    let by_id_status: HashMap<String, IssueStatus> =
+        issues.iter().map(|i| (i.id.clone(), i.status.clone())).collect();
+    let mut touched: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    for finding in findings {
+        let id = match &finding.issue_id {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+        let issue = match working.get_mut(&id) {
+            Some(i) => i,
+            None => continue,
+        };
+        match finding.kind {
+            FindingKind::DeadClaim => {
+                if issue.status == IssueStatus::InProgress {
+                    match issue.release() {
+                        Ok(()) => touched.push(id),
+                        Err(e) => failures.push(format!("{}: {}", id, e)),
+                    }
+                } else {
+                    // Blocked-but-claimed: release() requires in_progress, so
+                    // clear the claim directly; blocked status stays derived.
+                    issue.claimed_by = None;
+                    issue.claimed_at = None;
+                    issue.updated_at = Utc::now();
+                    touched.push(id);
+                }
+            }
+            FindingKind::BlockerDesync => {
+                let resolved: Vec<String> = issue
+                    .blocked_by
+                    .iter()
+                    .filter(|b| {
+                        by_id_status
+                            .get(*b)
+                            .map_or(true, |status| *status == IssueStatus::Done)
+                    })
+                    .cloned()
+                    .collect();
+                for blocker in &resolved {
+                    issue.remove_blocker(blocker);
+                }
+                if issue.status == IssueStatus::Blocked && issue.blocked_by.is_empty() {
+                    issue.update_blocked_status();
+                    issue.updated_at = Utc::now();
+                }
+                touched.push(id);
+            }
+            _ => {}
+        }
+    }
+
+    let mut fixed = Vec::new();
+    touched.sort();
+    touched.dedup();
+    for id in touched {
+        let issue = &working[&id];
+        match store.update_issue(issue) {
+            Ok(()) => fixed.push(id),
+            Err(e) => failures.push(format!("{}: {}", id, e)),
+        }
+    }
+    (fixed, failures)
+}
+
+fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+
+    let issues = match store.load_issues() {
+        Ok(i) => i,
+        Err(err) => handle_manna_error(err),
+    };
+
+    let mut findings: Vec<Finding> = Vec::new();
+
+    // 1. landed_open (report-only)
+    match collect_landed_trailers() {
+        Ok(landed) => findings.extend(check_landed_open(&issues, &landed)),
+        Err(reason) => findings.push(Finding::skipped("landed_open", &reason)),
+    }
+
+    // 2. dead_claim
+    findings.extend(check_dead_claims(&issues));
+
+    // 3. blocker_desync
+    findings.extend(check_blocker_desync(&issues));
+
+    // 4. stale_dream
+    findings.extend(check_stale_dream(&issues, Utc::now(), dream_age_days));
+
+    // 5. dangling_track
+    findings.extend(check_dangling_track(&issues));
+
+    // 6. doc_reference
+    findings.extend(check_doc_references(&issues));
+
+    // 7. prompt_pairing (forward: pointer content, reverse: staged prompt files)
+    findings.extend(check_prompt_pairing_forward(&issues));
+    findings.extend(check_prompt_pairing_reverse(
+        &issues,
+        &Path::new(".dev").join("session-prompts"),
+    ));
+
+    // Findings describe pre-fix drift; `fixed` lists what --fix addressed.
+    let (fixed, fix_failures) = if fix {
+        apply_reconcile_fixes(&store, &issues, &findings)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let drift_written = if write_drift {
+        match write_drift_file(&findings) {
+            Ok(path) => Some(path),
+            Err(e) => output_error(&format!("Failed to write drift.yaml: {}", e), EXIT_SYSTEM_ERROR),
+        }
+    } else {
+        None
+    };
+
+    // Advisory verb: findings alone never fail the run; --fix failures do.
+    let exit_code = if fix_failures.is_empty() { EXIT_SUCCESS } else { EXIT_USER_ERROR };
+    output_with_exit(
+        ReconcileData {
+            findings,
+            fixed,
+            fix_failures,
+            drift_written,
+        },
+        json,
+        exit_code,
+    );
 }
 
 // ============================================================================
@@ -640,15 +1883,26 @@ fn main() {
     match cli.command {
         Commands::Init => cmd_init(),
         Commands::Status => cmd_status(),
-        Commands::Create { title, description } => cmd_create(title, description),
+        Commands::Create { title, description, issue_type, track, source, prompt } => {
+            cmd_create(title, description, issue_type, track, source, prompt)
+        }
         Commands::Claim { id } => cmd_claim(id),
         Commands::Done { id } => cmd_done(id),
         Commands::Abandon { id } => cmd_abandon(id),
         Commands::Block { id, blocker_id } => cmd_block(id, blocker_id),
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
-        Commands::List { status } => cmd_list(status),
+        Commands::List { status, issue_type, track, json } => cmd_list(status, issue_type, track, json),
         Commands::Show { id } => cmd_show(id),
-        Commands::Context { max_tokens } => cmd_context(max_tokens),
+        Commands::Update { id, title, description, status, issue_type, track, source, prompt } => {
+            cmd_update(id, title, description, status, issue_type, track, source, prompt)
+        }
+        Commands::Delete { id } => cmd_delete(id),
+        Commands::Context { max_tokens, json } => cmd_context(max_tokens, json),
+        Commands::Dream { spark, track, source } => cmd_dream(spark, track, source),
+        Commands::Lint { json } => cmd_lint(json),
+        Commands::Reconcile { fix, write_drift, dream_age_days, json } => {
+            cmd_reconcile(fix, write_drift, dream_age_days, json)
+        }
     }
 }
 
@@ -762,6 +2016,10 @@ mod tests {
             title: "Test".to_string(),
             status: IssueStatus::Open,
             claimed_by: None,
+            issue_type: IssueType::Item,
+            track: None,
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
@@ -770,6 +2028,9 @@ mod tests {
         assert!(yaml.contains("status: open"));
         // claimed_by should be skipped when None
         assert!(!yaml.contains("claimed_by"));
+        // default type and absent track are skipped: v1 output shape unchanged
+        assert!(!yaml.contains("type"));
+        assert!(!yaml.contains("track"));
     }
 
     #[test]
@@ -779,10 +2040,247 @@ mod tests {
             title: "Test".to_string(),
             status: IssueStatus::InProgress,
             claimed_by: Some("ses_123".to_string()),
+            issue_type: IssueType::Item,
+            track: None,
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
         assert!(yaml.contains("claimed_by: ses_123"));
+    }
+
+    #[test]
+    fn test_issue_summary_with_type_and_track() {
+        let summary = IssueSummary {
+            id: "mn-abc123".to_string(),
+            title: "Test".to_string(),
+            status: IssueStatus::Open,
+            claimed_by: None,
+            issue_type: IssueType::Dream,
+            track: Some("mn-def456".to_string()),
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: Some(DREAM_INERT_MARKER.to_string()),
+        };
+
+        let yaml = serde_yaml::to_string(&summary).unwrap();
+        assert!(yaml.contains("type: dream"));
+        assert!(yaml.contains("track: mn-def456"));
+        assert!(yaml.contains("not claimable"));
+    }
+
+    #[test]
+    fn test_parse_issue_type_valid() {
+        assert_eq!(parse_issue_type("track").unwrap(), IssueType::Track);
+        assert_eq!(parse_issue_type("item").unwrap(), IssueType::Item);
+        assert_eq!(parse_issue_type("dream").unwrap(), IssueType::Dream);
+        // Case insensitive, matching parse_status
+        assert_eq!(parse_issue_type("Track").unwrap(), IssueType::Track);
+    }
+
+    #[test]
+    fn test_parse_issue_type_invalid() {
+        let result = parse_issue_type("epic");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid type"));
+    }
+
+    #[test]
+    fn test_validate_track_target() {
+        let mut track = Issue::new("mn-aaa111".to_string(), "Track".to_string()).unwrap();
+        track.issue_type = IssueType::Track;
+        let item = Issue::new("mn-bbb222".to_string(), "Item".to_string()).unwrap();
+        let issues = vec![track, item];
+
+        assert!(validate_track_target(&issues, "mn-aaa111").is_ok());
+        assert!(validate_track_target(&issues, "mn-404404")
+            .unwrap_err()
+            .contains("not found"));
+        assert!(validate_track_target(&issues, "mn-bbb222")
+            .unwrap_err()
+            .contains("not a track"));
+    }
+
+    /// Seven days and change back: far enough from both day boundaries that
+    /// the rendered age is `7d ago` no matter what hour the suite runs at.
+    ///
+    /// Read once per test and passed everywhere, never re-read: two calls to
+    /// `now()` straddling UTC midnight would build a row on one date and
+    /// expect the other, which is a test that fails once a year for no reason.
+    fn seven_days_ago() -> chrono::DateTime<Utc> {
+        Utc::now() - chrono::Duration::days(7) - chrono::Duration::hours(1)
+    }
+
+    fn aged_row(id: &str, title: &str, when: chrono::DateTime<Utc>) -> Issue {
+        let mut issue = Issue::new(id.to_string(), title.to_string()).unwrap();
+        issue.created_at = when;
+        issue.updated_at = when;
+        issue
+    }
+
+    fn aged_stamp(when: chrono::DateTime<Utc>) -> String {
+        format!("{} (7d ago)", when.format("%Y-%m-%d"))
+    }
+
+    #[test]
+    fn test_build_context_zero_tracks_byte_stable() {
+        // A board with no track rows must render the v1 by-status format
+        // exactly — pinned here byte for byte, now including the age every row
+        // carries so a stale row cannot read as current work.
+        let when = seven_days_ago();
+        let open = aged_row("mn-aaa111", "Open item", when);
+        let mut working = aged_row("mn-bbb222", "Working item", when);
+        working.claimed_by = Some("ses_x".to_string());
+        working.status = IssueStatus::InProgress;
+        let mut blocked = aged_row("mn-ccc333", "Blocked item", when);
+        blocked.blocked_by.push("mn-aaa111".to_string());
+        blocked.status = IssueStatus::Blocked;
+        let mut finished = aged_row("mn-ddd444", "Done item", when);
+        finished.status = IssueStatus::Done;
+
+        let context = build_context(&[open, working, blocked, finished]);
+        let stamp = aged_stamp(when);
+        assert_eq!(
+            context,
+            format!(
+                "# Manna Context\n\n\
+                 ## Open Issues (1)\n\
+                 - mn-aaa111: Open item [open] updated {stamp}\n\n\
+                 ## In Progress Issues (1)\n\
+                 - mn-bbb222: Working item [in_progress, claimed by ses_x] updated {stamp}\n\n\
+                 ## Blocked Issues (1)\n\
+                 - mn-ccc333: Blocked item [blocked by: mn-aaa111] updated {stamp}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_build_context_track_tree() {
+        let when = seven_days_ago();
+        let mut track = aged_row("mn-aaa111", "Harness", when);
+        track.issue_type = IssueType::Track;
+        let mut on_track = aged_row("mn-bbb222", "Tracked item", when);
+        on_track.track = Some("mn-aaa111".to_string());
+        let mut claimed = aged_row("mn-ccc333", "Claimed item", when);
+        claimed.track = Some("mn-aaa111".to_string());
+        claimed.claimed_by = Some("ses_x".to_string());
+        claimed.status = IssueStatus::InProgress;
+        let mut done_on_track = aged_row("mn-ddd444", "Done item", when);
+        done_on_track.track = Some("mn-aaa111".to_string());
+        done_on_track.status = IssueStatus::Done;
+        let loose = aged_row("mn-eee555", "Loose item", when);
+        let mut dangling = aged_row("mn-fff666", "Dangling item", when);
+        dangling.track = Some("mn-404404".to_string());
+        let mut spark = aged_row("mn-abc123", "Spark", when);
+        spark.issue_type = IssueType::Dream;
+
+        let context = build_context(&[track, on_track, claimed, done_on_track, loose, dangling, spark]);
+        let stamp = aged_stamp(when);
+
+        assert!(context.contains("## Harness (mn-aaa111)\n"));
+        assert!(context.contains(&format!("- mn-bbb222: Tracked item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!(
+            "- mn-ccc333: Claimed item [in_progress, claimed by ses_x] updated {stamp}\n"
+        )));
+        // Done still excluded
+        assert!(!context.contains("mn-ddd444"));
+        // Trackless and dangling-edge items both land under Untracked
+        assert!(context.contains("## Untracked\n"));
+        assert!(context.contains(&format!("- mn-eee555: Loose item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!("- mn-fff666: Dangling item [open] updated {stamp}\n")));
+        assert!(context.contains("## Dreams\nDreams are parked sparks"));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] updated {} {}\n",
+            stamp, DREAM_INERT_MARKER
+        )));
+        // v1 by-status sections replaced by the tree
+        assert!(!context.contains("## Open Issues"));
+        // Ordering: track section, then Untracked, then Dreams
+        let track_pos = context.find("## Harness").unwrap();
+        let untracked_pos = context.find("## Untracked").unwrap();
+        let dreams_pos = context.find("## Dreams").unwrap();
+        assert!(track_pos < untracked_pos && untracked_pos < dreams_pos);
+    }
+
+    #[test]
+    fn test_build_context_zero_tracks_marks_dreams() {
+        // The trackless render (the global dream inbox above all) has no
+        // Dreams section, so the marker on the row is what carries the gate.
+        let when = seven_days_ago();
+        let item = aged_row("mn-aaa111", "Open item", when);
+        let mut spark = aged_row("mn-abc123", "Spark", when);
+        spark.issue_type = IssueType::Dream;
+
+        let context = build_context(&[item, spark]);
+        let stamp = aged_stamp(when);
+
+        assert!(context.contains(&format!("- mn-aaa111: Open item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] updated {} {}\n",
+            stamp, DREAM_INERT_MARKER
+        )));
+        assert!(context.contains("Dreams are parked sparks"));
+        assert!(!context.contains("## Dreams"));
+    }
+
+    #[test]
+    fn test_conversion_authorization_lines() {
+        let promoted =
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Item).unwrap();
+        assert!(promoted.contains("AUTHORIZED"));
+        assert!(promoted.contains("now claimable work"));
+        assert!(promoted.contains("agent-do manna claim mn-abc123"));
+
+        let parked =
+            conversion_authorization("mn-abc123", IssueType::Item, IssueType::Dream).unwrap();
+        assert!(parked.contains("PARKED"));
+        assert!(parked.contains("no longer claimable"));
+        assert!(parked.contains("--type item"));
+
+        // Non-crossing changes stay silent: the line marks the boundary, not
+        // every edit.
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Item).is_none());
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Track).is_none());
+        assert!(
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Dream).is_none()
+        );
+    }
+
+    #[test]
+    fn test_build_context_track_tree_skips_empty_optional_sections() {
+        let mut track = Issue::new("mn-aaa111".to_string(), "Harness".to_string()).unwrap();
+        track.issue_type = IssueType::Track;
+        let mut on_track = Issue::new("mn-bbb222".to_string(), "Tracked item".to_string()).unwrap();
+        on_track.track = Some("mn-aaa111".to_string());
+
+        let context = build_context(&[track, on_track]);
+        assert!(context.contains("## Harness (mn-aaa111)\n"));
+        assert!(!context.contains("## Untracked"));
+        assert!(!context.contains("## Dreams"));
+    }
+
+    #[test]
+    fn test_drift_report_shape() {
+        let report = DriftReport {
+            generated_at: "2026-07-21T00:00:00Z".to_string(),
+            session: None,
+            findings: vec![Finding {
+                kind: FindingKind::StaleDream,
+                issue_id: Some("mn-abc123".to_string()),
+                detail: "open dream older than 14 days".to_string(),
+                evidence: None,
+                proposed_fix: Some("promote or close".to_string()),
+            }],
+        };
+
+        let yaml = serde_yaml::to_string(&report).unwrap();
+        assert!(yaml.contains("generated_at: "));
+        // Pinned contract: session is null when no session id is pinned
+        assert!(yaml.contains("session: null"));
+        assert!(yaml.contains("kind: stale_dream"));
+        assert!(yaml.contains("issue_id: mn-abc123"));
+        assert!(yaml.contains("proposed_fix: promote or close"));
+        assert!(!yaml.contains("evidence"));
     }
 
     #[test]
@@ -976,5 +2474,127 @@ mod tests {
             .filter(|i| i.status == IssueStatus::Done)
             .collect();
         assert_eq!(done_only.len(), 1);
+    }
+
+    // ── prompt pairing ──────────────────────────────────────────────────
+
+    fn issue_with_prompt(id: &str, prompt: &Path) -> Issue {
+        let mut i = Issue::new(id.to_string(), "Prompted".to_string()).unwrap();
+        i.prompt = Some(prompt.to_string_lossy().into_owned());
+        i
+    }
+
+    fn done_issue(mut issue: Issue) -> Issue {
+        issue.claim("ses_x".to_string()).unwrap();
+        issue.complete().unwrap();
+        issue
+    }
+
+    #[test]
+    fn test_lint_prompt_files() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "work order").unwrap();
+
+        let good = issue_with_prompt("mn-aaa111", &real);
+        let missing = issue_with_prompt("mn-bbb222", &temp.path().join("gone.md"));
+        let done_missing = done_issue(issue_with_prompt("mn-ccc333", &temp.path().join("gone.md")));
+        let pointerless = Issue::new("mn-ddd444".to_string(), "Plain".to_string()).unwrap();
+
+        let findings = lint_prompt_files(&[good, missing, done_missing, pointerless]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].issue_id, "mn-bbb222");
+        assert_eq!(findings[0].rule, "prompt_file");
+        assert!(findings[0].detail.contains("gone.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_forward() {
+        let temp = TempDir::new().unwrap();
+        let paired = temp.path().join("paired.md");
+        std::fs::write(&paired, "# order for mn-aaa111 and mn-eee555\n").unwrap();
+        let unpaired = temp.path().join("unpaired.md");
+        std::fs::write(&unpaired, "# no ids here\n").unwrap();
+
+        let good = issue_with_prompt("mn-aaa111", &paired);
+        let bad = issue_with_prompt("mn-bbb222", &unpaired);
+        // Missing file stays lint's job; done issues are exempt.
+        let ghost = issue_with_prompt("mn-ccc333", &temp.path().join("gone.md"));
+        let done_bad = done_issue(issue_with_prompt("mn-ddd444", &unpaired));
+        // The interim description pointer feeds the same check.
+        let mut desc = Issue::new("mn-eee555".to_string(), "Interim".to_string()).unwrap();
+        desc.description = Some(format!("PROMPT: {}\nbody", paired.display()));
+
+        let findings = check_prompt_pairing_forward(&[good, bad, ghost, done_bad, desc]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::PromptPairing);
+        assert_eq!(findings[0].issue_id.as_deref(), Some("mn-bbb222"));
+        assert!(findings[0].detail.contains("unpaired.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("session-prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("lane-a.md"),
+            "Claim first: `agent-do manna claim mn-aaa111`\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lane-b.md"),
+            "Claim: MANNA_SESSION_ID=lane agent-do manna claim mn-bbb222\n\
+             foreign claim: agent-do manna claim mn-f0f0f0\n\
+             done claim: agent-do manna claim mn-ddd444\n\
+             bare mention of mn-ccc333 as data\n",
+        )
+        .unwrap();
+        // Non-markdown files are not staged prompts.
+        std::fs::write(dir.join("notes.txt"), "agent-do manna claim mn-eee555\n").unwrap();
+
+        let pointed = issue_with_prompt("mn-aaa111", &dir.join("lane-a.md"));
+        let pointerless = Issue::new("mn-bbb222".to_string(), "No pointer".to_string()).unwrap();
+        // Bare mentions are data, not pairing promises: no pointer required.
+        let mentioned = Issue::new("mn-ccc333".to_string(), "Only mentioned".to_string()).unwrap();
+        let done = done_issue(Issue::new("mn-ddd444".to_string(), "Done".to_string()).unwrap());
+        let in_txt = Issue::new("mn-eee555".to_string(), "Claimed in .txt".to_string()).unwrap();
+
+        let findings =
+            check_prompt_pairing_reverse(&[pointed, pointerless, mentioned, done, in_txt], &dir);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, FindingKind::PromptPairing);
+        assert_eq!(findings[0].issue_id.as_deref(), Some("mn-bbb222"));
+        assert!(findings[0].detail.contains("no prompt pointer"));
+        assert!(findings[0].evidence.as_deref().unwrap().contains("lane-b.md"));
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse_mismatch_and_canonicalize() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("session-prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane-a.md"), "agent-do manna claim mn-aaa111\n").unwrap();
+        let elsewhere = temp.path().join("elsewhere.md");
+        std::fs::write(&elsewhere, "mn-aaa111\n").unwrap();
+
+        // Pointer at a different file than the one referencing the issue.
+        let mispointed = issue_with_prompt("mn-aaa111", &elsewhere);
+        let findings = check_prompt_pairing_reverse(&[mispointed], &dir);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].detail.contains("does not resolve"));
+
+        // An unnormalized pointer to the same file pairs via canonicalize.
+        let dotted = temp.path().join("session-prompts").join("..").join("session-prompts").join("lane-a.md");
+        let normalized = issue_with_prompt("mn-aaa111", &dotted);
+        assert!(check_prompt_pairing_reverse(&[normalized], &dir).is_empty());
+    }
+
+    #[test]
+    fn test_check_prompt_pairing_reverse_missing_dir_is_empty_scan() {
+        let temp = TempDir::new().unwrap();
+        let issue = Issue::new("mn-aaa111".to_string(), "Any".to_string()).unwrap();
+        let findings = check_prompt_pairing_reverse(&[issue], &temp.path().join("absent"));
+        assert!(findings.is_empty());
     }
 }

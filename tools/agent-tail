@@ -567,6 +567,51 @@ cmd_errors() {
 }
 
 cmd_list() {
+    local json_output=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_output=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ $json_output -eq 1 ]]; then
+        python3 -c "
+import json, os, glob
+
+state_dir = '$TAIL_STATE_DIR'
+sessions = []
+if os.path.isdir(state_dir):
+    for session_id in sorted(os.listdir(state_dir)):
+        session_path = os.path.join(state_dir, session_id)
+        if not os.path.isdir(session_path):
+            continue
+        services = []
+        running = 0
+        for pidfile in glob.glob(os.path.join(session_path, '*.pid')):
+            svc_name = os.path.splitext(os.path.basename(pidfile))[0]
+            with open(pidfile) as f:
+                pid = f.read().strip()
+            is_running = False
+            try:
+                os.kill(int(pid), 0)
+                is_running = True
+                running += 1
+            except (OSError, ValueError):
+                pass
+            services.append({
+                'name': svc_name,
+                'pid': int(pid) if pid.isdigit() else pid,
+                'status': 'running' if is_running else 'stopped',
+            })
+        if running > 0:
+            sessions.append({'id': session_id, 'running': running, 'services': services})
+
+print(json.dumps({'sessions': sessions, 'count': len(sessions)}, indent=2))
+"
+        return
+    fi
+
     local found=0
     if [[ ! -d "$TAIL_STATE_DIR" ]]; then
         echo "No active tail sessions."
@@ -607,13 +652,51 @@ cmd_list() {
 
 cmd_sessions() {
     local base_dir="tmp/logs"
+    local json_output=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dir) base_dir="$2"; shift 2 ;;
+            --json) json_output=1; shift ;;
             *) shift ;;
         esac
     done
+
+    if [[ $json_output -eq 1 ]]; then
+        python3 -c "
+import json, os, glob, re
+
+base_dir = '$base_dir'
+sessions = []
+if os.path.isdir(base_dir):
+    latest = ''
+    latest_link = os.path.join(base_dir, 'latest')
+    if os.path.islink(latest_link):
+        latest = os.readlink(latest_link)
+
+    for entry in sorted(os.listdir(base_dir)):
+        entry_path = os.path.join(base_dir, entry)
+        if not os.path.isdir(entry_path) or not re.match(r'^[0-9]{4}-', entry):
+            continue
+        log_files = glob.glob(os.path.join(entry_path, '*.log'))
+        size_bytes = 0
+        for root, _dirs, files in os.walk(entry_path):
+            for fname in files:
+                try:
+                    size_bytes += os.path.getsize(os.path.join(root, fname))
+                except OSError:
+                    pass
+        sessions.append({
+            'id': entry,
+            'log_count': len(log_files),
+            'size_bytes': size_bytes,
+            'is_latest': entry == latest,
+        })
+
+print(json.dumps({'base_dir': os.path.abspath(base_dir), 'sessions': sessions, 'count': len(sessions)}, indent=2))
+"
+        return
+    fi
 
     if [[ ! -d "$base_dir" ]]; then
         echo "No sessions found in $base_dir"
@@ -792,7 +875,8 @@ case "${1:-help}" in
         cmd_errors "$@"
         ;;
     list|ls)
-        cmd_list
+        shift
+        cmd_list "$@"
         ;;
     sessions)
         shift

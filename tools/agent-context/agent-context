@@ -37,7 +37,7 @@ Core:
   search <query>                    Search across all indexed content
   retrieve <query> [--fresh]        Return token-budgeted context for agents
     --require-fresh                 Fail if selected WAN docs cannot be verified fresh
-    --require-official              Only return official/local trusted packages
+    --require-official              Only return official trusted packages
     --prefer-latest                 Prefer packages whose version is current
     --require-current               Fail if selected docs are known stale by version
     --offline                       Never perform network refresh

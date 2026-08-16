@@ -232,7 +232,7 @@ EXPANSIONS = {
     "llm": "llm language model ai",
 }
 TRUST_MULT = {"official": 1.5, "maintainer": 1.2, "local": 1.3, "community": 1.0}
-OFFICIAL_TRUSTS = {"official", "local"}
+OFFICIAL_TRUSTS = {"official"}
 CURRENT_VERSION_STATUSES = {"current", "floating_fresh", "local", ""}
 CURRENCY_MULT = {
     "current": 1.12,
@@ -318,6 +318,30 @@ def load_failures(path):
 
 def query_mentions_specific_version(text):
     return bool(re.search(r"\b(v\d+|version\s+\d+|\d+\.\d+(?:\.\d+)?)\b", text.lower()))
+
+def query_wants_external_authority(text):
+    normalized = text.lower()
+    return bool(re.search(
+        r"\b(api|sdk|docs?|documentation|reference|model|models|latest|current|version|migration|release|opus|sonnet|haiku|claude|anthropic)\b",
+        normalized,
+    ))
+
+def row_is_local(row):
+    source_kind = row["source_kind"] or ""
+    ptype = row["type"] or ""
+    return source_kind.startswith("local") or ptype in {"skill", "local"}
+
+def authority_priority(row):
+    if row_is_local(row):
+        return 0
+    trust = row["trust"] or ""
+    if trust == "official":
+        return 4
+    if trust == "maintainer":
+        return 3
+    if trust == "community":
+        return 2
+    return 1
 
 def derived_freshness(row, now):
     source_kind = row["source_kind"] or ""
@@ -416,6 +440,10 @@ except Exception as exc:
     print(json.dumps(result, indent=2) if output_format == "json" else f"Error: {result['error']}", file=sys.stderr if output_format != "json" else sys.stdout)
     sys.exit(1)
 
+prefer_external_authority = (
+    (fresh_requested or prefer_latest or require_official)
+    and query_wants_external_authority(query)
+)
 candidates = []
 for row in rows:
     trust_mult = TRUST_MULT.get(row["trust"], 1.0)
@@ -426,13 +454,14 @@ for row in rows:
     if prefer_latest and not query_mentions_specific_version(query):
         currency_mult = CURRENCY_MULT.get(currency_status, CURRENCY_MULT["unknown"])
     score = abs(row["bm25_score"]) * trust_mult * fb_mult * currency_mult
-    candidates.append((score, row))
-candidates.sort(key=lambda item: item[0], reverse=True)
+    priority = authority_priority(row) if prefer_external_authority else 0
+    candidates.append((priority, score, row))
+candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
 now = datetime.now(timezone.utc)
 selected = []
 remaining = max_tokens
-for score, row in candidates:
+for _priority, score, row in candidates:
     if len(selected) >= limit or remaining <= 0:
         break
     if require_official and (row["trust"] or "") not in OFFICIAL_TRUSTS:

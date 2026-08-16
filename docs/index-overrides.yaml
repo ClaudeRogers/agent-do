@@ -1,0 +1,46 @@
+# Presentation-only metadata for bin/gen-index.
+# Tool existence and default descriptions remain canonical in registry.yaml.
+categories:
+  core:
+    description: Terminal, desktop, browser, and device control
+    tools: [tui, macos, appleevents, ide, ios, android, repl, ssh, docker, screen, browse, unbrowse]
+  data:
+    description: Data, APIs, local development, and version control
+    tools: [context, db, psql, k8s, git, debug, jupyter, api, clipboard, ocr, excel, manna, coord, sessions, tail, vision, spec]
+  apps:
+    description: Communication and productivity applications
+    tools: [slack, meetings, discord, email, calendar, notion, linear, obsidian, figma, sheets]
+  infra:
+    description: Cloud, CI/CD, identity, monitoring, and networking
+    tools: [render, vercel, supabase, gcp, cloud, cloudflare, clerk, okta, namecheap, resend, ci, gh, logs, metrics, vm, network, dns]
+  media:
+    description: Image, video, audio, and document processing
+    tools: [pdf2md, image, video, audio, transcribe, pdf, 3d, cad, latex]
+  security:
+    description: Security inspection and reverse engineering
+    tools: [burp, wireshark, ghidra]
+  comms:
+    description: Video, voice, and messaging channels
+    tools: [zoom, meet, teams, voice, sms]
+  hardware:
+    description: Physical device and peripheral control
+    tools: [hardware, serial, midi, homekit, bluetooth, usb, printer]
+  science:
+    description: Notebook and laboratory environments
+    tools: [colab, lab]
+  meta:
+    description: Agent orchestration, models, evaluation, memory, and quality
+    tools: [agent, auth, creds, dpt, eval, harness, learn, memory, models, prompt, swarm, vector, zpc]
+  other:
+    description: Additional specialized integrations
+
+description_overrides:
+  git: "Local repository operations. For GitHub PRs/reviews use: agent-do gh"
+  gh: "GitHub PR/review operations. For local repository work use: agent-do git"
+
+task_routing:
+  github: gh
+  github_pr: gh
+  pull_request: gh
+  pr_review: gh
+  local_git: git

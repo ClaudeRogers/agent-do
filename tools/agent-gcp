@@ -121,7 +121,7 @@ exchange_sa_token() {
     local jwt="${header}.${claims}.${signature}"
 
     # Exchange JWT for access token
-    curl -s -X POST "$TOKEN_API" \
+    curl -s --max-time 30 --connect-timeout 10 -X POST "$TOKEN_API" \
         --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
         --data-urlencode "assertion=$jwt" | \
         python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token', ''))"
@@ -185,7 +185,7 @@ gcp_request() {
     local token
     token=$(get_access_token) || return 1
 
-    local args=(-s -X "$method" "$url" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "$url" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
 
@@ -322,6 +322,10 @@ browse_ensure_session() {
 cmd_auth_status() {
     local token
     token=$(get_access_token 2>/dev/null) || {
+        if [[ "$JSON_MODE" == "1" ]]; then
+            python3 -c "import json; print(json.dumps({'authenticated': False, 'error': 'Not authenticated. Set GCP_ACCESS_TOKEN, GCP_SERVICE_ACCOUNT, or run gcloud auth login.'}))"
+            return 1
+        fi
         echo "Status: NOT AUTHENTICATED"
         echo ""
         echo "Configure one of:"
@@ -330,6 +334,41 @@ cmd_auth_status() {
         echo "  gcloud auth login"
         return 1
     }
+
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local source="" sa_email="" token_state
+        if [[ -n "${GCP_ACCESS_TOKEN:-}" ]]; then
+            source="GCP_ACCESS_TOKEN env var"
+        elif [[ -n "${GCP_SERVICE_ACCOUNT:-}" ]]; then
+            sa_email=$(python3 -c "import json; print(json.load(open('${GCP_SERVICE_ACCOUNT}'))['client_email'])" 2>/dev/null)
+            source="Service account ($sa_email)"
+        elif command -v gcloud &>/dev/null; then
+            source="gcloud CLI"
+        fi
+        local result
+        result=$(gcp_request GET "${CRM_API}/projects:search?pageSize=1" 2>/dev/null) || result=""
+        if echo "$result" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+sys.exit(1 if 'error' in data else 0)
+" 2>/dev/null; then
+            token_state="VALID"
+        else
+            token_state="COULD NOT VALIDATE"
+        fi
+        python3 -c "
+import json, sys
+print(json.dumps({
+    'authenticated': True,
+    'token_masked': sys.argv[1],
+    'source': sys.argv[2] or None,
+    'service_account': sys.argv[3] or None,
+    'project': sys.argv[4] or None,
+    'token_state': sys.argv[5],
+}))
+" "${token:0:8}****" "$source" "$sa_email" "${GCP_PROJECT:-}" "$token_state"
+        return 0
+    fi
 
     local masked="${token:0:8}****"
     echo "Status: Authenticated"
@@ -351,7 +390,7 @@ cmd_auth_status() {
 
     # Validate token with a lightweight API call
     local result
-    result=$(gcp_request GET "${CRM_API}/projects:search?pageSize=1" 2>/dev/null)
+    result=$(gcp_request GET "${CRM_API}/projects:search?pageSize=1" 2>/dev/null) || result=""
     if echo "$result" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -373,6 +412,36 @@ cmd_auth_token() {
 # --- Project Commands ---
 
 cmd_projects() {
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local result
+        result=$(gcp_request GET "${CRM_API}/projects:search?pageSize=50" 2>/dev/null) || {
+            python3 -c "import json; print(json.dumps({'error': 'No GCP credentials configured. Set GCP_ACCESS_TOKEN, GCP_SERVICE_ACCOUNT, or install gcloud CLI.'}))"
+            return 1
+        }
+        printf '%s' "$result" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except (ValueError, OSError):
+    print(json.dumps({'error': 'Empty or invalid response from Cloud Resource Manager API'}))
+    sys.exit(1)
+if 'error' in data:
+    msg = data['error'].get('message', data['error']) if isinstance(data['error'], dict) else data['error']
+    print(json.dumps({'error': msg}))
+    sys.exit(1)
+out = []
+for p in data.get('projects', []):
+    out.append({
+        'projectId': p.get('projectId', ''),
+        'number': p.get('name', '').split('/')[-1] if '/' in p.get('name', '') else '',
+        'displayName': p.get('displayName', ''),
+        'state': p.get('state', ''),
+    })
+print(json.dumps({'count': len(out), 'projects': out}))
+"
+        return $?
+    fi
+
     local result
     result=$(gcp_request GET "${CRM_API}/projects:search?pageSize=50")
 
@@ -433,6 +502,43 @@ if labels:
 # --- API Management Commands ---
 
 cmd_apis() {
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local project number result
+        project=$(gcp_project "${1:-}" 2>/dev/null) || {
+            python3 -c "import json; print(json.dumps({'error': 'Project required (pass as argument or set GCP_PROJECT)'}))"
+            return 1
+        }
+        number=$(get_project_number "$project" 2>/dev/null) || {
+            python3 -c "import json,sys; print(json.dumps({'error': 'Could not resolve project number for ' + sys.argv[1]}))" "$project"
+            return 1
+        }
+        result=$(gcp_request GET "${SU_API}/projects/$number/services?filter=state:ENABLED&pageSize=200" 2>/dev/null) || {
+            python3 -c "import json; print(json.dumps({'error': 'No GCP credentials configured. Set GCP_ACCESS_TOKEN, GCP_SERVICE_ACCOUNT, or install gcloud CLI.'}))"
+            return 1
+        }
+        printf '%s' "$result" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except (ValueError, OSError):
+    print(json.dumps({'error': 'Empty or invalid response from Service Usage API'}))
+    sys.exit(1)
+if 'error' in data:
+    msg = data['error'].get('message', data['error']) if isinstance(data['error'], dict) else data['error']
+    print(json.dumps({'error': msg}))
+    sys.exit(1)
+out = []
+for s in data.get('services', []):
+    config = s.get('config', {})
+    out.append({
+        'name': config.get('name', s.get('name', '').split('/')[-1]),
+        'title': config.get('title', ''),
+    })
+print(json.dumps({'project': sys.argv[1], 'count': len(out), 'apis': out}))
+" "$project"
+        return $?
+    fi
+
     local project
     project=$(gcp_project "${1:-}") || return 1
 
@@ -1044,6 +1150,34 @@ cmd_oauth_create() {
 }
 
 cmd_oauth_list() {
+    if [[ "$JSON_MODE" == "1" ]]; then
+        local project
+        project=$(gcp_project "${1:-}" 2>/dev/null) || {
+            python3 -c "import json; print(json.dumps({'error': 'Project required (pass as argument or set GCP_PROJECT)'}))"
+            return 1
+        }
+        if ! run_browse get url &>/dev/null 2>&1; then
+            python3 -c "import json; print(json.dumps({'error': 'No browser session active. Start with: agent-do browse open https://console.cloud.google.com, log in to your Google account, then retry.'}))"
+            return 1
+        fi
+        run_browse open "https://console.cloud.google.com/apis/credentials?project=${project}" >/dev/null 2>&1
+        run_browse wait --stable >/dev/null 2>&1
+        sleep 2
+        local snap
+        snap=$(run_browse snapshot -i 2>/dev/null)
+        printf '%s' "$snap" | python3 -c "
+import sys, json
+clients = []
+for line in sys.stdin:
+    if '.apps.googleusercontent.com' in line or 'oauth' in line.lower():
+        text = line.strip()
+        if text:
+            clients.append(text)
+print(json.dumps({'project': sys.argv[1], 'source': 'console', 'count': len(clients), 'clients': clients}))
+" "$project"
+        return $?
+    fi
+
     local project
     project=$(gcp_project "${1:-}") || return 1
 
@@ -1087,7 +1221,10 @@ if not found:
 
 cmd_snapshot() {
     local token
-    token=$(get_access_token 2>/dev/null)
+    # Guard the assignment: an unguarded `token=$(...)` inherits a non-zero exit
+    # from get_access_token and, under `set -e`, aborts the script before the
+    # guard below can emit its structured error (bare exit 1, no output).
+    token=$(get_access_token 2>/dev/null) || token=""
     if [[ -z "$token" ]]; then
         echo '{"error": "Not authenticated. Set GCP_ACCESS_TOKEN, GCP_SERVICE_ACCOUNT, or install gcloud."}'
         return 1
@@ -1107,7 +1244,7 @@ def api_get(url):
         'Content-Type': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:
@@ -1209,6 +1346,20 @@ print(json.dumps(snapshot, indent=2))
 }
 
 # --- Main ---
+
+# Strip a trailing/positional --json flag from the argument list so it is never
+# mistaken for a positional argument (e.g. a project id). Sets JSON_MODE for
+# command handlers that emit structured output.
+JSON_MODE=0
+_filtered_args=()
+for _arg in "$@"; do
+    if [[ "$_arg" == "--json" ]]; then
+        JSON_MODE=1
+    else
+        _filtered_args+=("$_arg")
+    fi
+done
+set -- "${_filtered_args[@]}"
 
 case "${1:-help}" in
     auth)

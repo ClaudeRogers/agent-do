@@ -10,6 +10,7 @@ agent-pdf - PDF operations
 Commands:
   snapshot                   Show available tools and PDF files (JSON)
   read <file>                Extract text from PDF
+  extract <file>             Extract text from PDF (alias of read)
   info <file>                Show PDF info
   merge <files...> <output>  Merge PDFs
   split <file> [pages]       Split PDF by pages

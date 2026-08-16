@@ -10,6 +10,7 @@ import { StreamServer } from './stream-server.js';
 const isWindows = process.platform === 'win32';
 // Session support - each session gets its own socket/pid
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
+let explicitSocketPath = null;
 // Stream server for browser preview
 let streamServer = null;
 // Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
@@ -19,6 +20,9 @@ const DEFAULT_STREAM_PORT = 9223;
  */
 export function setSession(session) {
     currentSession = session;
+}
+export function setSocketPath(socketPath) {
+    explicitSocketPath = socketPath;
 }
 /**
  * Get the current session
@@ -47,6 +51,8 @@ export function getSocketPath(session) {
     if (isWindows) {
         return String(getPortForSession(sess));
     }
+    if (sess === currentSession && explicitSocketPath)
+        return explicitSocketPath;
     return path.join(os.tmpdir(), `agent-browser-${sess}.sock`);
 }
 /**
@@ -165,8 +171,18 @@ export async function startDaemon(options) {
                         socket.write(serializeResponse(resp) + '\n');
                         continue;
                     }
+                    if (parseResult.command.action === 'ping') {
+                        socket.write(serializeResponse({
+                            id: parseResult.command.id,
+                            success: true,
+                            session: currentSession,
+                            children: browser.getPages().length,
+                            uptime_s: Math.floor(process.uptime()),
+                        }) + '\n');
+                        continue;
+                    }
                     // Auto-launch browser if not already launched and this isn't a launch/close/login command
-                    const skipAutoLaunch = ['launch', 'close', 'login_start', 'login_done', 'login_status', 'login_cancel'];
+                    const skipAutoLaunch = ['ping', 'launch', 'close', 'login_start', 'login_done', 'login_status', 'login_cancel'];
                     if (!browser.isLaunched() &&
                         !skipAutoLaunch.includes(parseResult.command.action)) {
                         const extensions = process.env.AGENT_BROWSER_EXTENSIONS
@@ -280,6 +296,15 @@ export async function startDaemon(options) {
 }
 // Run daemon if this is the entry point
 if (process.argv[1]?.endsWith('daemon.js') || process.env.AGENT_BROWSER_DAEMON === '1') {
+    const args = process.argv.slice(2);
+    for (let index = 0; index < args.length; index++) {
+        if (args[index] === '--session' && args[index + 1]) {
+            setSession(args[++index]);
+        }
+        else if (args[index] === '--socket' && args[index + 1]) {
+            setSocketPath(args[++index]);
+        }
+    }
     startDaemon().catch((err) => {
         console.error('Daemon error:', err);
         cleanupSocket();

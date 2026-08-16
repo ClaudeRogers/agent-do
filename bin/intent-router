@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Intent router using Claude API.
-Maps natural language intents to agent-* tool commands.
-"""
+"""Provider-aware natural-language router for agent-do tool commands."""
 
 import json
 import os
@@ -10,16 +7,72 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import anthropic
-except ModuleNotFoundError:
-    anthropic = None
-
 # Add lib to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
+from ai_router import llm_call
 from cache import check_cache, cache_result, fuzzy_match, note_route_outcome, infer_project_scope
-from registry import load_registry, get_tool_info, get_tool_secret_envs, has_tool
+from registry import (
+    load_registry,
+    get_tool_info,
+    get_tool_secret_envs,
+    get_tool_contracts,
+    get_tool_contract_attributes,
+    has_tool,
+)
+from telemetry import append_event
+
+READ_LEANING = {"show", "list", "get", "what", "check", "view", "read", "find"}
+
+
+def annotate_route_contracts(result: dict) -> dict:
+    """Attach the resolved verb's beats/attributes from contracts.
+
+    Runs strictly AFTER cache_result/note_route_outcome so annotations are
+    never persisted into patterns.db and replayed stale.
+    """
+    tool, command = result.get("tool"), result.get("command")
+    if not tool or not command:
+        return result
+    info = (load_registry().get("tools") or {}).get(tool) or {}
+    first = str(command).split()[0]
+    beats = sorted({
+        beat
+        for beat, verbs in get_tool_contracts(info).items()
+        for verb in verbs
+        if verb == command or verb.split()[0] == first
+    })
+    attrs = sorted({
+        attr
+        for verb, alist in get_tool_contract_attributes(info).items()
+        if verb == command or verb.split()[0] == first
+        for attr in alist
+    })
+    result["beats"] = beats
+    result["attributes"] = attrs
+    return result
+
+
+def log_read_write_mismatch(intent: str, result: dict) -> None:
+    first_word = (intent.split() or [""])[0].lower()
+    if first_word not in READ_LEANING:
+        return
+    write_shaped = {"interact", "save"} & set(result.get("beats") or [])
+    dangerous = {"destructive", "sensitive"} & set(result.get("attributes") or [])
+    if not (write_shaped or dangerous):
+        return
+    try:
+        append_event(
+            "route_intent_mismatch",
+            "intent-router",
+            intent=intent,
+            tool=result.get("tool"),
+            command=result.get("command"),
+            beats=result.get("beats"),
+            attributes=result.get("attributes"),
+        )
+    except Exception:
+        pass  # telemetry must never break routing
 
 
 def resolve_tool_executable(tool_name: str) -> Path | None:
@@ -103,7 +156,7 @@ def route_intent(
     dry_run: bool = False,
     explain: bool = False,
 ) -> dict:
-    """Route intent to tool command using Claude."""
+    """Route intent to a tool command using the configured fast model role."""
 
     # Try cache first
     cached = check_cache(intent, project_scope=project_scope)
@@ -116,14 +169,6 @@ def route_intent(
     if fuzzy and route_is_supported(fuzzy) and not explain:
         fuzzy['from_fuzzy'] = True
         return fuzzy
-
-    # Fall back to LLM
-    if anthropic is None:
-        raise RuntimeError(
-            "The 'anthropic' package is not installed. Install requirements.txt to use natural language routing."
-        )
-
-    client = anthropic.Anthropic()
 
     mode = "explain what tool to use" if explain else "determine the exact command"
 
@@ -156,14 +201,14 @@ Rules:
 - Keep args as a flat list of strings
 - Use flags dict for named options (--flag value)"""
 
-    response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+    response = llm_call(
+        "fast",
+        [{"role": "user", "content": prompt}],
         max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
     )
 
     # Extract JSON from response
-    text = response.content[0].text
+    text = response.text
     # Handle potential markdown code blocks
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0]
@@ -239,13 +284,18 @@ def execute(
     cmd = build_command(result)
     cmd_str = ' '.join(cmd)
 
+    annotate_route_contracts(result)
+    log_read_write_mismatch(intent, result)
+
     if dry_run:
         if json_output:
             output = {
                 "status": "dry_run",
                 "command": cmd_str,
                 "tool": result.get('tool'),
-                "explanation": result.get('explanation')
+                "explanation": result.get('explanation'),
+                "beats": result.get('beats'),
+                "attributes": result.get('attributes')
             }
             print(json.dumps(output))
         else:
@@ -253,6 +303,28 @@ def execute(
             if result.get('explanation'):
                 print(f"  ({result['explanation']})")
         return 0
+
+    # Mode-aware destructive gate: natural-language routes to destructive or
+    # sensitive verbs ask first unless auto mode is on (Erik decision #3).
+    dangerous = {"destructive", "sensitive"} & set(result.get("attributes") or [])
+    if dangerous and os.environ.get("AGENT_DO_AUTO_DESTRUCTIVE") != "1":
+        question = (
+            f"This resolves to `{cmd_str}`, which is marked {'/'.join(sorted(dangerous))}. "
+            "Rerun with AGENT_DO_AUTO_DESTRUCTIVE=1 to execute destructive routes "
+            "from natural language, or invoke the structured command directly."
+        )
+        if json_output:
+            print(json.dumps({
+                "status": "needs_input",
+                "question": question,
+                "command": cmd_str,
+                "tool": result.get('tool'),
+                "beats": result.get('beats'),
+                "attributes": result.get('attributes'),
+            }))
+        else:
+            print(f"? {question}")
+        return 2
 
     # Show what we're doing
     source = ""
@@ -313,7 +385,9 @@ def execute(
                 "tool": result.get('tool'),
                 "exit_code": proc.returncode,
                 "stdout": proc.stdout,
-                "stderr": proc.stderr
+                "stderr": proc.stderr,
+                "beats": result.get('beats'),
+                "attributes": result.get('attributes')
             }
             print(json.dumps(output))
         return proc.returncode
@@ -414,7 +488,7 @@ def main():
             print(f"Error parsing router response: {e}")
         return 1
     except Exception as e:
-        is_api_error = anthropic is not None and isinstance(e, anthropic.APIError)
+        is_api_error = getattr(e, "status_code", getattr(e, "status", None)) is not None
         if args.json:
             error_type = "api_error" if is_api_error else "error"
             print(json.dumps({"status": "error", "error": error_type, "message": str(e)}))

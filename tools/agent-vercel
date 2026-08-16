@@ -29,6 +29,7 @@ Projects are referenced by name directly.
 
 Options:
   --team <id>                  Team ID (appended as ?teamId=)
+  --json                       Emit raw Vercel API JSON (read commands)
 
 Environment:
   VERCEL_ACCESS_TOKEN           API token (Bearer)
@@ -49,12 +50,14 @@ EOF
 # --- Helpers ---
 
 TEAM_ID=""
+WANT_JSON=0
 
 parse_global_opts() {
     local args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --team) TEAM_ID="$2"; shift 2 ;;
+            --json) WANT_JSON=1; shift ;;
             *) args+=("$1"); shift ;;
         esac
     done
@@ -86,7 +89,7 @@ vercel_request() {
     local tq
     tq=$(team_query "$endpoint")
 
-    local args=(-s -X "$method" "${VERCEL_API}${endpoint}${tq}" \
+    local args=(-s --max-time 30 --connect-timeout 10 -X "$method" "${VERCEL_API}${endpoint}${tq}" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
 
@@ -101,11 +104,32 @@ json_escape() {
     python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"
 }
 
+# Emit a raw Vercel API response verbatim as one JSON document (--json mode),
+# or a structured JSON error with a nonzero exit if the body is empty/non-JSON.
+emit_json() {
+    local raw="$1"
+    printf '%s' "$raw" | python3 -c "
+import sys, json
+raw = sys.stdin.read()
+try:
+    json.loads(raw)
+except (ValueError, TypeError):
+    print(json.dumps({'error': 'empty or non-JSON response from Vercel API', 'raw': raw}))
+    sys.exit(1)
+sys.stdout.write(raw if raw.endswith(chr(10)) else raw + chr(10))
+"
+}
+
 # --- Commands ---
 
 cmd_projects() {
     local result
     result=$(vercel_request GET "/v10/projects?limit=50")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -140,6 +164,11 @@ cmd_show() {
 
     local result
     result=$(vercel_request GET "/v10/projects/$name")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json, datetime
@@ -196,6 +225,11 @@ cmd_deployments() {
 
     local result
     result=$(vercel_request GET "/v6/deployments?projectId=${project_id}&limit=10")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json, datetime
@@ -282,6 +316,11 @@ cmd_inspect() {
     local result
     result=$(vercel_request GET "/v13/deployments/$dpl_id")
 
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
+
     echo "$result" | python3 -c "
 import sys, json, datetime
 d = json.load(sys.stdin)
@@ -324,6 +363,11 @@ cmd_logs() {
 
     local result
     result=$(vercel_request GET "/v3/deployments/$dpl_id/events")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json, datetime
@@ -417,6 +461,11 @@ cmd_env() {
 
     local result
     result=$(vercel_request GET "/v10/projects/$name/env")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -518,6 +567,11 @@ cmd_domains() {
     local result
     result=$(vercel_request GET "/v10/projects/$name/domains")
 
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
+
     echo "$result" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -542,6 +596,11 @@ for d in items:
 cmd_teams() {
     local result
     result=$(vercel_request GET "/v2/teams")
+
+    if [[ "$WANT_JSON" == "1" ]]; then
+        emit_json "$result" || return 1
+        return 0
+    fi
 
     echo "$result" | python3 -c "
 import sys, json
@@ -587,7 +646,7 @@ def api_get(path):
         'Content-Type': 'application/json',
     })
     try:
-        with urlopen(req) as resp:
+        with urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
     except HTTPError as e:
         if e.code == 401:

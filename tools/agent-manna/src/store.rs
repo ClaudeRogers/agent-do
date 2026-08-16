@@ -137,12 +137,33 @@ impl MannaStore {
     }
 
     /// Append a new issue to issues.jsonl with exclusive file lock.
+    /// Acquire the board-wide mutation lock.
+    ///
+    /// Every mutating operation must hold this for its FULL read-modify-write
+    /// span. Per-file locks are not enough: rewrite paths build a new file and
+    /// rename it over the board, so a writer locking only its own temp file
+    /// excludes nobody, and two concurrent mutations silently revert each
+    /// other (observed live 2026-07-22: a `done` lost to a description edit).
+    /// The lock releases when the returned handle drops.
+    fn lock_board(&self) -> Result<File> {
+        let lock_path = self.manna_dir().join("board.lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock_file
+            .lock_exclusive()
+            .map_err(|e| MannaError::LockFailed(e.to_string()))?;
+        Ok(lock_file)
+    }
+
     pub fn append_issue(&self, issue: &Issue) -> Result<()> {
         let path = self.issues_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
         }
 
+        let _board_lock = self.lock_board()?;
         let file = OpenOptions::new().append(true).open(&path)?;
 
         // Acquire exclusive lock
@@ -167,6 +188,10 @@ impl MannaStore {
         if !path.exists() {
             return Err(MannaError::NotInitialized);
         }
+
+        // Hold the board lock across load, mutate, write, and rename — a
+        // stale load otherwise reverts concurrent writers at rename time.
+        let _board_lock = self.lock_board()?;
 
         // Load all issues
         let mut issues = self.load_issues()?;
@@ -206,6 +231,43 @@ impl MannaStore {
         // Atomic rename
         fs::rename(&temp_path, &path)?;
 
+        Ok(())
+    }
+
+    /// Delete an issue by ID, rewriting issues.jsonl atomically.
+    pub fn delete_issue(&self, id: &str) -> Result<()> {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+
+        // Same full-span board lock as update_issue: rewrite paths must not
+        // race each other or appends.
+        let _board_lock = self.lock_board()?;
+
+        let issues = self.load_issues()?;
+        let remaining: Vec<Issue> = issues.into_iter().filter(|i| i.id != id).collect();
+
+        // load_issues succeeded, so a missing id means it never existed.
+        let before = self.load_issues()?.len();
+        if remaining.len() == before {
+            return Err(MannaError::IssueNotFound(id.to_string()));
+        }
+
+        let temp_path = path.with_extension("jsonl.tmp");
+        {
+            let temp_file = File::create(&temp_path)?;
+            temp_file
+                .lock_exclusive()
+                .map_err(|e| MannaError::LockFailed(e.to_string()))?;
+            let mut writer = std::io::BufWriter::new(&temp_file);
+            for issue in &remaining {
+                serde_json::to_writer(&mut writer, issue)?;
+                writeln!(writer)?;
+            }
+            writer.flush()?;
+        }
+        fs::rename(&temp_path, &path)?;
         Ok(())
     }
 
@@ -459,6 +521,72 @@ mod tests {
         for issue in &issues {
             assert!(issue.id.starts_with("mn-"));
             assert!(!issue.title.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_concurrent_mutations_lose_no_writes() {
+        // The 2026-07-22 incident class: rewrite paths (update/delete) built
+        // from a stale load used to revert concurrent writers at rename time.
+        // Ten threads each own one issue and update it 20 times while other
+        // threads do the same; every issue must end at its final value, and
+        // interleaved appends must all survive the rewrites.
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MannaStore::new(temp_dir.path()));
+        store.init().unwrap();
+
+        for t in 0..10 {
+            let issue = Issue::new(format!("mn-mut{:03}", t), format!("Mutator {}", t)).unwrap();
+            store.append_issue(&issue).unwrap();
+        }
+
+        let mut handles = vec![];
+        for t in 0..10 {
+            let store_clone = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for round in 1..=20 {
+                    let mut issue = store_clone
+                        .load_issues()
+                        .unwrap()
+                        .into_iter()
+                        .find(|i| i.id == format!("mn-mut{:03}", t))
+                        .unwrap();
+                    issue.title = format!("Mutator {} round {}", t, round);
+                    store_clone.update_issue(&issue).unwrap();
+                }
+            }));
+        }
+        // Appenders race the rewriters: their rows must never vanish.
+        for a in 0..4 {
+            let store_clone = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..5 {
+                    let issue = Issue::new(
+                        format!("mn-app{}{:02}", a, i),
+                        format!("Appender {} Issue {}", a, i),
+                    )
+                    .unwrap();
+                    store_clone.append_issue(&issue).unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let issues = store.load_issues().unwrap();
+        assert_eq!(issues.len(), 30, "lost rows: expected 30, got {}", issues.len());
+        for t in 0..10 {
+            let issue = issues
+                .iter()
+                .find(|i| i.id == format!("mn-mut{:03}", t))
+                .unwrap();
+            assert_eq!(
+                issue.title,
+                format!("Mutator {} round 20", t),
+                "lost update on {}",
+                issue.id
+            );
         }
     }
 

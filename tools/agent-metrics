@@ -3,6 +3,21 @@
 
 set -euo pipefail
 
+# Emit a JSON document for a metric: name + raw text body (preserved verbatim).
+emit_json() {
+    local metric="$1"
+    local body="$2"
+    python3 -c '
+import json, sys
+metric = sys.argv[1]
+body = sys.argv[2]
+lines = body.split("\n")
+if lines and lines[-1] == "":
+    lines = lines[:-1]
+print(json.dumps({"metric": metric, "output": body, "lines": lines}, indent=2))
+' "$metric" "$body"
+}
+
 show_help() {
     cat << 'EOF'
 agent-metrics - System metrics and monitoring
@@ -45,24 +60,34 @@ cmd_cpu() {
         esac
     done
 
-    if [[ "$(uname)" == "Darwin" ]]; then
-        if [[ -n "$watch" ]]; then
+    # Watch mode streams forever; JSON is a single-document contract, so it
+    # only applies to the one-shot path.
+    if [[ -n "$watch" ]]; then
+        if [[ "$(uname)" == "Darwin" ]]; then
             while true; do
                 top -l 1 -n 0 | grep "CPU usage"
                 sleep "$interval"
             done
         else
-            top -l 1 -n 0 | grep "CPU usage"
-        fi
-    else
-        if [[ -n "$watch" ]]; then
             while true; do
                 grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "CPU: %.1f%%\n", usage}'
                 sleep "$interval"
             done
-        else
-            grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "CPU: %.1f%%\n", usage}'
         fi
+        return
+    fi
+
+    local out
+    if [[ "$(uname)" == "Darwin" ]]; then
+        out="$(top -l 1 -n 0 | grep "CPU usage")"
+    else
+        out="$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "CPU: %.1f%%\n", usage}')"
+    fi
+
+    if [[ -n "$json" ]]; then
+        emit_json cpu "$out"
+    else
+        printf '%s\n' "$out"
     fi
 }
 
@@ -76,53 +101,182 @@ cmd_memory() {
         esac
     done
 
+    local out
     if [[ "$(uname)" == "Darwin" ]]; then
-        vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages\s+([^:]+)[^\d]+(\d+)/ and printf("%-16s %6.1f MB\n", "$1:", $2 * $size / 1048576);'
+        out="$(vm_stat | perl -ne '/page size of (\d+)/ and $size=$1; /Pages\s+([^:]+)[^\d]+(\d+)/ and printf("%-16s %6.1f MB\n", "$1:", $2 * $size / 1048576);')"
     else
-        free -h
+        out="$(free -h)"
+    fi
+
+    if [[ -n "$json" ]]; then
+        emit_json memory "$out"
+    else
+        printf '%s\n' "$out"
     fi
 }
 
 cmd_disk() {
-    df -h | grep -E "^/dev|Filesystem"
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local out
+    out="$(df -h | grep -E "^/dev|Filesystem")"
+
+    if [[ -n "$json" ]]; then
+        emit_json disk "$out"
+    else
+        printf '%s\n' "$out"
+    fi
 }
 
 cmd_network() {
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local out
     if [[ "$(uname)" == "Darwin" ]]; then
-        netstat -ib | head -10
+        out="$(netstat -ib | sed -n '1,10p')"
     else
         if command -v ip &> /dev/null; then
-            ip -s link | head -30
+            out="$(ip -s link | sed -n '1,30p')"
         else
-            netstat -i
+            out="$(netstat -i)"
         fi
+    fi
+
+    if [[ -n "$json" ]]; then
+        emit_json network "$out"
+    else
+        printf '%s\n' "$out"
     fi
 }
 
 cmd_processes() {
-    local count="${1:-10}"
+    local json=""
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    local count="${args[0]:-10}"
 
+    # Capture full process listing once, then slice in-memory. Slicing a
+    # captured string avoids the head-closes-pipe SIGPIPE (exit 141) that a
+    # `ps | head` pipeline triggers under `set -o pipefail`.
+    local out
     if [[ "$(uname)" == "Darwin" ]]; then
-        ps aux | head -1
-        ps aux --sort=-%cpu | head -n "$((count + 1))" | tail -n "$count"
+        local listing header sorted
+        listing="$(ps aux)"
+        header="$(printf '%s\n' "$listing" | sed -n '1p')"
+        # macOS ps has no --sort; this matches the prior behavior (sorted
+        # slice is empty there). On systems where it succeeds, take the slice.
+        sorted="$(ps aux --sort=-%cpu 2>/dev/null | sed -n "2,$((count + 1))p" || true)"
+        if [[ -n "$sorted" ]]; then
+            out="$(printf '%s\n%s' "$header" "$sorted")"
+        else
+            out="$header"
+        fi
     else
-        ps aux --sort=-%cpu | head -n "$((count + 1))"
+        out="$(ps aux --sort=-%cpu | sed -n "1,$((count + 1))p")"
+    fi
+
+    if [[ -n "$json" ]]; then
+        emit_json processes "$out"
+    else
+        printf '%s\n' "$out"
     fi
 }
 
 cmd_load() {
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local out
     if [[ "$(uname)" == "Darwin" ]]; then
-        sysctl -n vm.loadavg
+        out="$(sysctl -n vm.loadavg)"
     else
-        cat /proc/loadavg
+        out="$(cat /proc/loadavg)"
+    fi
+
+    if [[ -n "$json" ]]; then
+        emit_json load "$out"
+    else
+        printf '%s\n' "$out"
     fi
 }
 
 cmd_uptime() {
-    uptime
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local out
+    out="$(uptime)"
+
+    if [[ -n "$json" ]]; then
+        emit_json uptime "$out"
+    else
+        printf '%s\n' "$out"
+    fi
 }
 
 cmd_all() {
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ -n "$json" ]]; then
+        local uptime_out cpu_out mem_out disk_out load_out proc_out
+        uptime_out="$(uptime)"
+        cpu_out="$(cmd_cpu 2>/dev/null || echo "Could not get CPU info")"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            mem_out="$(top -l 1 -n 0 | grep PhysMem)"
+        else
+            mem_out="$(free -h | grep -E "^Mem")"
+        fi
+        disk_out="$(df -h / | sed -n '$p')"
+        load_out="$(cmd_load)"
+        proc_out="$(cmd_processes 5)"
+        python3 -c '
+import json, sys
+keys = ["uptime", "cpu", "memory", "disk", "load", "processes"]
+vals = sys.argv[1:1+len(keys)]
+metrics = {}
+for k, v in zip(keys, vals):
+    lines = v.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    metrics[k] = {"output": v, "lines": lines}
+print(json.dumps({"metric": "all", "metrics": metrics}, indent=2))
+' "$uptime_out" "$cpu_out" "$mem_out" "$disk_out" "$load_out" "$proc_out"
+        return
+    fi
+
     echo "=== System Metrics ==="
     echo
 
@@ -177,23 +331,28 @@ case "${1:-help}" in
         cmd_memory "$@"
         ;;
     disk|storage)
-        cmd_disk
+        shift || true
+        cmd_disk "$@"
         ;;
     network|net)
-        cmd_network
+        shift || true
+        cmd_network "$@"
         ;;
     processes|ps|top)
         shift || true
         cmd_processes "$@"
         ;;
     load)
-        cmd_load
+        shift || true
+        cmd_load "$@"
         ;;
     uptime)
-        cmd_uptime
+        shift || true
+        cmd_uptime "$@"
         ;;
     all|summary)
-        cmd_all
+        shift || true
+        cmd_all "$@"
         ;;
     watch)
         shift || true

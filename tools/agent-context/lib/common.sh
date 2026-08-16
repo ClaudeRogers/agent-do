@@ -75,7 +75,17 @@ ensure_init() {
         fi
         exit 1
     }
-    _context_migrate_schema
+    # A corrupt/unreadable index.db makes migration throw. Without this guard
+    # `set -e` would kill the command mid-flight, leaving nonzero exit + empty
+    # stdout (the launchd regression). Convert that into a structured error.
+    _context_migrate_schema 2>/dev/null || {
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            json_error "Context index at $CONTEXT_INDEX_DB is unreadable or corrupt. Run 'agent-do context init' to reset it." 1
+        else
+            echo "Error: Context index at $CONTEXT_INDEX_DB is unreadable or corrupt. Run 'agent-do context init' to reset it." >&2
+        fi
+        exit 1
+    }
 }
 
 validate_json() {
@@ -94,6 +104,17 @@ append_jsonl() {
 count_lines() {
     local file="$1"
     [[ -f "$file" && -s "$file" ]] && wc -l < "$file" | tr -d ' ' || echo "0"
+}
+
+# Coerce a value to a non-negative integer, defaulting to 0. Guarantees the
+# numeric snapshot fields are always valid JSON even if a helper returned an
+# empty or malformed value.
+_ctx_int() {
+    if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$1"
+    else
+        printf '0'
+    fi
 }
 
 # Approximate token count: words * 1.3
@@ -598,25 +619,29 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 
-conn = sqlite3.connect(sys.argv[1])
-conn.execute("PRAGMA busy_timeout = 5000")
-now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-counts = Counter()
-for status, expires_at in conn.execute(
-    "SELECT COALESCE(refresh_status, 'unknown'), expires_at FROM package_meta"
-):
-    resolved = status or "unknown"
-    if resolved not in {"local", "failed"} and expires_at and expires_at < now:
-        resolved = "stale"
-    counts[resolved] += 1
-conn.close()
-print(
-    counts.get("fresh", 0),
-    counts.get("stale", 0),
-    counts.get("failed", 0),
-    counts.get("local", 0),
-    counts.get("unknown", 0),
-)
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    conn.execute("PRAGMA busy_timeout = 5000")
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    counts = Counter()
+    for status, expires_at in conn.execute(
+        "SELECT COALESCE(refresh_status, 'unknown'), expires_at FROM package_meta"
+    ):
+        resolved = status or "unknown"
+        if resolved not in {"local", "failed"} and expires_at and expires_at < now:
+            resolved = "stale"
+        counts[resolved] += 1
+    conn.close()
+    print(
+        counts.get("fresh", 0),
+        counts.get("stale", 0),
+        counts.get("failed", 0),
+        counts.get("local", 0),
+        counts.get("unknown", 0),
+    )
+except Exception:
+    # Never leave the caller's `read` with empty input; emit safe defaults.
+    print(0, 0, 0, 0, 0)
 PYTHON
 }
 
@@ -626,13 +651,17 @@ import sqlite3
 import sys
 from collections import Counter
 
-conn = sqlite3.connect(sys.argv[1])
-conn.execute("PRAGMA busy_timeout = 5000")
-counts = Counter(status or "unknown" for (status,) in conn.execute("SELECT COALESCE(version_status, 'unknown') FROM package_meta"))
-conn.close()
-current = counts.get("current", 0) + counts.get("floating_fresh", 0)
-behind = counts.get("behind_major", 0) + counts.get("behind_minor", 0) + counts.get("behind_patch", 0)
-print(current, behind, counts.get("registry_failed", 0), counts.get("unknown", 0))
+try:
+    conn = sqlite3.connect(sys.argv[1])
+    conn.execute("PRAGMA busy_timeout = 5000")
+    counts = Counter(status or "unknown" for (status,) in conn.execute("SELECT COALESCE(version_status, 'unknown') FROM package_meta"))
+    conn.close()
+    current = counts.get("current", 0) + counts.get("floating_fresh", 0)
+    behind = counts.get("behind_major", 0) + counts.get("behind_minor", 0) + counts.get("behind_patch", 0)
+    print(current, behind, counts.get("registry_failed", 0), counts.get("unknown", 0))
+except Exception:
+    # Never leave the caller's `read` with empty input; emit safe defaults.
+    print(0, 0, 0, 0)
 PYTHON
 }
 
@@ -641,8 +670,10 @@ cmd_status() {
     ensure_init
 
     local pkg_count cache_size_kb annotations_count feedback_count
-    local fresh_count stale_count failed_count local_count unknown_count
-    local current_count behind_count registry_failed_count version_unknown_count
+    # Pre-initialize the read-target counts so a failed/partial `read` never
+    # leaves them unset (set -u) nor emits an empty RAW JSON field.
+    local fresh_count=0 stale_count=0 failed_count=0 local_count=0 unknown_count=0
+    local current_count=0 behind_count=0 registry_failed_count=0 version_unknown_count=0
 
     pkg_count=$(python3 -c "
 import sqlite3, sys
@@ -659,8 +690,25 @@ conn.close()
     cache_size_kb=$(du -sk "$CONTEXT_CACHE_DIR" 2>/dev/null | cut -f1 || echo "0")
     annotations_count=$(count_lines "$CONTEXT_HOME/annotations.jsonl")
     feedback_count=$(count_lines "$CONTEXT_HOME/feedback.jsonl")
-    read -r fresh_count stale_count failed_count local_count unknown_count < <(_context_freshness_counts)
-    read -r current_count behind_count registry_failed_count version_unknown_count < <(_context_currency_counts)
+    # `|| true` keeps set -e from killing status if a helper yields no line.
+    read -r fresh_count stale_count failed_count local_count unknown_count < <(_context_freshness_counts 2>/dev/null) || true
+    read -r current_count behind_count registry_failed_count version_unknown_count < <(_context_currency_counts 2>/dev/null) || true
+
+    # Coerce every numeric to a valid integer so JSON is always well-formed
+    # and text output stays byte-identical on the success path.
+    pkg_count=$(_ctx_int "$pkg_count")
+    cache_size_kb=$(_ctx_int "$cache_size_kb")
+    annotations_count=$(_ctx_int "$annotations_count")
+    feedback_count=$(_ctx_int "$feedback_count")
+    fresh_count=$(_ctx_int "$fresh_count")
+    stale_count=$(_ctx_int "$stale_count")
+    failed_count=$(_ctx_int "$failed_count")
+    local_count=$(_ctx_int "$local_count")
+    unknown_count=$(_ctx_int "$unknown_count")
+    current_count=$(_ctx_int "$current_count")
+    behind_count=$(_ctx_int "$behind_count")
+    registry_failed_count=$(_ctx_int "$registry_failed_count")
+    version_unknown_count=$(_ctx_int "$version_unknown_count")
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         snapshot_begin "context"

@@ -26,6 +26,7 @@ FAIL = 0
 
 # Track requests to assert on dry-run (no HTTP calls made)
 _requests: list[tuple[str, str]] = []
+_auth_headers: list[str] = []
 _post_bodies: dict[str, dict] = {}
 _put_bodies: dict[str, dict] = {}
 FAIL_SNAPSHOT_FOR_OPS = False
@@ -43,9 +44,10 @@ def check(desc: str, condition: bool, detail: str = "") -> None:
         FAIL += 1
 
 
-def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run(argv: list[str], *, env: dict[str, str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(JIRA_PY), *argv],
+        input=stdin,
         text=True,
         capture_output=True,
         env=env,
@@ -334,17 +336,84 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         _requests.append(("GET", self.path))
+        _auth_headers.append(self.headers.get("Authorization", ""))
         self._route_get(parsed.path, qs)
 
     def do_POST(self) -> None:  # noqa: N802
         body_bytes = self._read_body()
         _requests.append(("POST", self.path))
+        _auth_headers.append(self.headers.get("Authorization", ""))
         path = urlparse(self.path).path
         path = path.replace("/rest/api/2/", "/rest/api/3/")
         body = json.loads(body_bytes) if body_bytes else {}
         _post_bodies[path] = body
 
-        if path == "/rest/api/3/issue":
+        if path == "/rest/api/3/search/jql":
+            jql = body.get("jql", "")
+            if "statusCategory != Done" in jql:
+                if FAIL_SNAPSHOT_FOR_OPS and "project = OPS" in jql:
+                    self._send_err("OPS search failed", status=500)
+                    return
+                count = 5 if "project = PROJ" in jql else 2
+                self._send({"issues": [{"key": f"{'PROJ' if count == 5 else 'OPS'}-{i}"} for i in range(count)]})
+            elif "assignee = currentUser()" in jql:
+                self._send({
+                    "issues": [
+                        {
+                            "key": "PROJ-1",
+                            "fields": {
+                                "summary": "Fix login bug",
+                                "status": {"name": "In Progress"},
+                                "issuetype": {"name": "Bug"},
+                                "priority": {"name": "High"},
+                                "assignee": {"displayName": "Test User", "emailAddress": "test@example.com"},
+                                "reporter": {"displayName": "Reporter"},
+                                "labels": ["backend"],
+                                "created": "2026-01-01T00:00:00.000Z",
+                                "updated": "2026-01-15T00:00:00.000Z",
+                                "description": None,
+                            },
+                        }
+                    ],
+                })
+            elif "project = EMPTY" in jql:
+                self._send({"issues": [], "maxResults": body.get("maxResults", 50)})
+            else:
+                self._send({
+                    "issues": [
+                        {
+                            "key": "PROJ-1",
+                            "fields": {
+                                "summary": "Fix login bug",
+                                "status": {"name": "In Progress"},
+                                "issuetype": {"name": "Bug"},
+                                "priority": {"name": "High"},
+                                "assignee": {"displayName": "Test User", "emailAddress": "test@example.com"},
+                                "reporter": {"displayName": "Reporter"},
+                                "labels": ["backend"],
+                                "created": "2026-01-01T00:00:00.000Z",
+                                "updated": "2026-01-15T00:00:00.000Z",
+                                "description": None,
+                            },
+                        },
+                        {
+                            "key": "PROJ-2",
+                            "fields": {
+                                "summary": "Add dark mode",
+                                "status": {"name": "Todo"},
+                                "issuetype": {"name": "Story"},
+                                "priority": {"name": "Medium"},
+                                "assignee": None,
+                                "reporter": {"displayName": "Reporter"},
+                                "labels": [],
+                                "created": "2026-01-02T00:00:00.000Z",
+                                "updated": "2026-01-16T00:00:00.000Z",
+                                "description": None,
+                            },
+                        },
+                    ],
+                })
+        elif path == "/rest/api/3/issue":
             project = ((body.get("fields") or {}).get("project") or {}).get("key")
             issue_type = ((body.get("fields") or {}).get("issuetype") or {}).get("name")
             if project == "KAN" and issue_type == "Bug":
@@ -369,6 +438,7 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802
         body_bytes = self._read_body()
         _requests.append(("PUT", self.path))
+        _auth_headers.append(self.headers.get("Authorization", ""))
         path = urlparse(self.path).path
         path = path.replace("/rest/api/2/", "/rest/api/3/")
         body = json.loads(body_bytes) if body_bytes else {}
@@ -381,6 +451,7 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         _requests.append(("DELETE", self.path))
+        _auth_headers.append(self.headers.get("Authorization", ""))
         path = urlparse(self.path).path
         path = path.replace("/rest/api/2/", "/rest/api/3/")
 
@@ -424,8 +495,8 @@ def main() -> int:
             r = run(["connections", "add", "work",
                      "--url", base_url,
                      "--email", "test@example.com",
-                     "--token", "tok-secret",
-                     "--default"], env=env)
+                     "--token-stdin",
+                     "--default"], env=env, stdin="tok-secret\n")
             check("connections add exits 0", r.returncode == 0, r.stderr)
             check("connections add prints profile name", "work" in r.stdout, r.stdout)
             check("connections add marks default", "default" in r.stdout, r.stdout)
@@ -441,6 +512,7 @@ def main() -> int:
             creds = json.loads(creds_file.read_text())
             check("connections add: url stored in creds", creds.get("url") == base_url, str(creds))
             check("connections add: token stored in creds", creds.get("token") == "tok-secret", str(creds))
+            check("connections add --token-stdin keeps token out of stdout", "tok-secret" not in r.stdout, r.stdout)
 
             print("\nconnections add: URL normalization")
             r = run(["connections", "add", "normalized",
@@ -740,12 +812,10 @@ def main() -> int:
             r = run(["issue", "list", "PROJ", "--mine"], env=env)
             check("issue list --mine exits 0", r.returncode == 0, r.stderr)
             check("issue list --mine shows PROJ-1", "PROJ-1" in r.stdout, r.stdout)
-            # Verify the JQL sent to the server uses unquoted currentUser()
-            # The query string will be URL-encoded: currentUser() → currentUser%28%29
-            mine_reqs = [path for m, path in _requests if m == "GET" and "search" in path]
-            check("issue list --mine sends unquoted currentUser()", any("currentUser%28%29" in p or "currentUser()" in p for p in mine_reqs), str(mine_reqs))
-            # %22 is URL-encoded double-quote; verify it does NOT appear before currentUser
-            check("issue list --mine does NOT quote currentUser()", not any('%22currentUser' in p or '"currentUser()' in p for p in mine_reqs), str(mine_reqs))
+            # Cloud search uses POST /search/jql; verify currentUser() stays unquoted in the JSON body.
+            mine_jql = (_post_bodies.get("/rest/api/3/search/jql") or {}).get("jql", "")
+            check("issue list --mine sends unquoted currentUser()", "currentUser()" in mine_jql, mine_jql)
+            check("issue list --mine does NOT quote currentUser()", '"currentUser()"' not in mine_jql, mine_jql)
 
             print("\nissue list: all filters combined")
             r = run(["issue", "list", "PROJ",
@@ -808,6 +878,7 @@ def main() -> int:
                      "--type", "Bug"], env=env)
             check("issue create KAN bug exits 0", r.returncode == 0, r.stderr)
             check("issue create KAN bug prints key", "KAN-8" in r.stdout, r.stdout)
+            check("issue create KAN bug surfaces fallback warning", "Warning:" in r.stdout and "Task" in r.stdout, r.stdout)
             kan_posts = [path for m, path in _requests if m == "POST" and path == "/rest/api/3/issue"]
             check("issue create KAN bug retries after issue type error", len(kan_posts) >= 2, str(_requests))
             kan_body = _post_bodies.get("/rest/api/3/issue", {})
@@ -843,6 +914,17 @@ def main() -> int:
             sprint_body = _post_bodies.get("/rest/api/3/issue", {})
             sprint_field = (sprint_body.get("fields") or {}).get("customfield_10020", {})
             check("issue create --sprint sends customfield_10020", sprint_field.get("id") == 42)
+
+            print("\nissue create --sprint-field override")
+            _post_bodies.clear()
+            r = run(["issue", "create", "PROJ",
+                     "--summary", "Sprint issue with custom field",
+                     "--sprint", "42",
+                     "--sprint-field", "customfield_12345"], env=env)
+            check("issue create --sprint-field exits 0", r.returncode == 0, r.stderr)
+            custom_sprint_body = _post_bodies.get("/rest/api/3/issue", {})
+            custom_sprint_field = (custom_sprint_body.get("fields") or {}).get("customfield_12345", {})
+            check("issue create --sprint-field sends requested field", custom_sprint_field.get("id") == 42, str(custom_sprint_body))
 
             r = run(["issue", "create", "PROJ",
                      "--summary", "Bad sprint",
@@ -1132,6 +1214,8 @@ def main() -> int:
             check("search --json tool field", sj.get("tool") == "search")
             check("search --json has issues", len(sj["data"]["issues"]) > 0)
             check("search --json has total", "total" in sj["data"])
+            check("search --json total falls back to count when Cloud omits total",
+                  sj["data"]["total"] == sj["data"]["count"], sj["data"])
             check("search --json has jql", "jql" in sj["data"])
 
             r = run(["search", "project = PROJ", "--limit", "10", "--json"], env=env)
@@ -1292,8 +1376,10 @@ def main() -> int:
                  "--email", "admin",
                  "--token", "pat",
                  "--server"], env=env)
+            _auth_headers.clear()
             r = run(["whoami", "--connection", "dc2"], env=env)
             check("Server/DC whoami exits 0", r.returncode == 0, r.stderr)
+            check("Server/DC uses Bearer PAT auth", any(h == "Bearer pat" for h in _auth_headers), str(_auth_headers))
 
             # Server mode uses api/2/ paths - verify via issue create ADF vs plain text
             _post_bodies.clear()
@@ -1356,16 +1442,16 @@ def main() -> int:
             _requests.clear()
             r = run(["issue", "list", "PROJ", "--mine", "--assignee", "alice@example.com"], env=env)
             check("--mine then --assignee exits 0", r.returncode == 0, r.stderr)
-            mine_then_ass = [path for m, path in _requests if m == "GET" and "search" in path]
+            mine_then_ass = (_post_bodies.get("/rest/api/3/search/jql") or {}).get("jql", "")
             # last flag (--assignee alice) wins → should NOT have currentUser() in JQL
-            check("--mine then --assignee: explicit assignee wins", not any("currentUser" in p for p in mine_then_ass), str(mine_then_ass))
+            check("--mine then --assignee: explicit assignee wins", "currentUser" not in mine_then_ass, mine_then_ass)
 
             _requests.clear()
             r = run(["issue", "list", "PROJ", "--assignee", "alice@example.com", "--mine"], env=env)
             check("--assignee then --mine exits 0", r.returncode == 0, r.stderr)
-            ass_then_mine = [path for m, path in _requests if m == "GET" and "search" in path]
+            ass_then_mine = (_post_bodies.get("/rest/api/3/search/jql") or {}).get("jql", "")
             # last flag (--mine) wins → should have currentUser() in JQL
-            check("--assignee then --mine: --mine wins", any("currentUser" in p for p in ass_then_mine), str(ass_then_mine))
+            check("--assignee then --mine: --mine wins", "currentUser" in ass_then_mine, ass_then_mine)
 
             # ── issue create: duplicate labels ───────────────────────────────────
 
@@ -1456,6 +1542,19 @@ def main() -> int:
             check("issue transition no --to exits 1", r.returncode == 1)
             check("issue transition no --to shows error", "Error:" in r.stderr, r.stderr)
             check("issue transition no --to mentions transitions command", "transitions" in r.stderr.lower(), r.stderr)
+
+            # ── unknown flag rejection ───────────────────────────────────────────
+
+            print("\nunknown flag rejection")
+            _requests.clear()
+            r = run(["issue", "delete", "PROJ-3", "--confirm", "--dry-rnu"], env=env)
+            check("issue delete typo flag exits 1", r.returncode == 1)
+            check("issue delete typo flag reports unknown flag", "Unknown flag" in r.stderr, r.stderr)
+            check("issue delete typo flag sends no DELETE", not any(m == "DELETE" for m, _ in _requests), str(_requests))
+
+            r = run(["issue", "create", "PROJ", "--summary", "x", "--dry-rnu"], env=env)
+            check("issue create typo flag exits 1", r.returncode == 1)
+            check("issue create typo flag reports unknown flag", "Unknown flag" in r.stderr, r.stderr)
 
             # ── unknown subcommand errors ────────────────────────────────────────
 
@@ -1598,11 +1697,16 @@ def main() -> int:
     check("registry documents issue link", "issue link" in jira_commands)
     check("registry documents issue delete", "issue delete" in jira_commands)
     check("registry documents user find", "user find" in jira_commands)
-    command_concurrency = registry.get_tool_command_concurrency(jira_info)
-    check("registry concurrency has issue link", command_concurrency.get("issue link") == "write")
-    check("registry concurrency has user find", command_concurrency.get("user find") == "read")
-    check("malformed command_concurrency is ignored",
-          registry.get_tool_command_concurrency({"routing": {"command_concurrency": ["bad"]}}) == {})
+    check("registry no longer has routing.command_concurrency",
+          "command_concurrency" not in (jira_info.get("routing") or {}))
+    jira_contracts = registry.get_tool_contracts(jira_info)
+    check("registry contracts put issue link in write beats",
+          "issue link" in jira_contracts.get("interact", []) and "issue link" in jira_contracts.get("save", []))
+    jira_attrs = registry.get_tool_contract_attributes(jira_info)
+    check("registry contracts mark issue delete destructive",
+          "destructive" in jira_attrs.get("issue delete", []))
+    check("registry contracts mark connections add sensitive",
+          "sensitive" in jira_attrs.get("connections add", []))
 
     print(f"\nResults: {PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1

@@ -3,6 +3,75 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$REPO_ROOT/lib/json-output.sh" ]]; then
+    # shellcheck source=lib/json-output.sh
+    source "$REPO_ROOT/lib/json-output.sh"
+else
+    OUTPUT_FORMAT="${OUTPUT_FORMAT:-text}"
+    parse_output_format() {
+        local args=()
+        for arg in "$@"; do
+            if [[ "$arg" == "--json" ]]; then
+                OUTPUT_FORMAT="json"
+            else
+                args+=("$arg")
+            fi
+        done
+        PARSED_ARGS=("${args[@]}")
+    }
+    json_error() {
+        local message="$1"
+        local code="${2:-1}"
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            python3 -c "import json,sys; print(json.dumps({'success': False, 'error': sys.argv[1], 'code': int(sys.argv[2])}, indent=2))" "$message" "$code"
+        else
+            echo "Error: $message" >&2
+        fi
+        return "$code"
+    }
+fi
+
+# Emit a captured block of text, or an explicit empty-result message when blank.
+# In --json mode, wrap the lines in a structured document so the result is always
+# a single valid JSON document.
+emit_lines() {
+    local command="$1"
+    local empty_message="$2"
+    local text="$3"
+
+    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        python3 - "$command" "$empty_message" "$text" <<'PY'
+import json
+import sys
+
+command = sys.argv[1]
+empty_message = sys.argv[2]
+text = sys.argv[3]
+lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+payload = {
+    "success": True,
+    "tool": "usb",
+    "command": command,
+    "count": len(lines),
+    "items": lines,
+}
+if not lines:
+    payload["message"] = empty_message
+print(json.dumps(payload, indent=2))
+PY
+        return 0
+    fi
+
+    if [[ -n "${text//[$' \t\n']/}" ]]; then
+        printf '%s\n' "$text"
+    else
+        echo "$empty_message"
+    fi
+}
+
 show_help() {
     cat << 'EOF'
 agent-usb - USB device management
@@ -15,6 +84,9 @@ Commands:
   mount <device>             Mount USB storage
   unmount <device>           Unmount USB storage
 
+Options:
+  --json                     Emit structured JSON output
+
 Examples:
   agent-usb list
   agent-usb tree
@@ -24,55 +96,64 @@ EOF
 }
 
 cmd_list() {
+    local output
     if [[ "$(uname)" == "Darwin" ]]; then
-        system_profiler SPUSBDataType 2>/dev/null | grep -E "^\s+(Product ID|Vendor ID|Manufacturer|Speed|Serial Number|[A-Za-z].*:$)" | head -50
+        output="$(system_profiler SPUSBDataType 2>/dev/null | grep -E "^\s+(Product ID|Vendor ID|Manufacturer|Speed|Serial Number|[A-Za-z].*:$)" | head -50 || true)"
     else
         if command -v lsusb &> /dev/null; then
-            lsusb
+            output="$(lsusb || true)"
+        elif [[ -d /sys/bus/usb/devices/ ]]; then
+            output="$(ls -la /sys/bus/usb/devices/ 2>/dev/null || true)"
         else
-            ls -la /sys/bus/usb/devices/ 2>/dev/null || echo "Error: lsusb not found"
-        fi
-    fi
-}
-
-cmd_tree() {
-    if [[ "$(uname)" == "Darwin" ]]; then
-        system_profiler SPUSBDataType 2>/dev/null
-    else
-        if command -v lsusb &> /dev/null; then
-            lsusb -t
-        else
-            echo "Error: lsusb not found"
+            json_error "lsusb not found and no /sys/bus/usb/devices/ available" 1
             return 1
         fi
     fi
+    emit_lines "list" "No USB devices found" "$output"
+}
+
+cmd_tree() {
+    local output
+    if [[ "$(uname)" == "Darwin" ]]; then
+        output="$(system_profiler SPUSBDataType 2>/dev/null || true)"
+    else
+        if command -v lsusb &> /dev/null; then
+            output="$(lsusb -t || true)"
+        else
+            json_error "lsusb not found" 1
+            return 1
+        fi
+    fi
+    emit_lines "tree" "No USB devices found" "$output"
 }
 
 cmd_info() {
     local device="${1:-}"
 
     if [[ -z "$device" ]]; then
-        echo "Error: Device name or ID required"
+        json_error "Device name or ID required" 1
         return 1
     fi
 
+    local output
     if [[ "$(uname)" == "Darwin" ]]; then
-        system_profiler SPUSBDataType 2>/dev/null | grep -A 20 -i "$device"
+        output="$(system_profiler SPUSBDataType 2>/dev/null | grep -A 20 -i "$device" || true)"
     else
         if command -v lsusb &> /dev/null; then
-            lsusb -v 2>/dev/null | grep -A 30 -i "$device" || lsusb | grep -i "$device"
+            output="$(lsusb -v 2>/dev/null | grep -A 30 -i "$device" || lsusb | grep -i "$device" || true)"
         else
-            echo "Error: lsusb not found"
+            json_error "lsusb not found" 1
             return 1
         fi
     fi
+    emit_lines "info" "No USB device matched: $device" "$output"
 }
 
 cmd_eject() {
     local device="$*"
 
     if [[ -z "$device" ]]; then
-        echo "Error: Device name required"
+        json_error "Device name required" 1
         return 1
     fi
 
@@ -155,15 +236,20 @@ cmd_unmount() {
 }
 
 cmd_disks() {
+    local output
     if [[ "$(uname)" == "Darwin" ]]; then
-        diskutil list
+        output="$(diskutil list || true)"
     else
-        lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,LABEL 2>/dev/null || fdisk -l 2>/dev/null
+        output="$(lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,LABEL 2>/dev/null || fdisk -l 2>/dev/null || true)"
     fi
+    emit_lines "disks" "No disks found" "$output"
 }
 
+parse_output_format "$@"
+ARGS=("${PARSED_ARGS[@]:-}")
+
 # Main
-case "${1:-help}" in
+case "${ARGS[0]:-help}" in
     list|ls|devices)
         cmd_list
         ;;
@@ -171,20 +257,16 @@ case "${1:-help}" in
         cmd_tree
         ;;
     info|show)
-        shift
-        cmd_info "$@"
+        cmd_info "${ARGS[@]:1}"
         ;;
     eject|safely-remove)
-        shift
-        cmd_eject "$@"
+        cmd_eject "${ARGS[@]:1}"
         ;;
     mount)
-        shift
-        cmd_mount "$@"
+        cmd_mount "${ARGS[@]:1}"
         ;;
     unmount|umount)
-        shift
-        cmd_unmount "$@"
+        cmd_unmount "${ARGS[@]:1}"
         ;;
     disks|volumes)
         cmd_disks
@@ -193,8 +275,10 @@ case "${1:-help}" in
         show_help
         ;;
     *)
-        echo "Unknown command: $1"
-        echo "Try: agent-usb help"
+        json_error "Unknown command: ${ARGS[0]}" 1
+        if [[ "${OUTPUT_FORMAT:-text}" != "json" ]]; then
+            echo "Try: agent-usb help" >&2
+        fi
         exit 1
         ;;
 esac

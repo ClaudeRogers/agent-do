@@ -1,0 +1,159 @@
+# models.yaml — source of truth for agent-do's own internal LLM calls.
+# Generated templates and user-selected engines are intentionally out of scope.
+# Validate with: agent-do models doctor
+version: 1
+
+roles:
+  fast:
+    chain:
+      - anthropic/claude-haiku-4-5-20251001
+      - openai/gpt-5.6-luna
+      - anthropic/claude-sonnet-5
+    env: AGENT_DO_MODEL_FAST
+    generation:
+      effort: low
+      thinking: adaptive
+  vision:
+    chain:
+      - anthropic/claude-sonnet-5
+      - openai/gpt-5.6-terra
+      - anthropic/claude-haiku-4-5-20251001
+    env: AGENT_DO_MODEL_VISION
+    generation:
+      effort: medium
+      thinking: adaptive
+  deep:
+    chain:
+      - anthropic/claude-opus-4-8
+      - openai/gpt-5.6-sol
+      - anthropic/claude-sonnet-5
+    env: AGENT_DO_MODEL_DEEP
+    generation:
+      effort: max
+      thinking: adaptive
+
+# Capability records below were read from Anthropic's complete /v1/models
+# response on 2026-07-20. `agent-do models doctor` refreshes and verifies them.
+models:
+  anthropic/claude-sonnet-5:
+    provider: anthropic
+    endpoint: messages
+    modalities: [text, image, pdf]
+    max_input_tokens: 1000000
+    max_tokens: 128000
+    capabilities:
+      image_input: {supported: true}
+      pdf_input: {supported: true}
+      structured_outputs: {supported: true}
+      thinking:
+        supported: true
+        types:
+          adaptive: {supported: true}
+          enabled: {supported: false}
+      effort:
+        supported: true
+        low: {supported: true}
+        medium: {supported: true}
+        high: {supported: true}
+        xhigh: {supported: true}
+        max: {supported: true}
+  anthropic/claude-opus-4-8:
+    provider: anthropic
+    endpoint: messages
+    modalities: [text, image, pdf]
+    max_input_tokens: 1000000
+    max_tokens: 128000
+    capabilities:
+      image_input: {supported: true}
+      pdf_input: {supported: true}
+      structured_outputs: {supported: true}
+      thinking:
+        supported: true
+        types:
+          adaptive: {supported: true}
+          enabled: {supported: false}
+      effort:
+        supported: true
+        low: {supported: true}
+        medium: {supported: true}
+        high: {supported: true}
+        xhigh: {supported: true}
+        max: {supported: true}
+  anthropic/claude-haiku-4-5-20251001:
+    provider: anthropic
+    endpoint: messages
+    modalities: [text, image, pdf]
+    max_input_tokens: 200000
+    max_tokens: 64000
+    capabilities:
+      image_input: {supported: true}
+      pdf_input: {supported: true}
+      structured_outputs: {supported: true}
+      thinking:
+        supported: true
+        types:
+          adaptive: {supported: false}
+          enabled: {supported: true}
+      effort: {supported: false}
+  openai/gpt-5.6-sol:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+  openai/gpt-5.6-terra:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+  openai/gpt-5.6-luna:
+    provider: openai
+    endpoint: responses
+    modalities: [text, image]
+    max_input_tokens: 922000
+    max_tokens: 128000
+    capabilities:
+      structured_outputs: {supported: true}
+      image_input: {supported: true}
+      reasoning_effort:
+        supported: true
+        values: [none, low, medium, high, xhigh, max]
+    docs: https://developers.openai.com/api/docs/models/gpt-5.6-luna
+
+# Published ceilings that are not per-model: API page limits, quotas, caps.
+# Read them with `agent-do harness quantity lookup <provider>.<subject>.<name>`
+# instead of typing the number into code.
+#
+# Unlike the model records above, nothing here is machine-refreshed, so every
+# entry carries its own citation and the date it was read — in data, not in a
+# comment, because `models doctor --fix` round-trips this file through a YAML
+# dumper and comments do not survive that.
+limits:
+  anthropic/models_list:
+    provider: anthropic
+    page_limit:
+      value: 1000
+      unit: records
+      source: 'https://platform.claude.com/docs/en/api/models-list — limit: defaults to 20, ranges from 1 to 1000'
+      verified: '2026-08-03'
+
+retired:
+  anthropic:
+    - claude-3-sonnet-20240229
+    - claude-sonnet-4-20250514
+  openai: []

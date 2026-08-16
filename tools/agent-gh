@@ -13,13 +13,16 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 AGENT_DO_HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
 STATE_DIR = AGENT_DO_HOME / "gh"
 REPOS_CACHE = STATE_DIR / "repos.json"
 USER_CACHE = STATE_DIR / "user.json"
+PORTFOLIO_FILE = STATE_DIR / "portfolio.yaml"
+
+PORTFOLIO_PATTERN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*)/(?:\*|[A-Za-z0-9._-]+)")
 
 PR_VIEW_FIELDS = ",".join(
     [
@@ -120,23 +123,27 @@ def gh_bin() -> str:
     return found
 
 
-def run_gh(args: list[str], *, input_text: str | None = None) -> str:
+def run_gh(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> str:
     cmd = [gh_bin(), *args]
-    result = subprocess.run(
-        cmd,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise GhError(f"gh {' '.join(args)} timed out after {int(timeout or 0)}s") from None
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown gh error"
         raise GhError(f"gh {' '.join(args)} failed: {detail}")
     return result.stdout
 
 
-def gh_json(args: list[str], *, input_text: str | None = None) -> Any:
-    output = run_gh(args, input_text=input_text).strip()
+def gh_json(args: list[str], *, input_text: str | None = None, timeout: float | None = None) -> Any:
+    output = run_gh(args, input_text=input_text, timeout=timeout).strip()
     if not output:
         return None
     try:
@@ -231,7 +238,19 @@ def normalize_repo(item: dict[str, Any]) -> dict[str, Any]:
         "url": item.get("html_url") or item.get("url"),
         "pushed_at": item.get("pushed_at") or item.get("pushedAt"),
         "updated_at": item.get("updated_at") or item.get("updatedAt"),
+        "permissions": {key: bool(value) for key, value in (item.get("permissions") or {}).items()},
+        "open_issues_count": item.get("open_issues_count"),
     }
+
+
+def flatten_pages(raw: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(raw, list) and raw and isinstance(raw[0], list):
+        for page in raw:
+            items.extend(page)
+    elif isinstance(raw, list):
+        items = raw
+    return [item for item in items if isinstance(item, dict)]
 
 
 def fetch_repos(limit: int | None = None) -> list[dict[str, Any]]:
@@ -241,14 +260,7 @@ def fetch_repos(limit: int | None = None) -> list[dict[str, Any]]:
         "--slurp",
         "/user/repos?affiliation=owner,collaborator,organization_member&sort=updated&per_page=100",
     ]
-    raw = gh_json(args)
-    items: list[dict[str, Any]] = []
-    if isinstance(raw, list) and raw and isinstance(raw[0], list):
-        for page in raw:
-            items.extend(page)
-    elif isinstance(raw, list):
-        items = raw
-    repos = [normalize_repo(item) for item in items if isinstance(item, dict)]
+    repos = [normalize_repo(item) for item in flatten_pages(gh_json(args))]
     repos = [repo for repo in repos if repo.get("full_name")]
     if limit is not None:
         repos = repos[:limit]
@@ -287,6 +299,13 @@ def normalize_pr(item: dict[str, Any]) -> dict[str, Any]:
         "url": item.get("url"),
         "comments": item.get("commentsCount"),
         "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        # Stage fields exist on every row; REST search cannot see them, and
+        # an honest absence is null, never a guess (stage contract law).
+        "review_decision": None,
+        "merge_state": None,
+        "checks": None,
+        "review_requests": None,
+        "next_action": None,
     }
 
 
@@ -502,7 +521,7 @@ query($owner:String!, $repo:String!, $number:Int!) {
     return threads
 
 
-def build_inbox(limit: int) -> list[dict[str, Any]]:
+def build_inbox(limit: int, *, ceremony_only: bool = False) -> dict[str, Any]:
     items: dict[str, dict[str, Any]] = {}
 
     def add(reason: str, prs: list[dict[str, Any]]) -> None:
@@ -513,6 +532,26 @@ def build_inbox(limit: int) -> list[dict[str, Any]]:
             entry = items.setdefault(key, {**pr, "reasons": []})
             if reason not in entry["reasons"]:
                 entry["reasons"].append(reason)
+
+    # One GraphQL round trip replaces the 4 ceremony subprocesses and the
+    # per-repo/per-PR sweep calls (measured 30s -> ~1s). REST remains the
+    # loud fallback; AGENT_GH_INBOX=rest forces it.
+    graphql_error: str | None = None
+    if os.environ.get("AGENT_GH_INBOX") != "rest":
+        try:
+            sweep, viewer = build_inbox_graphql(limit, ceremony_only, add)
+            # Post-pass after dedupe: derive the two ceremony reasons the
+            # GraphQL path no longer searches for (the stage fields carry
+            # the same signals authoritatively), then map next_action from
+            # the merged row.
+            for entry in items.values():
+                derive_authored_reasons(entry)
+                entry["next_action"] = next_action_for(entry, viewer)
+            entries = list(items.values())
+            return {"items": entries[:limit], "total": len(entries), "sweep": sweep}
+        except GhError as exc:
+            graphql_error = str(exc)
+            items.clear()
 
     base = argparse.Namespace(
         limit=limit,
@@ -536,7 +575,19 @@ def build_inbox(limit: int) -> list[dict[str, Any]]:
     changes = argparse.Namespace(**{**vars(base), "review_requested": None, "author": "@me", "review": "changes_requested"})
     add("authored_changes_requested", search_prs(changes))
 
-    return list(items.values())[:limit]
+    sweep: dict[str, Any] | None = None
+    if not ceremony_only:
+        viewer = current_user().get("login") or ""
+        sweep = maintainer_sweep(viewer, add)
+        sweep["path"] = "rest-fallback" if graphql_error else "rest"
+        # The envelope stamp holds on the REST path too: the keys exist on
+        # every row, their values are honestly null here.
+        sweep["stage_contract"] = 1
+        if graphql_error:
+            sweep["graphql_error"] = graphql_error
+
+    entries = list(items.values())
+    return {"items": entries[:limit], "total": len(entries), "sweep": sweep}
 
 
 def is_bot_login(login: str | None) -> bool:
@@ -544,6 +595,562 @@ def is_bot_login(login: str | None) -> bool:
         return False
     lower = login.lower()
     return lower.endswith("[bot]") or lower in {"dependabot", "dependabot-preview"}
+
+
+SWEEP_GH_TIMEOUT = 60
+
+
+def gh_json_pages(path: str) -> list[dict[str, Any]]:
+    return flatten_pages(gh_json(["api", "--paginate", "--slurp", path], timeout=SWEEP_GH_TIMEOUT))
+
+
+# ── GraphQL inbox ──────────────────────────────────────────────────────────
+# The REST inbox is N+4 serial round trips (4 ceremony searches, then pulls
+# and reviews per swept repo — measured 30s over 20 active repos). One
+# GraphQL document answers all of it in a single trip: the four ceremony
+# searches AND the maintainer sweep, the latter as an owner-scoped search
+# (viewer.repositories enumeration measured ~4.5s per page server-side, so
+# it is avoided entirely; eligibility comes from the repos cache the REST
+# sweep already trusts). The REST path below remains the loud fallback, and
+# the sweep stats say which path ran.
+
+# GitHub's published per-page ceiling for search connections.
+SWEEP_SEARCH_PAGE = 100
+# Reviews ride nested on each sweep PR. Truncation is never silent: when
+# totalCount exceeds the window and the viewer is not in it, that one PR's
+# reviews are fetched over REST rather than misclassified.
+SWEEP_REVIEW_WINDOW = 30
+
+GRAPHQL_PR_CORE = """
+fragment PrCore on PullRequest {
+  number title state isDraft updatedAt url
+  author { login }
+  repository { nameWithOwner }
+  labels(first: 20) { nodes { name } }
+  comments { totalCount }
+  reviewDecision
+  mergeStateStatus
+  reviewRequests(first: 1) { totalCount }
+  commits(last: 1) { nodes { commit { statusCheckRollup {
+    state
+    contexts(first: 30) { totalCount nodes {
+      __typename
+      ... on CheckRun { status conclusion }
+      ... on StatusContext { state }
+    } }
+  } } } }
+}
+"""
+
+# mergeStateStatus rides the merge-info preview accept header; harmless
+# where the field has since gone GA.
+GRAPHQL_ACCEPT_HEADER = "Accept: application/vnd.github.merge-info-preview+json"
+
+# Check-rollup context outcomes, bucketed the way `gh pr checks` buckets
+# them: neutral and skipped count as passed, stale counts as failed.
+CHECK_PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CHECK_FAILED = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
+
+CEREMONY_SEARCHES = (
+    ("review_requested", "is:pr state:open review-requested:@me"),
+    ("authored_open", "is:pr state:open author:@me"),
+    ("authored_failed_checks", "is:pr state:open author:@me status:failure"),
+    ("authored_changes_requested", "is:pr state:open author:@me review:changes-requested"),
+)
+
+# The GraphQL path executes only the first two: with stage enrichment on
+# every row, authored_failed_checks and authored_changes_requested are
+# DERIVED from checks.failed and review_decision — the same signals the
+# search qualifiers filter on, read from the authoritative rollup instead.
+# Two fewer heavy searches per run; the REST fallback still runs all four.
+GRAPHQL_CEREMONY_SEARCHES = CEREMONY_SEARCHES[:2]
+
+
+def run_graphql(query: str) -> dict[str, Any]:
+    payload = gh_json(
+        ["api", "graphql", "-H", GRAPHQL_ACCEPT_HEADER, "-f", f"query={query}"],
+        timeout=SWEEP_GH_TIMEOUT,
+    )
+    if not isinstance(payload, dict):
+        raise GhError("graphql returned no payload")
+    if payload.get("errors"):
+        raise GhError(f"graphql error: {payload['errors'][0].get('message', payload['errors'][0])}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise GhError("graphql returned no data")
+    return data
+
+
+def _graphql_search_alias(name: str, query: str, limit: int) -> str:
+    return f"{name}: search(type: ISSUE, first: {limit}, query: {json.dumps(query)}) {{ nodes {{ ...PrCore }} }}"
+
+
+def _graphql_sweep_alias(query: str, cursor: str | None) -> str:
+    after = f", after: {json.dumps(cursor)}" if cursor else ""
+    return (
+        f"sweep: search(type: ISSUE, first: {SWEEP_SEARCH_PAGE}{after}, query: {json.dumps(query)}) {{ "
+        "pageInfo { hasNextPage endCursor } "
+        "nodes { ...PrCore ... on PullRequest { headRefOid "
+        f"reviews(last: {SWEEP_REVIEW_WINDOW}) {{ totalCount nodes {{ "
+        "state submittedAt author { login } commit { oid } } } } } }"
+    )
+
+
+def checks_from_rollup(node: dict[str, Any]) -> dict[str, int] | None:
+    """Bucket the check rollup into counted outcomes.
+
+    A PR with no rollup gets None, never zeros — the counts come from the
+    rollup or they do not exist (bounds discipline). If the context window
+    truncates (totalCount above what arrived), total keeps the true count,
+    so a bucket sum below total reads as truncation, not invention.
+    """
+    commits = ((node.get("commits") or {}).get("nodes")) or []
+    rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup")) if commits else None
+    if not isinstance(rollup, dict):
+        return None
+    contexts = rollup.get("contexts") or {}
+    counts = {"passed": 0, "failed": 0, "pending": 0, "total": contexts.get("totalCount") or 0}
+    for ctx in contexts.get("nodes") or []:
+        if not isinstance(ctx, dict):
+            continue
+        if ctx.get("__typename") == "CheckRun":
+            outcome = str(ctx.get("conclusion") or "").upper()
+            if not outcome and str(ctx.get("status") or "").upper() != "COMPLETED":
+                counts["pending"] += 1
+                continue
+        else:
+            outcome = str(ctx.get("state") or "").upper()
+        if outcome in CHECK_PASSED:
+            counts["passed"] += 1
+        elif outcome in CHECK_FAILED:
+            counts["failed"] += 1
+        else:
+            counts["pending"] += 1
+    return counts
+
+
+def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
+    """GraphQL PR node -> the exact dict shape the REST paths emit."""
+    repo = (node.get("repository") or {}).get("nameWithOwner")
+    author = node.get("author") or {}
+    labels = ((node.get("labels") or {}).get("nodes")) or []
+    return {
+        "ref": f"{repo}#{node.get('number')}",
+        "repo": repo,
+        "number": node.get("number"),
+        "title": node.get("title"),
+        "state": str(node.get("state") or "").lower(),
+        "draft": bool(node.get("isDraft")),
+        "author": author.get("login") if isinstance(author, dict) else author,
+        "updated_at": node.get("updatedAt"),
+        "url": node.get("url"),
+        "comments": (node.get("comments") or {}).get("totalCount"),
+        "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        "review_decision": node.get("reviewDecision"),
+        "merge_state": node.get("mergeStateStatus"),
+        "checks": checks_from_rollup(node),
+        "review_requests": (node.get("reviewRequests") or {}).get("totalCount"),
+        "next_action": None,
+    }
+
+
+def derive_authored_reasons(entry: dict[str, Any]) -> None:
+    """Reasons the GraphQL path no longer searches for, derived from stage
+    fields carrying the same signals authoritatively (rollup and
+    reviewDecision instead of the status:/review: search qualifiers)."""
+    reasons = entry.setdefault("reasons", [])
+    if "authored_open" not in reasons:
+        return
+    if ((entry.get("checks") or {}).get("failed") or 0) > 0 and "authored_failed_checks" not in reasons:
+        reasons.append("authored_failed_checks")
+    if entry.get("review_decision") == "CHANGES_REQUESTED" and "authored_changes_requested" not in reasons:
+        reasons.append("authored_changes_requested")
+
+
+def next_action_for(item: dict[str, Any], viewer: str) -> dict[str, Any] | None:
+    """The deterministic next-action verb — engine-owned, first match wins
+    (11-GH-STAGE-AWARENESS.md mapping table; consumers never re-derive it).
+    `yours` means exactly: the ball is in the viewing user's court.
+    `command` is data typed behind a human Enter, never executed here."""
+    authored = bool(viewer) and item.get("author") == viewer
+    checks = item.get("checks") or {}
+    number = item.get("number")
+    if item.get("draft"):
+        return {"verb": "Draft", "detail": "still being written", "yours": False, "command": None}
+    if item.get("merge_state") == "DIRTY":
+        return {"verb": "Resolve conflicts", "detail": "branch cannot merge", "yours": authored, "command": None}
+    if authored and item.get("review_decision") == "CHANGES_REQUESTED":
+        return {"verb": "Address review", "detail": "changes requested", "yours": True,
+                "command": f"agent-do gh pr {number}"}
+    if authored and (checks.get("failed") or 0) > 0:
+        return {"verb": "Fix checks", "detail": f"{checks['failed']} of {checks['total']} failing",
+                "yours": True, "command": f"agent-do gh checks {number}"}
+    if authored and item.get("review_decision") == "APPROVED" and item.get("merge_state") == "CLEAN":
+        return {"verb": "Merge", "detail": "approved, checks green", "yours": True,
+                "command": f"agent-do gh merge {number}"}
+    if not authored and "review_requested" in (item.get("reasons") or []):
+        return {"verb": "Review", "detail": "your review requested", "yours": True,
+                "command": f"agent-do gh pr {number}"}
+    if authored:
+        pending = item.get("review_requests")
+        detail = f"{pending} reviewer(s) pending" if pending else "no review yet"
+        return {"verb": "Awaiting review", "detail": detail, "yours": False, "command": None}
+    return None
+
+
+def _rest_shaped_reviews(pr_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """GraphQL review nodes -> REST review dicts, so classify_review_state
+    runs unchanged on both paths (zero classifier drift)."""
+    shaped = []
+    for review in ((pr_node.get("reviews") or {}).get("nodes")) or []:
+        if not isinstance(review, dict):
+            continue
+        shaped.append({
+            "user": {"login": ((review.get("author") or {}).get("login"))},
+            "state": review.get("state"),
+            "submitted_at": review.get("submittedAt"),
+            "commit_id": ((review.get("commit") or {}).get("oid")),
+        })
+    return shaped
+
+
+def _classify_sweep_node(
+    node: dict[str, Any],
+    viewer: str,
+    eligible: set[str],
+    add: Callable[[str, list[dict[str, Any]]], None],
+    stats: dict[str, Any],
+) -> None:
+    full = ((node.get("repository") or {}).get("nameWithOwner")) or ""
+    if full not in eligible:
+        # Owner-scoped search sees repos we can only read; the REST sweep
+        # never swept those, so neither does this path.
+        stats["skipped_no_role"] += 1
+        return
+    author = ((node.get("author") or {}).get("login"))
+    if node.get("number") is None or not author or author == viewer:
+        return
+    reviews = _rest_shaped_reviews(node)
+    review_conn = node.get("reviews") or {}
+    if (review_conn.get("totalCount") or 0) > len(reviews) and not any(
+        review["user"]["login"] == viewer for review in reviews
+    ):
+        # The viewer's review may sit outside the window; fetch the full
+        # list for this one PR rather than misclassify it as unreviewed.
+        try:
+            reviews = gh_json_pages(f"repos/{full}/pulls/{node['number']}/reviews?per_page=100")
+        except GhError as exc:
+            stats["unswept"].append({"repo": full, "reason": f"reviews for #{node['number']}: {exc}"})
+            return
+    stats["prs_classified"] += 1
+    token = classify_review_state(reviews, viewer, node.get("headRefOid"))
+    if token is None:
+        stats["waiting_on_author"] += 1
+        return
+    entry = normalize_graphql_pr(node)
+    add(f"maintainer_{token}", [entry])
+    if is_bot_login(author):
+        add("bot_author", [entry])
+
+
+def build_inbox_graphql(
+    limit: int,
+    ceremony_only: bool,
+    add: Callable[[str, list[dict[str, Any]]], None],
+) -> dict[str, Any] | None:
+    """Concurrent-document inbox. Returns (sweep stats | None when ceremony_only, viewer login)."""
+    eligible: set[str] = set()
+    sweep_field = ""
+    sweep_query = ""
+    if not ceremony_only:
+        eligible = {repo["full_name"] for repo in repos_for_sweep()}
+        owners = sorted({full.split("/")[0] for full in eligible})
+        if owners:
+            sweep_query = "is:pr is:open archived:false " + " ".join(f"user:{owner}" for owner in owners)
+            sweep_field = _graphql_sweep_alias(sweep_query, None)
+    # Aliased search fields execute serially inside one document, so the
+    # ceremony and sweep documents go over the wire concurrently. Wider
+    # fan-out was measured and rejected: five concurrent documents ran
+    # SLOWER than two (GitHub queues concurrent GraphQL per token), so two
+    # is the shape until GitHub changes its economics.
+    from concurrent.futures import ThreadPoolExecutor
+
+    aliases = " ".join(_graphql_search_alias(name, query, limit) for name, query in GRAPHQL_CEREMONY_SEARCHES)
+    ceremony_doc = f"query {{ viewer {{ login }} {aliases} }} {GRAPHQL_PR_CORE}"
+    if sweep_field:
+        sweep_doc = f"query {{ {sweep_field} }} {GRAPHQL_PR_CORE}"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ceremony_future = pool.submit(run_graphql, ceremony_doc)
+            sweep_future = pool.submit(run_graphql, sweep_doc)
+            data = ceremony_future.result()
+            data["sweep"] = (sweep_future.result() or {}).get("sweep")
+    else:
+        data = run_graphql(ceremony_doc)
+    # A response that parses but lacks the requested aliases is a failure,
+    # not an empty inbox — treat it like any other GraphQL error and let the
+    # REST fallback carry the run.
+    missing = [name for name, _ in GRAPHQL_CEREMONY_SEARCHES if name not in data]
+    if not isinstance(data.get("viewer"), dict) or "login" not in (data.get("viewer") or {}):
+        missing.append("viewer.login")
+    if sweep_field and not isinstance(data.get("sweep"), dict):
+        missing.append("sweep")
+    if missing:
+        raise GhError(f"graphql response missing field(s): {', '.join(missing)}")
+    for name, _ in GRAPHQL_CEREMONY_SEARCHES:
+        nodes = ((data.get(name) or {}).get("nodes")) or []
+        add(name, [normalize_graphql_pr(node) for node in nodes if isinstance(node, dict)])
+    viewer = (data.get("viewer") or {}).get("login") or ""
+    if ceremony_only:
+        return None, viewer
+    stats: dict[str, Any] = {
+        "repos_swept": len(eligible), "prs_classified": 0, "waiting_on_author": 0,
+        "unswept": [], "skipped_no_role": 0, "path": "graphql", "stage_contract": 1,
+    }
+    if not eligible:
+        stats["unswept"].append({"repo": "*", "reason": "no sweep-eligible repos in inventory"})
+    connection = data.get("sweep") or {}
+    while sweep_field:
+        for node in connection.get("nodes") or []:
+            if isinstance(node, dict):
+                _classify_sweep_node(node, viewer, eligible, add, stats)
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        follow_up = f"query {{ {_graphql_sweep_alias(sweep_query, page.get('endCursor'))} }} {GRAPHQL_PR_CORE}"
+        connection = run_graphql(follow_up).get("sweep") or {}
+    portfolio_sweep(viewer, add, stats, role_covered=set(eligible))
+    return stats, viewer
+
+
+def sweep_eligible(repo: dict[str, Any]) -> bool:
+    if repo.get("archived"):
+        return False
+    permissions = repo.get("permissions") or {}
+    return bool(permissions.get("admin") or permissions.get("maintain") or permissions.get("push"))
+
+
+def repos_for_sweep() -> list[dict[str, Any]]:
+    cache = read_repos_cache()
+    repos = (cache or {}).get("repos") or []
+    if not repos or any("permissions" not in repo for repo in repos):
+        repos = fetch_repos()
+        write_repos_cache(repos)
+    return [repo for repo in repos if repo.get("full_name") and sweep_eligible(repo)]
+
+
+def _yaml():
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - project dependency
+        raise GhError("pyyaml is required for portfolio storage") from exc
+    return yaml
+
+
+def validate_portfolio_pattern(pattern: str) -> str:
+    value = (pattern or "").strip()
+    if not PORTFOLIO_PATTERN_RE.fullmatch(value):
+        raise GhError(f"Invalid portfolio pattern: {pattern!r} (use owner/repo or owner/*)")
+    return value
+
+
+def read_portfolio() -> list[str]:
+    if not PORTFOLIO_FILE.exists():
+        return []
+    yaml = _yaml()
+    try:
+        payload = yaml.safe_load(PORTFOLIO_FILE.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise GhError(f"invalid portfolio file {PORTFOLIO_FILE}: {exc}") from exc
+    patterns = payload.get("patterns") if isinstance(payload, dict) else None
+    return [str(pattern) for pattern in patterns or [] if isinstance(pattern, str)]
+
+
+def write_portfolio(patterns: list[str]) -> None:
+    yaml = _yaml()
+    ensure_state_dir()
+    payload = {"updated_at": now_iso(), "patterns": sorted(set(patterns))}
+    tmp = PORTFOLIO_FILE.parent / (PORTFOLIO_FILE.name + ".tmp")
+    tmp.write_text(yaml.safe_dump(payload, default_flow_style=False, sort_keys=True))
+    tmp.replace(PORTFOLIO_FILE)
+
+
+def is_no_access_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in ("404", "403", "not found", "forbidden"))
+
+
+def expand_portfolio_patterns(patterns: list[str], unswept: list[dict[str, Any]]) -> list[tuple[str, int | None]]:
+    """Expand portfolio patterns to (full_name, open_issues_count) pairs.
+
+    Exact patterns carry no metadata (None); owner/* expands through the REST
+    repo listing for that owner. Unresolvable patterns land in unswept."""
+    expanded: list[tuple[str, int | None]] = []
+    for pattern in patterns:
+        owner, _, tail = pattern.partition("/")
+        if tail != "*":
+            expanded.append((pattern, None))
+            continue
+        listing: list[dict[str, Any]] | None = None
+        failure = ""
+        for path in (f"orgs/{owner}/repos?per_page=100", f"users/{owner}/repos?per_page=100"):
+            try:
+                listing = gh_json_pages(path)
+                break
+            except GhError as exc:
+                failure = str(exc)
+        if listing is None:
+            unswept.append({"repo": pattern, "reason": "no access" if is_no_access_error(failure) else failure})
+            continue
+        for item in listing:
+            full = item.get("full_name")
+            if full and not item.get("archived"):
+                expanded.append((full, item.get("open_issues_count")))
+    return expanded
+
+
+def normalize_rest_pr(repo_full: str, item: dict[str, Any]) -> dict[str, Any]:
+    author = item.get("user") or {}
+    labels = item.get("labels") or []
+    return {
+        "ref": f"{repo_full}#{item.get('number')}",
+        "repo": repo_full,
+        "number": item.get("number"),
+        "title": item.get("title"),
+        "state": item.get("state"),
+        "draft": bool(item.get("draft")),
+        "author": author.get("login") if isinstance(author, dict) else author,
+        "updated_at": item.get("updated_at"),
+        "url": item.get("html_url"),
+        "comments": None,
+        "labels": [label.get("name") for label in labels if isinstance(label, dict)],
+        "review_decision": None,
+        "merge_state": None,
+        "checks": None,
+        "review_requests": None,
+        "next_action": None,
+    }
+
+
+def classify_review_state(reviews: list[dict[str, Any]], viewer: str, head_sha: str | None) -> str | None:
+    """Classify a third-party PR by the viewer's latest submitted review.
+
+    Returns a bare reason token, or None when the ball is with the author
+    (viewer requested changes at the current head)."""
+    viewer_reviews = [
+        review
+        for review in reviews
+        if isinstance(review, dict)
+        and ((review.get("user") or {}).get("login")) == viewer
+        and str(review.get("state") or "").upper() != "PENDING"
+    ]
+    latest = max(viewer_reviews, key=lambda review: review.get("submitted_at") or "", default=None)
+    if latest is None:
+        return "unreviewed"
+    if head_sha and latest.get("commit_id") != head_sha:
+        return "review_stale"
+    state = str(latest.get("state") or "").upper()
+    if state == "APPROVED":
+        return "approved_unmerged"
+    if state == "CHANGES_REQUESTED":
+        return None
+    # COMMENTED or DISMISSED at head: no decision recorded, still on us.
+    return "unreviewed"
+
+
+def classify_maintainer_state(reviews: list[dict[str, Any]], viewer: str, head_sha: str | None) -> str | None:
+    token = classify_review_state(reviews, viewer, head_sha)
+    return None if token is None else f"maintainer_{token}"
+
+
+def sweep_repo_pulls(
+    full: str,
+    viewer: str,
+    add: Callable[[str, list[dict[str, Any]]], None],
+    bucket: dict[str, Any],
+    unswept: list[dict[str, Any]],
+    reason_prefix: str,
+) -> None:
+    """Sweep one repo's open third-party PRs into the inbox under reason_prefix."""
+    try:
+        pulls = gh_json_pages(f"repos/{full}/pulls?state=open&per_page=100")
+    except GhError as exc:
+        message = str(exc)
+        if reason_prefix == "portfolio_" and is_no_access_error(message):
+            message = "no access"
+        unswept.append({"repo": full, "reason": message})
+        return
+    bucket["repos_swept"] += 1
+    for pull in pulls:
+        author = (pull.get("user") or {}).get("login")
+        number = pull.get("number")
+        if number is None or not author or author == viewer:
+            continue
+        try:
+            reviews = gh_json_pages(f"repos/{full}/pulls/{number}/reviews?per_page=100")
+        except GhError as exc:
+            unswept.append({"repo": full, "reason": f"reviews for #{number}: {exc}"})
+            continue
+        bucket["prs_classified"] += 1
+        token = classify_review_state(reviews, viewer, (pull.get("head") or {}).get("sha"))
+        if token is None:
+            bucket["waiting_on_author"] += 1
+            continue
+        entry = normalize_rest_pr(full, pull)
+        add(reason_prefix + token, [entry])
+        if is_bot_login(author):
+            add("bot_author", [entry])
+
+
+def maintainer_sweep(viewer: str, add: Callable[[str, list[dict[str, Any]]], None]) -> dict[str, Any]:
+    """Waiting-on-us from role (repos we can push to) plus declared portfolio.
+
+    A repo is either swept or loudly in `unswept` — never silently skipped."""
+    stats: dict[str, Any] = {"repos_swept": 0, "prs_classified": 0, "waiting_on_author": 0, "unswept": []}
+    role_repos: list[dict[str, Any]] = []
+    try:
+        role_repos = repos_for_sweep()
+    except GhError as exc:
+        stats["unswept"].append({"repo": "*", "reason": f"repo inventory unavailable: {exc}"})
+    role_covered: set[str] = set()
+    for repo in role_repos:
+        full = repo["full_name"]
+        role_covered.add(full)
+        # open_issues_count includes open PRs, so zero proves nothing is open.
+        if repo.get("open_issues_count") == 0:
+            stats["repos_swept"] += 1
+            continue
+        sweep_repo_pulls(full, viewer, add, stats, stats["unswept"], "maintainer_")
+
+    portfolio_sweep(viewer, add, stats, role_covered)
+    return stats
+
+
+def portfolio_sweep(
+    viewer: str,
+    add: Callable[[str, list[dict[str, Any]]], None],
+    stats: dict[str, Any],
+    role_covered: set[str],
+) -> None:
+    """Declared-portfolio sweep, shared by the REST and GraphQL inbox paths."""
+    portfolio_stats: dict[str, Any] = {"patterns": 0, "repos_swept": 0, "prs_classified": 0, "waiting_on_author": 0}
+    stats["portfolio"] = portfolio_stats
+    try:
+        patterns = read_portfolio()
+    except GhError as exc:
+        stats["unswept"].append({"repo": "portfolio", "reason": str(exc)})
+        patterns = []
+    portfolio_stats["patterns"] = len(patterns)
+    if patterns:
+        seen: set[str] = set()
+        for full, open_issues in expand_portfolio_patterns(patterns, stats["unswept"]):
+            # Role wins on dedupe: role-covered repos keep maintainer_* reasons.
+            if full in role_covered or full in seen:
+                continue
+            seen.add(full)
+            if open_issues == 0:
+                portfolio_stats["repos_swept"] += 1
+                continue
+            sweep_repo_pulls(full, viewer, add, portfolio_stats, stats["unswept"], "portfolio_")
 
 
 def search_candidates_for_awaiting(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -1242,13 +1849,41 @@ def cmd_prs(args: argparse.Namespace) -> None:
         print_table(prs, ["ref", "state", "draft", "author", "updated_at", "title"])
 
 
+CEREMONY_ONLY_NOTICE = "ceremony-only view: maintainer sweep skipped; role-derived waiting-on-us PRs are not shown."
+
+
 def cmd_inbox(args: argparse.Namespace) -> None:
-    entries = build_inbox(args.limit)
-    payload = {"count": len(entries), "items": entries}
+    result = build_inbox(args.limit, ceremony_only=args.ceremony_only)
+    entries = result["items"]
+    sweep = result["sweep"]
+    payload: dict[str, Any] = {"count": len(entries), "items": entries}
+    if sweep is not None:
+        payload["sweep"] = sweep
+        payload["total"] = result["total"]
     if args.json:
         print_json(payload)
-    else:
-        print_table(entries, ["ref", "reasons", "state", "author", "updated_at", "title"])
+        if args.ceremony_only:
+            print(CEREMONY_ONLY_NOTICE, file=sys.stderr)
+        return
+    print_table(entries, ["ref", "reasons", "state", "author", "updated_at", "title"])
+    if args.ceremony_only:
+        print(CEREMONY_ONLY_NOTICE)
+        return
+    if result["total"] > len(entries):
+        print(f"showing {len(entries)} of {result['total']} items; raise --limit for the rest")
+    unswept = sweep["unswept"]
+    print(
+        f"maintainer sweep: {sweep['repos_swept']} repos, {sweep['prs_classified']} PRs; "
+        f"{sweep['waiting_on_author']} waiting on author; {len(unswept)} unswept"
+    )
+    portfolio = sweep.get("portfolio") or {}
+    if portfolio.get("patterns"):
+        print(
+            f"portfolio sweep: {portfolio['patterns']} patterns, {portfolio['repos_swept']} repos, "
+            f"{portfolio['prs_classified']} PRs; {portfolio['waiting_on_author']} waiting on author"
+        )
+    for entry in unswept:
+        print(f"  unswept: {entry['repo']}: {entry['reason']}")
 
 
 def cmd_awaiting(args: argparse.Namespace) -> None:
@@ -1289,6 +1924,35 @@ def cmd_awaiting(args: argparse.Namespace) -> None:
             print_table(payload["items"], ["ref", "reasons", "state", "author", "updated_at", "title"])
         if payload.get("scope_note"):
             print(f"\nNote: {payload['scope_note']}")
+
+
+def cmd_portfolio(args: argparse.Namespace) -> None:
+    action = args.portfolio_command
+    if action == "list":
+        patterns = read_portfolio()
+        if args.json:
+            print_json({"count": len(patterns), "patterns": patterns, "file": str(PORTFOLIO_FILE)})
+        elif not patterns:
+            print("Portfolio is empty.")
+        else:
+            for pattern in patterns:
+                print(pattern)
+        return
+    if not args.pattern:
+        raise GhError(f"portfolio {action} requires a pattern (owner/repo or owner/*)")
+    pattern = validate_portfolio_pattern(args.pattern)
+    patterns = read_portfolio()
+    if action == "add":
+        if pattern in patterns:
+            print(f"Already in portfolio: {pattern}")
+            return
+        write_portfolio([*patterns, pattern])
+        print(f"Added to portfolio: {pattern}")
+        return
+    if pattern not in patterns:
+        raise GhError(f"Not in portfolio: {pattern}")
+    write_portfolio([entry for entry in patterns if entry != pattern])
+    print(f"Removed from portfolio: {pattern}")
 
 
 def cmd_pr(args: argparse.Namespace) -> None:
@@ -1370,7 +2034,10 @@ def cmd_review_summary(args: argparse.Namespace) -> None:
 
 
 def cmd_doctrine(args: argparse.Namespace) -> None:
-    print(REVIEW_DOCTRINE)
+    if getattr(args, "json", False):
+        print_json({"doctrine": REVIEW_DOCTRINE})
+    else:
+        print(REVIEW_DOCTRINE)
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
@@ -1602,7 +2269,18 @@ def build_parser() -> argparse.ArgumentParser:
     inbox = sub.add_parser("inbox", help="Show actionable PR work across repositories")
     inbox.add_argument("--json", action="store_true")
     inbox.add_argument("--limit", type=int, default=30)
+    inbox.add_argument(
+        "--ceremony-only",
+        action="store_true",
+        help="Skip the maintainer sweep; show only the four ceremony searches",
+    )
     inbox.set_defaults(func=cmd_inbox)
+
+    portfolio = sub.add_parser("portfolio", help="Manage the declared portfolio of swept repos")
+    portfolio.add_argument("portfolio_command", nargs="?", choices=["add", "remove", "list"], default="list")
+    portfolio.add_argument("pattern", nargs="?", help="owner/repo or owner/*")
+    portfolio.add_argument("--json", action="store_true")
+    portfolio.set_defaults(func=cmd_portfolio)
 
     awaiting = sub.add_parser("awaiting", help="Show open PRs likely awaiting your review")
     awaiting.add_argument("query", nargs="?")
@@ -1683,6 +2361,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.set_defaults(func=cmd_merge)
 
     doctrine = sub.add_parser("doctrine", help="Print the PR review doctrine")
+    doctrine.add_argument("--json", action="store_true")
     doctrine.set_defaults(func=cmd_doctrine)
 
     close = sub.add_parser("close", help="Close a pull request")
@@ -1742,12 +2421,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def show_help() -> None:
     print(
-        """agent-gh - GitHub PR and review work-state
+        """GitHub PR/review operations. For local repository work use: agent-do git
 
 Commands:
   whoami                         Show authenticated GitHub user
   repos [sync]                   List or sync accessible repositories
-  inbox                          Show actionable PR work across repositories
+  inbox [--ceremony-only]        Show actionable PR work: maintainer + portfolio sweep + review ceremony
+  portfolio [add|remove|list]    Manage the declared portfolio of swept repos (owner/repo or owner/*)
   awaiting                       Show open PRs likely awaiting your review
   prs [query]                    Search pull requests
   pr <repo#num|url|num>          Show PR details
@@ -1771,6 +2451,8 @@ Commands:
 
 Examples:
   agent-do gh inbox
+  agent-do gh inbox --ceremony-only
+  agent-do gh portfolio add Versova-Intelligence-Division/*
   agent-do gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova
   agent-do gh awaiting --owner Versova-Intelligence-Division --author ctyrrell-versova --audit --replies --probe-deploys
   agent-do gh prs --review-requested

@@ -38,3 +38,16 @@ tools/streamdeck/
 
 # Session handoff docs (local, git-ignored)
 .handoff/
+
+# Agent session dirs (local)
+.opencode/
+
+# Probe debris: a verb that mistakes a flag for an output path
+--json
+
+# Manna drift advisory (per-machine SessionEnd output, not repo truth)
+.manna/drift.yaml
+
+# Tool-local test boards never ship
+tools/agent-manna/.manna/
+.manna/board.lock

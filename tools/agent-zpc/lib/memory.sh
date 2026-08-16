@@ -54,6 +54,17 @@ PYTHON
 
     append_jsonl "$ZPC_MEMORY_DIR/lessons.jsonl" "$json_line" || return 1
 
+    # A write is where identity gets cheap: the row just appended, and every
+    # id-less row written before this existed, take the ids readers already
+    # derive for them. The stored line replaces the one built above so callers
+    # see the id they will need to retract it by.
+    _zpc_backfill "$ZPC_MEMORY_DIR/lessons.jsonl" "les-" >/dev/null
+    local stored
+    stored="$(tail -n 1 "$ZPC_MEMORY_DIR/lessons.jsonl" 2>/dev/null)"
+    [[ -n "$stored" ]] && json_line="$stored"
+    local lesson_id
+    lesson_id="$(printf '%s' "$json_line" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)" || lesson_id=""
+
     # Update global project index
     ensure_global
     local project_path
@@ -84,7 +95,11 @@ PYTHON
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         json_success "$json_line"
     else
-        echo "Lesson captured: $takeaway (tags: $tags)"
+        if [[ -n "$lesson_id" ]]; then
+            echo "Lesson captured [$lesson_id]: $takeaway (tags: $tags)"
+        else
+            echo "Lesson captured: $takeaway (tags: $tags)"
+        fi
     fi
 }
 
@@ -144,10 +159,21 @@ PYTHON
 
     append_jsonl "$ZPC_MEMORY_DIR/decisions.jsonl" "$json_line" || return 1
 
+    _zpc_backfill "$ZPC_MEMORY_DIR/decisions.jsonl" "dec-" >/dev/null
+    local stored
+    stored="$(tail -n 1 "$ZPC_MEMORY_DIR/decisions.jsonl" 2>/dev/null)"
+    [[ -n "$stored" ]] && json_line="$stored"
+    local decision_id
+    decision_id="$(printf '%s' "$json_line" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)" || decision_id=""
+
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         json_success "$json_line"
     else
-        echo "Decision logged: $chosen (confidence: $confidence)"
+        if [[ -n "$decision_id" ]]; then
+            echo "Decision logged [$decision_id]: $chosen (confidence: $confidence)"
+        else
+            echo "Decision logged: $chosen (confidence: $confidence)"
+        fi
     fi
 }
 
@@ -263,6 +289,7 @@ with open(sys.argv[2], "a") as f:
     for entry_json in data["entries"]:
         f.write(entry_json + "\n")
 PYTHON
+        _zpc_backfill "$ZPC_MEMORY_DIR/decisions.jsonl" "dec-" >/dev/null
     fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then

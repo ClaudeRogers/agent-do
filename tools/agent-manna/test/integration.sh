@@ -382,6 +382,379 @@ else
 fi
 
 # ============================================================================
+# Board Grammar Tests (types, tracks, dream, lint, reconcile)
+# ============================================================================
+
+echo ""
+echo "=== Board Grammar Tests ==="
+
+GRAMMAR_DIR=$(mktemp -d)
+GRAMMAR_PHYS=$(cd "$GRAMMAR_DIR" && pwd -P)
+cd "$GRAMMAR_DIR"
+"$MANNA" init >/dev/null 2>&1
+
+# ----------------------------------------------------------------------------
+# Test G1: types and track edges
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G1: types and track edges"
+output=$("$MANNA" create "Umbrella track" --type track 2>&1) || true
+check_yaml "$output" "success: true" "create --type track succeeds"
+check_yaml "$output" "type: track" "created issue carries type track"
+TRACK_ID=$(extract_id "$output")
+
+output=$("$MANNA" create "Tracked item" --track "$TRACK_ID" --source "test/integration.sh" 2>&1) || true
+check_yaml "$output" "success: true" "create --track succeeds"
+check_yaml "$output" "track: $TRACK_ID" "created item carries track edge"
+check_yaml "$output" "source: test/integration.sh" "created item carries source"
+ITEM_ID=$(extract_id "$output")
+
+output=$("$MANNA" create "Bad edge" --track "$ITEM_ID" 2>&1) || exit_code=$?
+check_yaml "$output" "success: false" "--track to a non-track errors"
+check_yaml "$output" "not a track" "error names the non-track target"
+
+output=$("$MANNA" create "Ghost edge" --track "mn-404404" 2>&1) || exit_code=$?
+check_yaml "$output" "success: false" "--track to a missing id errors"
+
+output=$("$MANNA" create "Nested track" --type track --track "$TRACK_ID" 2>&1) || exit_code=$?
+check_yaml "$output" "success: false" "tracks don't nest on create"
+
+output=$("$MANNA" update "$ITEM_ID" --type track 2>&1) || exit_code=$?
+check_yaml "$output" "success: false" "update --type track with a track edge errors"
+
+output=$("$MANNA" list --type track 2>&1) || true
+check_yaml "$output" "$TRACK_ID" "list --type track finds the track"
+if [[ "$output" != *"$ITEM_ID"* ]]; then
+    pass "list --type track excludes items"
+else
+    fail "list --type track excludes items" "item leaked into track filter: $output"
+fi
+
+output=$("$MANNA" list --track "$TRACK_ID" 2>&1) || true
+check_yaml "$output" "$ITEM_ID" "list --track finds track members"
+
+# ----------------------------------------------------------------------------
+# Test G2: dream walks up to the nearest board
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G2: dream on local board"
+mkdir -p "$GRAMMAR_DIR/sub/dir"
+cd "$GRAMMAR_DIR/sub/dir"
+output=$("$MANNA" dream "A spark from below" --source "shower" 2>&1) || true
+check_yaml "$output" "success: true" "dream succeeds from a subdirectory"
+check_yaml "$output" "type: dream" "dream carries type dream"
+check_yaml "$output" "board: $GRAMMAR_PHYS" "dream walked up to the nearest board"
+DREAM_ID=$(extract_id "$output")
+cd "$GRAMMAR_DIR"
+output=$("$MANNA" show "$DREAM_ID" 2>&1) || true
+check_yaml "$output" "A spark from below" "dream landed on the walk-up board"
+
+# ----------------------------------------------------------------------------
+# Test G3: dream global inbox fallback
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G3: dream global inbox fallback"
+INBOX_HOME=$(mktemp -d)
+NOBOARD_DIR=$(mktemp -d)
+cd "$NOBOARD_DIR"
+output=$(AGENT_DO_HOME="$INBOX_HOME" "$MANNA" dream "Homeless spark" 2>&1) || true
+check_yaml "$output" "success: true" "dream succeeds with no board in sight"
+check_yaml "$output" "filed to global inbox" "dream reports the inbox fallback"
+if [[ -f "$INBOX_HOME/inbox/.manna/issues.jsonl" ]]; then
+    pass "inbox board auto-initialized"
+else
+    fail "inbox board auto-initialized" "no issues.jsonl under $INBOX_HOME/inbox/.manna"
+fi
+cd "$GRAMMAR_DIR"
+rm -rf "$INBOX_HOME" "$NOBOARD_DIR"
+
+# ----------------------------------------------------------------------------
+# Test G4: lint gate
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G4: lint"
+# Board so far: track + tracked item + open dream (untracked dreams are fine)
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "lint exits 0 on a clean board"
+check_yaml "$output" "clean: true" "lint reports clean"
+
+output=$("$MANNA" create "Loose item" 2>&1) || true
+LOOSE_ID=$(extract_id "$output")
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint exits 1 with findings"
+check_yaml "$output" "untracked_item" "lint names the untracked_item rule"
+check_yaml "$output" "$LOOSE_ID" "lint names the loose item"
+
+"$MANNA" update "$LOOSE_ID" --track "$TRACK_ID" >/dev/null 2>&1 || true
+lint_exit=0
+output=$("$MANNA" lint --json 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "lint exits 0 after attaching the item"
+check_yaml "$output" '"clean":true' "lint --json reports clean"
+
+# ----------------------------------------------------------------------------
+# Test G5: reconcile
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G5: reconcile"
+# Manufacture a blocker desync: A blocks B, A completes, B stays blocked.
+output=$("$MANNA" create "Blocker work" --track "$TRACK_ID" 2>&1) || true
+A_ID=$(extract_id "$output")
+output=$("$MANNA" create "Dependent work" --track "$TRACK_ID" 2>&1) || true
+B_ID=$(extract_id "$output")
+"$MANNA" block "$B_ID" "$A_ID" >/dev/null 2>&1
+"$MANNA" claim "$A_ID" >/dev/null 2>&1
+"$MANNA" done "$A_ID" >/dev/null 2>&1
+
+rec_exit=0
+output=$("$MANNA" reconcile 2>&1) || rec_exit=$?
+check_exit 0 "$rec_exit" "reconcile exits 0 (advisory)"
+check_yaml "$output" "blocker_desync" "reconcile detects the blocker desync"
+check_yaml "$output" "$B_ID" "reconcile names the desynced issue"
+
+output=$("$MANNA" show "$B_ID" 2>&1) || true
+check_yaml "$output" "status: blocked" "reconcile without --fix mutates nothing"
+
+rec_exit=0
+output=$("$MANNA" reconcile --write-drift 2>&1) || rec_exit=$?
+check_exit 0 "$rec_exit" "reconcile --write-drift exits 0"
+if [[ -f .manna/drift.yaml ]]; then
+    pass "drift.yaml written"
+else
+    fail "drift.yaml written" "missing .manna/drift.yaml"
+fi
+if command -v yq &>/dev/null; then
+    if yq eval '.' .manna/drift.yaml >/dev/null 2>&1; then
+        pass "drift.yaml is valid YAML (yq)"
+    else
+        fail "drift.yaml is valid YAML (yq)" "yq parsing failed"
+    fi
+fi
+if grep -q "generated_at:" .manna/drift.yaml && grep -q "findings:" .manna/drift.yaml; then
+    pass "drift.yaml has the pinned shape"
+else
+    fail "drift.yaml has the pinned shape" "missing generated_at/findings keys"
+fi
+if grep -q "kind: blocker_desync" .manna/drift.yaml; then
+    pass "drift.yaml carries the finding"
+else
+    fail "drift.yaml carries the finding" "no blocker_desync entry"
+fi
+
+rec_exit=0
+output=$("$MANNA" reconcile --fix 2>&1) || rec_exit=$?
+check_exit 0 "$rec_exit" "reconcile --fix exits 0"
+output=$("$MANNA" show "$B_ID" 2>&1) || true
+check_yaml "$output" "status: open" "reconcile --fix unblocked the dependent"
+
+output=$("$MANNA" reconcile --dream-age-days 0 --json 2>&1) || true
+check_yaml "$output" "stale_dream" "reconcile --dream-age-days 0 flags the fresh dream"
+
+# ----------------------------------------------------------------------------
+# Test G6: context renders the track tree (and stays v1 without tracks)
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G6: context track tree"
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "## Umbrella track ($TRACK_ID)" "context groups items under the track"
+check_yaml "$output" "## Dreams" "context renders a Dreams section"
+check_yaml "$output" "$DREAM_ID" "context lists the dream"
+if [[ "$output" != *"$A_ID"* ]]; then
+    pass "context still excludes done issues"
+else
+    fail "context still excludes done issues" "done issue leaked: $output"
+fi
+if [[ "$output" != *"## Open Issues"* ]]; then
+    pass "track tree replaces the by-status sections"
+else
+    fail "track tree replaces the by-status sections" "v1 sections leaked into grouped render"
+fi
+
+UNTYPED_DIR=$(mktemp -d)
+cd "$UNTYPED_DIR"
+"$MANNA" init >/dev/null 2>&1
+"$MANNA" create "Plain issue" >/dev/null 2>&1
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "## Open Issues (1)" "untyped board keeps the v1 render"
+if [[ "$output" != *"## Untracked"* && "$output" != *"## Dreams"* ]]; then
+    pass "untyped board has no tree sections"
+else
+    fail "untyped board has no tree sections" "tree sections leaked: $output"
+fi
+cd "$GRAMMAR_DIR"
+rm -rf "$UNTYPED_DIR"
+
+cd "$TEST_DIR"
+rm -rf "$GRAMMAR_DIR"
+
+# ----------------------------------------------------------------------------
+# Test G7: prompt pairing (--prompt field, lint existence, reconcile pairing)
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7: prompt pairing"
+PAIR_DIR=$(mktemp -d)
+PAIR_PHYS=$(cd "$PAIR_DIR" && pwd -P)
+cd "$PAIR_DIR"
+"$MANNA" init >/dev/null 2>&1
+mkdir -p .dev/session-prompts
+PROMPT_A="$PAIR_PHYS/.dev/session-prompts/lane-a.md"
+PROMPT_B="$PAIR_PHYS/.dev/session-prompts/lane-b.md"
+
+output=$("$MANNA" create "Paired work" --prompt "$PROMPT_A" 2>&1) || true
+check_yaml "$output" "success: true" "create --prompt succeeds before the file exists"
+PAIR_ID=$(extract_id "$output")
+
+output=$("$MANNA" show "$PAIR_ID" 2>&1) || true
+check_yaml "$output" "prompt: $PROMPT_A" "show displays the prompt pointer"
+
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint exits 1 on a missing prompt file"
+check_yaml "$output" "prompt_file" "lint names the prompt_file rule"
+check_yaml "$output" "$PAIR_ID" "lint names the pointing issue"
+
+printf '# Lane A work order (%s)\nClaim first: agent-do manna claim %s\n' "$PAIR_ID" "$PAIR_ID" > "$PROMPT_A"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "lint exits 0 once the prompt file exists"
+
+rec_exit=0
+output=$("$MANNA" reconcile --json 2>&1) || rec_exit=$?
+check_exit 0 "$rec_exit" "reconcile exits 0 on a paired board"
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "correctly paired board reports no prompt_pairing finding"
+else
+    fail "correctly paired board reports no prompt_pairing finding" "unexpected finding: $output"
+fi
+
+output=$("$MANNA" create "Pointerless work" 2>&1) || true
+LONE_ID=$(extract_id "$output")
+# A bare id mention is data, not a pairing promise: no finding without a claim command.
+printf '# Lane B notes: relates to %s\n' "$LONE_ID" > "$PROMPT_B"
+output=$("$MANNA" reconcile --json 2>&1) || true
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "bare id mention without a claim command produces no finding"
+else
+    fail "bare id mention without a claim command produces no finding" "unexpected finding: $output"
+fi
+
+printf 'Claim: agent-do manna claim %s\n' "$LONE_ID" >> "$PROMPT_B"
+output=$("$MANNA" reconcile --json 2>&1) || true
+check_yaml "$output" "prompt_pairing" "reconcile flags a claim command whose issue lacks a pointer"
+check_yaml "$output" "$LONE_ID" "reconcile names the pointerless issue"
+
+output=$("$MANNA" update "$LONE_ID" --prompt "$PROMPT_B" 2>&1) || true
+check_yaml "$output" "success: true" "update --prompt succeeds"
+output=$("$MANNA" reconcile --json 2>&1) || true
+if [[ "$output" != *"prompt_pairing"* ]]; then
+    pass "pointer repair clears the pairing finding"
+else
+    fail "pointer repair clears the pairing finding" "finding persisted: $output"
+fi
+
+cd "$TEST_DIR"
+rm -rf "$PAIR_DIR"
+
+# ----------------------------------------------------------------------------
+# Test G8: dreams are visible and inert until converted
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G8: dream claim gate"
+GATE_DIR=$(mktemp -d)
+cd "$GATE_DIR"
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "Umbrella track" --type track 2>&1) || true
+G_TRACK=$(extract_id "$output")
+output=$("$MANNA" create "Real work" --track "$G_TRACK" 2>&1) || true
+G_ITEM=$(extract_id "$output")
+output=$("$MANNA" dream "A parked spark" 2>&1) || true
+G_DREAM=$(extract_id "$output")
+
+# The refusal must not touch the board: hash the file on both sides.
+if command -v md5 &>/dev/null; then
+    hash_cmd() { md5 -q "$1"; }
+else
+    hash_cmd() { md5sum "$1" | awk '{print $1}'; }
+fi
+before_hash=$(hash_cmd .manna/issues.jsonl)
+claim_exit=0
+output=$("$MANNA" claim "$G_DREAM" 2>&1) || claim_exit=$?
+after_hash=$(hash_cmd .manna/issues.jsonl)
+
+check_exit 2 "$claim_exit" "claim on a dream exits 2"
+check_yaml "$output" "success: false" "claim on a dream refuses"
+check_yaml "$output" "$G_DREAM" "refusal names the dream id"
+check_yaml "$output" "not claimable work" "refusal says a dream is not claimable work"
+check_yaml "$output" "update $G_DREAM --type item" "refusal gives the exact conversion command"
+check_yaml "$output" "Erik" "refusal names who authorizes"
+if [[ "$before_hash" == "$after_hash" ]]; then
+    pass "refused claim wrote nothing (board byte-identical)"
+else
+    fail "refused claim wrote nothing (board byte-identical)" "issues.jsonl changed: $before_hash -> $after_hash"
+fi
+output=$("$MANNA" show "$G_DREAM" 2>&1) || true
+check_yaml "$output" "status: open" "refused dream is still open"
+check_yaml "$output" "type: dream" "refused dream is still a dream"
+if [[ "$output" != *"claimed_by"* ]]; then
+    pass "refused dream carries no claim"
+else
+    fail "refused dream carries no claim" "claimed_by present: $output"
+fi
+
+# Visibility is the ruling: the dream stays in every list, marked inert.
+output=$("$MANNA" list 2>&1) || true
+check_yaml "$output" "$G_DREAM" "list still shows the dream"
+check_yaml "$output" "not claimable, needs conversion" "list marks the dream inert"
+output=$("$MANNA" list --json 2>&1) || true
+check_yaml "$output" '"gate":"[DREAM: not claimable, needs conversion]"' "list --json carries the gate marker"
+output=$("$MANNA" context 2>&1) || true
+check_yaml "$output" "$G_DREAM" "context still shows the dream"
+# Every context row carries when it last moved, so the inert marker is pinned
+# around the age rather than against a stamp that changes every second.
+check_yaml "$output" "$G_DREAM: A parked spark [open] updated $(date -u +%Y-%m-%d) (" \
+    "context dates and ages the dream row"
+check_yaml "$output" "ago) [DREAM: not claimable, needs conversion]" \
+    "context marks the dream row inert"
+check_yaml "$output" "update <id> --type item" "context spells out the conversion command"
+
+# Items are untouched by the gate.
+claim_exit=0
+output=$("$MANNA" claim "$G_ITEM" 2>&1) || claim_exit=$?
+check_exit 0 "$claim_exit" "claim on an item still succeeds"
+check_yaml "$output" "status: in_progress" "claimed item goes in_progress"
+"$MANNA" abandon "$G_ITEM" >/dev/null 2>&1
+
+# Conversion is the authorization act.
+output=$("$MANNA" update "$G_DREAM" --type item 2>&1) || true
+check_yaml "$output" "AUTHORIZED" "conversion prints an authorization line"
+check_yaml "$output" "now claimable work" "authorization line says the row is claimable"
+claim_exit=0
+output=$("$MANNA" claim "$G_DREAM" 2>&1) || claim_exit=$?
+check_exit 0 "$claim_exit" "claim succeeds after conversion"
+check_yaml "$output" "status: in_progress" "converted dream claims like any item"
+
+# And back: parking an item prints the inverse and restores the gate.
+"$MANNA" abandon "$G_DREAM" >/dev/null 2>&1
+output=$("$MANNA" update "$G_DREAM" --type dream 2>&1) || true
+check_yaml "$output" "PARKED" "parking prints the inverse line"
+check_yaml "$output" "no longer claimable" "inverse line says the row is not claimable"
+claim_exit=0
+"$MANNA" claim "$G_DREAM" >/dev/null 2>&1 || claim_exit=$?
+check_exit 2 "$claim_exit" "re-parked dream refuses claim again"
+
+# A non-crossing edit stays silent.
+output=$("$MANNA" update "$G_ITEM" --title "Real work, renamed" 2>&1) || true
+if [[ "$output" != *"authorization"* ]]; then
+    pass "non-crossing update prints no authorization line"
+else
+    fail "non-crossing update prints no authorization line" "unexpected line: $output"
+fi
+
+cd "$TEST_DIR"
+rm -rf "$GATE_DIR"
+
+# ============================================================================
 # Summary
 # ============================================================================
 

@@ -3,6 +3,27 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [[ -f "$REPO_ROOT/lib/json-output.sh" ]]; then
+    # shellcheck source=lib/json-output.sh
+    source "$REPO_ROOT/lib/json-output.sh"
+else
+    OUTPUT_FORMAT="${OUTPUT_FORMAT:-text}"
+    parse_output_format() {
+        local args=()
+        for arg in "$@"; do
+            if [[ "$arg" == "--json" ]]; then
+                OUTPUT_FORMAT="json"
+            else
+                args+=("$arg")
+            fi
+        done
+        PARSED_ARGS=("${args[@]}")
+    }
+fi
+
 show_help() {
     cat << 'EOF'
 agent-serial - Serial port communication
@@ -18,6 +39,7 @@ Options:
   --bits <5-8>               Data bits (default: 8)
   --parity <N|E|O>           Parity (default: N)
   --stop <1|2>               Stop bits (default: 1)
+  --json                     Emit structured JSON output (list)
 
 Examples:
   agent-serial list
@@ -27,13 +49,38 @@ EOF
 }
 
 cmd_list() {
+    local ports
+    if [[ "$(uname)" == "Darwin" ]]; then
+        ports="$(ls -1 /dev/tty.* /dev/cu.* 2>/dev/null | grep -v Bluetooth || true)"
+    else
+        ports="$(ls -1 /dev/ttyUSB* /dev/ttyACM* /dev/ttyS* 2>/dev/null || true)"
+    fi
+
+    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        python3 - "$ports" <<'PY'
+import json
+import sys
+
+text = sys.argv[1]
+ports = [line.rstrip() for line in text.splitlines() if line.strip()]
+print(json.dumps({
+    "success": True,
+    "tool": "serial",
+    "command": "list",
+    "count": len(ports),
+    "ports": ports,
+}, indent=2))
+PY
+        return 0
+    fi
+
     echo "Serial ports:"
     echo
 
-    if [[ "$(uname)" == "Darwin" ]]; then
-        ls -1 /dev/tty.* /dev/cu.* 2>/dev/null | grep -v Bluetooth || echo "No serial ports found"
+    if [[ -n "${ports//[$' \t\n']/}" ]]; then
+        printf '%s\n' "$ports"
     else
-        ls -1 /dev/ttyUSB* /dev/ttyACM* /dev/ttyS* 2>/dev/null || echo "No serial ports found"
+        echo "No serial ports found"
     fi
 }
 
@@ -147,32 +194,31 @@ cmd_raw() {
     echo "Port configured for raw mode at $baud baud"
 }
 
+parse_output_format "$@"
+ARGS=("${PARSED_ARGS[@]:-}")
+
 # Main
-case "${1:-help}" in
+case "${ARGS[0]:-help}" in
     list|ls|ports)
         cmd_list
         ;;
     monitor|mon|watch)
-        shift
-        cmd_monitor "$@"
+        cmd_monitor "${ARGS[@]:1}"
         ;;
     send|write|tx)
-        shift
-        cmd_send "$@"
+        cmd_send "${ARGS[@]:1}"
         ;;
     config|settings)
-        shift
-        cmd_config "$@"
+        cmd_config "${ARGS[@]:1}"
         ;;
     raw)
-        shift
-        cmd_raw "$@"
+        cmd_raw "${ARGS[@]:1}"
         ;;
     help|--help|-h)
         show_help
         ;;
     *)
-        echo "Unknown command: $1"
+        echo "Unknown command: ${ARGS[0]}"
         echo "Try: agent-serial help"
         exit 1
         ;;

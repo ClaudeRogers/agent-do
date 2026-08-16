@@ -4,6 +4,7 @@ Offline pattern matcher for agent-do.
 Provides fallback when LLM is unavailable.
 """
 
+import os
 import sys
 import re
 import shutil
@@ -14,13 +15,23 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
 try:
-    from registry import load_registry, search_tools, match_prompt_tools, get_default_command, has_tool
+    from registry import (
+        load_registry,
+        search_tools,
+        match_prompt_tools,
+        get_default_command,
+        get_tool_contracts,
+        get_tool_contract_attributes,
+        has_tool,
+    )
 except ModuleNotFoundError as e:
     if e.name == "yaml":
         load_registry = None
         search_tools = None
         match_prompt_tools = None
         get_default_command = None
+        get_tool_contracts = None
+        get_tool_contract_attributes = None
         has_tool = None
     else:
         raise
@@ -216,6 +227,38 @@ def registry_prompt_match(intent: str, registry: dict) -> Optional[dict]:
     }
 
 
+def annotate_route_contracts(result: dict) -> dict:
+    """Mirror of intent-router's annotation: beats/attributes for the verb,
+    plus the mode-aware destructive gate via the existing clarification path."""
+    if load_registry is None or get_tool_contracts is None:
+        return result
+    tool, command = result.get("tool"), result.get("command")
+    if not tool or not command:
+        return result
+    info = (load_registry().get("tools") or {}).get(tool) or {}
+    first = str(command).split()[0]
+    result["beats"] = sorted({
+        beat
+        for beat, verbs in get_tool_contracts(info).items()
+        for verb in verbs
+        if verb == command or verb.split()[0] == first
+    })
+    result["attributes"] = sorted({
+        attr
+        for verb, alist in get_tool_contract_attributes(info).items()
+        if verb == command or verb.split()[0] == first
+        for attr in alist
+    })
+    dangerous = {"destructive", "sensitive"} & set(result["attributes"])
+    if dangerous and os.environ.get("AGENT_DO_AUTO_DESTRUCTIVE") != "1" and not result.get("clarification_needed"):
+        result["clarification_needed"] = (
+            f"This resolves to `{tool} {command}`, which is marked "
+            f"{'/'.join(sorted(dangerous))}. Rerun with AGENT_DO_AUTO_DESTRUCTIVE=1 "
+            "or invoke the structured command directly."
+        )
+    return result
+
+
 def match_intent(intent: str) -> dict:
     """Try all matching strategies."""
 
@@ -225,23 +268,23 @@ def match_intent(intent: str) -> dict:
     fuzzy = fuzzy_match(intent)
     if fuzzy and route_has_valid_tool(fuzzy):
         fuzzy['from_fuzzy'] = True
-        return fuzzy
+        return annotate_route_contracts(fuzzy)
 
     # 2. Try shared registry routing metadata
     registry_match = registry_prompt_match(intent, registry)
     if registry_match and route_has_valid_tool(registry_match):
         registry_match['from_registry_routing'] = True
-        return registry_match
+        return annotate_route_contracts(registry_match)
 
     # 3. Try legacy pattern matching
     pattern_match = match_patterns(intent)
     if pattern_match:
-        return pattern_match
+        return annotate_route_contracts(pattern_match)
 
     # 4. Try keyword matching
     keyword = keyword_match(intent, registry)
     if keyword:
-        return keyword
+        return annotate_route_contracts(keyword)
 
     # 5. No match
     return {

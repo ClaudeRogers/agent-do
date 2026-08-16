@@ -130,6 +130,69 @@ cmd_install() {
 }
 
 cmd_extensions() {
+    local json_output=false
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --json) json_output=true ;;
+        esac
+    done
+
+    if $json_output; then
+        if ! command -v jupyter &> /dev/null; then
+            python3 -c "import json,sys; print(json.dumps({'ok': False, 'error': 'JupyterLab not installed', 'hint': 'pip install jupyterlab'})); sys.exit(1)"
+            return 1
+        fi
+
+        local ext_raw=""
+        local source=""
+        if ext_raw=$(jupyter labextension list 2>&1); then
+            source="labextension"
+        elif ext_raw=$(jupyter server extension list 2>&1); then
+            source="server_extension"
+        else
+            ext_raw=""
+            source="none"
+        fi
+
+        EXT_RAW="$ext_raw" EXT_SOURCE="$source" python3 -c "
+import json, os, re, sys
+
+raw = os.environ.get('EXT_RAW', '')
+source = os.environ.get('EXT_SOURCE', 'none')
+
+extensions = []
+for line in raw.splitlines():
+    stripped = line.strip()
+    if not stripped:
+        continue
+    low = stripped.lower()
+    if low.endswith(':') or low.startswith('jupyterlab v') or 'config dir' in low \
+            or low.startswith('valid ') or low.startswith('known labextensions'):
+        continue
+    # Lines like '        @jupyterlab/git v0.50.0 enabled OK'
+    m = re.match(r'^(\S+)(?:\s+v?([0-9][^\s]*))?(?:\s+(\w+))?(?:\s+(\w+))?', stripped)
+    if not m:
+        continue
+    name = m.group(1)
+    if name.startswith('-') or '/' not in name and not name.startswith('@') and not name[0].isalpha():
+        continue
+    extensions.append({
+        'name': name,
+        'version': m.group(2),
+        'status': m.group(3),
+    })
+
+print(json.dumps({
+    'ok': True,
+    'source': source,
+    'count': len(extensions),
+    'extensions': extensions,
+}))
+"
+        return 0
+    fi
+
     echo "Installed JupyterLab extensions:"
     echo
     jupyter labextension list 2>/dev/null || \
@@ -234,7 +297,8 @@ case "${1:-help}" in
         cmd_install "$@"
         ;;
     extensions|ext)
-        cmd_extensions
+        shift
+        cmd_extensions "$@"
         ;;
     new|create)
         shift

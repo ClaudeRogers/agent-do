@@ -7,14 +7,22 @@ are AI-gated, advisory, and emitted only when the model selects high-confidence 
 the full agent-do catalog.
 """
 
+# Hooks run under whatever python3 the harness resolves, which on macOS is the
+# system 3.9 where `X | None` in an annotation raises at import time. Deferring
+# annotations keeps this file loadable there; the repo still targets 3.10+.
+from __future__ import annotations
+
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from shutil import which
 from pathlib import Path
+
+HOOK_START = time.monotonic()
 
 # File lives at <repo>/hooks/claude/agent-do-prompt-router.py, so the repo
 # root is two parents up and lib/ is its sibling.
@@ -136,43 +144,24 @@ DEFAULT_HOOK_AI_CONFIDENCE = 0.86
 
 CONTEXT_RETRIEVE_QUERY_MAX_CHARS = 280
 
+KNOWN_DOC_SOURCE_COMMANDS = [
+    (
+        re.compile(r"\b(anthropic|claude|opus|sonnet|haiku)\b", re.IGNORECASE),
+        "agent-do context fetch-llms docs.claude.com --trust official --tags ai,llm,claude --register-source --source-name anthropic-docs",
+    ),
+]
+
 
 def build_ai_catalog(registry: dict) -> list[dict]:
-    """Return the full agent-do catalog in a compact form suitable for hook routing."""
+    """Return every tool as a latency-bounded classifier index."""
     catalog = []
     for tool, info in sorted(registry.get("tools", {}).items()):
-        commands = list((info.get("commands") or {}).keys())
-        examples = []
-        for example in (info.get("examples") or [])[:3]:
-            intent = example.get("intent")
-            command = example.get("command")
-            if intent and command:
-                examples.append({"intent": intent, "command": command})
-        routing_intents = []
-        routing = info.get("routing") or {}
-        for item in (routing.get("intents") or [])[:8]:
-            if not isinstance(item, dict):
-                continue
-            label = item.get("label")
-            if not label:
-                continue
-            routing_intents.append(
-                {
-                    "label": str(label),
-                    "examples": [str(ex) for ex in (item.get("examples") or [])[:4]],
-                    "recommended_entrypoint": str(item.get("recommended_entrypoint") or ""),
-                }
-            )
-
+        description = " ".join(str(info.get("description") or "").split())[:120]
         catalog.append(
             {
                 "tool": tool,
-                "description": info.get("description", ""),
-                "capabilities": [str(item) for item in (info.get("capabilities") or [])[:6]],
-                "commands": commands,
-                "recommended_entrypoints": get_recommended_entrypoints(info) if get_recommended_entrypoints else [],
-                "examples": examples,
-                "routing_intents": routing_intents,
+                "description": description,
+                "entrypoints": (get_recommended_entrypoints(info)[:2] if get_recommended_entrypoints else []),
             }
         )
     return catalog
@@ -246,14 +235,34 @@ def fallback_focus_command(prompt: str, cwd: str | None) -> str:
 
 
 def compact_peers(active_peers: list[dict]) -> list[dict]:
-    return [
+    peers = [
         {
             "agent": peer.get("alias") or peer.get("agent_id"),
             "goal": ((peer.get("focus") or {}).get("goal")) or "",
             "paths": ((peer.get("focus") or {}).get("paths")) or [],
+            "age": peer.get("age") or "",
+            "phase": peer.get("phase") or "",
+            "mode": peer.get("mode") or "writer",
+            "role": peer.get("role") or "",
         }
         for peer in active_peers[:8]
     ]
+    peers.sort(key=lambda item: 0 if item["mode"] == "writer" else 1)
+    return peers
+
+
+def format_peer_line(peer: dict) -> str:
+    label = str(peer.get("agent"))
+    details = []
+    if peer.get("mode") == "read-only":
+        details.append(f"{peer.get('role') or 'auditor'}, read-only")
+    if peer.get("phase"):
+        details.append(f"phase:{peer['phase']}")
+    if peer.get("age"):
+        details.append(peer["age"])
+    suffix = f" ({', '.join(details)})" if details else ""
+    goal = f" goal: {peer['goal']}" if peer.get("goal") else ""
+    return f"- {label}{suffix}{goal}"
 
 
 def compact_interrupts(interrupts: list[dict]) -> list[dict]:
@@ -296,7 +305,15 @@ def build_context_retrieve_command(query: str) -> str:
         return ""
     if len(query) > CONTEXT_RETRIEVE_QUERY_MAX_CHARS:
         query = query[:CONTEXT_RETRIEVE_QUERY_MAX_CHARS].rstrip() + "..."
-    return f"agent-do context retrieve {shlex.quote(query)} --fresh --prefer-latest --max-tokens 8000"
+    return f"agent-do context retrieve {shlex.quote(query)} --require-fresh --require-official --prefer-latest --max-tokens 8000"
+
+
+def known_doc_source_commands(query: str) -> list[str]:
+    commands = []
+    for pattern, command in KNOWN_DOC_SOURCE_COMMANDS:
+        if pattern.search(query):
+            commands.append(command)
+    return commands
 
 
 def ai_context_retrieval_context(decision: dict | None) -> tuple[str, list[str], list[str]]:
@@ -313,13 +330,23 @@ def ai_context_retrieval_context(decision: dict | None) -> tuple[str, list[str],
     if not command:
         return "", [], []
 
+    source_commands = known_doc_source_commands(query)
+    fallback = ""
+    if source_commands:
+        fallback = (
+            "\nIf retrieval reports no fresh official result, fetch the known official source and retry:\n"
+            + "\n".join(f"- `{source_command}`" for source_command in source_commands)
+            + "\n"
+        )
+
     return (
         "## agent-do Context Retrieval\n\n"
-        "This prompt asks for external docs/API/library behavior. Before answering or implementing, run:\n"
+        "This prompt asks for current external docs/API/library behavior. Before answering or implementing, run:\n"
         f"- `{command}`\n\n"
-        "Use the returned provenance and freshness metadata. If retrieval fails, say what remains stale instead of guessing.\n",
+        "Use the returned provenance and freshness metadata. If retrieval fails, say what remains stale instead of guessing.\n"
+        f"{fallback}",
         ["context"],
-        [command],
+        [command, *source_commands],
     )
 
 
@@ -415,8 +442,7 @@ Four products share this hook. All of them must be classified by INTENT, not by 
 Rules:
 - "Workspace work" for coord includes editing files, debugging, testing, reviewing code/PRs, committing, pushing, deploying, or "do it/go" continuation of work.
 - Pure discussion, status questions, explanations, model choice, and "no touching" prompts should not be blocked.
-- For tool suggestions, inspect the full catalog and emit only if one or two agent-do commands are clearly stellar and exact.
-- Tools may declare routing_intents with labels and examples. Treat those as classifier labels, not keyword rules. If a prompt matches one, suggest the recommended entrypoint only when it is the right immediate action.
+- For tool suggestions, inspect the complete compact index and emit only if one or two listed entrypoints are clearly stellar and exact.
 - Do not emit generic setup/search/status suggestions unless the prompt directly asks for that operation.
 - It is good to emit nothing. Be conservative on every classification. False positives are worse than false negatives.
 - Never invent tools. Commands must start with `agent-do <tool>`.
@@ -465,6 +491,15 @@ Respond with JSON only:
   ]
 }}
 """
+    # Claude Code kills the whole hook at 5s and discards ALL output. Base
+    # stages (registry, coord, models config) already spend 1.5-2s, so the AI
+    # call gets only what remains of a 4.2s safety line, and is skipped
+    # entirely when too little is left. max_tokens stays small: a routing
+    # decision is a tiny JSON object, and a large cap invites generations
+    # that eat the deadline.
+    remaining = 4.2 - (time.monotonic() - HOOK_START)
+    if remaining < 0.9:
+        return None
     return call_json_model(
         prompt_text,
         flag_name="AGENT_DO_HOOK_AI",
@@ -474,6 +509,9 @@ Respond with JSON only:
             "Be engineering-ready, clear, and concise. Use the fewest words that preserve correctness; "
             "do not omit necessary operational detail."
         ),
+        max_tokens=600,
+        timeout_seconds=min(1.75, remaining - 0.25),
+        max_retries=0,
     )
 
 
@@ -507,10 +545,11 @@ def format_coord_requirement(
     if not valid_focus_command(command):
         command = fallback_focus_command(prompt, cwd)
 
-    peer_lines = []
-    for peer in compact_peers(coord_state.get("active_peers") or []):
-        suffix = f" goal: {peer['goal']}" if peer.get("goal") else ""
-        peer_lines.append(f"- {peer.get('agent')}{suffix}")
+    peer_lines = [format_peer_line(peer) for peer in compact_peers(coord_state.get("active_peers") or [])]
+    counts = coord_state.get("peer_counts") or {}
+    hidden = int(counts.get("dead", 0)) + int(counts.get("stale", 0)) + int(counts.get("stopped", 0))
+    if hidden:
+        peer_lines.append(f"- ({hidden} dead/stopped/stale sessions on the board, not shown)")
     peers = "\n".join(peer_lines) if peer_lines else "- active peer present"
 
     return (
@@ -605,7 +644,8 @@ def resolve_agent_do_binary() -> str | None:
     if direct:
         return direct
 
-    repo_candidate = Path(__file__).resolve().parents[1] / "agent-do"
+    # This file lives at <repo>/hooks/claude/; the dispatcher is two levels up.
+    repo_candidate = Path(__file__).resolve().parents[2] / "agent-do"
     if repo_candidate.exists():
         return str(repo_candidate)
 
@@ -623,8 +663,50 @@ def resolve_agent_do_binary() -> str | None:
     return None
 
 
+def run_bounded(
+    cmd: list[str],
+    cwd: str | None,
+    env: dict | None,
+    timeout: float,
+) -> tuple[int | None, str]:
+    """Run with a hard wall-clock bound, SIGKILLing the whole process group.
+
+    A plain subprocess.run(timeout=...) kills only the direct child; a wedged
+    grandchild keeps the stdout pipe open and communicate() blocks anyway.
+    start_new_session gives the child its own group so the kill takes the
+    whole tree down and the pipe closes.
+    """
+    import signal
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None, ""
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            proc.communicate(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return None, ""
+
+
 def load_coord_state(cwd: str | None) -> dict:
-    state = {"active_peers": [], "focus_goal": "", "interrupts": []}
+    state = {"active_peers": [], "peer_counts": {}, "focus_goal": "", "interrupts": []}
     if not cwd:
         return state
     agent_do = resolve_agent_do_binary()
@@ -634,33 +716,30 @@ def load_coord_state(cwd: str | None) -> dict:
     hook_env = os.environ.copy()
     hook_env["AGENT_DO_TELEMETRY_SUPPRESS"] = "1"
 
-    touched = subprocess.run(
-        [agent_do, "coord", "touch", "--json"],
-        cwd=cwd,
-        env=hook_env,
-        text=True,
-        capture_output=True,
-        check=False,
+    # Hard per-call budget: the hook itself gets 5s from Claude Code, and a
+    # slow or wedged agent-do spawn must degrade to "no coord context", not
+    # eat the whole hook (which discards ALL hook output).
+    touch_rc, touch_out = run_bounded(
+        [agent_do, "coord", "touch", "--json"], cwd=cwd, env=hook_env, timeout=2.0
     )
-    if touched.returncode != 0 or not touched.stdout.strip():
+    if touch_rc != 0 or not touch_out.strip():
         return state
 
-    touch_payload = json.loads(touched.stdout)
+    touch_payload = json.loads(touch_out)
     state["active_peers"] = touch_payload.get("active_peers", [])
+    state["peer_counts"] = touch_payload.get("peer_counts", {})
     state["focus_goal"] = ((touch_payload.get("focus") or {}).get("goal")) or ""
 
-    interrupts_run = subprocess.run(
+    interrupts_rc, interrupts_out = run_bounded(
         [agent_do, "coord", "interrupts", "--json", "--limit", "5"],
         cwd=cwd,
         env=hook_env,
-        text=True,
-        capture_output=True,
-        check=False,
+        timeout=2.0,
     )
-    if interrupts_run.returncode != 0 or not interrupts_run.stdout.strip():
+    if interrupts_rc != 0 or not interrupts_out.strip():
         interrupts_payload = {"interrupts": []}
     else:
-        interrupts_payload = json.loads(interrupts_run.stdout)
+        interrupts_payload = json.loads(interrupts_out)
 
     state["interrupts"] = interrupts_payload.get("interrupts", [])
     return state

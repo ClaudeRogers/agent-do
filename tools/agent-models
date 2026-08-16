@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""agent-models - Internal LLM model resolution and diagnostics."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR / "lib"))
+
+from models import (  # noqa: E402
+    ModelConfigError,
+    VALID_ROLES,
+    apply_doctor_fixes,
+    candidates,
+    doctor_report,
+    generation_params,
+    resolve,
+    role_snapshot,
+)
+
+
+def emit(payload: dict, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if "roles" in payload:
+        print(f"agent-do models — {payload['file']}")
+        for role, item in payload["roles"].items():
+            selected = item["resolved"]
+            print(f"  {role:<6} {selected['provider']}/{selected['model']}")
+        return
+    print(f"{payload['provider']}/{payload['model']}")
+
+
+def emit_doctor(payload: dict, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print("agent-do models doctor")
+    for provider, item in payload["providers"].items():
+        print(f"  {provider:<10} {item['status']:<11} {item['models']} models")
+    for item in payload["models"]:
+        print(f"  {item['status']:<11} {item['provider']}/{item['model']}")
+    for warning in payload.get("warnings", []):
+        print(f"  warning: {warning}")
+    if payload.get("fixed"):
+        print("  updated models.yaml")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Resolve agent-do internal LLM models")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list", help="Show configured roles and resolved models")
+    list_parser.add_argument("--json", action="store_true")
+
+    resolve_parser = subparsers.add_parser("resolve", help="Resolve one internal model role")
+    resolve_parser.add_argument("role", choices=VALID_ROLES)
+    resolve_parser.add_argument("--json", action="store_true")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Verify provider lists and capabilities")
+    doctor_parser.add_argument("--fix", action="store_true", help="Persist verified retirements and capability refreshes")
+    doctor_parser.add_argument("--json", action="store_true")
+
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "list":
+            emit(role_snapshot(), args.json)
+            return 0
+        if args.command == "doctor":
+            report = doctor_report()
+            if args.fix:
+                apply_doctor_fixes(report)
+                report["fixed"] = True
+            emit_doctor(report, args.json)
+            return 0 if report["ok"] else 1
+        selected = resolve(args.role)
+        selected["generation_params"] = generation_params(selected["model"], selected["provider"], args.role)
+        selected["candidates"] = candidates(args.role)
+        for candidate in selected["candidates"]:
+            candidate["generation_params"] = generation_params(
+                candidate["model"], candidate["provider"], args.role
+            )
+        emit(selected, args.json)
+        return 0
+    except ModelConfigError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

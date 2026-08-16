@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CODEX_STOP = HOME / ".codex" / "hooks" / "stop-quality-gate.py"
 CODEX_PROMPT_ROUTER = HOME / ".codex" / "hooks" / "agent-do-prompt-router.py"
 CLAUDE_PROMPT_ROUTER = HOME / ".claude" / "hooks" / "agent-do-prompt-router.py"
+PRETOOL_HOOK = ROOT / "hooks" / "claude" / "agent-do-pretooluse-check.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -81,9 +82,42 @@ def test_prompt_router_hooks_are_advisory() -> None:
             require("hookSpecificOutput" in payload, f"{label} should emit context: {payload}")
 
 
+def test_pretool_safety_headsup_for_destructive_agent_do() -> None:
+    """An agent-do call resolving to a destructive/sensitive verb gets an
+    advisory safety heads-up — never a block."""
+    if not PRETOOL_HOOK.exists():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        # manna delete is destructive; the hook should surface that, advisory-only.
+        payload = run_hook(
+            PRETOOL_HOOK,
+            {"tool_name": "Bash", "tool_input": {"command": "agent-do manna delete mn-abc123"},
+             "session_id": "safety-test"},
+            home=home,
+        )
+        assert_not_blocking(payload, "pretool safety heads-up")
+        ctx = json.dumps(payload).lower()
+        require("destructive" in ctx, f"destructive agent-do call must surface safety: {payload}")
+
+        # A read verb gets no safety heads-up (nothing to warn about).
+        read_payload = run_hook(
+            PRETOOL_HOOK,
+            {"tool_name": "Bash", "tool_input": {"command": "agent-do manna list"},
+             "session_id": "safety-test-2"},
+            home=home,
+        )
+        assert_not_blocking(read_payload, "pretool read no-warn")
+        require(
+            "destructive" not in json.dumps(read_payload).lower(),
+            f"read verb must not raise a destructive warning: {read_payload}",
+        )
+
+
 def main() -> int:
     test_codex_stop_is_advisory()
     test_prompt_router_hooks_are_advisory()
+    test_pretool_safety_headsup_for_destructive_agent_do()
     print("global hook nonblocking tests passed")
     return 0
 

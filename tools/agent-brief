@@ -1,0 +1,1666 @@
+#!/usr/bin/env python3
+"""agent-brief — the estate briefing engine.
+
+The panel's brain: joins GitHub PR attention, the manna board, live coord
+presence, session history, and git into ranked threads, a delta since the
+caller's last look, one-tap suggestions carried as data (never executed),
+and a paragraph whose every sentence cites a receipt.
+
+Design source of truth (read it before changing shapes):
+  /Users/erik/Custom-Coding/holy-ghostty/.dev/session-prompts/10-INTELLIGENT-INBOX.md
+
+The honesty covenant, non-negotiable:
+  - every assertion carries a receipt id (commit hash, mn-id, PR ref, event id)
+  - unknown stays unknown; a degraded source is an annotation, never a guess
+    and never silence
+  - no model output enters the contract unless grounded in the structured
+    inputs; a paragraph citing a receipt the engine never issued is rejected
+  - numbers come from the joined data, never the model
+
+The contract is versioned and FULL SHAPE from day one: a capability that is
+not yet live ships as an honest degradation in the payload (for example
+ranking.mode = "heuristic"), never as an absent field, so consumers render
+one contract forever.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+
+# One bounded read probe — the same budget `harness contracts audit` applies
+# to a single declared read verb. Sourced, not invented; callers who need a
+# longer sweep (gh inbox cold cache) pass --timeout.
+from quantities import READ_PROBE_TIMEOUT_SECONDS
+
+CONTRACT_VERSION = 1
+
+AGENT_DO_HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do"))
+BRIEF_DIR = AGENT_DO_HOME / "brief"
+STATE_FILE = BRIEF_DIR / "state.json"
+JOURNAL_FILE = BRIEF_DIR / "journal.jsonl"
+
+MN_ID_RE = re.compile(r"\bmn-[0-9a-f]{6}\b")
+
+# coord compresses a session uuid into "session-" + the first 12 hex of the
+# uuid with dashes removed (agent-coord identity scheme). The manna board
+# stores the full uuid in claimed_by. This constant mirrors coord's own
+# truncation so "who claimed it" joins to "who is alive right now".
+COORD_ID_HEX_CHARS = 12
+
+# Ranking shape constants — scoring parameters, not caps. Each names the
+# judgment it encodes; none truncates output.
+RANK_NEEDS_ME = 3.0        # an actionable thread outranks any merely-recent one
+RANK_PINNED = 2.0          # an explicit pin is the human overriding the ranker
+RANK_STRANDED = 1.5        # a claim with no live session is quiet trouble
+RANK_CLAIMABLE = 0.5       # ready work floats above plain inventory, below anything needing the human
+RECENCY_WINDOW_HOURS = 168.0  # attention decays across one week of estate time
+JOURNAL_MAX_SHIFT = 1.0    # learned behavior nudges rank, never dominates it
+
+# A network sweep (gh inbox) is not a local probe. Until a sweep has taught
+# us its real duration it is budgeted at this multiple of the probe budget;
+# after one success, at this multiple of its last observed duration —
+# slower than twice the known-good pace reads as hung, not slow. The caller's
+# explicit --timeout overrides both.
+SWEEP_BUDGET_FACTOR = 2.0
+
+# Deterministic prose spells out counts a person would say in words; a sum a
+# person would write in digits stays digits. Twenty is where speech gives up.
+NUMBER_WORDS = (
+    "no", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+)
+
+# What each source is to the person reading the paragraph.
+SOURCE_HUMAN = {
+    "github": "GitHub",
+    "manna": "the board",
+    "reconcile": "board reconcile",
+    "coord": "live sessions",
+    "sessions": "session history",
+    "git": "commit history",
+}
+
+KIND_HUMAN = {
+    "pr": ("pull request", "pull requests"),
+    "manna": ("board item", "board items"),
+    "session": ("live session", "live sessions"),
+    "other": ("thread", "threads"),
+}
+
+
+def count_word(n: int) -> str:
+    return NUMBER_WORDS[n] if 0 <= n < len(NUMBER_WORDS) else str(n)
+
+
+def count_phrase(n: int, singular: str, plural: str | None = None) -> str:
+    noun = singular if n == 1 else (plural or singular + "s")
+    return f"{count_word(n)} {noun}"
+
+
+def relative_phrase(since: datetime, now: datetime) -> str:
+    seconds = max(0.0, (now - since).total_seconds())
+    if seconds < 90:
+        return "in the last minute"
+    if seconds < 3600:
+        return f"in the last {count_phrase(int(seconds // 60), 'minute')}"
+    if seconds < 7200:
+        return "in the last hour"
+    if seconds < 86400:
+        return f"in the last {count_phrase(int(seconds // 3600), 'hour')}"
+    if seconds < 172800:
+        return "since yesterday"
+    return f"in the last {count_phrase(int(seconds // 86400), 'day')}"
+
+# Record separator LEADS each record so the --name-only file list that git
+# prints after the format line stays inside its own record when we split.
+# %B (raw body) is carried beside the strict trailers because the wild is
+# full of split trailer paragraphs: a blank line between "Manna:" and
+# "Co-Authored-By:" demotes the Manna line to body text under git's trailer
+# parser, while the board tool still counts it. The trailing %x1f fences the
+# multiline body off from the --name-only file list.
+GIT_LOG_FORMAT = "%x1e%H%x1f%cI%x1f%s%x1f%(trailers:key=Manna,valueonly,separator= )%x1f%B%x1f"
+
+# The board convention, line-anchored: prose mentioning an mn-id is not a
+# reference; a "Manna: mn-xxxxxx" line anywhere in the message is.
+MANNA_TRAILER_LINE_RE = re.compile(r"^Manna:\s*(mn-[0-9a-f]{6})\s*$", re.MULTILINE)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_iso(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        cleaned = value.strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(cleaned)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Receipts — every fact in the payload points into this book.
+# ---------------------------------------------------------------------------
+
+class ReceiptBook:
+    def __init__(self) -> None:
+        self._by_key: dict[tuple[str, str], str] = {}
+        self.entries: dict[str, dict[str, str]] = {}
+
+    def add(self, kind: str, ref: str, detail: str = "") -> str:
+        key = (kind, ref)
+        if key in self._by_key:
+            return self._by_key[key]
+        rid = f"r{len(self.entries) + 1}"
+        self._by_key[key] = rid
+        entry = {"kind": kind, "ref": ref}
+        if detail:
+            entry["detail"] = detail
+        self.entries[rid] = entry
+        return rid
+
+
+# ---------------------------------------------------------------------------
+# Sources — each returns {status, origin, fetched_at, data, reason?}.
+# status: ok | degraded | absent. Degraded and absent carry the reason in
+# full (fail-closed with full-error logging, the mn-b2e2e9 lesson).
+# ---------------------------------------------------------------------------
+
+def _fixture_dir() -> Path | None:
+    value = os.environ.get("AGENT_BRIEF_FIXTURES")
+    return Path(value) if value else None
+
+
+def _source(status: str, data: Any, origin: str, reason: str = "") -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "status": status,
+        "origin": origin,
+        "fetched_at": iso(now_utc()),
+        "data": data,
+    }
+    if reason:
+        record["reason"] = reason
+    return record
+
+
+def _from_fixture(name: str) -> dict[str, Any] | None:
+    fixtures = _fixture_dir()
+    if fixtures is None:
+        return None
+    path = fixtures / f"{name}.json"
+    if not path.exists():
+        return _source("absent", None, "fixture", f"no fixture {path.name}")
+    try:
+        return _source("ok", json.loads(path.read_text()), "fixture")
+    except (json.JSONDecodeError, OSError) as exc:
+        return _source("degraded", None, "fixture", f"fixture {path.name} unreadable: {exc}")
+
+
+def _run(cmd: list[str], cwd: str | None, timeout: float) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", f"timeout after {timeout}s: {' '.join(cmd[:3])}"
+    except (OSError, FileNotFoundError) as exc:
+        return -1, "", f"{cmd[0]}: {exc}"
+
+
+def _run_json(cmd: list[str], cwd: str | None, timeout: float) -> dict[str, Any]:
+    rc, out, err = _run(cmd, cwd, timeout)
+    if not out.strip():
+        reason = err.strip() or f"exit {rc} with empty output"
+        return _source("degraded", None, "live", reason)
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError as exc:
+        tail = out.strip().splitlines()[-1] if out.strip() else ""
+        return _source("degraded", None, "live", f"unparseable JSON ({exc}); last line: {tail}")
+    # Findings-style tools may exit nonzero while still emitting a valid
+    # payload; parsed output is the truth, the exit code is an annotation.
+    return _source("ok", payload, "live")
+
+
+def github_budget(explicit: float | None, state: dict[str, Any]) -> float:
+    """The sweep budget: caller's explicit timeout, else calibration, else bootstrap."""
+    if explicit is not None:
+        return explicit
+    last_ok = ((state.get("calibration", {}).get("github")) or {}).get("last_ok_seconds")
+    if isinstance(last_ok, (int, float)) and last_ok > 0:
+        return max(float(READ_PROBE_TIMEOUT_SECONDS), SWEEP_BUDGET_FACTOR * float(last_ok))
+    return SWEEP_BUDGET_FACTOR * float(READ_PROBE_TIMEOUT_SECONDS)
+
+
+def gather_github(timeout: float) -> dict[str, Any]:
+    fixture = _from_fixture("github")
+    if fixture is not None:
+        return fixture
+    started = time.monotonic()
+    source = _run_json([str(ROOT / "tools" / "agent-gh"), "inbox", "--json"], None, timeout)
+    if source["status"] == "ok":
+        # Private calibration field; stripped before the payload ships so
+        # contract v1's source shape stays exactly as the consumer pinned it.
+        source["_duration_seconds"] = round(time.monotonic() - started, 1)
+    return source
+
+
+def resolve_board(value: str | None, repo: Path) -> tuple[Path, list[str]]:
+    """Resolve a board directory liberally: the .manna dir itself, a repo
+    root containing one, or the issues.jsonl file. Returns the choice plus
+    every candidate tried, so a miss can say exactly where it looked
+    (consumer round 3: a false board-absent must name its search)."""
+    if not value:
+        candidate = repo / ".manna"
+        return candidate, [str(candidate)]
+    path = Path(value).expanduser().resolve()
+    if not path.exists():
+        _fail_loud(
+            f"--focused-board does not exist: {value} — pass the .manna directory, "
+            f"its repo root, or the issues.jsonl file, as a PATH"
+        )
+    candidates: list[Path] = []
+    if path.name == "issues.jsonl":
+        candidates.append(path.parent)
+    if path.name == ".manna":
+        candidates.append(path)
+    candidates.append(path / ".manna")
+    tried: list[str] = []
+    for candidate in candidates:
+        tried.append(str(candidate))
+        if (candidate / "issues.jsonl").exists():
+            return candidate, tried
+    return candidates[0], tried
+
+
+def gather_manna(board_dir: Path, tried: list[str] | None = None) -> dict[str, Any]:
+    fixture = _from_fixture("manna")
+    if fixture is not None:
+        return fixture
+    ledger = board_dir / "issues.jsonl"
+    if not ledger.exists():
+        looked = "; looked at: " + ", ".join(tried) if tried else ""
+        return _source("absent", None, "live", f"no board ledger at {ledger}{looked}")
+    issues: list[dict[str, Any]] = []
+    bad_lines = 0
+    try:
+        for line in ledger.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                issues.append(json.loads(line))
+            except json.JSONDecodeError:
+                bad_lines += 1
+    except OSError as exc:
+        return _source("degraded", None, "live", f"{ledger}: {exc}")
+    if bad_lines:
+        return _source(
+            "degraded", {"issues": issues}, "live",
+            f"{bad_lines} unparseable line(s) in {ledger.name}; {len(issues)} read",
+        )
+    return _source("ok", {"issues": issues}, "live")
+
+
+def gather_reconcile(repo: Path, timeout: float) -> dict[str, Any]:
+    fixture = _from_fixture("reconcile")
+    if fixture is not None:
+        return fixture
+    manna_bin = ROOT / "tools" / "agent-manna" / "agent-manna"
+    return _run_json([str(manna_bin), "reconcile", "--json"], str(repo), timeout)
+
+
+def gather_coord(repo: Path, timeout: float) -> dict[str, Any]:
+    fixture = _from_fixture("coord")
+    if fixture is not None:
+        return fixture
+    coord_bin = ROOT / "tools" / "agent-coord"
+    return _run_json([str(coord_bin), "peers", "--json"], str(repo), timeout)
+
+
+def gather_sessions(project: str, timeout: float) -> dict[str, Any]:
+    fixture = _from_fixture("sessions")
+    if fixture is not None:
+        return fixture
+    sessions_bin = ROOT / "tools" / "agent-sessions"
+    # No --limit: the sessions tool's own default governs the page size.
+    return _run_json(
+        [str(sessions_bin), "list", "--json", "--project", project], None, timeout
+    )
+
+
+def gather_git(repo: Path, timeout: float) -> dict[str, Any]:
+    fixture = _from_fixture("git")
+    if fixture is not None:
+        return fixture
+    if not (repo / ".git").exists():
+        return _source("absent", None, "live", f"{repo} is not a git repository")
+    rc, out, err = _run(
+        ["git", "-C", str(repo), "log", "--name-only", f"--format={GIT_LOG_FORMAT}"],
+        None, timeout,
+    )
+    if rc != 0:
+        return _source("degraded", None, "live", err.strip() or f"git log exit {rc}")
+    commits: list[dict[str, Any]] = []
+    for record in out.split("\x1e"):
+        if not record.strip():
+            continue
+        parts = record.split("\x1f")
+        if len(parts) < 6:
+            continue
+        trailer_ids = MN_ID_RE.findall(parts[3])
+        body_ids = MANNA_TRAILER_LINE_RE.findall(parts[4])
+        commits.append({
+            "hash": parts[0].strip(),
+            "date": parts[1].strip(),
+            "subject": parts[2].strip(),
+            "manna": sorted(set(trailer_ids) | set(body_ids)),
+            "files": [line for line in parts[5].splitlines() if line.strip()],
+        })
+    return _source("ok", {"commits": commits}, "live")
+
+
+def gather_all(
+    repo: Path,
+    board_dir: Path,
+    local_budget: float,
+    sweep_budget: float,
+    board_tried: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    jobs = {
+        "github": lambda: gather_github(sweep_budget),
+        "manna": lambda: gather_manna(board_dir, board_tried),
+        "reconcile": lambda: gather_reconcile(repo, local_budget),
+        "coord": lambda: gather_coord(repo, local_budget),
+        "sessions": lambda: gather_sessions(repo.name, local_budget),
+        "git": lambda: gather_git(repo, local_budget),
+    }
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {name: pool.submit(job) for name, job in jobs.items()}
+        for name, future in futures.items():
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # a source may fail; the brief may not
+                results[name] = _source("degraded", None, "live", f"gatherer crashed: {exc}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Store — read-state, pins, snoozes (own state under ~/.agent-do/brief/).
+# ---------------------------------------------------------------------------
+
+def load_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        return {"callers": {}, "pins": {}, "snoozes": {}}
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"callers": {}, "pins": {}, "snoozes": {}}
+    for key in ("callers", "pins", "snoozes"):
+        state.setdefault(key, {})
+    return state
+
+
+def save_state(state: dict[str, Any]) -> None:
+    BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(STATE_FILE)
+
+
+def journal_append(entry: dict[str, Any]) -> None:
+    BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+    with JOURNAL_FILE.open("a") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def journal_read() -> list[dict[str, Any]]:
+    if not JOURNAL_FILE.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in JOURNAL_FILE.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def thread_kind_of(thread_id: str) -> str:
+    if thread_id.startswith("mn-"):
+        return "manna"
+    if "#" in thread_id:
+        return "pr"
+    if thread_id.startswith("session-"):
+        return "session"
+    return "other"
+
+
+# ---------------------------------------------------------------------------
+# Threads — the join. mn-id is the preferred spine; a PR or live session
+# with no board edge becomes its own thread.
+# ---------------------------------------------------------------------------
+
+def _norm_uuid(value: str) -> str:
+    return re.sub(r"[^0-9a-f]", "", (value or "").lower())
+
+
+def build_threads(
+    sources: dict[str, dict[str, Any]],
+    receipts: ReceiptBook,
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    threads: dict[str, dict[str, Any]] = {}
+
+    def thread_for(tid: str, kind: str, title: str) -> dict[str, Any]:
+        if tid not in threads:
+            threads[tid] = {
+                "id": tid,
+                "kind": kind,
+                "title": title,
+                "needs_me": False,
+                "claimable": False,
+                "why": [],
+                "receipts": [],
+                "pr": None,
+                "manna": None,
+                "session": None,
+                "last_commit": None,
+                "updated_at": None,
+                "pinned": False,
+                "snoozed": False,
+            }
+        return threads[tid]
+
+    def touch(thread: dict[str, Any], stamp: str | None) -> None:
+        if not stamp:
+            return
+        current = thread.get("updated_at")
+        if current is None or (parse_iso(stamp) or now_utc()) > (parse_iso(current) or now_utc()):
+            thread["updated_at"] = stamp
+
+    def cite(thread: dict[str, Any], rid: str) -> None:
+        if rid not in thread["receipts"]:
+            thread["receipts"].append(rid)
+
+    # -- manna items are the preferred spine
+    manna = sources["manna"]
+    issues = (manna.get("data") or {}).get("issues", []) if manna["status"] != "absent" else []
+    open_issues = [i for i in issues if i.get("status") not in {"done", "closed"}]
+    for issue in open_issues:
+        mn_id = issue.get("id", "")
+        if not mn_id:
+            continue
+        rid = receipts.add("mn", mn_id, issue.get("title", ""))
+        thread = thread_for(mn_id, "manna", issue.get("title", mn_id))
+        thread["manna"] = {
+            "id": mn_id,
+            "status": issue.get("status"),
+            "type": issue.get("type", "item"),
+            "track": issue.get("track"),
+            "claimed_by": issue.get("claimed_by"),
+            "blocked_by": issue.get("blocked_by") or [],
+        }
+        cite(thread, rid)
+        touch(thread, issue.get("updated_at") or issue.get("created_at"))
+        # Unclaimed, unblocked work is claimable inventory — Library, not
+        # "needs me". Rows addressed to the human are PR attention, stranded
+        # claims, and one-tap suggestions; a wall of claimable rows is how a
+        # panel becomes an ignored dashboard (track mn-70875b row law).
+        if (
+            issue.get("status") == "open"
+            and issue.get("type", "item") == "item"
+            and not issue.get("claimed_by")
+            and not issue.get("blocked_by")
+        ):
+            thread["claimable"] = True
+
+    # -- github PRs join by mn-id in the title, else stand alone
+    github = sources["github"]
+    pr_items = (github.get("data") or {}).get("items", []) if github["status"] == "ok" else []
+    for item in pr_items:
+        ref = item.get("ref") or f"{item.get('repo', '?')}#{item.get('number', '?')}"
+        rid = receipts.add("pr", ref, item.get("title", ""))
+        mn_edges = MN_ID_RE.findall(item.get("title", ""))
+        tid = mn_edges[0] if mn_edges and mn_edges[0] in threads else ref
+        thread = thread_for(tid, "manna" if tid.startswith("mn-") else "pr", item.get("title", ref))
+        thread["pr"] = {
+            "ref": ref,
+            "title": item.get("title"),
+            "author": item.get("author"),
+            "state": item.get("state"),
+            "draft": item.get("draft", False),
+            "reasons": item.get("reasons", []),
+            "url": item.get("url"),
+            "updated_at": item.get("updated_at"),
+        }
+        cite(thread, rid)
+        touch(thread, item.get("updated_at"))
+        if item.get("reasons"):
+            thread["needs_me"] = True
+            thread["why"].append({
+                "reason": "pr: " + ", ".join(item["reasons"]),
+                "receipt": rid,
+            })
+
+    # -- git commits attach a last_commit to mn threads (trailer edges)
+    git_src = sources["git"]
+    commits = (git_src.get("data") or {}).get("commits", []) if git_src["status"] == "ok" else []
+    for commit in commits:
+        for mn_id in commit.get("manna", []):
+            if mn_id in threads and threads[mn_id]["last_commit"] is None:
+                rid = receipts.add("commit", commit["hash"], commit.get("subject", ""))
+                threads[mn_id]["last_commit"] = {
+                    "hash": commit["hash"],
+                    "subject": commit.get("subject"),
+                    "date": commit.get("date"),
+                }
+                cite(threads[mn_id], rid)
+                touch(threads[mn_id], commit.get("date"))
+
+    # -- coord peers: focus goal names an mn-id -> live session on that thread
+    coord = sources["coord"]
+    peers = (coord.get("data") or {}).get("peers", []) if coord["status"] == "ok" else []
+    live_tails = {}
+    for peer in peers:
+        agent_id = peer.get("agent_id", "")
+        tail = agent_id.removeprefix("session-")
+        if peer.get("status") in {"active", "idle"}:
+            live_tails[tail] = peer
+        goal = ((peer.get("focus") or {}).get("goal")) or ""
+        mn_edges = MN_ID_RE.findall(goal)
+        rid = receipts.add("coord", agent_id, goal or peer.get("status", ""))
+        if mn_edges and mn_edges[0] in threads:
+            thread = threads[mn_edges[0]]
+        elif peer.get("status") == "active" and goal:
+            thread = thread_for(agent_id, "session", goal)
+        else:
+            continue
+        thread["session"] = {
+            "agent_id": agent_id,
+            "status": peer.get("status"),
+            "goal": goal or None,
+            "phase": (peer.get("focus") or {}).get("phase") or peer.get("phase"),
+            "last_seen": peer.get("last_seen"),
+        }
+        cite(thread, rid)
+        touch(thread, peer.get("last_seen"))
+
+    # -- claim liveness: a claimed item with no live coord session is trouble
+    for thread in threads.values():
+        claim = (thread.get("manna") or {}).get("claimed_by")
+        if not claim or thread.get("session"):
+            continue
+        tail = _norm_uuid(claim)[:COORD_ID_HEX_CHARS]
+        if tail in live_tails:
+            peer = live_tails[tail]
+            rid = receipts.add("coord", peer.get("agent_id", tail), "claim holder present")
+            thread["session"] = {
+                "agent_id": peer.get("agent_id"),
+                "status": peer.get("status"),
+                "goal": ((peer.get("focus") or {}).get("goal")),
+                "phase": (peer.get("focus") or {}).get("phase") or peer.get("phase"),
+                "last_seen": peer.get("last_seen"),
+            }
+            cite(thread, rid)
+        elif (thread["manna"] or {}).get("status") == "in_progress":
+            rid = receipts.add("mn", thread["id"], f"claimed_by {claim}")
+            thread["needs_me"] = True
+            thread["why"].append({
+                "reason": "claimed in_progress with no live session (stranded?)",
+                "receipt": rid,
+            })
+
+    # -- pins and snoozes from the store; snooze-until-changed self-clears
+    pins = state.get("pins", {})
+    snoozes = state.get("snoozes", {})
+    cleared: list[str] = []
+    for thread in threads.values():
+        fingerprint = thread_fingerprint(thread)
+        thread["fingerprint"] = fingerprint
+        if thread["id"] in pins:
+            thread["pinned"] = True
+        snooze = snoozes.get(thread["id"])
+        if snooze:
+            until = parse_iso(snooze.get("until") or "")
+            if snooze.get("until_changed"):
+                if snooze.get("fingerprint") == fingerprint:
+                    thread["snoozed"] = True
+                else:
+                    cleared.append(thread["id"])
+            elif until and until > now_utc():
+                thread["snoozed"] = True
+            else:
+                cleared.append(thread["id"])
+    for tid in cleared:
+        snoozes.pop(tid, None)
+    state["snoozes"] = snoozes
+
+    return list(threads.values())
+
+
+def thread_fingerprint(thread: dict[str, Any]) -> str:
+    material = json.dumps(
+        {
+            "id": thread["id"],
+            "title": thread.get("title"),
+            "updated_at": thread.get("updated_at"),
+            "manna_status": (thread.get("manna") or {}).get("status"),
+            "pr_state": (thread.get("pr") or {}).get("state"),
+            "last_commit": (thread.get("last_commit") or {}).get("hash"),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Ranking — heuristic scoring plus a continuous journal shift. The mode is
+# reported honestly: "learned" only when observed behavior actually moved a
+# score; otherwise "heuristic".
+# ---------------------------------------------------------------------------
+
+def rank_threads(threads: list[dict[str, Any]], journal: list[dict[str, Any]]) -> dict[str, Any]:
+    by_kind: dict[str, dict[str, int]] = {}
+    for entry in journal:
+        kind = entry.get("kind") or thread_kind_of(entry.get("thread", ""))
+        counts = by_kind.setdefault(kind, {"acted": 0, "ignored": 0, "snoozed": 0, "total": 0})
+        action = entry.get("action")
+        if action in counts:
+            counts[action] += 1
+        counts["total"] += 1
+
+    learned = False
+    now = now_utc()
+    for thread in threads:
+        score = 0.0
+        reasons: list[str] = []
+        if thread["needs_me"]:
+            score += RANK_NEEDS_ME
+            reasons.append(f"needs you: {thread['why'][0]['reason']} (+{RANK_NEEDS_ME})")
+        if thread["pinned"]:
+            score += RANK_PINNED
+            reasons.append(f"pinned (+{RANK_PINNED})")
+        stranded = any("stranded" in w["reason"] for w in thread["why"])
+        if stranded:
+            score += RANK_STRANDED
+            reasons.append(f"stranded claim (+{RANK_STRANDED})")
+        if thread.get("claimable"):
+            score += RANK_CLAIMABLE
+            reasons.append(f"claimable (+{RANK_CLAIMABLE})")
+        updated = parse_iso(thread.get("updated_at") or "")
+        if updated:
+            age_hours = max(0.0, (now - updated).total_seconds() / 3600.0)
+            recency = max(0.0, 1.0 - age_hours / RECENCY_WINDOW_HOURS)
+            if recency > 0:
+                score += recency
+                reasons.append(f"updated {age_hours:.0f}h ago (+{recency:.2f})")
+        counts = by_kind.get(thread["kind"])
+        if counts and counts["total"]:
+            shift = JOURNAL_MAX_SHIFT * (
+                counts["acted"] - counts["ignored"] - counts["snoozed"]
+            ) / counts["total"]
+            if shift:
+                learned = True
+                score += shift
+                reasons.append(
+                    f"journal: {counts['acted']} acted / {counts['ignored']} ignored"
+                    f" / {counts['snoozed']} snoozed on {thread['kind']} threads ({shift:+.2f})"
+                )
+        if thread["snoozed"]:
+            reasons.append("snoozed: held out of the needs-you ordering")
+        thread["rank"] = {"score": round(score, 3), "reasons": reasons}
+
+    threads.sort(key=lambda t: (t["snoozed"], -t["rank"]["score"], t["id"]))
+    return {
+        "mode": "learned" if learned else "heuristic",
+        "journal_observations": len(journal),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Delta — what changed since the caller's last look.
+# ---------------------------------------------------------------------------
+
+def compute_delta(
+    threads: list[dict[str, Any]],
+    since_arg: str | None,
+    state: dict[str, Any],
+    caller_key: str,
+) -> dict[str, Any]:
+    if since_arg:
+        mode = "explicit"
+        since = parse_iso(since_arg)
+    else:
+        stored = (state.get("callers", {}).get(caller_key) or {}).get("last_brief_at")
+        since = parse_iso(stored or "")
+        mode = "read_state" if since else "first_look"
+    changed: list[str] = []
+    if since:
+        for thread in threads:
+            updated = parse_iso(thread.get("updated_at") or "")
+            if updated and updated > since:
+                changed.append(thread["id"])
+    else:
+        changed = [t["id"] for t in threads]
+    return {
+        "mode": mode,
+        "since": iso(since) if since else None,
+        "thread_ids": changed,
+        "count": len(changed),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Suggestions — reconcile desyncs as one-tap proposals. Commands are data;
+# nothing here executes anything.
+# ---------------------------------------------------------------------------
+
+BOARD_DIR_NAME = ".manna"
+
+
+def _board_only_landing(evidence: str, git_source: dict[str, Any]) -> bool:
+    """True only on positive proof that the 'landing' was board bookkeeping.
+
+    A `Manna:` trailer proves a commit REFERENCED the item, not that its work
+    landed — a board-staging chore touches only .manna/ (consumer feedback on
+    mn-f79edc, 2026-08-11; same trailer≠landed class the holy-ghostty board
+    audit flagged). Downgrade only when every evidence commit resolves in the
+    focused repo's log AND every file across them sits under .manna/; an
+    unresolved commit or a missing file list stays unknown, and unknown keeps
+    reconcile's own claim.
+    """
+    if git_source.get("status") != "ok":
+        return False
+    commits = (git_source.get("data") or {}).get("commits", [])
+    prefixes = re.findall(r"\b[0-9a-f]{7,40}\b", evidence or "")
+    if not prefixes:
+        return False
+    matched: list[dict[str, Any]] = []
+    for prefix in prefixes:
+        found = next((c for c in commits if c.get("hash", "").startswith(prefix)), None)
+        if found is None or not found.get("files"):
+            return False
+        matched.append(found)
+    return all(
+        path.split("/", 1)[0] == BOARD_DIR_NAME
+        for commit in matched
+        for path in commit["files"]
+    )
+
+
+def build_suggestions(
+    sources: dict[str, dict[str, Any]], receipts: ReceiptBook
+) -> list[dict[str, Any]]:
+    reconcile = sources["reconcile"]
+    findings = (reconcile.get("data") or {}).get("findings", []) if reconcile["status"] == "ok" else []
+    suggestions: list[dict[str, Any]] = []
+    for index, finding in enumerate(findings, start=1):
+        kind = finding.get("kind", "unknown")
+        issue_id = finding.get("issue_id", "")
+        rid = receipts.add(
+            "reconcile", f"{kind}:{issue_id or index}",
+            finding.get("evidence", finding.get("detail", "")),
+        )
+        # issue_id flows into a command a human will fire from the panel, and
+        # reconcile findings derive from board text and commit messages —
+        # attacker-influenced in a shared repo. Anything not shaped exactly
+        # like an mn-id gets no command at all, and says why.
+        if issue_id and re.fullmatch(r"mn-[0-9a-f]{6}", issue_id) is None:
+            suggestions.append({
+                "id": f"s{index}",
+                "kind": kind,
+                "issue_id": None,
+                "label": f"reconcile finding '{kind}' carries a malformed issue id; inspect the board by hand",
+                "command": None,
+                "argv": None,
+                "receipts": [rid],
+            })
+            continue
+        if kind == "landed_open" and issue_id:
+            if _board_only_landing(finding.get("evidence", ""), sources["git"]):
+                label = (
+                    f"{issue_id} looks landed, but its trailer commits touch only "
+                    f"{BOARD_DIR_NAME}/ (board staging, not work); inspect before closing"
+                )
+                argv = ["agent-do", "manna", "show", issue_id]
+            else:
+                label = f"Close {issue_id} — commits carrying its trailer already landed"
+                argv = ["agent-do", "manna", "done", issue_id]
+        elif kind == "stale_dream" and issue_id:
+            label = f"Convert or close stale dream {issue_id}"
+            argv = ["agent-do", "manna", "update", issue_id, "--type", "item"]
+        elif issue_id:
+            label = finding.get("proposed_fix") or finding.get("detail") or kind
+            argv = ["agent-do", "manna", "show", issue_id]
+        else:
+            label = finding.get("proposed_fix") or finding.get("detail") or kind
+            argv = None
+        suggestions.append({
+            "id": f"s{index}",
+            "kind": kind,
+            "issue_id": issue_id or None,
+            "label": label,
+            # command is display text for humans; argv is what a consumer
+            # should execute (execv-style, never through a shell).
+            "command": " ".join(argv) if argv else None,
+            "argv": argv,
+            "receipts": [rid],
+        })
+    return suggestions
+
+
+# ---------------------------------------------------------------------------
+# The paragraph — deterministic sentence always available; the model voice
+# replaces it only when its every citation checks out.
+# ---------------------------------------------------------------------------
+
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def deterministic_paragraph(
+    threads: list[dict[str, Any]],
+    delta: dict[str, Any],
+    suggestions: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    source_total: int,
+) -> dict[str, Any]:
+    """Human prose, not machine-speak (consumer round 3): counts in words,
+    times as relative phrases, degradation as plain consequence."""
+    need = [t for t in threads if t["needs_me"] and not t["snoozed"]]
+    claimable = [t for t in threads if t.get("claimable") and not t["snoozed"]]
+    cited: list[str] = []
+    for thread in need + claimable:
+        cited.extend(thread["receipts"][:1])
+    impaired = sorted({a["source"] for a in annotations if a.get("kind") == "source"})
+    sentences: list[str] = []
+    if not need and not suggestions:
+        # The covenant's core case (round 2, finding 1): degraded is not
+        # empty. A clean bill may only be issued by healthy sources; under
+        # impairment the paragraph says what it cannot see.
+        if impaired:
+            count = len(impaired)
+            verb = "is" if count == 1 else "are"
+            sentences.append(
+                f"{count_word(count).capitalize()} of {count_word(source_total)} sources "
+                f"{verb} unreadable — no verdict on what needs you."
+            )
+        else:
+            sentences.append("Nothing needs you.")
+    else:
+        if need:
+            kinds: dict[str, int] = {}
+            for thread in need:
+                kinds[thread["kind"]] = kinds.get(thread["kind"], 0) + 1
+            breakdown = _join_names([
+                count_phrase(count, *KIND_HUMAN.get(kind, KIND_HUMAN["other"]))
+                for kind, count in sorted(kinds.items())
+            ])
+            lead = count_phrase(len(need), "thread").capitalize()
+            verb = "needs" if len(need) == 1 else "need"
+            sentences.append(f"{lead} {verb} you — {breakdown}.")
+        if suggestions:
+            count = len(suggestions)
+            verb = "is" if count == 1 else "are"
+            sentences.append(f"{count_phrase(count, 'one-tap suggestion').capitalize()} {verb} waiting.")
+    if claimable:
+        count = len(claimable)
+        verb = "sits" if count == 1 else "sit"
+        sentences.append(f"{count_phrase(count, 'item').capitalize()} {verb} claimable for any lane.")
+    if delta["mode"] == "first_look":
+        sentences.append("This is a first look, so everything counts as new.")
+    elif delta["count"]:
+        since = parse_iso(delta.get("since") or "")
+        when = relative_phrase(since, now_utc()) if since else "since your last look"
+        sentences.append(f"{count_phrase(delta['count'], 'thread').capitalize()} changed {when}.")
+    degraded = sorted({
+        SOURCE_HUMAN.get(a["source"], a["source"])
+        for a in annotations
+        if a.get("kind") == "source" and a.get("status") == "degraded"
+    })
+    missing = sorted({
+        SOURCE_HUMAN.get(a["source"], a["source"])
+        for a in annotations
+        if a.get("kind") == "source" and a.get("status") == "absent"
+    })
+    if degraded:
+        verb = "is" if len(degraded) == 1 else "are"
+        sentence = f"{_join_names(degraded)} {verb} unreadable right now."
+        sentences.append(sentence[0].upper() + sentence[1:])
+    if missing:
+        verb = "is" if len(missing) == 1 else "are"
+        sentence = f"{_join_names(missing)} {verb} missing here."
+        sentences.append(sentence[0].upper() + sentence[1:])
+    return {
+        "text": " ".join(sentences),
+        "mode": "deterministic",
+        "model": None,
+        "receipts": sorted(set(cited)),
+    }
+
+
+def _voice_unavailable_reason() -> str:
+    """Say exactly why the voice is off and what would turn it on — a silent
+    fallback inside a subprocess cost the consumer a diagnosis round."""
+    flag = (os.environ.get("AGENT_BRIEF_AI") or "").strip().lower()
+    if flag in {"0", "false", "no", "off", "never", "disabled"}:
+        return "voice disabled by AGENT_BRIEF_AI=off"
+    details: list[str] = []
+    for sdk_name, key_name in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY")):
+        try:
+            __import__(sdk_name)
+            sdk_present = True
+        except Exception:
+            sdk_present = False
+        key_present = bool(os.environ.get(key_name))
+        if sdk_present and key_present:
+            return ""
+        if sdk_present:
+            details.append(f"{sdk_name} SDK present but {key_name} is unset in this process environment")
+        elif key_present:
+            details.append(f"{key_name} is set but the {sdk_name} SDK is not importable here")
+        else:
+            details.append(f"{sdk_name} SDK not importable and {key_name} unset")
+    return (
+        "voice skipped: " + "; ".join(details) + ". Voice needs one provider key in the calling "
+        "process's environment — export it there, or store it once with "
+        "`agent-do creds store ANTHROPIC_API_KEY --stdin` and invoke through `agent-do brief` "
+        "so the dispatcher injects the declared credential."
+    )
+
+
+def model_paragraph(
+    threads: list[dict[str, Any]],
+    delta: dict[str, Any],
+    suggestions: list[dict[str, Any]],
+    receipts: ReceiptBook,
+    annotations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return a model-voiced paragraph, or None (with an annotation) on any failure."""
+    try:
+        from ai_router import ai_max_tokens, ai_requested, llm_call
+    except Exception as exc:
+        annotations.append({"kind": "voice", "reason": f"model adapter unavailable: {exc}"})
+        return None
+    if not ai_requested("AGENT_BRIEF_AI"):
+        annotations.append({
+            "kind": "voice",
+            "reason": _voice_unavailable_reason() or "no model credential configured; deterministic voice",
+        })
+        return None
+    facts = {
+        "threads": [
+            {
+                "id": t["id"],
+                "title": t["title"],
+                "needs_me": t["needs_me"],
+                "claimable": t.get("claimable", False),
+                "why": [w["reason"] for w in t["why"]],
+                "receipts": t["receipts"],
+                "rank_reasons": t["rank"]["reasons"],
+                "snoozed": t["snoozed"],
+            }
+            for t in threads
+        ],
+        "delta": delta,
+        "suggestions": [
+            {"label": s["label"], "receipts": s["receipts"]} for s in suggestions
+        ],
+        "impaired_sources": sorted({
+            a["source"] for a in annotations if a.get("kind") == "source"
+        }),
+        "receipts": receipts.entries,
+    }
+    system = (
+        "You brief a busy engineer on their estate. Write ONE paragraph, at most "
+        "120 words, plain and direct. Every sentence must be supported by the "
+        "structured facts provided and cite the receipt ids it rests on in "
+        "square brackets, e.g. [r3]. Use ONLY receipt ids that appear in the "
+        "facts. No numbers that are not in the facts. If nothing needs the "
+        "reader AND no source is impaired, say so plainly. If sources are "
+        "impaired, never issue a clean bill — say what could not be read."
+    )
+    try:
+        response = llm_call(
+            "fast",
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(facts, sort_keys=True)},
+            ],
+            max_tokens=ai_max_tokens(),
+        )
+    except Exception as exc:
+        annotations.append({"kind": "voice", "reason": f"model call failed: {exc}"})
+        return None
+    text = (response.text or "").strip()
+    if not text:
+        annotations.append({"kind": "voice", "reason": "model returned empty text"})
+        return None
+    cited = set(re.findall(r"\br\d+\b", text))
+    unknown = cited - set(receipts.entries)
+    if unknown:
+        annotations.append({
+            "kind": "voice",
+            "reason": f"model cited receipts the engine never issued ({', '.join(sorted(unknown))}); rejected",
+        })
+        return None
+    return {
+        "text": text,
+        "mode": "model",
+        "model": f"{response.provider}/{response.model}",
+        "receipts": sorted(cited),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Assembly — the composite contract.
+# ---------------------------------------------------------------------------
+
+def _fail_loud(message: str) -> None:
+    """An explicit caller value that cannot be honored fails with exit 2 —
+    silently falling back to cwd masked a slug-vs-path bug for a full
+    consumer round (mn-f79edc round 2, finding 3)."""
+    print(json.dumps({"success": False, "error": message}))
+    raise SystemExit(2)
+
+
+def resolve_repo(value: str | None) -> Path:
+    if value:
+        candidate = Path(value).expanduser().resolve()
+        if not candidate.exists():
+            _fail_loud(
+                f"--focused-repo does not exist: {value} — pass the repo root as a "
+                f"filesystem PATH (absolute, or relative to the calling cwd), not a slug"
+            )
+    else:
+        candidate = Path.cwd()
+    probe = candidate
+    while probe != probe.parent:
+        if (probe / ".git").exists():
+            return probe
+        probe = probe.parent
+    return candidate
+
+
+def assemble(
+    repo: Path,
+    board_dir: Path,
+    since: str | None,
+    timeout: float | None,
+    use_model: bool,
+    peek: bool,
+    board_tried: list[str] | None = None,
+) -> dict[str, Any]:
+    receipts = ReceiptBook()
+    state = load_state()
+    journal = journal_read()
+    local_budget = timeout if timeout is not None else float(READ_PROBE_TIMEOUT_SECONDS)
+    sources = gather_all(repo, board_dir, local_budget, github_budget(timeout, state), board_tried)
+
+    calibrated = False
+    duration = sources["github"].pop("_duration_seconds", None)
+    if duration is not None:
+        state.setdefault("calibration", {})["github"] = {
+            "last_ok_seconds": duration,
+            "at": iso(now_utc()),
+        }
+        calibrated = True
+
+    annotations: list[dict[str, Any]] = []
+    for name, source in sources.items():
+        if source["status"] != "ok":
+            annotations.append({
+                "kind": "source",
+                "source": name,
+                "status": source["status"],
+                "reason": source.get("reason", ""),
+            })
+
+    threads = build_threads(sources, receipts, state)
+    ranking = rank_threads(threads, journal)
+    caller_key = str(repo)
+    delta = compute_delta(threads, since, state, caller_key)
+    suggestions = build_suggestions(sources, receipts)
+
+    paragraph = None
+    if use_model:
+        paragraph = model_paragraph(threads, delta, suggestions, receipts, annotations)
+    else:
+        annotations.append({"kind": "voice", "reason": "model voice disabled by caller (--no-model)"})
+    if paragraph is None:
+        paragraph = deterministic_paragraph(threads, delta, suggestions, annotations, len(sources))
+
+    generated = iso(now_utc())
+    if not peek:
+        state.setdefault("callers", {})[caller_key] = {"last_brief_at": generated}
+    if not peek or calibrated:
+        save_state(state)
+
+    return {
+        "contract": CONTRACT_VERSION,
+        "generated_at": generated,
+        "caller": {
+            "focused_repo": str(repo),
+            "focused_board": str(board_dir),
+            "since": since,
+            "peek": peek,
+        },
+        "paragraph": paragraph,
+        "threads": threads,
+        "threads_total": len(threads),
+        "delta": delta,
+        "suggestions": suggestions,
+        "suggestions_total": len(suggestions),
+        "ranking": ranking,
+        "read_state": {
+            "last_brief_at": (state.get("callers", {}).get(caller_key) or {}).get("last_brief_at"),
+            "pins": len(state.get("pins", {})),
+            "snoozes": len(state.get("snoozes", {})),
+        },
+        "annotations": annotations,
+        "receipts": receipts.entries,
+        "sources": {
+            name: {k: v for k, v in source.items() if k != "data"}
+            for name, source in sources.items()
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# ask — a question over the estate, receipts attached to every hit.
+# ---------------------------------------------------------------------------
+
+def gather_ask(
+    repo: Path,
+    board_dir: Path,
+    question: str,
+    timeout: float | None,
+    board_tried: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], ReceiptBook, list[dict[str, Any]]]:
+    receipts = ReceiptBook()
+    annotations: list[dict[str, Any]] = []
+    hits: list[dict[str, Any]] = []
+    timeout = timeout if timeout is not None else float(READ_PROBE_TIMEOUT_SECONDS)
+
+    sessions_bin = ROOT / "tools" / "agent-sessions"
+    source = _from_fixture("ask_sessions") or _run_json(
+        [str(sessions_bin), "search", question, "--json"], None, timeout
+    )
+    if source["status"] == "ok":
+        rows = source["data"].get("result") or []
+        if isinstance(rows, dict):
+            rows = rows.get("results", [])
+        for row in rows:
+            rid = receipts.add("session", str(row.get("id", "")), str(row.get("first_prompt", ""))[:160])
+            hits.append({"source": "sessions", "summary": str(row.get("first_prompt", ""))[:160], "receipt": rid})
+    else:
+        annotations.append({"kind": "source", "source": "sessions", "status": source["status"], "reason": source.get("reason", "")})
+
+    git_src = _from_fixture("ask_git")
+    if git_src is None:
+        rc, out, err = _run(
+            ["git", "-C", str(repo), "log", "--grep", question, "-i", f"--format={GIT_LOG_FORMAT}"],
+            None, timeout,
+        )
+        if rc == 0:
+            for record in out.split("\x1e"):
+                parts = record.strip("\n").split("\x1f")
+                if len(parts) >= 3 and parts[0].strip():
+                    rid = receipts.add("commit", parts[0].strip(), parts[2].strip())
+                    hits.append({"source": "git", "summary": parts[2].strip(), "receipt": rid})
+        else:
+            annotations.append({"kind": "source", "source": "git", "status": "degraded", "reason": err.strip() or f"git exit {rc}"})
+    elif git_src["status"] == "ok":
+        for commit in git_src["data"].get("commits", []):
+            rid = receipts.add("commit", commit.get("hash", ""), commit.get("subject", ""))
+            hits.append({"source": "git", "summary": commit.get("subject", ""), "receipt": rid})
+
+    manna_src = gather_manna(board_dir, board_tried)
+    if manna_src["status"] != "absent" and manna_src.get("data"):
+        needle = question.lower()
+        for issue in manna_src["data"].get("issues", []):
+            haystack = f"{issue.get('title', '')} {issue.get('description', '')}".lower()
+            if needle in haystack:
+                rid = receipts.add("mn", issue.get("id", ""), issue.get("title", ""))
+                hits.append({"source": "manna", "summary": issue.get("title", ""), "receipt": rid})
+    else:
+        annotations.append({"kind": "source", "source": "manna", "status": manna_src["status"], "reason": manna_src.get("reason", "")})
+
+    zpc_bin = ROOT / "tools" / "agent-zpc" / "agent-zpc"
+    zpc_src = _from_fixture("ask_zpc") or _run_json(
+        [str(zpc_bin), "query", "--text", question, "--json"], str(repo), timeout
+    )
+    if zpc_src["status"] == "ok":
+        result = zpc_src["data"].get("result") or {}
+        for row in result.get("results", []):
+            ref = row.get("id", "")
+            summary = row.get("takeaway") or row.get("decision") or row.get("problem") or ref
+            rid = receipts.add("zpc", ref, str(summary)[:160])
+            hits.append({"source": "zpc", "summary": str(summary)[:160], "receipt": rid})
+    else:
+        annotations.append({"kind": "source", "source": "zpc", "status": zpc_src["status"], "reason": zpc_src.get("reason", "")})
+
+    return hits, receipts, annotations
+
+
+def run_ask(args: argparse.Namespace) -> int:
+    repo = resolve_repo(args.focused_repo)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    hits, receipts, annotations = gather_ask(repo, board_dir, args.question, args.timeout, board_tried)
+
+    answer: dict[str, Any] | None = None
+    if not args.no_model:
+        try:
+            from ai_router import ai_max_tokens, ai_requested, llm_call
+
+            if ai_requested("AGENT_BRIEF_AI"):
+                system = (
+                    "Answer the question using ONLY the evidence rows provided. "
+                    "Cite the receipt id of every claim in square brackets, e.g. [r2]. "
+                    "Use only receipt ids present in the evidence. If the evidence "
+                    "does not answer the question, say what is unknown."
+                )
+                payload = {"question": args.question, "evidence": hits, "receipts": receipts.entries}
+                response = llm_call(
+                    "fast",
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(payload, sort_keys=True)},
+                    ],
+                    max_tokens=ai_max_tokens(),
+                )
+                text = (response.text or "").strip()
+                cited = set(re.findall(r"\br\d+\b", text))
+                unknown = cited - set(receipts.entries)
+                if text and not unknown:
+                    answer = {
+                        "text": text,
+                        "mode": "model",
+                        "model": f"{response.provider}/{response.model}",
+                        "receipts": sorted(cited),
+                    }
+                elif unknown:
+                    annotations.append({
+                        "kind": "voice",
+                        "reason": f"model cited unissued receipts ({', '.join(sorted(unknown))}); rejected",
+                    })
+            else:
+                annotations.append({
+                    "kind": "voice",
+                    "reason": _voice_unavailable_reason() or "no model credential configured; deterministic answer",
+                })
+        except Exception as exc:
+            annotations.append({"kind": "voice", "reason": f"model call failed: {exc}"})
+    if answer is None:
+        by_source: dict[str, int] = {}
+        for hit in hits:
+            by_source[hit["source"]] = by_source.get(hit["source"], 0) + 1
+        breakdown = ", ".join(f"{count} from {name}" for name, count in sorted(by_source.items())) or "none"
+        answer = {
+            "text": f"{len(hits)} matching record(s) across the estate ({breakdown}). "
+                    "Each hit carries its receipt; no model voice was applied.",
+            "mode": "deterministic",
+            "model": None,
+            "receipts": [h["receipt"] for h in hits],
+        }
+
+    result = {
+        "contract": CONTRACT_VERSION,
+        "question": args.question,
+        "answer": answer,
+        "hits": hits,
+        "hits_total": len(hits),
+        "annotations": annotations,
+        "receipts": receipts.entries,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(answer["text"])
+        for hit in hits:
+            print(f"  [{hit['receipt']}] {hit['source']}: {hit['summary']}")
+        for note in annotations:
+            print(f"  ! {note.get('source', note['kind'])}: {note.get('reason', '')}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def run_holy(args: argparse.Namespace) -> int:
+    repo = resolve_repo(args.focused_repo)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek, board_tried)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def run_threads(args: argparse.Namespace) -> int:
+    repo = resolve_repo(args.focused_repo)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, use_model=False, peek=True, board_tried=board_tried)
+    # A threads view carries no paragraph, so a voice annotation would be
+    # noise about a capability nobody asked for here.
+    annotations = [a for a in payload["annotations"] if a.get("kind") != "voice"]
+    if args.json:
+        subset = {
+            "contract": payload["contract"],
+            "generated_at": payload["generated_at"],
+            "threads": payload["threads"],
+            "threads_total": payload["threads_total"],
+            "ranking": payload["ranking"],
+            "annotations": annotations,
+            "receipts": payload["receipts"],
+            "sources": payload["sources"],
+        }
+        print(json.dumps(subset, indent=2, sort_keys=True))
+        return 0
+    print(f"{payload['threads_total']} thread(s); ranking mode {payload['ranking']['mode']}")
+    for thread in payload["threads"]:
+        marks = "".join([
+            "!" if thread["needs_me"] else " ",
+            "*" if thread["pinned"] else " ",
+            "z" if thread["snoozed"] else " ",
+        ])
+        joined = "+".join(
+            part for part, present in (
+                ("mn", thread["manna"]), ("pr", thread["pr"]),
+                ("live", thread["session"]), ("commit", thread["last_commit"]),
+            ) if present
+        ) or "-"
+        print(f"  {marks} [{thread['rank']['score']:>6.2f}] {thread['id']}  ({joined})  {thread['title']}")
+        for why in thread["why"]:
+            print(f"           - {why['reason']} [{why['receipt']}]")
+    for note in annotations:
+        print(f"  ! {note.get('source', note.get('kind'))}: {note.get('reason', '')}")
+    return 0
+
+
+def run_now(args: argparse.Namespace) -> int:
+    repo = resolve_repo(args.focused_repo)
+    board_dir, board_tried = resolve_board(args.focused_board, repo)
+    payload = assemble(repo, board_dir, args.since, args.timeout, not args.no_model, args.peek, board_tried)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    paragraph = payload["paragraph"]
+    print(paragraph["text"])
+    voice = paragraph["mode"] + (f" ({paragraph['model']})" if paragraph.get("model") else "")
+    print(f"\n  voice: {voice}")
+    need = [t for t in payload["threads"] if t["needs_me"] and not t["snoozed"]]
+    for thread in need:
+        print(f"  ! {thread['id']}: {thread['title']}  [{', '.join(thread['receipts'])}]")
+    for suggestion in payload["suggestions"]:
+        tap = f"  $ {suggestion['command']}" if suggestion.get("command") else ""
+        print(f"  > {suggestion['label']}{tap}")
+    for note in payload["annotations"]:
+        print(f"  ! {note.get('source', note.get('kind'))}: {note.get('reason', '')}")
+    return 0
+
+
+def run_pin(args: argparse.Namespace, pinned: bool) -> int:
+    state = load_state()
+    if pinned:
+        state["pins"][args.thread] = {"at": iso(now_utc())}
+        journal_append({"ts": iso(now_utc()), "thread": args.thread, "kind": thread_kind_of(args.thread), "action": "pinned"})
+    else:
+        if args.thread not in state["pins"]:
+            print(json.dumps({"success": False, "error": f"{args.thread} is not pinned"}))
+            return 1
+        state["pins"].pop(args.thread, None)
+    save_state(state)
+    print(json.dumps({"success": True, "thread": args.thread, "pinned": pinned}))
+    return 0
+
+
+def run_snooze(args: argparse.Namespace) -> int:
+    if not args.until and not args.until_changed:
+        print(json.dumps({
+            "success": False,
+            "error": "snooze needs --until <iso8601> or --until-changed; an unbounded snooze is a hidden delete",
+        }))
+        return 2
+    entry: dict[str, Any] = {"at": iso(now_utc())}
+    if args.until:
+        until = parse_iso(args.until)
+        if until is None:
+            print(json.dumps({"success": False, "error": f"unparseable --until: {args.until}"}))
+            return 2
+        entry["until"] = iso(until)
+    if args.until_changed:
+        entry["until_changed"] = True
+        if args.fingerprint:
+            entry["fingerprint"] = args.fingerprint
+        else:
+            repo = resolve_repo(args.focused_repo)
+            board_dir, board_tried = resolve_board(args.focused_board, repo)
+            payload = assemble(repo, board_dir, None, args.timeout, use_model=False, peek=True)
+            match = next((t for t in payload["threads"] if t["id"] == args.thread), None)
+            if match is None:
+                print(json.dumps({
+                    "success": False,
+                    "error": f"{args.thread} is not a current thread; cannot fingerprint it for until-changed",
+                }))
+                return 2
+            entry["fingerprint"] = match["fingerprint"]
+    state = load_state()
+    state["snoozes"][args.thread] = entry
+    save_state(state)
+    journal_append({"ts": iso(now_utc()), "thread": args.thread, "kind": thread_kind_of(args.thread), "action": "snoozed"})
+    print(json.dumps({"success": True, "thread": args.thread, "snooze": entry}))
+    return 0
+
+
+def run_unsnooze(args: argparse.Namespace) -> int:
+    state = load_state()
+    if args.thread not in state["snoozes"]:
+        print(json.dumps({"success": False, "error": f"{args.thread} is not snoozed"}))
+        return 1
+    state["snoozes"].pop(args.thread)
+    save_state(state)
+    print(json.dumps({"success": True, "thread": args.thread, "snoozed": False}))
+    return 0
+
+
+OBSERVE_ACTIONS = ("acted", "ignored", "snoozed", "pinned", "opened")
+
+
+def run_observe(args: argparse.Namespace) -> int:
+    if args.action not in OBSERVE_ACTIONS:
+        print(json.dumps({
+            "success": False,
+            "error": f"unknown action '{args.action}'; one of: {', '.join(OBSERVE_ACTIONS)}",
+        }))
+        return 2
+    entry = {
+        "ts": iso(now_utc()),
+        "thread": args.thread,
+        "kind": thread_kind_of(args.thread),
+        "action": args.action,
+    }
+    if args.note:
+        entry["note"] = args.note
+    journal_append(entry)
+    print(json.dumps({"success": True, "observed": entry}))
+    return 0
+
+
+def run_state(args: argparse.Namespace) -> int:
+    state = load_state()
+    journal = journal_read()
+    payload = {
+        "success": True,
+        "store": str(BRIEF_DIR),
+        "callers": state.get("callers", {}),
+        "pins": state.get("pins", {}),
+        "snoozes": state.get("snoozes", {}),
+        "calibration": state.get("calibration", {}),
+        "journal_observations": len(journal),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+HELP_EPILOG = """
+Commands:
+  now       Human-readable estate brief (model voice when configured, honest
+            deterministic fallback otherwise)
+  threads   Joined thread objects: gh PR <-> manna item <-> live session <->
+            last commit <-> claim state
+  ask       Answer a question over the estate (sessions, git, board, zpc);
+            every claim carries a receipt id
+  holy      The full composite contract as JSON (versioned; consumers fail
+            closed on drift)
+  pin       Pin a thread (rank boost, survives restarts)
+  unpin     Remove a pin
+  snooze    Snooze a thread (--until <iso8601> or --until-changed)
+  unsnooze  Clear a snooze
+  observe   Record observed behavior on a thread (acted|ignored|snoozed|
+            pinned|opened) — feeds the ranker
+  state     Show the read-state store and journal size
+
+Context flags (now/threads/ask/holy/snooze):
+  --focused-repo <path>    Repo checkout the caller has focused (default: cwd)
+  --focused-board <path>   .manna directory (default: <repo>/.manna)
+  --since <iso8601>        Delta baseline; otherwise read-state, else first look
+  --timeout <seconds>      Per-source budget for every source. Default: local
+                           sources get the shared read-probe budget; the GitHub
+                           sweep self-calibrates to twice its last observed
+                           duration (bootstrap: twice the probe budget). One
+                           successful run with an explicit --timeout teaches
+                           the default.
+  --no-model               Skip the model voice even when configured
+  --peek                   Do not advance read-state
+
+Fixtures: set AGENT_BRIEF_FIXTURES=<dir> to read {github,manna,reconcile,
+coord,sessions,git}.json instead of live sources (origin is reported).
+"""
+
+
+def add_context_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--focused-repo", help="path to the focused repo checkout (default: cwd)")
+    parser.add_argument("--focused-board", help="path to the .manna board directory (default: <repo>/.manna)")
+    parser.add_argument("--since", help="ISO8601 delta baseline")
+    parser.add_argument(
+        "--timeout", type=float, default=None,
+        help="per-source budget in seconds for every source (default: the shared "
+             "read-probe budget locally; the GitHub sweep self-calibrates from "
+             "its last observed duration, bootstrapping at twice the probe budget)",
+    )
+    parser.add_argument("--no-model", action="store_true", help="skip the model voice")
+    parser.add_argument("--peek", action="store_true", help="do not advance read-state")
+    parser.add_argument("--json", action="store_true", help="structured JSON output")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="agent-brief",
+        description="Estate briefing engine — ranked threads, delta, suggestions, receipts.",
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_now = sub.add_parser("now", help="human-readable estate brief")
+    add_context_flags(p_now)
+
+    p_threads = sub.add_parser("threads", help="joined thread objects")
+    add_context_flags(p_threads)
+
+    p_ask = sub.add_parser("ask", help="question over the estate")
+    p_ask.add_argument("question")
+    add_context_flags(p_ask)
+
+    p_holy = sub.add_parser("holy", help="composite contract JSON for the Holy panel")
+    add_context_flags(p_holy)
+
+    p_pin = sub.add_parser("pin", help="pin a thread")
+    p_pin.add_argument("thread")
+    p_unpin = sub.add_parser("unpin", help="unpin a thread")
+    p_unpin.add_argument("thread")
+
+    p_snooze = sub.add_parser("snooze", help="snooze a thread")
+    p_snooze.add_argument("thread")
+    p_snooze.add_argument("--until", help="ISO8601 timestamp the snooze expires at")
+    p_snooze.add_argument("--until-changed", action="store_true", help="snooze until the thread changes")
+    p_snooze.add_argument("--fingerprint", help="explicit fingerprint (else computed live)")
+    add_context_flags(p_snooze)
+
+    p_unsnooze = sub.add_parser("unsnooze", help="clear a snooze")
+    p_unsnooze.add_argument("thread")
+
+    p_observe = sub.add_parser("observe", help="record observed behavior on a thread")
+    p_observe.add_argument("thread")
+    p_observe.add_argument("action", help="acted|ignored|snoozed|pinned|opened")
+    p_observe.add_argument("--note", help="optional context")
+
+    p_state = sub.add_parser("state", help="show the read-state store")
+    p_state.add_argument("--json", action="store_true", help="structured JSON output")
+
+    args = parser.parse_args(argv)
+    if not args.command:
+        parser.print_help()
+        return 0
+    try:
+        if args.command == "now":
+            return run_now(args)
+        if args.command == "threads":
+            return run_threads(args)
+        if args.command == "ask":
+            return run_ask(args)
+        if args.command == "holy":
+            return run_holy(args)
+        if args.command == "pin":
+            return run_pin(args, pinned=True)
+        if args.command == "unpin":
+            return run_pin(args, pinned=False)
+        if args.command == "snooze":
+            return run_snooze(args)
+        if args.command == "unsnooze":
+            return run_unsnooze(args)
+        if args.command == "observe":
+            return run_observe(args)
+        if args.command == "state":
+            return run_state(args)
+    except KeyboardInterrupt:
+        return 130
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
