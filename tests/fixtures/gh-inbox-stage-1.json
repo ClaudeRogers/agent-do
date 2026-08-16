@@ -1,0 +1,894 @@
+{
+  "count": 30,
+  "items": [
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": "agent-do gh pr 23",
+        "detail": "your review requested",
+        "verb": "Review",
+        "yours": true
+      },
+      "number": 23,
+      "reasons": [
+        "review_requested",
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#23",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 1,
+      "state": "open",
+      "title": "feat(agent-ci): triage verb - deterministic failure classification for failed runs",
+      "updated_at": "2026-07-29T17:04:59Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/23"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 2,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": "agent-do gh pr 15",
+        "detail": "your review requested",
+        "verb": "Review",
+        "yours": true
+      },
+      "number": 15,
+      "reasons": [
+        "review_requested",
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#15",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 1,
+      "state": "open",
+      "title": "feat: add agent-sentry \u2014 Sentry error tracking and issue management",
+      "updated_at": "2026-07-29T17:05:04Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/15"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 3,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": "agent-do gh pr 13",
+        "detail": "your review requested",
+        "verb": "Review",
+        "yours": true
+      },
+      "number": 13,
+      "reasons": [
+        "review_requested",
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#13",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 1,
+      "state": "open",
+      "title": "feat: add agent-cronitor for scheduled job and uptime monitoring",
+      "updated_at": "2026-07-29T17:04:56Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/13"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 3,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": "agent-do gh pr 11",
+        "detail": "your review requested",
+        "verb": "Review",
+        "yours": true
+      },
+      "number": 11,
+      "reasons": [
+        "review_requested",
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#11",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 1,
+      "state": "open",
+      "title": "feat: add agent-betterstack for Better Stack Uptime monitoring and incident management",
+      "updated_at": "2026-07-29T17:04:54Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/11"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 3,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": "agent-do gh merge 89",
+        "detail": "approved, checks green",
+        "verb": "Merge",
+        "yours": true
+      },
+      "number": 89,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#89",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": "APPROVED",
+      "review_requests": 0,
+      "state": "open",
+      "title": "Campaign 03: platform glue \u2014 Traction Report, global search, inbox fixes, projects parity, home/directory",
+      "updated_at": "2026-08-13T18:49:52Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/89"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 2,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 2,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/IAMthat.vision#2",
+      "repo": "ovachiever/IAMthat.vision",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "fix(security): upgrade Next.js and add CI",
+      "updated_at": "2026-07-09T21:15:57Z",
+      "url": "https://github.com/ovachiever/IAMthat.vision/pull/2"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 2,
+        "pending": 0,
+        "total": 2
+      },
+      "comments": 1,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 1,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/iamthat-vision#1",
+      "repo": "ovachiever/iamthat-vision",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(repo): publish network truth without unsafe assets",
+      "updated_at": "2026-07-09T21:20:37Z",
+      "url": "https://github.com/ovachiever/iamthat-vision/pull/1"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 1,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 1,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/dm-ds-lab#1",
+      "repo": "ovachiever/dm-ds-lab",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(eval): add IAMthat resonance harness",
+      "updated_at": "2026-07-09T21:01:28Z",
+      "url": "https://github.com/ovachiever/dm-ds-lab/pull/1"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 1,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 1,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/recognition-oracle#1",
+      "repo": "ovachiever/recognition-oracle",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(iamthat): add Recognition Oracle funnel",
+      "updated_at": "2026-07-09T20:57:48Z",
+      "url": "https://github.com/ovachiever/recognition-oracle/pull/1"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 2,
+        "pending": 0,
+        "total": 2
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [
+        "codex"
+      ],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": true
+      },
+      "number": 2,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/vms.io---codex-web-version#2",
+      "repo": "ovachiever/vms.io---codex-web-version",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "fix: update icon import for next og",
+      "updated_at": "2025-10-16T15:48:27Z",
+      "url": "https://github.com/ovachiever/vms.io---codex-web-version/pull/2"
+    },
+    {
+      "author": "ovachiever",
+      "checks": {
+        "failed": 0,
+        "passed": 2,
+        "pending": 0,
+        "total": 2
+      },
+      "comments": 1,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 1,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/youaretheSTAR.app#1",
+      "repo": "ovachiever/youaretheSTAR.app",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "Redesign and reorganize website layout and content",
+      "updated_at": "2025-10-17T15:34:28Z",
+      "url": "https://github.com/ovachiever/youaretheSTAR.app/pull/1"
+    },
+    {
+      "author": "ovachiever",
+      "checks": null,
+      "comments": 0,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "no review yet",
+        "verb": "Awaiting review",
+        "yours": false
+      },
+      "number": 21,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "Doriandarko/o1-engineer#21",
+      "repo": "Doriandarko/o1-engineer",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "Added o1-eng_OR.py for Accessing o1 Models via OpenRouter API",
+      "updated_at": "2024-10-04T13:46:12Z",
+      "url": "https://github.com/Doriandarko/o1-engineer/pull/21"
+    },
+    {
+      "author": "ovachiever",
+      "checks": null,
+      "comments": 0,
+      "draft": false,
+      "labels": [],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": true
+      },
+      "number": 1,
+      "reasons": [
+        "authored_open"
+      ],
+      "ref": "ovachiever/versova-agi#1",
+      "repo": "ovachiever/versova-agi",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "Experimental streaming",
+      "updated_at": "2024-05-11T01:37:07Z",
+      "url": "https://github.com/ovachiever/versova-agi/pull/1"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 0,
+      "draft": true,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": {
+        "command": null,
+        "detail": "still being written",
+        "verb": "Draft",
+        "yours": false
+      },
+      "number": 29,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "Versova-Intelligence-Division/vid-watcher#29",
+      "repo": "Versova-Intelligence-Division/vid-watcher",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat: add Aggregator v1 offline proposal gate",
+      "updated_at": "2026-08-13T16:37:47Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vid-watcher/pull/29"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 94,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#94",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps): bump pnpm/action-setup from 6.0.9 to 6.0.10",
+      "updated_at": "2026-08-10T22:15:12Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/94"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 93,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#93",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps): bump @ai-sdk/react from 3.0.118 to 4.0.41",
+      "updated_at": "2026-08-03T22:20:19Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/93"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 92,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#92",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps-dev): bump eslint from 9.39.4 to 9.39.5",
+      "updated_at": "2026-08-03T22:17:50Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/92"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 91,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#91",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps): bump @tanstack/react-query-devtools from 5.101.2 to 5.101.4",
+      "updated_at": "2026-08-03T22:17:18Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/91"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 90,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#90",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps): bump the react group across 1 directory with 2 updates",
+      "updated_at": "2026-08-10T22:16:55Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/90"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 3,
+        "pending": 0,
+        "total": 3
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 86,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/vms.io#86",
+      "repo": "Versova-Intelligence-Division/vms.io",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(deps): bump the radix-ui group across 1 directory with 19 updates",
+      "updated_at": "2026-08-10T22:25:27Z",
+      "url": "https://github.com/Versova-Intelligence-Division/vms.io/pull/86"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": false
+      },
+      "number": 27,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "ovachiever/agent-do#27",
+      "repo": "ovachiever/agent-do",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(gh): gate cr and sync automation",
+      "updated_at": "2026-07-23T02:32:32Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/27"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": false
+      },
+      "number": 26,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "ovachiever/agent-do#26",
+      "repo": "ovachiever/agent-do",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(gh): add raw API passthrough",
+      "updated_at": "2026-07-23T02:30:38Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/26"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 4,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 25,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "ovachiever/agent-do#25",
+      "repo": "ovachiever/agent-do",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "docs: Cursor registration in docs/INTEGRATION.md (part B of #20 split)",
+      "updated_at": "2026-07-29T17:18:02Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/25"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 0,
+        "passed": 4,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 24,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "ovachiever/agent-do#24",
+      "repo": "ovachiever/agent-do",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat: Cursor adapter hooks + install.sh --cursor (part A of #20 split)",
+      "updated_at": "2026-07-29T16:25:21Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/24"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 2,
+      "draft": false,
+      "labels": [],
+      "merge_state": "UNSTABLE",
+      "next_action": null,
+      "number": 18,
+      "reasons": [
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#18",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(agent-coderabbit): add CodeRabbit local CLI plugin",
+      "updated_at": "2026-07-23T00:57:08Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/18"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": false
+      },
+      "number": 16,
+      "reasons": [
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#16",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat: add agent-datadog \u2014 monitors, logs, metrics, incidents, dashboards, SLOs",
+      "updated_at": "2026-07-23T01:33:45Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/16"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 7,
+      "draft": false,
+      "labels": [],
+      "merge_state": "UNSTABLE",
+      "next_action": null,
+      "number": 10,
+      "reasons": [
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#10",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat: add agent-mongo plugin for MongoDB and CosmosDB",
+      "updated_at": "2026-07-23T01:24:33Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/10"
+    },
+    {
+      "author": "ClaudeRogers",
+      "checks": {
+        "failed": 0,
+        "passed": 1,
+        "pending": 0,
+        "total": 1
+      },
+      "comments": 8,
+      "draft": false,
+      "labels": [],
+      "merge_state": "DIRTY",
+      "next_action": {
+        "command": null,
+        "detail": "branch cannot merge",
+        "verb": "Resolve conflicts",
+        "yours": false
+      },
+      "number": 9,
+      "reasons": [
+        "maintainer_review_stale"
+      ],
+      "ref": "ovachiever/agent-do#9",
+      "repo": "ovachiever/agent-do",
+      "review_decision": "CHANGES_REQUESTED",
+      "review_requests": 0,
+      "state": "open",
+      "title": "feat(gh): package agent-gh with issues, releases, and PR create",
+      "updated_at": "2026-07-23T02:30:04Z",
+      "url": "https://github.com/ovachiever/agent-do/pull/9"
+    },
+    {
+      "author": "dependabot",
+      "checks": {
+        "failed": 0,
+        "passed": 13,
+        "pending": 0,
+        "total": 13
+      },
+      "comments": 1,
+      "draft": false,
+      "labels": [],
+      "merge_state": "CLEAN",
+      "next_action": null,
+      "number": 4,
+      "reasons": [
+        "maintainer_unreviewed",
+        "bot_author"
+      ],
+      "ref": "Versova-Intelligence-Division/versova-inspectV2#4",
+      "repo": "Versova-Intelligence-Division/versova-inspectV2",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "chore(wren-ai-service): bump the all group across 1 directory with 42 updates",
+      "updated_at": "2026-07-27T23:40:43Z",
+      "url": "https://github.com/Versova-Intelligence-Division/versova-inspectV2/pull/4"
+    },
+    {
+      "author": "ctyrrell-versova",
+      "checks": {
+        "failed": 1,
+        "passed": 3,
+        "pending": 0,
+        "total": 4
+      },
+      "comments": 0,
+      "draft": false,
+      "labels": [],
+      "merge_state": "UNSTABLE",
+      "next_action": null,
+      "number": 1,
+      "reasons": [
+        "maintainer_unreviewed"
+      ],
+      "ref": "Versova-Intelligence-Division/rhAIzome#1",
+      "repo": "Versova-Intelligence-Division/rhAIzome",
+      "review_decision": null,
+      "review_requests": 0,
+      "state": "open",
+      "title": "fix: enable RLS on organisms and evolution_history tables",
+      "updated_at": "2026-04-15T18:59:30Z",
+      "url": "https://github.com/Versova-Intelligence-Division/rhAIzome/pull/1"
+    }
+  ],
+  "sweep": {
+    "path": "graphql",
+    "portfolio": {
+      "patterns": 0,
+      "prs_classified": 0,
+      "repos_swept": 0,
+      "waiting_on_author": 0
+    },
+    "prs_classified": 32,
+    "repos_swept": 139,
+    "skipped_no_role": 0,
+    "stage_contract": 1,
+    "unswept": [],
+    "waiting_on_author": 3
+  },
+  "total": 38
+}

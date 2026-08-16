@@ -1,7 +1,7 @@
 //! Manna CLI - Issue tracking for AI agents.
 //!
 //! All output is YAML format for machine parsing.
-//! Exit codes: 0=success, 1=user error, 2=system error.
+//! Exit codes: 0=success, 1=user error, 2=system error or needs authorization.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,9 +10,12 @@ use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use manna_core::age::{age_of, dated};
 use manna_core::error::MannaError;
 use manna_core::id::generate_unique_id;
-use manna_core::issue::{is_default_type, Issue, IssueStatus, IssueType};
+use manna_core::issue::{
+    dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, DREAM_INERT_MARKER,
+};
 use manna_core::reconcile::{
     check_blocker_desync, check_dangling_track, check_landed_open, check_stale_dream,
     claim_command_ids, extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid,
@@ -24,6 +27,9 @@ use manna_core::store::MannaStore;
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USER_ERROR: i32 = 1;
 const EXIT_SYSTEM_ERROR: i32 = 2;
+/// A refusal awaiting a human decision, not a typo: shares the 2 the ecosystem
+/// already reads as "stop and escalate" rather than "fix your arguments".
+const EXIT_NEEDS_AUTHORIZATION: i32 = 2;
 
 #[derive(Parser)]
 #[command(name = "manna-core")]
@@ -240,6 +246,40 @@ struct ErrorResponse {
 #[derive(Serialize)]
 struct IssueData {
     issue: Issue,
+    /// How old the timestamps above are, rendered rather than stored.
+    ///
+    /// A sibling rather than a suffix on `created_at`/`updated_at`: those two
+    /// are RFC 3339 fields that `--json` consumers parse, and an age glued
+    /// inside them would break every parser to save a reader one line. The
+    /// exact timestamps stay exact, and the distance sits next to them.
+    age: IssueAge,
+}
+
+/// The two distances a reader of one issue actually asks about: how long ago
+/// it was filed, and how long since anything happened to it.
+#[derive(Serialize)]
+struct IssueAge {
+    created: String,
+    updated: String,
+}
+
+impl From<&Issue> for IssueAge {
+    fn from(issue: &Issue) -> Self {
+        IssueAge {
+            created: age_of(issue.created_at),
+            updated: age_of(issue.updated_at),
+        }
+    }
+}
+
+/// `update` result. The authorization line appears only when a type change
+/// crossed the dream boundary, because that crossing is the act that decides
+/// whether an agent may work the row.
+#[derive(Serialize)]
+struct UpdateData {
+    issue: Issue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -258,6 +298,12 @@ struct IssueSummary {
     issue_type: IssueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     track: Option<String>,
+    /// When the row last moved, and how long ago that was: `2026-07-27 (7d
+    /// ago)`. A list is where a stale row hides, so every row says its age.
+    updated: String,
+    /// Present only on dreams: the row is visible but not workable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -580,7 +626,7 @@ fn cmd_create(
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_claim(id: String) -> ! {
@@ -604,6 +650,12 @@ fn cmd_claim(id: String) -> ! {
     // Find issue
     let mut issue = find_issue(&issues, &id);
 
+    // Dreams are visible but inert: refuse before the store is ever touched,
+    // and exit 2 so an orchestrator reads "escalate", not "retry differently".
+    if issue.issue_type == IssueType::Dream {
+        output_error(&dream_claim_refusal(&issue.id), EXIT_NEEDS_AUTHORIZATION);
+    }
+
     // Claim it
     if let Err(e) = issue.claim(session_id) {
         output_error(&e, EXIT_USER_ERROR);
@@ -614,7 +666,7 @@ fn cmd_claim(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_done(id: String) -> ! {
@@ -646,7 +698,7 @@ fn cmd_done(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_abandon(id: String) -> ! {
@@ -678,7 +730,7 @@ fn cmd_abandon(id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_block(id: String, blocker_id: String) -> ! {
@@ -716,7 +768,7 @@ fn cmd_block(id: String, blocker_id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_unblock(id: String, blocker_id: String) -> ! {
@@ -746,7 +798,7 @@ fn cmd_unblock(id: String, blocker_id: String) -> ! {
         handle_manna_error(err);
     }
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_list(
@@ -797,6 +849,9 @@ fn cmd_list(
                 .map_or(true, |f| i.track.as_ref() == Some(f))
         })
         .map(|i| IssueSummary {
+            gate: (i.issue_type == IssueType::Dream)
+                .then(|| DREAM_INERT_MARKER.to_string()),
+            updated: dated(i.updated_at),
             id: i.id,
             title: i.title,
             status: i.status,
@@ -831,7 +886,7 @@ fn cmd_show(id: String) -> ! {
     // Find issue
     let issue = find_issue(&issues, &id);
 
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 fn cmd_update(
@@ -869,6 +924,7 @@ fn cmd_update(
         Err(err) => handle_manna_error(err),
     };
     let mut issue = find_issue(&issues, &id);
+    let type_before = issue.issue_type;
     if let Some(new_title) = title {
         if new_title.is_empty() || new_title.len() > 500 {
             output_error("Title must be 1-500 characters", EXIT_USER_ERROR);
@@ -920,10 +976,30 @@ fn cmd_update(
         );
     }
     issue.updated_at = chrono::Utc::now();
+    let authorization = conversion_authorization(&issue.id, type_before, issue.issue_type);
     if let Err(err) = store.update_issue(&issue) {
         handle_manna_error(err);
     }
-    output_success(IssueData { issue });
+    output_success(UpdateData { issue, authorization });
+}
+
+/// The line `update` prints when a type change crosses the dream boundary.
+///
+/// Conversion is the authorization act, so it is stated out loud in both
+/// directions rather than left to be inferred from a changed field.
+fn conversion_authorization(id: &str, before: IssueType, after: IssueType) -> Option<String> {
+    match (before, after) {
+        (IssueType::Dream, IssueType::Item) | (IssueType::Dream, IssueType::Track) => Some(format!(
+            "AUTHORIZED: {} converted dream -> {}. It is now claimable work: agent-do manna claim {}",
+            id, after, id
+        )),
+        (_, IssueType::Dream) if before != IssueType::Dream => Some(format!(
+            "PARKED: {} converted {} -> dream. It is no longer claimable; convert it back with \
+             agent-do manna update {} --type item before any agent works it.",
+            id, before, id
+        )),
+        _ => None,
+    }
 }
 
 fn cmd_delete(id: String) -> ! {
@@ -942,28 +1018,49 @@ fn cmd_delete(id: String) -> ! {
     if let Err(err) = store.delete_issue(&issue.id) {
         handle_manna_error(err);
     }
-    output_success(IssueData { issue });
+    output_success(IssueData { age: (&issue).into(), issue });
 }
 
 /// One context line for an issue, matching the v1 per-status format.
+///
+/// Dream rows carry the inert marker: they stay in every list an agent reads,
+/// so the line itself has to say the idea is not workable yet. Every row also
+/// carries when it last moved and how long ago that was — this blob is pasted
+/// straight into an agent's context, which is precisely where a six-week-old
+/// row gets read as current work.
 fn context_line(issue: &Issue) -> String {
-    match issue.status {
+    let body = match issue.status {
         IssueStatus::InProgress => {
             let claimed = issue
                 .claimed_by
                 .as_ref()
                 .map_or("".to_string(), |s| format!(", claimed by {}", s));
-            format!("- {}: {} [in_progress{}]\n", issue.id, issue.title, claimed)
+            format!("- {}: {} [in_progress{}]", issue.id, issue.title, claimed)
         }
         IssueStatus::Blocked => format!(
-            "- {}: {} [blocked by: {}]\n",
+            "- {}: {} [blocked by: {}]",
             issue.id,
             issue.title,
             issue.blocked_by.join(", ")
         ),
-        _ => format!("- {}: {} [{}]\n", issue.id, issue.title, issue.status),
+        _ => format!("- {}: {} [{}]", issue.id, issue.title, issue.status),
+    };
+
+    let body = format!("{} updated {}", body, dated(issue.updated_at));
+
+    if issue.issue_type == IssueType::Dream {
+        format!("{} {}\n", body, DREAM_INERT_MARKER)
+    } else {
+        format!("{}\n", body)
     }
 }
+
+/// The conversion instruction, printed once wherever dreams are rendered: the
+/// per-row marker stays short, so the command is spelled out per section
+/// instead of per line.
+const DREAMS_SECTION_NOTE: &str =
+    "Dreams are parked sparks, not work. `claim` refuses them; Erik converts one \
+     with `agent-do manna update <id> --type item` before any agent builds it.\n";
 
 /// Build the context blob. Boards with track rows render a track tree
 /// (per-track sections, then Untracked, then Dreams); boards with zero
@@ -1017,6 +1114,7 @@ fn build_context(issues: &[Issue]) -> String {
             .collect();
         if !dreams.is_empty() {
             context.push_str("## Dreams\n");
+            context.push_str(DREAMS_SECTION_NOTE);
             for dream in &dreams {
                 context.push_str(&context_line(dream));
             }
@@ -1041,32 +1139,33 @@ fn build_context(issues: &[Issue]) -> String {
     // Open issues
     context.push_str(&format!("## Open Issues ({})\n", open.len()));
     for issue in &open {
-        context.push_str(&format!("- {}: {} [open]\n", issue.id, issue.title));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // In-progress issues
     context.push_str(&format!("## In Progress Issues ({})\n", in_progress.len()));
     for issue in &in_progress {
-        let claimed = issue
-            .claimed_by
-            .as_ref()
-            .map_or("".to_string(), |s| format!(", claimed by {}", s));
-        context.push_str(&format!(
-            "- {}: {} [in_progress{}]\n",
-            issue.id, issue.title, claimed
-        ));
+        context.push_str(&context_line(issue));
     }
     context.push('\n');
 
     // Blocked issues
     context.push_str(&format!("## Blocked Issues ({})\n", blocked.len()));
     for issue in &blocked {
-        let blockers = issue.blocked_by.join(", ");
-        context.push_str(&format!(
-            "- {}: {} [blocked by: {}]\n",
-            issue.id, issue.title, blockers
-        ));
+        context.push_str(&context_line(issue));
+    }
+
+    // Trackless boards (the global dream inbox, above all) render dreams inside
+    // the by-status sections, so the conversion instruction trails the render.
+    let renders_dream = open
+        .iter()
+        .chain(in_progress.iter())
+        .chain(blocked.iter())
+        .any(|i| i.issue_type == IssueType::Dream);
+    if renders_dream {
+        context.push('\n');
+        context.push_str(DREAMS_SECTION_NOTE);
     }
 
     context
@@ -1919,6 +2018,8 @@ mod tests {
             claimed_by: None,
             issue_type: IssueType::Item,
             track: None,
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
@@ -1941,6 +2042,8 @@ mod tests {
             claimed_by: Some("ses_123".to_string()),
             issue_type: IssueType::Item,
             track: None,
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: None,
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
@@ -1956,11 +2059,14 @@ mod tests {
             claimed_by: None,
             issue_type: IssueType::Dream,
             track: Some("mn-def456".to_string()),
+            updated: "2026-07-27 (7d ago)".to_string(),
+            gate: Some(DREAM_INERT_MARKER.to_string()),
         };
 
         let yaml = serde_yaml::to_string(&summary).unwrap();
         assert!(yaml.contains("type: dream"));
         assert!(yaml.contains("track: mn-def456"));
+        assert!(yaml.contains("not claimable"));
     }
 
     #[test]
@@ -1995,63 +2101,98 @@ mod tests {
             .contains("not a track"));
     }
 
+    /// Seven days and change back: far enough from both day boundaries that
+    /// the rendered age is `7d ago` no matter what hour the suite runs at.
+    ///
+    /// Read once per test and passed everywhere, never re-read: two calls to
+    /// `now()` straddling UTC midnight would build a row on one date and
+    /// expect the other, which is a test that fails once a year for no reason.
+    fn seven_days_ago() -> chrono::DateTime<Utc> {
+        Utc::now() - chrono::Duration::days(7) - chrono::Duration::hours(1)
+    }
+
+    fn aged_row(id: &str, title: &str, when: chrono::DateTime<Utc>) -> Issue {
+        let mut issue = Issue::new(id.to_string(), title.to_string()).unwrap();
+        issue.created_at = when;
+        issue.updated_at = when;
+        issue
+    }
+
+    fn aged_stamp(when: chrono::DateTime<Utc>) -> String {
+        format!("{} (7d ago)", when.format("%Y-%m-%d"))
+    }
+
     #[test]
     fn test_build_context_zero_tracks_byte_stable() {
         // A board with no track rows must render the v1 by-status format
-        // exactly — pinned here byte for byte.
-        let open = Issue::new("mn-aaa111".to_string(), "Open item".to_string()).unwrap();
-        let mut working = Issue::new("mn-bbb222".to_string(), "Working item".to_string()).unwrap();
-        working.claim("ses_x".to_string()).unwrap();
-        let mut blocked = Issue::new("mn-ccc333".to_string(), "Blocked item".to_string()).unwrap();
-        blocked.add_blocker("mn-aaa111".to_string());
-        let mut finished = Issue::new("mn-ddd444".to_string(), "Done item".to_string()).unwrap();
-        finished.claim("ses_x".to_string()).unwrap();
-        finished.complete().unwrap();
+        // exactly — pinned here byte for byte, now including the age every row
+        // carries so a stale row cannot read as current work.
+        let when = seven_days_ago();
+        let open = aged_row("mn-aaa111", "Open item", when);
+        let mut working = aged_row("mn-bbb222", "Working item", when);
+        working.claimed_by = Some("ses_x".to_string());
+        working.status = IssueStatus::InProgress;
+        let mut blocked = aged_row("mn-ccc333", "Blocked item", when);
+        blocked.blocked_by.push("mn-aaa111".to_string());
+        blocked.status = IssueStatus::Blocked;
+        let mut finished = aged_row("mn-ddd444", "Done item", when);
+        finished.status = IssueStatus::Done;
 
         let context = build_context(&[open, working, blocked, finished]);
+        let stamp = aged_stamp(when);
         assert_eq!(
             context,
-            "# Manna Context\n\n\
-             ## Open Issues (1)\n\
-             - mn-aaa111: Open item [open]\n\n\
-             ## In Progress Issues (1)\n\
-             - mn-bbb222: Working item [in_progress, claimed by ses_x]\n\n\
-             ## Blocked Issues (1)\n\
-             - mn-ccc333: Blocked item [blocked by: mn-aaa111]\n"
+            format!(
+                "# Manna Context\n\n\
+                 ## Open Issues (1)\n\
+                 - mn-aaa111: Open item [open] updated {stamp}\n\n\
+                 ## In Progress Issues (1)\n\
+                 - mn-bbb222: Working item [in_progress, claimed by ses_x] updated {stamp}\n\n\
+                 ## Blocked Issues (1)\n\
+                 - mn-ccc333: Blocked item [blocked by: mn-aaa111] updated {stamp}\n"
+            )
         );
     }
 
     #[test]
     fn test_build_context_track_tree() {
-        let mut track = Issue::new("mn-aaa111".to_string(), "Harness".to_string()).unwrap();
+        let when = seven_days_ago();
+        let mut track = aged_row("mn-aaa111", "Harness", when);
         track.issue_type = IssueType::Track;
-        let mut on_track = Issue::new("mn-bbb222".to_string(), "Tracked item".to_string()).unwrap();
+        let mut on_track = aged_row("mn-bbb222", "Tracked item", when);
         on_track.track = Some("mn-aaa111".to_string());
-        let mut claimed = Issue::new("mn-ccc333".to_string(), "Claimed item".to_string()).unwrap();
+        let mut claimed = aged_row("mn-ccc333", "Claimed item", when);
         claimed.track = Some("mn-aaa111".to_string());
-        claimed.claim("ses_x".to_string()).unwrap();
-        let mut done_on_track = Issue::new("mn-ddd444".to_string(), "Done item".to_string()).unwrap();
+        claimed.claimed_by = Some("ses_x".to_string());
+        claimed.status = IssueStatus::InProgress;
+        let mut done_on_track = aged_row("mn-ddd444", "Done item", when);
         done_on_track.track = Some("mn-aaa111".to_string());
-        done_on_track.claim("ses_x".to_string()).unwrap();
-        done_on_track.complete().unwrap();
-        let loose = Issue::new("mn-eee555".to_string(), "Loose item".to_string()).unwrap();
-        let mut dangling = Issue::new("mn-fff666".to_string(), "Dangling item".to_string()).unwrap();
+        done_on_track.status = IssueStatus::Done;
+        let loose = aged_row("mn-eee555", "Loose item", when);
+        let mut dangling = aged_row("mn-fff666", "Dangling item", when);
         dangling.track = Some("mn-404404".to_string());
-        let mut spark = Issue::new("mn-abc123".to_string(), "Spark".to_string()).unwrap();
+        let mut spark = aged_row("mn-abc123", "Spark", when);
         spark.issue_type = IssueType::Dream;
 
         let context = build_context(&[track, on_track, claimed, done_on_track, loose, dangling, spark]);
+        let stamp = aged_stamp(when);
 
         assert!(context.contains("## Harness (mn-aaa111)\n"));
-        assert!(context.contains("- mn-bbb222: Tracked item [open]\n"));
-        assert!(context.contains("- mn-ccc333: Claimed item [in_progress, claimed by ses_x]\n"));
+        assert!(context.contains(&format!("- mn-bbb222: Tracked item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!(
+            "- mn-ccc333: Claimed item [in_progress, claimed by ses_x] updated {stamp}\n"
+        )));
         // Done still excluded
         assert!(!context.contains("mn-ddd444"));
         // Trackless and dangling-edge items both land under Untracked
         assert!(context.contains("## Untracked\n"));
-        assert!(context.contains("- mn-eee555: Loose item [open]\n"));
-        assert!(context.contains("- mn-fff666: Dangling item [open]\n"));
-        assert!(context.contains("## Dreams\n- mn-abc123: Spark [open]\n"));
+        assert!(context.contains(&format!("- mn-eee555: Loose item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!("- mn-fff666: Dangling item [open] updated {stamp}\n")));
+        assert!(context.contains("## Dreams\nDreams are parked sparks"));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] updated {} {}\n",
+            stamp, DREAM_INERT_MARKER
+        )));
         // v1 by-status sections replaced by the tree
         assert!(!context.contains("## Open Issues"));
         // Ordering: track section, then Untracked, then Dreams
@@ -2059,6 +2200,50 @@ mod tests {
         let untracked_pos = context.find("## Untracked").unwrap();
         let dreams_pos = context.find("## Dreams").unwrap();
         assert!(track_pos < untracked_pos && untracked_pos < dreams_pos);
+    }
+
+    #[test]
+    fn test_build_context_zero_tracks_marks_dreams() {
+        // The trackless render (the global dream inbox above all) has no
+        // Dreams section, so the marker on the row is what carries the gate.
+        let when = seven_days_ago();
+        let item = aged_row("mn-aaa111", "Open item", when);
+        let mut spark = aged_row("mn-abc123", "Spark", when);
+        spark.issue_type = IssueType::Dream;
+
+        let context = build_context(&[item, spark]);
+        let stamp = aged_stamp(when);
+
+        assert!(context.contains(&format!("- mn-aaa111: Open item [open] updated {stamp}\n")));
+        assert!(context.contains(&format!(
+            "- mn-abc123: Spark [open] updated {} {}\n",
+            stamp, DREAM_INERT_MARKER
+        )));
+        assert!(context.contains("Dreams are parked sparks"));
+        assert!(!context.contains("## Dreams"));
+    }
+
+    #[test]
+    fn test_conversion_authorization_lines() {
+        let promoted =
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Item).unwrap();
+        assert!(promoted.contains("AUTHORIZED"));
+        assert!(promoted.contains("now claimable work"));
+        assert!(promoted.contains("agent-do manna claim mn-abc123"));
+
+        let parked =
+            conversion_authorization("mn-abc123", IssueType::Item, IssueType::Dream).unwrap();
+        assert!(parked.contains("PARKED"));
+        assert!(parked.contains("no longer claimable"));
+        assert!(parked.contains("--type item"));
+
+        // Non-crossing changes stay silent: the line marks the boundary, not
+        // every edit.
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Item).is_none());
+        assert!(conversion_authorization("mn-abc123", IssueType::Item, IssueType::Track).is_none());
+        assert!(
+            conversion_authorization("mn-abc123", IssueType::Dream, IssueType::Dream).is_none()
+        );
     }
 
     #[test]

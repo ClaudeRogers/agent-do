@@ -110,6 +110,48 @@ def test_merge_gate() -> None:
             f"critical risk should warn: {gate}")
 
 
+def test_classify_maintainer_state() -> None:
+    gh = load_agent_gh()
+    viewer = "ovachiever"
+
+    def review(state: str, commit_id: str, submitted_at: str = "2026-04-28T10:00:00Z", login: str = viewer) -> dict:
+        return {"user": {"login": login}, "state": state, "commit_id": commit_id, "submitted_at": submitted_at}
+
+    classify = gh.classify_maintainer_state
+    require(classify([], viewer, "head") == "maintainer_unreviewed",
+            "no reviews should classify as unreviewed")
+    require(classify([review("APPROVED", "head", login="someone")], viewer, "head") == "maintainer_unreviewed",
+            "other users' reviews must not count")
+    require(classify([review("PENDING", "head")], viewer, "head") == "maintainer_unreviewed",
+            "pending drafts are not submitted reviews")
+    require(classify([review("APPROVED", "old")], viewer, "head") == "maintainer_review_stale",
+            "review behind head is stale")
+    require(classify([review("CHANGES_REQUESTED", "old")], viewer, "head") == "maintainer_review_stale",
+            "staleness must be checked before state")
+    require(classify([review("APPROVED", "head")], viewer, "head") == "maintainer_approved_unmerged",
+            "approved at head is approved_unmerged")
+    require(classify([review("CHANGES_REQUESTED", "head")], viewer, "head") is None,
+            "changes requested at head waits on the author")
+    require(classify([review("COMMENTED", "head")], viewer, "head") == "maintainer_unreviewed",
+            "commented at head is not a decision")
+    latest_wins = [review("APPROVED", "old", "2026-04-01T10:00:00Z"),
+                   review("CHANGES_REQUESTED", "head", "2026-04-28T10:00:00Z")]
+    require(classify(latest_wins, viewer, "head") is None,
+            "latest submitted review must win")
+
+
+def test_portfolio_patterns() -> None:
+    gh = load_agent_gh()
+    for good in ("acme/widgets", "acme/*", "a1/b.c-d_e"):
+        require(gh.validate_portfolio_pattern(good) == good, f"{good!r} should validate")
+    for bad in ("acme", "acme/", "/widgets", "acme/*x", "*/widgets", "acme/widgets/extra", "-acme/x", ""):
+        try:
+            gh.validate_portfolio_pattern(bad)
+            raise AssertionError(f"{bad!r} should be rejected")
+        except gh.GhError:
+            pass
+
+
 def make_exec(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -127,6 +169,88 @@ def main() -> int:
         fake_home = tmp / "home"
         fake_home.mkdir()
         log_path = tmp / "gh-calls.jsonl"
+
+        def rest_repo(name: str, *, permissions: dict, open_issues: int, archived: bool = False) -> dict:
+            return {
+                "name": name,
+                "full_name": f"ovachiever/{name}",
+                "owner": {"login": "ovachiever"},
+                "private": False,
+                "visibility": "public",
+                "archived": archived,
+                "default_branch": "main",
+                "html_url": f"https://github.com/ovachiever/{name}",
+                "permissions": permissions,
+                "open_issues_count": open_issues,
+            }
+
+        admin = {"admin": True, "maintain": False, "push": True, "triage": True, "pull": True}
+        push_only = {"admin": False, "maintain": False, "push": True, "triage": True, "pull": True}
+        read_only = {"admin": False, "maintain": False, "push": False, "triage": False, "pull": True}
+        sweep_repos = [
+            rest_repo("agent-do", permissions=admin, open_issues=5),
+            rest_repo("bots", permissions=push_only, open_issues=1),
+            rest_repo("broken", permissions=push_only, open_issues=2),
+            rest_repo("empty", permissions=push_only, open_issues=0),
+            rest_repo("readonly", permissions=read_only, open_issues=3),
+            rest_repo("attic", permissions=admin, open_issues=4, archived=True),
+        ]
+
+        def rest_pull(repo: str, number: int, author: str, head_sha: str) -> dict:
+            return {
+                "number": number,
+                "title": f"PR {number}",
+                "state": "open",
+                "draft": False,
+                "user": {"login": author},
+                "updated_at": "2026-04-29T12:00:00Z",
+                "html_url": f"https://github.com/ovachiever/{repo}/pull/{number}",
+                "head": {"sha": head_sha},
+                "labels": [],
+            }
+
+        sweep_pulls = {
+            "ovachiever/agent-do": [
+                rest_pull("agent-do", 3, "ctyrrell-versova", "head3"),
+                rest_pull("agent-do", 4, "ovachiever", "head4"),
+                rest_pull("agent-do", 6, "christyrrell", "head6"),
+                rest_pull("agent-do", 7, "ctyrrell-versova", "head7"),
+                rest_pull("agent-do", 8, "ctyrrell-versova", "head8"),
+            ],
+            "ovachiever/bots": [rest_pull("bots", 2, "dependabot[bot]", "headb2")],
+            "acme/widgets": [
+                rest_pull("widgets", 1, "someone-else", "headw1"),
+                rest_pull("widgets", 2, "someone-else", "headw2"),
+            ],
+            "solouser/lab": [rest_pull("lab", 9, "ovachiever", "headl9")],
+        }
+
+        portfolio_org_repos = {
+            "acme": [
+                {"full_name": "acme/widgets", "archived": False, "open_issues_count": 3},
+                {"full_name": "acme/quiet", "archived": False, "open_issues_count": 0},
+                {"full_name": "acme/attic", "archived": True, "open_issues_count": 9},
+            ],
+        }
+        portfolio_user_repos = {
+            "solouser": [{"full_name": "solouser/lab", "archived": False, "open_issues_count": 1}],
+        }
+
+        def viewer_review(state: str, commit_id: str, submitted_at: str) -> dict:
+            return {"user": {"login": "ovachiever"}, "state": state, "commit_id": commit_id, "submitted_at": submitted_at}
+
+        sweep_reviews = {
+            "ovachiever/agent-do#3": [],
+            "ovachiever/agent-do#6": [viewer_review("APPROVED", "head6", "2026-04-28T10:00:00Z")],
+            "ovachiever/agent-do#7": [viewer_review("CHANGES_REQUESTED", "old7", "2026-04-28T10:00:00Z")],
+            "ovachiever/agent-do#8": [
+                viewer_review("APPROVED", "old8", "2026-04-01T10:00:00Z"),
+                viewer_review("CHANGES_REQUESTED", "head8", "2026-04-28T10:00:00Z"),
+            ],
+            "ovachiever/bots#2": [],
+            "acme/widgets#1": [],
+            "acme/widgets#2": [viewer_review("CHANGES_REQUESTED", "headw2", "2026-04-28T10:00:00Z")],
+        }
 
         make_exec(
             fake_bin / "gh",
@@ -146,7 +270,42 @@ def emit(payload):
 if args[:2] == ["api", "user"]:
     emit({{"login": "ovachiever", "id": 1, "name": "Erik", "html_url": "https://github.com/ovachiever"}})
 elif args[:3] == ["api", "--paginate", "--slurp"]:
-    emit([[{{"name": "agent-do", "full_name": "ovachiever/agent-do", "owner": {{"login": "ovachiever"}}, "private": False, "visibility": "public", "archived": False, "default_branch": "main", "html_url": "https://github.com/ovachiever/agent-do"}}]])
+    path = args[3]
+    repos_fixture = json.loads({json.dumps(sweep_repos)!r})
+    pulls_fixture = json.loads({json.dumps(sweep_pulls)!r})
+    reviews_fixture = json.loads({json.dumps(sweep_reviews)!r})
+    if "/user/repos" in path:
+        emit([repos_fixture])
+    elif "/reviews" in path:
+        scoped = path.split("repos/", 1)[1].split("/reviews", 1)[0]
+        owner_repo, _, number = scoped.partition("/pulls/")
+        emit([reviews_fixture.get(owner_repo + "#" + number, [])])
+    elif "/pulls?" in path:
+        owner_repo = path.split("repos/", 1)[1].split("/pulls", 1)[0]
+        if owner_repo == "ovachiever/broken":
+            print("HTTP 500: boom", file=sys.stderr)
+            sys.exit(1)
+        if owner_repo == "ghost/hidden":
+            print("HTTP 404: Not Found", file=sys.stderr)
+            sys.exit(1)
+        emit([pulls_fixture.get(owner_repo, [])])
+    elif path.startswith("orgs/") and "/repos" in path:
+        owner = path.split("orgs/", 1)[1].split("/repos", 1)[0]
+        org_fixture = json.loads({json.dumps(portfolio_org_repos)!r})
+        if owner not in org_fixture:
+            print("HTTP 404: Not Found (org)", file=sys.stderr)
+            sys.exit(1)
+        emit([org_fixture[owner]])
+    elif path.startswith("users/") and "/repos" in path:
+        owner = path.split("users/", 1)[1].split("/repos", 1)[0]
+        user_fixture = json.loads({json.dumps(portfolio_user_repos)!r})
+        if owner not in user_fixture:
+            print("HTTP 404: Not Found (user)", file=sys.stderr)
+            sys.exit(1)
+        emit([user_fixture[owner]])
+    else:
+        print("unexpected api path: " + path, file=sys.stderr)
+        sys.exit(2)
 elif args[:2] == ["search", "prs"]:
     reason = "generic"
     if "--review-requested" in args and "--owner" in args:
@@ -320,6 +479,134 @@ else:
         refs = {item["ref"]: item["reasons"] for item in inbox_payload["items"]}
         require("review_requested" in refs["ovachiever/agent-do#3"], f"missing review inbox reason: {inbox_payload}")
         require("authored_failed_checks" in refs["ovachiever/agent-do#4"], f"missing failed checks reason: {inbox_payload}")
+
+        # Maintainer sweep (default): role-derived reasons merge with ceremony rows.
+        require("maintainer_unreviewed" in refs["ovachiever/agent-do#3"],
+                f"sweep should mark unreviewed third-party PR: {inbox_payload}")
+        require("maintainer_approved_unmerged" in refs["ovachiever/agent-do#6"],
+                f"approved-at-head PR should read approved_unmerged: {inbox_payload}")
+        require("maintainer_review_stale" in refs["ovachiever/agent-do#7"],
+                f"review behind head should read stale: {inbox_payload}")
+        require("ovachiever/agent-do#8" not in refs,
+                f"changes-requested-at-head PR must be excluded from rows: {inbox_payload}")
+        require(refs.get("ovachiever/bots#2") == ["maintainer_unreviewed", "bot_author"],
+                f"bot PR should carry bot_author tag: {inbox_payload}")
+        sweep = inbox_payload["sweep"]
+        require(sweep["repos_swept"] == 3, f"agent-do + bots + prefiltered empty should be swept: {sweep}")
+        require(sweep["prs_classified"] == 5, f"five third-party open PRs should classify: {sweep}")
+        require(sweep["waiting_on_author"] == 1, f"PR 8 waits on its author: {sweep}")
+        require(len(sweep["unswept"]) == 1 and sweep["unswept"][0]["repo"] == "ovachiever/broken",
+                f"failed repo must land in unswept: {sweep}")
+
+        calls_so_far = [" ".join(json.loads(line)) for line in log_path.read_text().splitlines()]
+        for skipped in ("empty", "readonly", "attic"):
+            require(not any(f"ovachiever/{skipped}/pulls" in call for call in calls_so_far),
+                    f"{skipped} must not be swept: {calls_so_far}")
+
+        inbox_table = run([str(AGENT_DO), "gh", "inbox"], cwd=ROOT, env=env)
+        require(inbox_table.returncode == 0, f"inbox table failed: {inbox_table.stderr}")
+        require("maintainer sweep: 3 repos, 5 PRs; 1 waiting on author; 1 unswept" in inbox_table.stdout,
+                f"missing sweep footer: {inbox_table.stdout}")
+        require("unswept: ovachiever/broken" in inbox_table.stdout,
+                f"unswept repos must be listed loudly: {inbox_table.stdout}")
+
+        # A hit --limit cap is loud, never silent.
+        capped = run([str(AGENT_DO), "gh", "inbox", "--limit", "2", "--json"], cwd=ROOT, env=env)
+        require(capped.returncode == 0, f"capped inbox failed: {capped.stderr}")
+        capped_payload = json.loads(capped.stdout)
+        require(capped_payload["count"] == 2 and capped_payload["total"] == 6,
+                f"capped JSON must report the uncapped total: {capped_payload['count']}/{capped_payload.get('total')}")
+        capped_table = run([str(AGENT_DO), "gh", "inbox", "--limit", "2"], cwd=ROOT, env=env)
+        require("showing 2 of 6 items; raise --limit" in capped_table.stdout,
+                f"capped table must announce truncation: {capped_table.stdout}")
+
+        # --ceremony-only: no sweep calls, byte-compatible JSON payload, loud notice.
+        before_ceremony = len(log_path.read_text().splitlines())
+        ceremony = run([str(AGENT_DO), "gh", "inbox", "--ceremony-only", "--json"], cwd=ROOT, env=env)
+        require(ceremony.returncode == 0, f"ceremony-only inbox failed: {ceremony.stderr}")
+        ceremony_payload = json.loads(ceremony.stdout)
+        require(set(ceremony_payload) == {"count", "items"},
+                f"ceremony-only JSON must not grow keys: {sorted(ceremony_payload)}")
+        require("ceremony-only" in ceremony.stderr, f"missing ceremony-only notice: {ceremony.stderr}")
+        ceremony_calls = [" ".join(json.loads(line)) for line in log_path.read_text().splitlines()[before_ceremony:]]
+        require(not any("pulls?state=open" in call or "/user/repos" in call for call in ceremony_calls),
+                f"ceremony-only must not sweep: {ceremony_calls}")
+
+        ceremony_table = run([str(AGENT_DO), "gh", "inbox", "--ceremony-only"], cwd=ROOT, env=env)
+        require(ceremony_table.returncode == 0, f"ceremony-only table failed: {ceremony_table.stderr}")
+        require("ceremony-only view" in ceremony_table.stdout, f"missing table notice: {ceremony_table.stdout}")
+        require("maintainer sweep:" not in ceremony_table.stdout,
+                f"ceremony-only must not print sweep footer: {ceremony_table.stdout}")
+
+        # An old-shape repos cache (no permissions) refreshes compatibly.
+        cache_path = fake_home / "gh" / "repos.json"
+        cache_path.write_text(json.dumps({"synced_at": "2026-01-01T00:00:00Z", "count": 1,
+                                          "repos": [{"full_name": "ovachiever/agent-do"}]}))
+        before_refresh = len(log_path.read_text().splitlines())
+        refreshed = run([str(AGENT_DO), "gh", "inbox", "--json"], cwd=ROOT, env=env)
+        require(refreshed.returncode == 0, f"inbox with old-shape cache failed: {refreshed.stderr}")
+        refresh_calls = [" ".join(json.loads(line)) for line in log_path.read_text().splitlines()[before_refresh:]]
+        require(any("/user/repos" in call for call in refresh_calls),
+                f"permission-less cache should trigger a refresh: {refresh_calls}")
+        cached = json.loads(cache_path.read_text())
+        require(all("permissions" in repo for repo in cached["repos"]),
+                f"refreshed cache must carry permissions: {cached['repos'][:2]}")
+
+        # ── Declared portfolio: CRUD ───────────────────────────────────
+        pf_empty = run([str(AGENT_DO), "gh", "portfolio", "list", "--json"], cwd=ROOT, env=env)
+        require(pf_empty.returncode == 0, f"portfolio list failed: {pf_empty.stderr}")
+        require(json.loads(pf_empty.stdout)["patterns"] == [], f"portfolio should start empty: {pf_empty.stdout}")
+
+        for pattern in ("acme/*", "solouser/*", "ovachiever/agent-do", "ghost/hidden", "ovachiever/solo"):
+            added = run([str(AGENT_DO), "gh", "portfolio", "add", pattern], cwd=ROOT, env=env)
+            require(added.returncode == 0, f"portfolio add {pattern} failed: {added.stderr}")
+
+        bad = run([str(AGENT_DO), "gh", "portfolio", "add", "not-a-pattern"], cwd=ROOT, env=env)
+        require(bad.returncode == 1 and "Invalid portfolio pattern" in bad.stderr,
+                f"invalid pattern must be rejected: rc={bad.returncode} {bad.stderr}")
+        bad_wild = run([str(AGENT_DO), "gh", "portfolio", "add", "acme/*x"], cwd=ROOT, env=env)
+        require(bad_wild.returncode == 1, f"partial wildcard must be rejected: {bad_wild.stdout}")
+
+        removed = run([str(AGENT_DO), "gh", "portfolio", "remove", "ovachiever/solo"], cwd=ROOT, env=env)
+        require(removed.returncode == 0, f"portfolio remove failed: {removed.stderr}")
+        missing_rm = run([str(AGENT_DO), "gh", "portfolio", "remove", "ovachiever/solo"], cwd=ROOT, env=env)
+        require(missing_rm.returncode == 1, f"removing absent pattern must fail: {missing_rm.stdout}")
+
+        pf_list = run([str(AGENT_DO), "gh", "portfolio", "list", "--json"], cwd=ROOT, env=env)
+        pf_payload = json.loads(pf_list.stdout)
+        require(pf_payload["patterns"] == ["acme/*", "ghost/hidden", "ovachiever/agent-do", "solouser/*"],
+                f"unexpected portfolio state: {pf_payload}")
+        require((fake_home / "gh" / "portfolio.yaml").exists(), "portfolio file missing")
+        require(not (fake_home / "gh" / "portfolio.yaml.tmp").exists(), "atomic temp file left behind")
+
+        # ── Declared portfolio: sweep ──────────────────────────────────
+        pf_inbox = run([str(AGENT_DO), "gh", "inbox", "--json"], cwd=ROOT, env=env)
+        require(pf_inbox.returncode == 0, f"portfolio inbox failed: {pf_inbox.stderr}")
+        pf_inbox_payload = json.loads(pf_inbox.stdout)
+        pf_refs = {item["ref"]: item["reasons"] for item in pf_inbox_payload["items"]}
+        require(pf_refs.get("acme/widgets#1") == ["portfolio_unreviewed"],
+                f"wildcard-expanded repo should carry portfolio_unreviewed: {pf_refs}")
+        require("acme/widgets#2" not in pf_refs,
+                f"portfolio changes-requested-at-head must be excluded from rows: {pf_refs}")
+        require("maintainer_unreviewed" in pf_refs["ovachiever/agent-do#3"]
+                and not any(reason.startswith("portfolio_") for reason in pf_refs["ovachiever/agent-do#3"]),
+                f"role must win dedupe with no portfolio_* dupes: {pf_refs['ovachiever/agent-do#3']}")
+        pf_sweep = pf_inbox_payload["sweep"]["portfolio"]
+        require(pf_sweep == {"patterns": 4, "repos_swept": 3, "prs_classified": 2, "waiting_on_author": 1},
+                f"unexpected portfolio sweep stats: {pf_sweep}")
+        unswept_reasons = {entry["repo"]: entry["reason"] for entry in pf_inbox_payload["sweep"]["unswept"]}
+        require(unswept_reasons.get("ghost/hidden") == "no access",
+                f"unreadable portfolio repo must report no access: {unswept_reasons}")
+        require("ovachiever/broken" in unswept_reasons,
+                f"role unswept must survive alongside portfolio unswept: {unswept_reasons}")
+
+        pf_table = run([str(AGENT_DO), "gh", "inbox"], cwd=ROOT, env=env)
+        require("maintainer sweep: 3 repos, 5 PRs; 1 waiting on author; 2 unswept" in pf_table.stdout,
+                f"maintainer footer should count portfolio unswept: {pf_table.stdout}")
+        require("portfolio sweep: 4 patterns, 3 repos, 2 PRs; 1 waiting on author" in pf_table.stdout,
+                f"missing portfolio footer: {pf_table.stdout}")
+        require("unswept: ghost/hidden: no access" in pf_table.stdout,
+                f"no-access repo must be listed loudly: {pf_table.stdout}")
 
         awaiting = run(
             [
@@ -523,9 +810,172 @@ else:
 
     test_classify_risk()
     test_merge_gate()
+    test_classify_maintainer_state()
+    test_portfolio_patterns()
+    test_graphql_inbox()
+    test_next_action_mapping()
+    test_stage_fixture()
 
     print("gh tests passed")
     return 0
+
+
+def test_stage_fixture() -> None:
+    """The pinned live capture (2026-08-13) carries the stage contract and
+    at least one row in mapping states 1 (Draft), 5 (Merge), 6 (Review),
+    and 7 (Awaiting review) — the work-order verification set."""
+    gh = load_agent_gh()
+    fixture = json.loads((ROOT / "tests" / "fixtures" / "gh-inbox-stage-1.json").read_text())
+    require(fixture["sweep"]["stage_contract"] == 1, "pinned fixture must carry stage_contract 1")
+    verbs = {(item.get("next_action") or {}).get("verb") for item in fixture["items"]}
+    for required in ("Draft", "Merge", "Review", "Awaiting review"):
+        require(required in verbs, f"pinned fixture missing state '{required}': {sorted(v for v in verbs if v)}")
+    for item in fixture["items"]:
+        for key in ("review_decision", "merge_state", "checks", "review_requests", "next_action"):
+            require(key in item, f"fixture row {item['ref']} missing stage key {key}")
+
+    # Derived-reason parity: the two searched-no-more ceremony reasons come
+    # from stage fields.
+    entry = {"reasons": ["authored_open"], "checks": {"failed": 1, "total": 2, "passed": 1, "pending": 0},
+             "review_decision": "CHANGES_REQUESTED"}
+    gh.derive_authored_reasons(entry)
+    require("authored_failed_checks" in entry["reasons"] and "authored_changes_requested" in entry["reasons"],
+            f"derived reasons drifted: {entry['reasons']}")
+    untouched = {"reasons": ["review_requested"], "checks": {"failed": 3, "total": 3, "passed": 0, "pending": 0}}
+    gh.derive_authored_reasons(untouched)
+    require(untouched["reasons"] == ["review_requested"],
+            "derivation must only extend authored rows")
+
+
+def test_next_action_mapping() -> None:
+    gh = load_agent_gh()
+    base = {"number": 9, "author": "other", "draft": False, "merge_state": None,
+            "review_decision": None, "checks": None, "reasons": [], "review_requests": None}
+
+    def item(**kw):
+        merged = dict(base)
+        merged.update(kw)
+        return merged
+
+    # Rule 1, and the draft+approved collision stays Draft.
+    na = gh.next_action_for(item(draft=True, review_decision="APPROVED", merge_state="CLEAN", author="me"), "me")
+    require(na["verb"] == "Draft" and na["yours"] is False and na["command"] is None,
+            f"draft+approved must stay Draft: {na}")
+    # Rule 2, and the DIRTY+approved collision stays Resolve conflicts.
+    na = gh.next_action_for(item(author="me", merge_state="DIRTY", review_decision="APPROVED"), "me")
+    require(na["verb"] == "Resolve conflicts" and na["yours"] is True,
+            f"DIRTY+approved must stay Resolve conflicts: {na}")
+    na = gh.next_action_for(item(merge_state="DIRTY"), "me")
+    require(na["verb"] == "Resolve conflicts" and na["yours"] is False,
+            f"a stranger's conflicts are not your move: {na}")
+    # Rule 3.
+    na = gh.next_action_for(item(author="me", review_decision="CHANGES_REQUESTED"), "me")
+    require(na["verb"] == "Address review" and na["command"] == "agent-do gh pr 9",
+            f"changes-requested mapping drifted: {na}")
+    # Rule 4.
+    na = gh.next_action_for(item(author="me", checks={"passed": 1, "failed": 2, "pending": 0, "total": 3}), "me")
+    require(na["verb"] == "Fix checks" and na["detail"] == "2 of 3 failing"
+            and na["command"] == "agent-do gh checks 9", f"failed-checks mapping drifted: {na}")
+    # Rule 5.
+    na = gh.next_action_for(item(author="me", review_decision="APPROVED", merge_state="CLEAN"), "me")
+    require(na["verb"] == "Merge" and na["yours"] is True and na["command"] == "agent-do gh merge 9",
+            f"merge mapping drifted: {na}")
+    # Rule 6.
+    na = gh.next_action_for(item(reasons=["review_requested"]), "me")
+    require(na["verb"] == "Review" and na["yours"] is True and na["command"] == "agent-do gh pr 9",
+            f"review-requested mapping drifted: {na}")
+    # Rule 7, both details.
+    na = gh.next_action_for(item(author="me"), "me")
+    require(na["verb"] == "Awaiting review" and na["detail"] == "no review yet" and na["yours"] is False,
+            f"awaiting-review mapping drifted: {na}")
+    na = gh.next_action_for(item(author="me", review_requests=2), "me")
+    require(na["detail"] == "2 reviewer(s) pending", f"pending-reviewer detail drifted: {na}")
+    # Rule 8.
+    require(gh.next_action_for(item(reasons=["maintainer_unreviewed"]), "me") is None,
+            "not-authored without review_requested must map to null")
+
+    # Rollup bucketing: counted outcomes, never invented; no rollup -> null.
+    node = {"commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+        "totalCount": 4, "nodes": [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ]}}}}]}}
+    counts = gh.checks_from_rollup(node)
+    require(counts == {"passed": 2, "failed": 1, "pending": 1, "total": 4},
+            f"rollup bucketing drifted: {counts}")
+    require(gh.checks_from_rollup({"commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}}) is None,
+            "no rollup must be null, not zeros")
+    # Stage keys ride every normalized row, even when GraphQL omits them.
+    entry = gh.normalize_graphql_pr({"number": 1, "repository": {"nameWithOwner": "o/r"}})
+    for key in ("review_decision", "merge_state", "checks", "review_requests", "next_action"):
+        require(key in entry, f"stage key {key} missing from normalized row")
+
+
+def test_graphql_inbox() -> None:
+    gh = load_agent_gh()
+
+    # Generated documents must balance their braces — an unbalanced sweep
+    # alias cost a live round trip (RCURLY parse error, 2026-08-11).
+    aliases = " ".join(gh._graphql_search_alias(n, q, 30) for n, q in gh.CEREMONY_SEARCHES)
+    sweep = gh._graphql_sweep_alias("is:pr is:open user:someone", "CURSOR")
+    for doc in (
+        f"query {{ viewer {{ login }} {aliases} }} {gh.GRAPHQL_PR_CORE}",
+        f"query {{ {sweep} }} {gh.GRAPHQL_PR_CORE}",
+    ):
+        require(doc.count("{") == doc.count("}"), f"unbalanced braces in document: {doc}")
+
+    node = {
+        "number": 7, "title": "t", "state": "OPEN", "isDraft": False,
+        "updatedAt": "2026-08-11T00:00:00Z", "url": "https://x",
+        "author": {"login": "someone"},
+        "repository": {"nameWithOwner": "o/r"},
+        "labels": {"nodes": [{"name": "bug"}]},
+        "comments": {"totalCount": 2},
+        "headRefOid": "headsha",
+        "reviews": {"totalCount": 1, "nodes": [
+            {"state": "APPROVED", "submittedAt": "2026-08-10T00:00:00Z",
+             "author": {"login": "erik"}, "commit": {"oid": "oldsha"}},
+        ]},
+    }
+    entry = gh.normalize_graphql_pr(node)
+    require(entry["ref"] == "o/r#7" and entry["state"] == "open" and entry["comments"] == 2
+            and entry["labels"] == ["bug"], f"normalize_graphql_pr drifted from REST shape: {entry}")
+
+    added: list[tuple[str, str]] = []
+
+    def add(reason: str, prs: list) -> None:
+        added.extend((reason, pr["ref"]) for pr in prs)
+
+    stats = {"repos_swept": 0, "prs_classified": 0, "waiting_on_author": 0,
+             "unswept": [], "skipped_no_role": 0}
+    # Viewer's review sits on an old sha -> maintainer_review_stale.
+    gh._classify_sweep_node(node, "erik", {"o/r"}, add, stats)
+    require(("maintainer_review_stale", "o/r#7") in added, f"stale review misclassified: {added}")
+    # Changes requested at head -> ball with the author, nothing added.
+    node2 = json.loads(json.dumps(node))
+    node2["reviews"]["nodes"][0].update({"state": "CHANGES_REQUESTED", "commit": {"oid": "headsha"}})
+    before = list(added)
+    gh._classify_sweep_node(node2, "erik", {"o/r"}, add, stats)
+    require(added == before and stats["waiting_on_author"] == 1,
+            f"changes-requested at head must wait on author: {stats}")
+    # A repo outside the eligible set is skipped, mirroring the REST sweep.
+    gh._classify_sweep_node(node, "erik", {"other/repo"}, add, stats)
+    require(stats["skipped_no_role"] == 1, f"non-eligible repo must be skipped: {stats}")
+    # Viewer-authored PRs never enter the sweep.
+    node3 = json.loads(json.dumps(node))
+    node3["author"] = {"login": "erik"}
+    before = list(added)
+    gh._classify_sweep_node(node3, "erik", {"o/r"}, add, stats)
+    require(added == before, "viewer-authored PR must not enter the sweep")
+    # Bot author, no viewer review -> maintainer_unreviewed + bot_author.
+    node4 = json.loads(json.dumps(node))
+    node4["author"] = {"login": "dependabot"}
+    node4["reviews"] = {"totalCount": 0, "nodes": []}
+    gh._classify_sweep_node(node4, "erik", {"o/r"}, add, stats)
+    require(("maintainer_unreviewed", "o/r#7") in added and ("bot_author", "o/r#7") in added,
+            f"bot classification drifted: {added}")
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ agent-do db disconnect
 The rhythm is machine-readable. Every tool declares a `contracts:` block in
 `registry.yaml` mapping each command verb to its beats, with `attributes:` flags
 (destructive, long_running, polymorphic, composite, sensitive, passthrough) for
-the shapes a single beat cannot express. All 95 registered tools declare
+the shapes a single beat cannot express. All 96 registered tools declare
 contracts; a tool cannot merge without one.
 
 Orchestrators consume the declarations directly:
@@ -98,7 +98,7 @@ which deserve confirmation before an agent runs them.
 Declarations are kept true, not trusted:
 
 ```bash
-agent-do harness contracts validate   # gate: registry shape + 95/95 coverage, runs in CI
+agent-do harness contracts validate   # gate: registry shape + 96/96 coverage, runs in CI
 agent-do harness contracts drift      # registry promises vs live tool --help
 agent-do harness contracts audit      # behavioral probe of the read surface
 ```
@@ -284,7 +284,7 @@ arguments, shell history, or docs.
 
 ## Tool Tour
 
-95 registered tools. The flagships:
+96 registered tools. The flagships:
 
 | Tool | What it does |
 |---|---|

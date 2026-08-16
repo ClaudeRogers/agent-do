@@ -52,6 +52,19 @@ check_output() {
     fi
 }
 
+check_error_output() {
+    local desc="$1"
+    local pattern="$2"
+    shift 2
+    local output rc
+    output=$("$@" 2>&1); rc=$?
+    if [[ $rc -eq 1 ]] && echo "$output" | grep -q "$pattern"; then
+        pass "$desc"
+    else
+        fail "$desc" "expected exit 1 and pattern '$pattern', rc=$rc, got: $(echo "$output" | head -3)"
+    fi
+}
+
 echo "Testing agent-do..."
 echo
 
@@ -74,6 +87,22 @@ check_cmd "prompt hook AI routing tests" python3 "$SCRIPT_DIR/tests/test_prompt_
 check_cmd "model resolution tests" python3 "$SCRIPT_DIR/tests/test_models.py"
 check_cmd "generated discovery index tests" bash "$SCRIPT_DIR/tests/test_index_generation.sh"
 check_cmd "zpc global read-surface tests" python3 "$SCRIPT_DIR/tests/test_zpc_global.py"
+check_cmd "zpc position ledger tests" python3 "$SCRIPT_DIR/tests/test_zpc_position.py"
+check_cmd "zpc auto-counsel tests" python3 "$SCRIPT_DIR/tests/test_zpc_counsel_auto.py"
+check_cmd "zpc epistemics tests" python3 "$SCRIPT_DIR/tests/test_zpc_epistemics.py"
+check_cmd "brief estate engine tests" python3 "$SCRIPT_DIR/tests/test_brief.py"
+check_cmd "zpc delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_delivery.py"
+check_cmd "zpc memory bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_memory_bounds.py"
+check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitigate.py"
+check_cmd "zpc correction mining tests" python3 "$SCRIPT_DIR/tests/test_zpc_corrections.py"
+check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_preferences.py"
+check_cmd "zpc store-only init tests" python3 "$SCRIPT_DIR/tests/test_zpc_init_store_only.py"
+check_cmd "zpc store walk bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_store_walk.py"
+check_cmd "hook store resolution tests" python3 "$SCRIPT_DIR/tests/test_hook_store_resolution.py"
+check_cmd "session-start read tests" python3 "$SCRIPT_DIR/tests/test_session_start_reads.py"
+check_cmd "now stamp hook tests" python3 "$SCRIPT_DIR/tests/test_now_stamp.py"
+check_cmd "quantity write-check hook tests" python3 "$SCRIPT_DIR/tests/test_quantity_write_check.py"
+check_cmd "record age rendering tests" python3 "$SCRIPT_DIR/tests/test_record_ages.py"
 check_cmd "context retrieve authority tests" python3 "$SCRIPT_DIR/tests/test_context_retrieve_authority.py"
 check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"
@@ -102,15 +131,21 @@ check_cmd "vector tests" python3 "$SCRIPT_DIR/tests/test_vector.py"
 check_output "vector --help" "today" "$AGENT_DO" vector --help
 check_cmd "gh tests" python3 "$SCRIPT_DIR/tests/test_gh.py"
 check_cmd "datadog tests" python3 "$SCRIPT_DIR/tests/test_datadog.py"
+check_cmd "ci triage tests" python3 "$SCRIPT_DIR/tests/test_ci_triage.py"
 check_cmd "git guardrail tests" python3 "$SCRIPT_DIR/tests/test_git_guardrails.py"
+check_cmd "worktree binding tests" python3 "$SCRIPT_DIR/tests/test_worktree_binding.py"
 check_cmd "hardware tests" python3 "$SCRIPT_DIR/tests/test_hardware.py"
 check_cmd "meetings tests" python3 "$SCRIPT_DIR/tests/test_meetings.py"
 check_cmd "harness tests" python3 "$SCRIPT_DIR/tests/test_harness.py"
+check_cmd "quantity authority tests" python3 "$SCRIPT_DIR/tests/test_quantities.py"
 check_cmd "contracts gate tests" python3 "$SCRIPT_DIR/tests/test_contracts_gate.py"
 check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drift.py"
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
+check_cmd "bounds gate tests" python3 "$SCRIPT_DIR/tests/test_bounds_gate.py"
 check_cmd "routing contracts tests" python3 "$SCRIPT_DIR/tests/test_routing_contracts.py"
 check_cmd "contracts drift channel empty" "$AGENT_DO" harness contracts drift
+check_cmd "bounds drift clean against the authority" "$AGENT_DO" harness bounds drift
+check_output "contracts validate gates bounds too" "Bounds:" "$AGENT_DO" harness contracts validate
 check_cmd "tools reference doc in sync" "$SCRIPT_DIR/bin/gen-tools-doc" --check
 check_cmd "health probe tests" python3 "$SCRIPT_DIR/tests/test_health_probes.py"
 check_cmd "hook outcome telemetry tests" python3 "$SCRIPT_DIR/tests/test_hook_outcome_telemetry.py"
@@ -246,6 +281,11 @@ cat > "$BOOTSTRAP_PROJECT/CLAUDE.md" <<'EOF'
 Use `agent-do context`
 Use `agent-do zpc`
 EOF
+
+# --- agent-sentry ---
+check_output "sentry help includes PROJECTS header" "PROJECTS" "$AGENT_DO" sentry --help
+check_output "sentry help lists snapshot command" "snapshot" "$AGENT_DO" sentry --help
+check_error_output "sentry unknown command exits with error" "Unknown command" "$AGENT_DO" sentry bogus-command-xyz
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
 check_output "bootstrap initializes context and zpc" "Initialized: context, zpc" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"

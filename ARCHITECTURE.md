@@ -130,7 +130,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 ├── hooks/
 │   ├── claude/             # Canonical Claude Code hooks (4 events)
 │   └── codex/              # Canonical Codex hooks + Stop quality gate
-├── tools/agent-*           # 95 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 96 tools (standalone scripts + directory-based tools)
 ├── models.yaml             # Internal model roles: chains, capabilities, retired list
 ├── registry.yaml           # Master tool catalog with contracts
 └── test.sh                 # Test suite (gate inventory below)
@@ -161,7 +161,7 @@ Registries merge with higher priority overwriting lower:
 
 ## Contracts Layer
 
-The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 95 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 95 Declared: 95` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
+The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 96 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 96 Declared: 96` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -200,6 +200,36 @@ Only `passthrough` and `long_running` may stand alone without beat membership.
 
 No tool merges without a contracts declaration: the gate runs in `./test.sh` and in the `contracts-gate` GitHub workflow on every push and pull request.
 
+### Bounds: the second property the machine holds (`lib/bounds.py`)
+
+Contracts hold "which beats does this verb perform" across 96 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
+
+**Declaration** (`bounds:` beside `contracts:`), keyed by verb, or `*` for caps in shared library code that belong to no single verb. Four sources, and the source picks which enforcement applies:
+
+| `source` | `ref` is | Drift enforces | Audit enforces |
+|----------|----------|----------------|----------------|
+| `registry` | an authority key | the shipped literal equals it exactly — a copy that differs is stale by definition | output carries its total |
+| `derived` | an expression over authority keys | the literal equals what the expression computes; the factor in it is the explanation | output carries its total |
+| `measured` | a census expression | **no literal may ship at all** — a counted quantity is true only now | output carries its total |
+| `none` | nothing (a ref here is an error) | nothing: no ceiling is claimed | output carries its total, and any truncation marker carries magnitude |
+
+**Detection is evidence-based, never prose-based.** A command is bounding because a numeric literal sits in a bounding position in its implementation, at a file and line the gate prints — not because its description sounded like it returns a lot of rows. `BOUND_PARAMETERS` maps ~30 curated names to units; six syntaxes recognize the literal (kwarg/object assignment including quoted shell locals, shell `${X:-N}` defaults, `|| N` / `?? N` fallbacks, SQL `LIMIT N`, argparse `default=N`, `head -n` / `.slice(0, N)`). Comment and help-text lines are classified `doc` and never gated: a bound quoted in help documents a cap, it is not one. Test files are excluded — a bound asserted in a test is the test's fixture. Verb attribution walks up to the nearest enclosing definition or `case` arm and returns `None` rather than guessing, because a wrong attribution sends a reviewer to the wrong verb.
+
+**Gate reach equals authority reach** (`mark_gate_eligible`). The gate demands a receipt only for units the authority currently holds a ceiling in — `{unit for entry in authority_entries()}`, computed every run, listed nowhere. Demanding a citation the authority cannot supply would push the next agent toward inventing one, which is the defect, not the fix. Today that is `tokens` and `records`: 15 sites gate, and 164 caps in `rows`/`levels` are **inventoried on every run, never suppressed** — there is no grandfather file, nothing to empty, and nothing to forget. When lane-27's authority learns a unit, every site in it gates the same day with no change to this code.
+
+**What the gate cannot reach, it names.** The declaration surface is a tool's registry entry, so caps in `lib/` and `bin/` (8 today, including `lib/ai_router.py:DEFAULT_MAX_TOKENS`) belong to no tool and have nowhere to declare. They are counted and printed on every gate run rather than skipped: naming what the gate cannot reach is the difference between a boundary and a blind spot.
+
+**Drift** (`agent-do harness bounds drift [--tool X]`). Resolves each declared `ref` (longest-match key substitution, then arithmetic with no names, calls, or attribute access) and compares. The only tolerances in the module, both derived rather than chosen:
+
+- **Integer rounding: 0.5.** Rounding a real to an integer moves it by at most 0.5, so 0.5 is the unique tolerance that admits exactly the rounding a correct expression performs and no second number beyond it.
+- **The authority delivery floor: `min(max_tokens / max_input_tokens)` over every model record**, today 0.128 from `anthropic/claude-opus-4-8`. Every model record pairs a capacity with a delivery ceiling; that pair is a published statement, by the people who built the system, about how small one delivery may be relative to the space it is drawn from. A bound that *claims a ceiling governs it* (`registry` or `derived`) and lands below the tightest such ratio in the authority is smaller than any delivery ceiling any provider considered worth publishing, so its stated factor is doing no work and the number came from somewhere other than the ceiling it cites. That is the `inject at 6000 chars against a 200k-token window` shape. The number is **read, never written**: recomputed each run, stored nowhere, and it moves when the authority moves. It applies only to bounds asserting a ceiling relationship — `source: none` claims none, so there is no ratio to judge and the audit holds it to totals instead. With no record publishing both numbers there is no floor at all, because a checker with no evidence must not invent one.
+
+Same command checks **router coverage**: every model a `roles.*.chain` can select must have an authority record (mn-b7cb18). Reachability is exactly what the chains declare — a model no chain names cannot be selected, so nothing is owed for it — which keeps the check inside what the registry can prove and leaves the data fix with `models.yaml`'s maintainer.
+
+**Audit** (`agent-do harness bounds audit [--tool X]`). Probes declared bounding verbs and grades what comes back: a payload returning rows with no total fails, because a caller cannot tell a complete set from a capped one; a payload declaring `has_more`/`truncated` with no total fails as the bare fact of a cut; text output fails when a truncation marker carries no magnitude (`[truncated: 30 of 197 shown]` passes, `... output truncated` does not). Probes reach only verbs the registry already declares read-only, through `quantities._read_only_verb` — the same safety source the census uses, so a probe can never reach a write. Like `contracts audit`, the live run is on demand and its fixtures are what `./test.sh` enforces.
+
+**Outward scan** (`agent-do harness bounds scan <path> [--out FILE]`). The same detector, aimed at any project, because the pollution is already shipped and there is no map of it. Outward the context signal is a precondition rather than corroboration: a literal counts only in a file that references an LLM, DB, or HTTP client, since nothing else establishes that the number bounds a fetched set. The signal is file-scoped because imports are file-scoped in every language it reads. Each finding carries the published ceiling when the file names a model the authority knows, and names the missing authority record when it does not — the honest half of the same refusal `quantity lookup` makes. Report-only: it never rewrites a file.
+
 ## Internal Model Roles
 
 agent-do's own LLM calls (intent routing, suggest rerank, hook routing) never hardcode a model. `models.yaml` is the source of truth; `lib/models.py` resolves it; `lib/ai_router.py:llm_call(role, ...)` executes it. Generated templates and user-selected engines are out of scope by design.
@@ -209,6 +239,39 @@ agent-do's own LLM calls (intent routing, suggest rerank, hook routing) never ha
 - **Capability records**: per-model entries pin provider, endpoint (`messages` vs `responses`), modalities, token ceilings, and capability maps (thinking types, effort values). `generation_params` maps the role policy onto what the model actually advertises, so an unsupported effort or thinking type is silently dropped rather than sent. Requested `max_tokens` is capped to the model's recorded ceiling.
 - **Cross-provider fallback**: `llm_call` filters the chain to providers whose SDK and API key are both present, then walks it, crossing providers only on model-not-found (HTTP 404). Every fallback is reported to stderr and recorded as a `model_fallback` telemetry event. Other errors propagate; a 404 chain exhaustion raises.
 - **`agent-do models doctor`**: fetches each provider's complete model listing (Anthropic paginated to the end; pagination that claims more without a cursor fails loud), then classifies configured models: present in the listing = available; missing models get an individual probe where 404 = retired, 403 = unavailable-to-these-credentials (never auto-retired), anything else = error. `--fix` persists only verified retirements and Anthropic-published capability refreshes, atomically. `agent-do models list` and `agent-do models resolve <role>` expose the resolved state.
+
+## Quantity Authority (lib/quantities.py, `harness quantity` / `harness census`)
+
+Agents invent numbers because measuring costs a tool call and guessing costs nothing. This layer inverts that trade: one place to read a published number from, one place to measure a present one, so typing a literal is the more expensive option. Two kinds, and the distinction is load-bearing.
+
+- **LOOKED_UP** — a static, versioned ceiling somebody else published (a model's `max_tokens`, an API's page limit). Lives in `models.yaml` and is answered with the record it came from, so a caller can cite it.
+- **MEASURED** — how many exist *right now* (lines, directory entries, rows behind a read command). Computed on demand, never cached into a literal, because it is true only now.
+
+**Key grammar.** `<namespace>.<subject>.<quantity>`, e.g. `anthropic.claude-sonnet-5.max_tokens`. Parsed from the ends, never by splitting on every dot: subjects carry dots of their own (`openai.gpt-5.6-sol.max_tokens`), while namespace and quantity never do. Consumers reference a key; they never copy the value into code.
+
+**Two storage shapes in `models.yaml`, because they have two maintainers.** `models:` records are rewritten wholesale by `agent-do models doctor` from the provider's `/v1/models` response, so they carry no per-field provenance — the record is the citation and the doctor is the maintainer. `limits:` entries (page ceilings, quotas) are hand-maintained and each carries `value` + `unit` + `source` + `verified` **in data**, not in a comment: `models doctor --fix` round-trips the file through a YAML dumper and comments do not survive that.
+
+**Output shape (pinned; downstream lanes code against it).**
+
+Every `--json` payload also carries `ok` and `tool:"harness"`; successes add `command` and a timestamp (`generated_at` for lookups, `measured_at` for a census).
+
+| Verb | Bare stdout | `--json` payload |
+|------|-------------|------------------|
+| `quantity lookup <key>` | the number alone, newline-terminated (shell-substitutable) | `key`, `value`, `unit` (may be `null`), `kind:"looked_up"`, `provenance{file,record,field,maintained_by[,source,verified]}` |
+| `quantity keys [--prefix P]` | one key per line, sorted | `prefix`, `total`, `keys[]` — each entry `{key,value,unit,kind,provenance}` |
+| `census lines` | the total alone | `target`, `total`, `unit:"lines"`, `kind:"measured"`, `exact:true`, `method:"newline-count"`, `method_detail`, `final_line_unterminated`, `bytes_scanned` |
+| `census entries` | the total alone | …`unit:"entries"`, `method:"dir-scan"`, `glob`, `recursive` |
+| `census rows` | the total alone | …`unit:"rows"`, `method:"json-array"`, `verb`, `json_path` |
+| any refusal | nothing on stdout | `{ok:false, exact:false, refused:true, reason, detail}` — **no `total` key at all** |
+| any caller error | nothing on stdout | `{ok:false, error}` — **no `value` or `total` key at all** |
+
+**Exit codes.** `0` answered exactly · `1` the request could not run as asked (unknown or malformed key, unreadable target, non-read or undeclared verb, a `--path` that is not there) · `2` it ran but no exact count exists (payload not JSON, no array, ambiguous array, paginated, command failed, timed out). Refused and crashed must never look alike, and neither ever carries a number. Absence is the contract: a consumer that reads `payload["value"]` or `payload["total"]` on a failure gets a `KeyError`, not a silent `None`.
+
+**Census methods**, each self-reported in `method` (stable id) and `method_detail` (prose): `newline-count` counts `0x0A` bytes to match `wc -l` exactly and reports an unterminated final line in `final_line_unterminated` rather than silently adding it; `dir-scan` enumerates glob matches (`--recursive` for the whole tree); `json-array` runs an agent-do read command through argv (never a shell) and counts one JSON array.
+
+**`census rows` refuses more often than it answers, by design.** It runs only verbs the registry already declares read-only (beat union ⊆ `{snapshot, verify}`) — safety comes from the contracts layer, not a list kept alongside it, and an *undeclared* verb is refused because unknown safety is not safe. It then refuses when the payload is not JSON, contains no array, contains more than one array (name it with `--path`), or shows any sign of being one page of a larger set: `has_more`/`truncated`/`is_truncated` true, a `next_page`/`next_cursor`/`next_page_token`/`next_offset` present, or a declared `limit` exactly equal to the row count — at the page boundary a complete count and a capped one are the same number, which is precisely the failure this layer exists to prevent.
+
+**Consumers, not just producers.** `lib/ai_router.py:_cap_tokens` clamps requested output to the model's recorded ceiling, and `lib/models.py:fetch_provider_models` reads the Anthropic list-endpoint page size from `limits.anthropic/models_list.page_limit` instead of a literal. Both fail loud on absence: a guessed page size can silently return a truncated listing, and a truncated listing is how `models doctor` would decide a live model was retired.
 
 ## Manna Subsystem (tools/agent-manna, Rust)
 
@@ -370,7 +433,7 @@ json_list ...                # JSON array output
 
 ## Tool Concurrency Classification
 
-Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the counts in the current registry are 17 read, 17 write, 61 mixed (95 total). The field is a coarse summary validated against the contracts write surface; per-verb truth lives in the contracts blocks, and `harness contracts surface --json` is the machine-readable form orchestrators should consume. Read-only tools parallelize freely; write tools serialize; mixed tools require per-command inspection.
+Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the counts in the current registry are 17 read, 17 write, 62 mixed (96 total). The field is a coarse summary validated against the contracts write surface; per-verb truth lives in the contracts blocks, and `harness contracts surface --json` is the machine-readable form orchestrators should consume. Read-only tools parallelize freely; write tools serialize; mixed tools require per-command inspection.
 
 ## Exit Codes
 
@@ -380,7 +443,7 @@ Every tool declares `concurrency: read|write|mixed` in `registry.yaml`; the coun
 | `1` | Error | Tool error, missing dependency, invalid arguments, no matching tool |
 | `2` | Needs clarification | Natural language and offline modes: ambiguous intent, or a destructive/sensitive route without `AGENT_DO_AUTO_DESTRUCTIVE=1` |
 
-Exit 2 tells the orchestrator to answer the question and retry with `--context "answer"`. Individual tools may define their own conventions (agent-manna uses 2 for system errors); the 0/1/2 contract above is the dispatcher's natural-language surface.
+Exit 2 tells the orchestrator to answer the question and retry with `--context "answer"`. Individual tools may define their own conventions (agent-manna uses 2 for system errors; `harness census` uses 2 for a principled refusal to estimate, and `zpc position` for a refused flip); the 0/1/2 contract above is the dispatcher's natural-language surface.
 
 ## Test/CI Surface
 

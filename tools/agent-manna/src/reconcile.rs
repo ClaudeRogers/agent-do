@@ -655,8 +655,13 @@ mod tests {
 
     #[test]
     fn test_lint_dream_status() {
+        // claim() now refuses dreams, so an in_progress dream can only arrive
+        // from outside the CLI (a hand-edited board, an older binary). Lint is
+        // what catches that residue, so the state is set directly here.
         let mut d = dream("mn-aaa111", "Claimed dream");
-        d.claim("ses_x".to_string()).unwrap();
+        d.status = IssueStatus::InProgress;
+        d.claimed_by = Some("ses_x".to_string());
+        d.claimed_at = Some(Utc::now());
         let findings = lint_board(&[d]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "dream_status");

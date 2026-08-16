@@ -24,6 +24,7 @@ THREAD_ENV_KEYS = [
     "AGENT_DO_COORD_PID_START",
     "AGENT_DO_COORD_RUNTIME",
     "AGENT_DO_COORD_MODEL",
+    "AGENT_DO_COORD_ISOLATION_NUDGE",
     "TMUX_PANE",
 ]
 
@@ -466,6 +467,149 @@ def test_structured_focus(tmp_path: Path, env_base: dict[str, str]) -> None:
     require(bad.returncode != 0, f"invalid phase must be rejected: {bad.stdout}")
 
 
+def test_isolation_nudge(tmp_path: Path, env_base: dict[str, str]) -> None:
+    """Contention names the remedy; a declared branch this tree is not on is mandatory isolation."""
+    project = make_project(tmp_path, "isolation")
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+    env_a = clean_env(env_base)
+    env_a["CODEX_THREAD_ID"] = "iso-writer-a"
+    env_b = clean_env(env_base)
+    env_b["CODEX_THREAD_ID"] = "iso-writer-b"
+
+    coord_json(["role", "set", "builder", "--territory", "shared"], cwd=project, env=env_a)
+    coord_json(["role", "set", "builder", "--territory", "shared/api"], cwd=project, env=env_b)
+
+    # Both sides of the contention are told what to do, ownership-splitting first.
+    for env, other in ((env_a, "codex-isowriterb"), (env_b, "codex-isowritera")):
+        payload = coord_json(["interrupts"], cwd=project, env=env)
+        contention = next(
+            item
+            for item in payload["interrupts"]
+            if item["kind"] == "contention" and item["peer"] == other
+        )
+        summary = contention["summary"]
+        require("split ownership" in summary, f"remedy must name ownership-splitting: {summary}")
+        require("agent-do git worktree add" in summary, f"remedy must name the worktree command: {summary}")
+        require(
+            summary.index("split ownership") < summary.index("agent-do git worktree add"),
+            f"ownership-splitting is the cheaper fix and must be named first: {summary}",
+        )
+        require(
+            "does not share this board" in summary,
+            # The board is per-checkout by design (agent-manna store.rs:17); mn-68d471
+            # bound only memory. Drop this with the caveat if the board ever binds.
+            f"worktree remedy must carry the per-checkout board caveat: {summary}",
+        )
+        require(
+            contention["remedy"] and "split ownership" in contention["remedy"][0],
+            f"structured remedy must lead with ownership-splitting: {contention}",
+        )
+
+    # A lane on this checkout's branch is silent.
+    env_c = clean_env(env_base)
+    env_c["CODEX_THREAD_ID"] = "iso-lane-c"
+    same = coord_json(
+        ["focus", "set", "lane c", "--path", "docs", "--branch", head],
+        cwd=project,
+        env=env_c,
+    )
+    require(same["focus"]["branch"] == head, f"branch must be recorded on focus: {same}")
+    require(same["branch_mismatch"] is None, f"same branch must not flag isolation: {same}")
+    quiet = coord_json(["interrupts"], cwd=project, env=env_c)
+    require(
+        not [item for item in quiet["interrupts"] if item["kind"] == "contention"],
+        f"matching branch must stay silent: {quiet}",
+    )
+
+    # A lane needing another branch cannot share this working tree.
+    diverged = coord_json(
+        ["focus", "set", "lane c", "--branch", "feat/elsewhere"],
+        cwd=project,
+        env=env_c,
+    )
+    mismatch = diverged["branch_mismatch"]
+    require(mismatch and mismatch["declared"] == "feat/elsewhere", f"expected mismatch at declaration: {diverged}")
+    require(mismatch["head"] == head, f"mismatch must name the checkout branch: {diverged}")
+    payload_c = coord_json(["interrupts"], cwd=project, env=env_c)
+    branch_items = [
+        item
+        for item in payload_c["interrupts"]
+        if item["kind"] == "contention" and item["peer"] is None
+    ]
+    require(bool(branch_items), f"expected branch-mismatch interrupt: {payload_c}")
+    branch_summary = branch_items[0]["summary"]
+    require(
+        "one working tree holds one branch" in branch_summary,
+        f"branch interrupt must say why isolation is mandatory: {branch_summary}",
+    )
+    require(
+        "agent-do git worktree add feat/elsewhere" in branch_summary,
+        f"branch interrupt must name the remedy command: {branch_summary}",
+    )
+
+    # Nudge only: never a non-zero exit.
+    plain = coord(["interrupts"], cwd=project, env=env_c)
+    require(plain.returncode == 0, f"isolation nudge must never block: {plain.stderr}")
+
+    # Kill switch: contention survives, the nudge does not.
+    env_a_off = dict(env_a)
+    env_a_off["AGENT_DO_COORD_ISOLATION_NUDGE"] = "0"
+    off_payload = coord_json(["interrupts"], cwd=project, env=env_a_off)
+    off_contention = next(
+        item
+        for item in off_payload["interrupts"]
+        if item["kind"] == "contention" and item["peer"] == "codex-isowriterb"
+    )
+    require("worktree" not in off_contention["summary"], f"kill switch must silence remedy: {off_contention}")
+    require(off_contention["remedy"] == [], f"kill switch must empty the structured remedy: {off_contention}")
+
+    env_c_off = dict(env_c)
+    env_c_off["AGENT_DO_COORD_ISOLATION_NUDGE"] = "0"
+    off_c = coord_json(["interrupts"], cwd=project, env=env_c_off)
+    require(
+        not [item for item in off_c["interrupts"] if item["peer"] is None],
+        f"kill switch must silence the branch trigger: {off_c}",
+    )
+
+    # v1 focus records (no branch key) and malformed values read fine and stay silent.
+    focus_path = project / ".git" / "agent-do" / "coord" / "focus.json"
+    stored = json.loads(focus_path.read_text())
+    stored["focus"]["codex-v1lane"] = {
+        "agent_id": "codex-v1lane",
+        "goal": "v1 lane",
+        "paths": ["legacy"],
+        "updated_at": iso_ago(60),
+    }
+    stored["focus"]["codex-junklane"] = {
+        "agent_id": "codex-junklane",
+        "goal": "junk lane",
+        "paths": [],
+        "branch": {"not": "a branch"},
+        "updated_at": iso_ago(60),
+    }
+    focus_path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    for thread in ("v1lane", "junklane"):
+        env_legacy = clean_env(env_base)
+        env_legacy["CODEX_THREAD_ID"] = thread
+        legacy = coord(["interrupts"], cwd=project, env=env_legacy)
+        require(legacy.returncode == 0, f"{thread} record must not crash interrupts: {legacy.stderr}")
+        legacy_payload = coord_json(["interrupts"], cwd=project, env=env_legacy)
+        require(
+            not [item for item in legacy_payload["interrupts"] if item["peer"] is None],
+            f"{thread} record must not raise a branch interrupt: {legacy_payload}",
+        )
+    v1_focus = coord_json(["focus", "show", "codex-v1lane"], cwd=project, env=env_c)
+    require(v1_focus["focus"]["goal"] == "v1 lane", f"v1 focus record must still read: {v1_focus}")
+
+
 def test_drops_and_history(tmp_path: Path, env_base: dict[str, str]) -> None:
     project = make_project(tmp_path, "drops")
 
@@ -733,6 +877,7 @@ def main() -> int:
         test_roles_territory(tmp_path, env_base)
         test_guard(tmp_path, env_base)
         test_structured_focus(tmp_path, env_base)
+        test_isolation_nudge(tmp_path, env_base)
         test_drops_and_history(tmp_path, env_base)
         test_v1_migration(tmp_path, env_base)
         test_agent_process_anchor(tmp_path, env_base)
