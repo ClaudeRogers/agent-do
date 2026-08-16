@@ -296,7 +296,15 @@ def main() -> int:
         require(session_hook.returncode == 0, f"session hook failed: {session_hook.stderr}")
         session_payload = json.loads(session_hook.stdout)
         additional = session_payload["hookSpecificOutput"]["additionalContext"]
-        require("Project-Scoped agent-do Tools" in additional, f"expected project tooling section, got: {additional}")
+        # `suggest --project` is an on-demand command, never a session-start
+        # one: against a real repo it needs longer than a session hook can wait,
+        # so the section it fed was killed before it rendered and paid for
+        # nothing. The discovery hint stays — that is what points at the
+        # command when someone actually wants it.
+        require(
+            "Project-Scoped agent-do Tools" not in additional,
+            f"session start must not run suggest --project, got: {additional}",
+        )
         require("agent-do suggest --project" in additional, f"expected project discovery hint, got: {additional}")
 
     with tempfile.TemporaryDirectory() as tmpdir:

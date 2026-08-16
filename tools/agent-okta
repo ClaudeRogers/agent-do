@@ -69,7 +69,7 @@ Groups resolve by name or ID (00g...).
 Auth servers resolve by name, ID (aus...), or "default".
 
 Environment:
-  OKTA_DOMAIN                    Okta domain (e.g., versova.okta.com)
+  OKTA_DOMAIN                    Okta domain (e.g., example.okta.com)
   OKTA_API_TOKEN                 SSWS API token
 
 Examples:

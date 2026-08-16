@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (96 tools)
+## Summary (100 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -29,12 +29,14 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [appleevents](#appleevents) | Control scriptable macOS apps through AppleEvents, AppleScript, and JXA | mixed | 9 |
 | [audio](#audio) | Audio processing | mixed | 3 |
 | [auth](#auth) | Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials | mixed | 13 |
+| [betterstack](#betterstack) | Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call | mixed | 14 |
 | [bluetooth](#bluetooth) | Bluetooth control | mixed | 3 |
+| [brief](#brief) | Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions, and git into ranked threads, a delta since last look, one-tap suggestions carried as data, and a receipts-grounded paragraph | mixed | 10 |
 | [browse](#browse) | AI-first headless browser automation with @ref element selection, SSO/MFA login handoff, persistent sessions | mixed | 20 |
 | [burp](#burp) | Burp Suite automation | mixed | 4 |
 | [cad](#cad) | CAD file operations | mixed | 4 |
 | [calendar](#calendar) | Control calendar | mixed | 3 |
-| [ci](#ci) | Control CI/CD pipelines | write | 3 |
+| [ci](#ci) | Control CI/CD pipelines | write | 4 |
 | [clerk](#clerk) | Clerk authentication platform — users, organizations, sessions, OAuth apps, enterprise SSO, JWT templates, roles | mixed | 14 |
 | [clipboard](#clipboard) | Cross-app clipboard management | mixed | 4 |
 | [cloud](#cloud) | Control cloud providers (AWS, GCP, Azure) | mixed | 3 |
@@ -44,6 +46,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
 | [coord](#coord) | Project-local agent state and interrupt broker | mixed | 22 |
 | [creds](#creds) | Secure credential storage and resolution for agent-do tools | mixed | 8 |
+| [cronitor](#cronitor) | Cronitor scheduled job and uptime monitoring | mixed | 11 |
 | [db](#db) | Control database clients | mixed | 5 |
 | [debug](#debug) | Control debuggers | read | 5 |
 | [discord](#discord) | Control Discord | mixed | 2 |
@@ -55,11 +58,11 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [excel](#excel) | AI-first Excel CLI for workbook automation | mixed | 11 |
 | [figma](#figma) | Control Figma | read | 3 |
 | [gcp](#gcp) | Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation for OAuth credentials | mixed | 19 |
-| [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 23 |
+| [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 24 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
-| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 5 |
+| [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 8 |
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
 | [ide](#ide) | Control VS Code/Cursor editor | read | 5 |
 | [image](#image) | Image processing | mixed | 3 |
@@ -94,6 +97,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
+| [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
 | [sheets](#sheets) | Control Google Sheets | mixed | 3 |
@@ -117,7 +121,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [voice](#voice) | Voice synthesis and recognition | write | 4 |
 | [wireshark](#wireshark) | Network packet capture and analysis | read | 4 |
 | [zoom](#zoom) | Zoom meeting control | mixed | 5 |
-| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 13 |
+| [zpc](#zpc) | Experience journal — structured lessons, decisions, patterns per project. Complementary to context (knowledge library). | mixed | 16 |
 
 ## Tools
 
@@ -450,6 +454,69 @@ agent-do auth advance github
 - long_running (daemon/stream/session; may never return): `ensure`
 - composite (one call performs several beats internally): `advance`, `ensure`, `import-browser`, `probe`
 
+### betterstack
+
+Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect uptime monitors
+- view monitor availability and response times
+- pause and resume monitors
+- list and manage incidents (acknowledge, resolve)
+- list heartbeats
+- list status pages
+- view on-call schedules
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info
+- `availability`: Monitor availability summary
+- `response-times`: Monitor response time data
+- `pause`: Pause a monitor
+- `resume`: Resume a monitor
+- `incidents`: List incidents (--active for unresolved)
+- `incident`: Detailed incident info
+- `ack`: Acknowledge an incident
+- `resolve`: Resolve an incident
+- `heartbeats`: List all heartbeats
+- `status-pages`: List all status pages
+- `on-call`: List on-call schedules
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my betterstack monitors
+agent-do betterstack monitors
+# show betterstack monitor details
+agent-do betterstack show vms-web
+# check active incidents in betterstack
+agent-do betterstack incidents --active
+# check uptime availability
+agent-do betterstack availability versova-chat
+# pause a betterstack monitor
+agent-do betterstack pause vms-web
+# acknowledge a betterstack incident
+agent-do betterstack ack 12345
+# get betterstack account snapshot
+agent-do betterstack snapshot
+```
+
+**Credentials**
+
+- Required: `BETTERSTACK_API_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `availability`, `heartbeats`, `incident`, `incidents`, `monitors`, `on-call`, `response-times`, `show`, `snapshot`, `status-pages`
+- Write (connect/interact/save): `ack`, `pause`, `resolve`, `resume`
+- composite (one call performs several beats internally): `ack`, `pause`, `resolve`, `resume`
+
 ### bluetooth
 
 Bluetooth control
@@ -479,6 +546,67 @@ agent-do bluetooth scan
 
 - Read-only (snapshot/verify; safe to parallelize): `scan`
 - Write (connect/interact/save): `connect`, `disconnect`
+
+### brief
+
+Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions, and git into ranked threads, a delta since last look, one-tap suggestions carried as data, and a receipts-grounded paragraph
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- join gh inbox rows to manna items to live coord sessions to last commits to claim state
+- rank threads with reasons that explain every score (heuristic today, learned as the behavior journal fills)
+- compute the delta since the caller's last look (explicit --since, read-state, or first look)
+- carry manna reconcile desyncs as one-tap suggestions whose commands are data, never executed
+- speak a paragraph grounded in receipts (model voice when configured; deterministic fallback, annotated)
+- answer estate questions with a receipt id on every claim
+- versioned full-shape JSON contract for the Holy panel; consumers fail closed on drift
+- pin, snooze (until a timestamp or until the thread changes), record observed behavior
+- honest degradation — a failed source is an annotation, never a guess and never silence
+
+**Commands**
+
+- `now`: Human-readable estate brief; model voice when configured, deterministic sentence annotated otherwise
+- `threads`: Joined thread objects — gh PR ↔ manna item ↔ live session ↔ last commit ↔ claim state
+- `ask`: Answer a question over the estate (sessions, git log, board, zpc); every claim carries a receipt id
+- `holy`: Full composite contract JSON for the Holy panel — versioned, full shape, honest degradations
+- `pin`: Pin a thread (rank boost, survives restarts)
+- `unpin`: Remove a pin
+- `snooze`: Snooze a thread until a timestamp or until it changes (refuses an unbounded snooze)
+- `unsnooze`: Clear a snooze
+- `observe`: Record observed behavior on a thread (acted|ignored|snoozed|pinned|opened) — feeds the ranker
+- `state`: Show the read-state store and journal size
+
+**Examples**
+
+```bash
+# what needs me right now
+agent-do brief now
+# full contract for the Holy panel
+agent-do brief holy --focused-repo ~/Custom-Coding/holy-ghostty --since 2026-08-11T14:00:00Z
+# joined threads as data
+agent-do brief threads --json
+# ask the estate a question
+agent-do brief ask "who touched the auth flow last week"
+# snooze a thread until it changes
+agent-do brief snooze mn-53da2c --until-changed
+# record that I acted on a thread
+agent-do brief observe ovachiever/agent-do#23 acted
+```
+
+**Credentials**
+
+- Optional: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `state`, `threads`
+- Write (connect/interact/save): `ask`, `holy`, `now`, `observe`, `pin`, `snooze`, `unpin`, `unsnooze`
+- long_running (daemon/stream/session; may never return): `ask`, `holy`, `now`, `threads`
+- polymorphic (beat decided by payload or flag at call time): `now`, `snooze`
+- composite (one call performs several beats internally): `ask`, `holy`
+- own_state (writes only its own cache/state; parallel-safe): `holy`
 
 ### browse
 
@@ -678,17 +806,20 @@ Concurrency: `write`
 - `trigger`: Trigger build
 - `status`: View status
 - `logs`: View build logs
+- `triage`: Classify a failed run and draft a triage summary (dry-run)
 
 **Examples**
 
 ```bash
 # trigger deploy pipeline
 agent-do ci trigger deploy
+# triage a failed CI run
+agent-do ci triage 12345 --repo owner/repo
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `logs`, `status`
+- Read-only (snapshot/verify; safe to parallelize): `logs`, `status`, `triage`
 - Write (connect/interact/save): `trigger`
 
 ### clerk
@@ -1071,8 +1202,9 @@ Concurrency: `mixed`
 
 - mint session-UUID identities anchored to process pid + start time (pane reuse never inherits a dead session)
 - verify peer liveness (kill -0 + start-time match) and classify peers as active, idle, dead, stopped, or stale
-- declare structured focus (goal, phase, note, blocking_on, last_ship) with project-relative paths
+- declare structured focus (goal, phase, note, blocking_on, last_ship, branch) with project-relative paths
 - declare roles with exclusive-writer territories and compute overlap contention for both writers
+- name the isolation remedy in contention interrupts (split ownership first, worktree second) and flag a declared branch this checkout is not on as mandatory isolation
 - manage advisory claims and a warn-only pre-commit guard over live claims and territories
 - point peers at files via drops, declare dependencies, publish artifacts with file pointers
 - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
@@ -1091,7 +1223,7 @@ Concurrency: `mixed`
 - `guard`: Advisory commit guard: guard check [\<path> ...] [--staged] | guard install
 - `status`: Show current focus, needs, publishes, and interrupt counts
 - `interrupts`: Show current interrupts: interrupts [--mark-seen] [--limit \<n>]
-- `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] | show | clear
+- `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] [--branch \<name>] | show | clear
 - `claims`: List advisory claims
 - `claim`: Claim a file/path: claim \<path> [--reason \<text>] [--strength soft|strong]
 - `release`: Release a claim you own: release \<path>
@@ -1115,6 +1247,8 @@ agent-do coord role set builder --territory dm-ephemeris --territory shared/sche
 agent-do coord focus set "private Render networking" --path recognition-oracle/render.yaml --phase building
 # go quiet while another agent audits
 agent-do coord focus set "private Render networking" --phase quiet --note "QUIET while auditor runs"
+# declare the branch this lane needs so a mismatch with this checkout surfaces
+agent-do coord focus set "private Render networking" --branch feat/render-networking
 # claim a file to avoid overlap
 agent-do coord claim recognition-oracle/render.yaml --reason "private Render blueprint wiring"
 # declare that I am waiting on a package
@@ -1179,6 +1313,69 @@ agent-do creds check --tool vercel
 - Write (connect/interact/save): `delete`, `export`, `store`
 - destructive (irreversible data loss; confirm before auto-running): `delete`
 - sensitive (emits or persists secret material; guard output): `delete`, `store`
+
+### cronitor
+
+Cronitor scheduled job and uptime monitoring
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect monitors (jobs, heartbeats, checks)
+- view monitor details including schedule and assertions
+- create and delete monitors
+- pause and resume monitors for maintenance windows
+- send telemetry events (run, complete, fail, ok)
+- list and inspect issues (incidents)
+- list notification lists
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info by key
+- `create`: Create a monitor (JSON from stdin)
+- `delete`: Delete a monitor by key
+- `pause`: Pause a monitor (indefinitely or for N hours)
+- `resume`: Resume a paused monitor
+- `issues`: List issues (--open for unresolved only)
+- `issue`: Detailed issue info by key
+- `ping`: Send telemetry event (--state run|complete|fail|ok)
+- `notifications`: List notification lists
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my cronitor monitors
+agent-do cronitor monitors
+# show cronitor monitor details
+agent-do cronitor show TuoCU3
+# check open cronitor issues
+agent-do cronitor issues --open
+# send a cronitor telemetry ping
+agent-do cronitor ping my-job --state complete
+# pause a cronitor monitor for maintenance
+agent-do cronitor pause my-job 4
+# resume a paused cronitor monitor
+agent-do cronitor resume my-job
+# get cronitor account snapshot
+agent-do cronitor snapshot
+# create a new cronitor monitor
+echo '{"type":"job","key":"my-job","schedules":["0 * * * *"]}' | agent-do cronitor create
+```
+
+**Credentials**
+
+- Required: `CRONITOR_API_KEY`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `issue`, `issues`, `monitors`, `notifications`, `show`, `snapshot`
+- Write (connect/interact/save): `create`, `delete`, `pause`, `ping`, `resume`
+- destructive (irreversible data loss; confirm before auto-running): `delete`
+- composite (one call performs several beats internally): `create`, `pause`, `ping`, `resume`
 
 ### db
 
@@ -1681,7 +1878,8 @@ Concurrency: `mixed`
 
 - `whoami`: Show authenticated GitHub user
 - `repos`: List or sync accessible repositories
-- `inbox`: Show actionable PR work across repositories
+- `inbox`: Show actionable PR work across repositories — maintainer-role and declared-portfolio sweeps of open third-party PRs plus review-request ceremony (--ceremony-only skips the sweeps)
+- `portfolio`: Manage the declared portfolio of swept repos — add/remove owner/repo or owner/* patterns, list current declarations
 - `awaiting`: Show open PRs likely awaiting your review by broad review heuristics
 - `prs`: Search pull requests
 - `pr`: Show PR details
@@ -1732,8 +1930,9 @@ agent-do gh edit ovachiever/agent-do#5 --add-reviewer @me --add-label review-nee
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `pr`, `prs`, `repos`, `review`, `threads`, `whoami`
-- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `merge`, `ready`, `reopen`, `request-changes`, `update-branch`
+- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `portfolio list`, `pr`, `prs`, `repos`, `review`, `threads`, `whoami`
+- Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `merge`, `portfolio add`, `portfolio remove`, `ready`, `reopen`, `request-changes`, `update-branch`
+- own_state (writes only its own cache/state; parallel-safe): `portfolio add`, `portfolio remove`
 
 ### ghidra
 
@@ -1781,6 +1980,7 @@ Concurrency: `mixed`
 - inspect status, diffs, logs, conflicts, reflog, and unreachable commits
 - manage branches, stashes, remotes, and worktrees
 - seed named gitignored local files into fresh worktrees without overwriting targets
+- bind a new worktree's zpc memory to the primary store and warn that the manna board does not follow it
 - inspect and recover files from refs/auto shadow snapshots
 - preview safe branch cleanup before explicit apply
 
@@ -1796,7 +1996,7 @@ Concurrency: `mixed`
 - `push`: Push the current branch and establish upstream when absent
 - `sync`: Pull with rebase, then push
 - `snapshot`: Emit full repository state as JSON
-- `worktree add`: Add a worktree and seed named gitignored files by default
+- `worktree add`: Add a worktree, seed named gitignored files, and bind its zpc memory to this checkout's store
 - `worktree list`: List registered worktrees
 - `worktree remove`: Remove a clean registered worktree
 - `snap list`: List refs/auto shadow snapshots
@@ -1883,6 +2083,8 @@ Concurrency: `mixed`
 - build drill-down evidence bundles for sessions, runs, and harness changes
 - create and verify falsifiable harness change manifests
 - make registry, hook, tool, and memory surfaces visible as one harness instead of adjacent tools
+- answer quantity questions from an authority instead of a literal, and refuse to estimate
+- fail the build on a cap with no declared provenance, and report bare bounding literals in any project
 
 **Commands**
 
@@ -1891,6 +2093,9 @@ Concurrency: `mixed`
 - `evidence`: Build local drill-down evidence bundles
 - `manifest`: Create and verify harness change manifests
 - `contracts`: Contracts gate, lexicon, surface, and drift: contracts validate|propose|surface|drift
+- `quantity`: Looked-up ceilings by stable key, with provenance: quantity lookup|keys
+- `census`: Measured totals right now, exact or refused: census lines|entries|rows
+- `bounds`: Declared caps checked against the authority: bounds drift|audit|scan
 
 **Examples**
 
@@ -1905,14 +2110,22 @@ agent-do harness nudges effectiveness --since 7d
 agent-do harness evidence build latest-session
 # create a falsifiable manifest for an email hydration fix
 agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
+# what is this model's max output token ceiling
+agent-do harness quantity lookup anthropic.claude-sonnet-5.max_tokens
+# how many lines are in this file right now
+agent-do harness census lines registry.yaml
+# check every declared cap against the ceiling it cites
+agent-do harness bounds drift
+# find hardcoded token and row limits in a project
+agent-do harness bounds scan ~/Custom-Coding/some-project
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`
+- Read-only (snapshot/verify; safe to parallelize): `bounds audit`, `bounds drift`, `bounds scan`, `census`, `contracts audit`, `contracts drift`, `contracts surface`, `contracts validate`, `inspect`, `nudges`, `quantity`
 - Write (connect/interact/save): `contracts propose`, `evidence`, `manifest`
 - polymorphic (beat decided by payload or flag at call time): `contracts propose`, `manifest`
-- composite (one call performs several beats internally): `contracts audit`, `contracts drift`, `evidence`
+- composite (one call performs several beats internally): `bounds audit`, `contracts audit`, `contracts drift`, `evidence`
 
 ### homekit
 
@@ -2358,14 +2571,14 @@ Concurrency: `write`
 - `init`: Initialize manna repository
 - `status`: Show current session and claimed issues
 - `create`: Create new issue (--type track|item|dream, --track, --source)
-- `claim`: Claim an issue for the current session
+- `claim`: Claim an issue for the current session (refuses dreams, exit 2, until converted)
 - `done`: Mark a claimed issue as done
 - `abandon`: Release a claimed issue back to open
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
 - `show`: Show issue details
-- `update`: Update issue title, description, status, type, track, or source
+- `update`: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
@@ -2385,6 +2598,8 @@ agent-do manna list
 agent-do manna show 1
 # capture an idea for later
 agent-do manna dream 'Unify the auth flows'
+# convert a dream into claimable work
+agent-do manna update mn-abc123 --type item
 # check the board for drift
 agent-do manna reconcile --write-drift
 ```
@@ -3445,6 +3660,66 @@ agent-do screen type 'hello world'
 
 - Read-only (snapshot/verify; safe to parallelize): `cursor`, `displays`, `elements`, `find`, `snapshot`
 - Write (connect/interact/save): `click`, `press`, `scroll`, `type`
+
+### sentry
+
+Sentry error tracking, issue management, alerts, and releases
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect projects
+- search and filter issues with Sentry query syntax
+- view issue details with assignee, level, and event count
+- resolve, unresolve, ignore, and assign issues
+- list alert rules across all projects
+- list recent releases
+- full account snapshot as JSON
+
+**Commands**
+
+- `projects`: List all projects with platforms
+- `project`: Detailed project info
+- `issues`: List issues (--project, --query, --sort, --limit)
+- `issue`: Detailed issue info by short ID
+- `resolve`: Resolve an issue
+- `unresolve`: Reopen a resolved issue
+- `ignore`: Mark an issue as ignored
+- `assign`: Assign an issue to a user by email
+- `alerts`: List alert rules
+- `alert`: Detailed alert rule info
+- `releases`: List recent releases (--project)
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list sentry projects
+agent-do sentry projects
+# show unresolved sentry issues
+agent-do sentry issues
+# show sentry issues for versova-chat
+agent-do sentry issues --project versova-chat
+# get sentry issue details
+agent-do sentry issue VERSOVA-CHAT-B
+# resolve a sentry issue
+agent-do sentry resolve VERSOVA-CHAT-B
+# list sentry alert rules
+agent-do sentry alerts
+# get sentry account snapshot
+agent-do sentry snapshot
+```
+
+**Credentials**
+
+- Required: `SENTRY_AUTH_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `alert`, `alerts`, `issue`, `issues`, `project`, `projects`, `releases`, `snapshot`
+- Write (connect/interact/save): `assign`, `ignore`, `resolve`, `unresolve`
+- composite (one call performs several beats internally): `assign`, `ignore`, `resolve`, `unresolve`
 
 ### serial
 
@@ -4543,6 +4818,12 @@ Concurrency: `mixed`
 
 - capture structured lessons (context/problem/solution/takeaway)
 - log architectural decisions with options, rationale, confidence
+- hold positions with a falsifier and refuse evidence-free flips
+- name every claim with a content-derived id (les-/dec-) and retract it with evidence
+- inject memory as dated claims that live observation outranks, never as standing law
+- carry the user's recorded preferences into any directory, store or no store
+- re-litigate the most-exposed claims against current code and file challenges on divergence
+- clean-context second opinion on a receipts-only brief
 - consolidate lessons into patterns via harvest
 - inject memory context into AI agents
 - search and query memory by tag, date, or text
@@ -4556,13 +4837,16 @@ Concurrency: `mixed`
 - `learn`: Capture a structured lesson
 - `decide`: Log a decision with rationale
 - `decide-batch`: Batch-log decisions from planning phase
-- `harvest`: Post-build consolidation scan
+- `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
+- `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
+- `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
+- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and writes them to the machine-wide store as dated preference lessons, each carrying the sentence verbatim
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
 - `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob
-- `init`: Initialize .zpc/ in a project
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
+- `init`: Initialize .zpc/ in a project; --store-only creates the store alone (no .gitignore append, no agent instruction file) and keeps it out of git through .git/info/exclude, which is what an unattended caller may run in a repo it does not own
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check
 - `profile`: View/update project profile
@@ -4584,17 +4868,37 @@ agent-do zpc review --since HEAD~20 --dry-run
 agent-do zpc review --auto --phase 'Sprint 3'
 # consolidate after swarm build
 agent-do zpc harvest
+# learn from the corrections I have already typed
+agent-do zpc harvest --corrections --dry-run
+# what has this user already told me about how to work
+agent-do zpc inject --preferences
 # check memory status
 agent-do zpc status
 # search for docker lessons
 agent-do zpc query --tag docker
 # set up zpc in this project
 agent-do zpc init
+# correct a lesson that turned out to be wrong
+agent-do zpc retract les-1a2b3c --evidence 'src/api.ts:44 sets Retry-After on every 429' --takeaway 'the API does send Retry-After'
+# file doubt about a lesson without arguing it
+agent-do zpc retract --candidate les-1a2b3c --evidence 'no such handler in src/ today'
+# record a position I can be wrong about
+agent-do zpc position add 'the proxy corrupts the payload' --verdict 'double content-encoding' --confidence med --falsifier 'byte-identical body across the hop'
+# get a second opinion that has not seen the argument
+agent-do zpc counsel --brief .dev/receipts.md --question 'Did the payload survive the hop?'
+# second opinion without hand-picking the receipts
+agent-do zpc counsel --auto-brief --question 'Does the working tree do what the commit message claims?'
+# memory blob small enough to paste into a subagent prompt
+agent-do zpc inject --compact
+# re-check the lessons this project keeps repeating
+agent-do zpc inject --relitigate
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `inject`, `patterns`, `profile`, `query`, `status`
-- Write (connect/interact/save): `checkpoint`, `decide`, `decide-batch`, `harvest`, `init`, `learn`, `promote`, `review`
-- polymorphic (beat decided by payload or flag at call time): `harvest`, `review`
+- Read-only (snapshot/verify; safe to parallelize): `patterns`, `profile`, `query`, `status`
+- Write (connect/interact/save): `checkpoint`, `counsel`, `decide`, `decide-batch`, `harvest`, `init`, `inject`, `learn`, `position`, `promote`, `retract`, `review`
+- long_running (daemon/stream/session; may never return): `counsel`
+- polymorphic (beat decided by payload or flag at call time): `harvest`, `inject`, `position`, `review`
 - composite (one call performs several beats internally): `checkpoint`
+- own_state (writes only its own cache/state; parallel-safe): `counsel`

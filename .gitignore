@@ -50,3 +50,4 @@ tools/streamdeck/
 
 # Tool-local test boards never ship
 tools/agent-manna/.manna/
+.manna/board.lock

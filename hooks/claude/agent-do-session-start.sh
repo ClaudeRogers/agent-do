@@ -152,12 +152,12 @@ append_bootstrap_prompt() {
     bootstrap_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" bootstrap --recommend --json --cwd "$CWD" 2>/dev/null || true)
     [ -n "$bootstrap_json" ] || return 0
 
-    needs_bootstrap=$(echo "$bootstrap_json" | python3 -c "import json,sys; print('true' if json.load(sys.stdin).get('needs_bootstrap') else 'false')" 2>/dev/null || echo "false")
+    needs_bootstrap=$(echo "$bootstrap_json" | jq -r 'if .needs_bootstrap then "true" else "false" end' 2>/dev/null || echo "false")
     [ "$needs_bootstrap" = "true" ] || return 0
 
-    ask_prompt=$(echo "$bootstrap_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('ask_prompt',''))" 2>/dev/null || true)
-    project_root=$(echo "$bootstrap_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project_root',''))" 2>/dev/null || true)
-    commands=$(echo "$bootstrap_json" | python3 -c "import json,sys; data=json.load(sys.stdin); [print(cmd) for cmd in data.get('commands', [])]" 2>/dev/null || true)
+    ask_prompt=$(echo "$bootstrap_json" | jq -r '.ask_prompt // ""' 2>/dev/null || true)
+    project_root=$(echo "$bootstrap_json" | jq -r '.project_root // ""' 2>/dev/null || true)
+    commands=$(echo "$bootstrap_json" | jq -r '.commands[]?' 2>/dev/null || true)
 
     prompt_mode="${AGENT_DO_BOOTSTRAP_PROMPT_MODE:-}"
     if [ -z "$prompt_mode" ]; then
@@ -202,52 +202,15 @@ $commands
     If the user says no, continue normally and do not ask again in this session."
 }
 
-append_project_tooling() {
-    local suggest_json project_root signals tools_block
-
-    [ -n "$AGENT_DO_DIR" ] || return 0
-    [ -n "$CWD" ] || return 0
-    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
-
-    suggest_json=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" suggest --project --json --cwd "$CWD" --limit 5 2>/dev/null || true)
-    [ -n "$suggest_json" ] || return 0
-
-    project_root=$(echo "$suggest_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('project',''))" 2>/dev/null || true)
-    tools_block=$(echo "$suggest_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-lines = []
-for item in data.get('results', []):
-    lines.append(f\"- {item.get('tool')}: start with \`{item.get('primary')}\`\")
-    readiness = item.get('readiness') or {}
-    fix = readiness.get('fix')
-    note = readiness.get('note')
-    if fix and note:
-        lines.append(f\"  setup: \`{fix}\` ({note})\")
-print('\\n'.join(lines))
-" 2>/dev/null || true)
-    signals=$(echo "$suggest_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(', '.join(data.get('signals', [])))" 2>/dev/null || true)
-
-    [ -n "$tools_block" ] || return 0
-
-    CONTEXT="$CONTEXT
-
----
-
-## Project-Scoped agent-do Tools
-
-Current project root:
-\`$project_root\`
-
-Detected signals:
-\`${signals:-general}\`
-
-Top likely agent-do tools for this repo:
-$tools_block
-
-Refresh this list any time with:
-\`agent-do suggest --project\`"
-}
+# There is no project-tooling section here, and its absence is deliberate.
+# `agent-do suggest --project` needs ~10.5s against a real repo and this hook
+# could only afford 3, so it was killed on every session and the block it fed
+# never once rendered: the cost was paid, the text never arrived. What it would
+# have said reaches the session by three other roads anyway — CLAUDE.md's
+# task-to-tool routing table, the PreToolUse nudge at the moment a raw command
+# is typed, and zpc's project profile — and each of those is either free or
+# paid for elsewhere. `agent-do suggest --project` remains on demand, where a
+# ten-second answer is something the caller chose to wait for.
 
 # Run a command with a hard wall-clock bound, SIGKILLing its entire process
 # group on expiry so orphaned grandchildren cannot hold pipes open.
@@ -265,33 +228,79 @@ bounded_run() {
 
 append_coord_context() {
     local touch_json interrupts_json active_count focus_goal active_block interrupt_count interrupt_block
+    local coord_scratch
+    local -a coord_cmd
 
     [ -n "$AGENT_DO_DIR" ] || return 0
     [ -n "$CWD" ] || return 0
     [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
 
-    # bounded_run kills the whole process group on timeout: a slow or wedged
-    # agent-do spawn must degrade to "no coord context", never hold the pipe
-    # open and eat the hook's whole timeout budget.
-    touch_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord touch --json 2>/dev/null || true)
+    # Straight at the tool rather than through the dispatcher. `agent-do <tool>`
+    # spends most of a second before the tool itself starts — a registry parse
+    # to resolve declared credentials, then a telemetry write — and coord
+    # declares no credentials to resolve (`agent-do creds required coord`: none).
+    # Measured here: 1,126ms dispatched against 300ms direct. The dispatched
+    # form stays as the fallback, for an install whose resolved agent-do has no
+    # tools/ beside it.
+    if [ -x "$AGENT_DO_DIR/tools/agent-coord" ]; then
+        coord_cmd=("$AGENT_DO_DIR/tools/agent-coord")
+    else
+        coord_cmd=("$AGENT_DO_DIR/agent-do" coord)
+    fi
+
+    # Two reads, taken at the same time, because no single verb answers both
+    # questions and minting one is not this hook's call. `touch` renews the
+    # presence lease and is the only read carrying peer_counts, which is where
+    # the dead/stopped/stale tail comes from; `interrupts --mark-seen` is the
+    # only read that consumes what it shows. `coord status` carries both shapes
+    # and substitutes for neither: it marks nothing seen and drops peer_counts.
+    # So the two stay two and overlap, for one call's wall clock instead of two,
+    # each still under the same 2s bound it had alone. Overlapping is safe:
+    # coord takes its own flock around every read-modify-write, and both spawns
+    # resolve one identity, anchored to the runtime process rather than to
+    # either spawn's pid.
+    #
+    # bounded_run kills the whole process group on timeout, both children with
+    # it: a wedged coord must degrade to "no coord context", never hold the
+    # hook's budget open.
+    coord_scratch=$(mktemp -d "${TMPDIR:-/tmp}/agent-do-session-coord.XXXXXX" 2>/dev/null) || return 0
+    bounded_run 2 bash -c '
+        cd "$1" || exit 0
+        scratch="$2"
+        shift 2
+        "$@" touch --json > "$scratch/touch.json" 2>/dev/null &
+        "$@" interrupts --json --mark-seen --limit 5 > "$scratch/interrupts.json" 2>/dev/null &
+        wait
+    ' agent-do-session-coord "$CWD" "$coord_scratch" "${coord_cmd[@]}" >/dev/null 2>&1 || true
+
+    [ -s "$coord_scratch/touch.json" ] && touch_json=$(<"$coord_scratch/touch.json")
+    [ -s "$coord_scratch/interrupts.json" ] && interrupts_json=$(<"$coord_scratch/interrupts.json")
+    rm -rf "$coord_scratch" 2>/dev/null
+
     [ -n "$touch_json" ] || return 0
 
-    active_count=$(echo "$touch_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('active_peers', [])))" 2>/dev/null || echo "0")
-    focus_goal=$(echo "$touch_json" | python3 -c "import json,sys; data=json.load(sys.stdin); print(((data.get('focus') or {}).get('goal')) or '')" 2>/dev/null || true)
+    # jq rather than python3 for every parse below: the same answer for ~10ms
+    # instead of ~190ms, which is what an interpreter costs to start here. The
+    # counters keep a numeric guard because a parse failure now yields an empty
+    # string where python yielded a fallback integer, and `[ "" -gt 0 ]` is an
+    # error message, not a comparison.
+    active_count=$(echo "$touch_json" | jq -r '.active_peers | length' 2>/dev/null || echo "0")
+    case "$active_count" in
+        ''|*[!0-9]*) active_count=0 ;;
+    esac
+    focus_goal=$(echo "$touch_json" | jq -r '.focus.goal? // ""' 2>/dev/null || true)
 
-    interrupts_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" coord interrupts --json --mark-seen --limit 5 2>/dev/null || true)
-    interrupt_count=$(echo "$interrupts_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('interrupts', [])))" 2>/dev/null || echo "0")
+    interrupt_count=$(echo "$interrupts_json" | jq -r '.interrupts | length' 2>/dev/null || echo "0")
+    case "$interrupt_count" in
+        ''|*[!0-9]*) interrupt_count=0 ;;
+    esac
 
     if [ "$interrupt_count" -gt 0 ]; then
-        interrupt_block=$(echo "$interrupts_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-lines = []
-for item in data.get('interrupts', []):
-    prefix = '[new] ' if item.get('new') else ''
-    lines.append(f'- {prefix}{item.get(\"kind\")}: {item.get(\"summary\")}')
-print('\n'.join(lines))
-" 2>/dev/null || true)
+        interrupt_block=$(echo "$interrupts_json" | jq -r '
+            .interrupts[]?
+            | "- " + (if .new then "[new] " else "" end)
+              + (.kind | tostring) + ": " + (.summary | tostring)
+        ' 2>/dev/null || true)
 
         [ -n "$interrupt_block" ] || return 0
 
@@ -315,31 +324,24 @@ Use:
     [ "$active_count" -gt 0 ] || return 0
     [ -z "$focus_goal" ] || return 0
 
-    active_block=$(echo "$touch_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-peers = data.get('active_peers', [])
-peers.sort(key=lambda item: 0 if (item.get('mode') or 'writer') == 'writer' else 1)
-lines = []
-for peer in peers:
-    label = peer.get('alias') or peer.get('agent_id')
-    focus = peer.get('focus') or {}
-    details = []
-    if (peer.get('mode') or 'writer') == 'read-only':
-        details.append(f\"{peer.get('role') or 'auditor'}, read-only\")
-    if peer.get('phase'):
-        details.append(f\"phase:{peer['phase']}\")
-    if peer.get('age'):
-        details.append(peer['age'])
-    suffix = f\" ({', '.join(details)})\" if details else ''
-    goal = f\" goal: {focus.get('goal')}\" if focus.get('goal') else ''
-    lines.append(f'- {label}{suffix}{goal}')
-counts = data.get('peer_counts') or {}
-hidden = int(counts.get('dead', 0)) + int(counts.get('stopped', 0)) + int(counts.get('stale', 0))
-if hidden:
-    lines.append(f'- ({hidden} dead/stopped/stale sessions on the board, not shown)')
-print('\n'.join(lines))
-" 2>/dev/null || true)
+    # Writers first, then everyone else, each group in the order coord gave
+    # them: a partition rather than a sort, so nothing depends on whether jq's
+    # sort happens to be stable.
+    active_block=$(echo "$touch_json" | jq -r '
+        (([.active_peers[]? | select((.mode // "writer") == "writer")]
+          + [.active_peers[]? | select((.mode // "writer") != "writer")])[]
+         | ([(if (.mode // "writer") == "read-only"
+              then ((.role // "auditor") | tostring) + ", read-only" else empty end),
+             (if .phase then "phase:" + (.phase | tostring) else empty end),
+             (if .age then (.age | tostring) else empty end)]) as $details
+         | "- " + ((.alias // .agent_id) | tostring)
+           + (if ($details | length) > 0 then " (" + ($details | join(", ")) + ")" else "" end)
+           + (if (.focus.goal? // null) then " goal: " + (.focus.goal | tostring) else "" end)),
+        ((((.peer_counts.dead? // 0) + (.peer_counts.stopped? // 0) + (.peer_counts.stale? // 0)) as $hidden
+          | if $hidden > 0
+            then "- (\($hidden) dead/stopped/stale sessions on the board, not shown)"
+            else empty end))
+    ' 2>/dev/null || true)
 
     [ -n "$active_block" ] || return 0
 
@@ -374,7 +376,7 @@ append_manna_board() {
 
     board_json=$(cd "$CWD" && bounded_run 2 "$AGENT_DO_DIR/agent-do" manna context --max-tokens 1500 --json 2>/dev/null || true)
     if [ -n "$board_json" ]; then
-        board_block=$(echo "$board_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('context',''))" 2>/dev/null || true)
+        board_block=$(echo "$board_json" | jq -r '.context // ""' 2>/dev/null || true)
         if [ -n "$board_block" ]; then
             CONTEXT="$CONTEXT
 
@@ -409,6 +411,374 @@ $drift_block
 \`\`\`
 
 Reconcile the board against reality before claiming new work, then remove \`.manna/drift.yaml\` once resolved."
+}
+
+# Every project gets a store, without the hook ever writing a tracked file.
+# Two limits make that true. A git worktree is the unit of "project", so a bare
+# directory never gets one. And `zpc init` does more than create the store: it
+# appends to .gitignore and writes (or appends to) the repo's agent instruction
+# file, which is not something a silent session-start hook may do to a repo it
+# does not own. So auto-init rides a store-only mode and stays home without it.
+# The git worktree containing $CWD, for auto-init to know where a store
+# belongs. Asked of git rather than walked, because placement wants git's own
+# answer — GIT_DIR, linked worktrees and all. The store walk does not use this:
+# it carries its own ceiling from zpc_worktree_root, matching the rule zpc
+# resolves by, and the two must not be allowed to drift into each other.
+CWD_TOPLEVEL=""
+zpc_resolve_toplevel() {
+    [ -n "$CWD" ] || return 0
+    CWD_TOPLEVEL=$(cd "$CWD" 2>/dev/null && bounded_run 3 git rev-parse --show-toplevel 2>/dev/null) || CWD_TOPLEVEL=""
+    [ -n "$CWD_TOPLEVEL" ] && [ -d "$CWD_TOPLEVEL" ] || CWD_TOPLEVEL=""
+}
+
+zpc_autoinit() {
+    local toplevel dir init_help
+
+    [ "${AGENT_DO_ZPC_AUTOINIT:-1}" != "0" ] || return 0
+    [ -n "$CWD" ] || return 0
+    [ -n "$AGENT_DO_DIR" ] || return 0
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 0
+
+    toplevel="$CWD_TOPLEVEL"
+    [ -n "$toplevel" ] || return 0
+
+    # zpc resolves a store by walking up from cwd, so a store anywhere between
+    # cwd and the toplevel means this project already has one.
+    dir="$CWD"
+    while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+        [ -d "$dir/.zpc" ] && return 0
+        [ "$dir" = "$toplevel" ] && break
+        dir=$(dirname "$dir")
+    done
+    [ -d "$toplevel/.zpc" ] && return 0
+
+    # A bound worktree already has memory — someone else's directory holds it.
+    # Creating a store here would shadow that binding on the very next session
+    # and put this tree back on the path where its lessons die with it.
+    zpc_binding_for "$toplevel" >/dev/null 2>&1 && return 0
+
+    # init's argument loop swallows flags it does not know, so asking an older
+    # zpc for --store-only gets a full invasive init that reports success. The
+    # gate has to be positive: no such flag in the help text, no auto-init.
+    init_help=$(bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --help 2>/dev/null || true)
+    case "$init_help" in
+        *--store-only*) ;;
+        *) return 0 ;;
+    esac
+
+    (cd "$toplevel" && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc init --store-only) >/dev/null 2>&1 || return 0
+}
+
+# Owning uid of a path. Mode `link` reads the name itself; `target` (the
+# default) follows symlinks, so a .zpc pointing somewhere else is judged by what
+# it actually resolves to. Prints nothing when it cannot tell, and every caller
+# treats "cannot tell" as "do not trust". GNU stat reads -f as --file-system and
+# answers with something that is not a uid at all, so the answer has to look
+# like one before it counts.
+_path_uid() {
+    local uid
+    if [ "${2:-target}" = "link" ]; then
+        uid=$(stat -f %u "$1" 2>/dev/null) || uid=$(stat -c %u "$1" 2>/dev/null) || return 1
+    else
+        uid=$(stat -L -f %u "$1" 2>/dev/null) || uid=$(stat -L -c %u "$1" 2>/dev/null) || return 1
+    fi
+    case "$uid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$uid"
+}
+
+# A store is ours only when we own both the name and what it resolves to: a
+# link owned by somebody else can be re-aimed whenever they like, and a link we
+# own can still land in a directory we do not. zpc applies the identical pair
+# (tools/agent-zpc/lib/common.sh:_zpc_store_is_ours).
+_zpc_store_is_ours() {
+    local uid
+    uid=$(_path_uid "$1" link) || return 1
+    [ "$uid" = "$EUID" ] || return 1
+    uid=$(_path_uid "$1" target) || return 1
+    [ "$uid" = "$EUID" ]
+}
+
+# The store a directory is bound to, or nothing. `agent-git worktree add` binds
+# every linked worktree it creates, because .zpc/ is gitignored and an unbound
+# worktree would record its lessons into a store that dies with
+# `worktree remove`.
+#
+# The binding lives in this user's config, never in the repository, and that
+# location is the whole security property: a pointer file inside the tree would
+# let repository content decide where this hook reads memory from and where the
+# session writes it, and this hook injects what it finds as the project's
+# recorded truth without anyone asking. A clone cannot write $AGENT_DO_HOME.
+# Trust rules identical to zpc's (tools/agent-zpc/lib/common.sh:_zpc_binding_for).
+zpc_binding_for() {
+    local key="${1%/}" bindings worktree store
+    [ -n "$key" ] || return 1
+    bindings="${AGENT_DO_HOME:-$HOME/.agent-do}/zpc/worktree-bindings.tsv"
+    [ -f "$bindings" ] || return 1
+    _zpc_store_is_ours "$bindings" || return 1
+
+    while IFS="$(printf '\t')" read -r worktree store || [ -n "$worktree" ]; do
+        case "$worktree" in
+            ''|'#'*) continue ;;
+        esac
+        [ "${worktree%/}" = "$key" ] || continue
+        store="${store%$'\r'}"
+        store="${store%/}"
+        case "$store" in
+            /*/.zpc) ;;
+            *) return 1 ;;
+        esac
+        [ -d "$store" ] || return 1
+        _zpc_store_is_ours "$store" || return 1
+        printf '%s' "$store"
+        return 0
+    done < "$bindings"
+
+    return 1
+}
+
+# The worktree holding a directory: nearest ancestor-or-self carrying .git.
+# Tested for existence rather than directory-ness, because a submodule or a
+# linked worktree keeps .git as a file. Walked rather than asked of git: this
+# runs before the store walk on every session, and a subprocess to learn what a
+# few stat calls already know is a tax.
+zpc_worktree_root() {
+    local dir="${1%/}"
+    [ -n "$dir" ] || dir="/"
+    while :; do
+        [ -e "$dir/.git" ] && { printf '%s' "$dir"; return 0; }
+        [ "$dir" = "/" ] && break
+        dir="${dir%/*}"
+        [ -n "$dir" ] || dir="/"
+    done
+    return 1
+}
+
+# Where zpc would resolve a store from here — the upward walk resolve_zpc_dir
+# does (tools/agent-zpc/lib/common.sh) — but bounded and ownership-checked,
+# because this walk runs unattended at session start and whatever it finds gets
+# read to the agent as trusted memory.
+#
+# The ceiling: a git worktree stops at its toplevel; otherwise a cwd under
+# $HOME stops at $HOME; a cwd outside both walks nowhere at all and only ever
+# probes itself. Unbounded, a session opened anywhere under /tmp would find a
+# world-writable store planted above it and inject a stranger's lessons under a
+# heading that tells the agent to trust them.
+#
+# The ownership check is the second lock: a store is used only when the current
+# uid owns it. One we do not own is stepped over, not treated as fatal, and the
+# walk carries on above it. Stopping there looks like the careful choice and is
+# not one: the foreign store is refused either way, by this same check, so
+# stopping guards nothing — it only hands anyone who can write a directory on
+# your path a silent way to black out the real store above it.
+zpc_store_root() {
+    local dir="${1%/}" home under_home toplevel ceiling target
+
+    [ -n "$dir" ] || return 1
+    home="${HOME:-}"
+    home="${home%/}"
+
+    under_home=0
+    if [ -n "$home" ]; then
+        case "$dir" in
+            "$home"|"$home"/*) under_home=1 ;;
+        esac
+    fi
+
+    if toplevel=$(zpc_worktree_root "$dir"); then
+        ceiling="$toplevel"
+        # A repo that contains $HOME must not lift the floor back off.
+        if [ "$under_home" = 1 ] && [ ${#toplevel} -lt ${#home} ]; then
+            ceiling="$home"
+        fi
+    elif [ "$under_home" = 1 ]; then
+        ceiling="$home"
+    else
+        # No worktree and outside $HOME: probe this directory and stop.
+        ceiling="$dir"
+    fi
+
+    while :; do
+        # Not ours: fall through and keep climbing. A real store at a rung
+        # answers before that rung's binding does — memory sitting in front of
+        # you outranks a note about memory elsewhere.
+        if [ -d "$dir/.zpc" ] && _zpc_store_is_ours "$dir/.zpc"; then
+            printf '%s' "$dir"
+            return 0
+        fi
+        if target=$(zpc_binding_for "$dir"); then
+            printf '%s' "${target%/.zpc}"
+            return 0
+        fi
+        [ "$dir" = "$ceiling" ] && break
+        [ "$dir" = "/" ] && break
+        dir="${dir%/*}"
+        [ -n "$dir" ] || dir="/"
+    done
+    return 1
+}
+
+# At least one recorded line under .zpc/memory/. An initialized-but-empty store
+# has nothing worth embedding, so it keeps the advisory.
+zpc_has_records() {
+    local file
+    for file in "$1"/.zpc/memory/*.jsonl; do
+        [ -f "$file" ] || continue
+        grep -q '[^[:space:]]' "$file" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# Mark where this session started, for the Stop-event write nudge
+# (agent-do-zpc-write-nudge.sh) to measure against. Two facts plus one clock:
+# HEAD at the mark, recorded rows at the mark, and the file's own mtime, which
+# is what lets the nudge tell this session's edits from dirt that was already
+# in the tree. Written here rather than lazily at the first Stop so that work
+# done in the opening turn still counts.
+zpc_write_session_baseline() {
+    local state_dir baseline total n f store_root
+    [ -n "$CWD" ] || return 0
+    [ -n "$SESSION_ID" ] || return 0
+    store_root=$(zpc_store_root "$CWD") || return 0
+
+    state_dir="$store_root/.zpc/.state"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+
+    # One marker pair per session accumulates forever otherwise. Session-start
+    # is the once-per-session place to sweep it.
+    find "$state_dir" -maxdepth 1 -type f \
+        \( -name 'session-*.baseline' -o -name 'write-nudge-*.done' \) \
+        -mtime +7 -delete 2>/dev/null
+
+    baseline="$state_dir/session-$(printf '%s' "$SESSION_ID" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64).baseline"
+    # SessionStart fires again on resume and compact with the same session_id.
+    # Keeping the first mark keeps the clock honest.
+    [ -f "$baseline" ] && return 0
+
+    total=0
+    for f in "$store_root"/.zpc/memory/*.jsonl; do
+        [ -f "$f" ] || continue
+        n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+        case "$n" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        total=$((total + n))
+    done
+
+    {
+        printf 'head=%s\n' "$(cd "$store_root" && git rev-parse HEAD 2>/dev/null || printf '')"
+        printf 'zpc_lines=%s\n' "$total"
+    } > "$baseline" 2>/dev/null || return 0
+}
+
+# Preferences are the user's, not the project's, so they travel: an empty store
+# and a directory that will never have one both get them. Emits nothing and
+# reports failure unless there is real content, which keeps every caller's
+# existing fallback intact.
+append_zpc_preferences() {
+    local prefs_out prefs_rc
+
+    [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] || return 1
+    [ -n "$AGENT_DO_DIR" ] || return 1
+    [ -x "$AGENT_DO_DIR/agent-do" ] || return 1
+
+    prefs_out=$(cd "$1" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject --preferences 2>/dev/null)
+    prefs_rc=$?
+    [ "$prefs_rc" -eq 0 ] && [ -n "$prefs_out" ] || return 1
+
+    # No second cut here. `inject --preferences` fits its own blob to a budget
+    # read from the quantity authority and marks what it dropped with both
+    # numbers; a belt applied on top of that would cut at a byte offset it has
+    # no way to place, which is exactly how the project blob came to deliver
+    # zero claims. This hook's constraint is time, and bounded_run above is it.
+
+    CONTEXT="$CONTEXT
+
+---
+
+## ZPC Preferences (global memory)
+
+Preferences recorded across earlier sessions, loaded below. They are user-level, not project-level: they hold here regardless of what this directory contains.
+
+$prefs_out
+
+Log new ones where they happen: \`agent-do zpc learn\` and \`agent-do zpc decide\`."
+    return 0
+}
+
+append_zpc_memory() {
+    local inject_out inject_rc store_root
+
+    [ -n "$CWD" ] || return 0
+
+    # No store anywhere up the tree, and none coming: auto-init already declined
+    # this directory (not a git worktree, or it has no store-only mode to use).
+    # Preferences are still his, so they still arrive.
+    if ! store_root=$(zpc_store_root "$CWD"); then
+        append_zpc_preferences "$CWD"
+        return 0
+    fi
+
+    # The advisory below only *asks* the agent to go read the store, and asking
+    # is not a mechanism. When there are records to show, put the memory itself
+    # in context. Every failure mode (kill-switch, empty store, missing
+    # dispatcher, nonzero exit, timeout) falls through to the advisory, so the
+    # section degrades instead of disappearing.
+    if [ "${AGENT_DO_ZPC_INJECT:-1}" != "0" ] &&
+       [ -n "$AGENT_DO_DIR" ] &&
+       [ -x "$AGENT_DO_DIR/agent-do" ]; then
+        if zpc_has_records "$store_root"; then
+            # Run from the store's own root, which is $CWD for a session opened
+            # at the top and the walked-up answer otherwise. AGENT_DO_ZPC_SOURCE
+            # tags the access log; the export dies with the subshell so it never
+            # leaks into the rest of the hook.
+            inject_out=$(cd "$store_root" && export AGENT_DO_ZPC_SOURCE=hook && bounded_run 3 "$AGENT_DO_DIR/agent-do" zpc inject 2>/dev/null)
+            inject_rc=$?
+
+            if [ "$inject_rc" -eq 0 ] && [ -n "$inject_out" ]; then
+                # The blob arrives already fitted. It used to be cut again here,
+                # at 6000 characters, and the receipt is worth keeping: against a
+                # store of 197 rows that cut landed inside the protocol header,
+                # so the session received the boilerplate, none of the claims,
+                # and the four words `[zpc inject truncated]` to describe the
+                # loss. Two bounds on one payload is one bound too many — only
+                # inject can rank what it is cutting, so only inject cuts. What
+                # this hook owes the session is time, and bounded_run is that.
+
+                CONTEXT="$CONTEXT
+
+---
+
+## ZPC Project Memory
+
+This project's recorded memory, loaded below. Read it before coding; it is already in context, so do not re-run \`agent-do zpc inject\`.
+
+$inject_out
+
+Keep the loop closed: \`agent-do zpc learn\` and \`agent-do zpc decide\` as you work, \`agent-do zpc harvest\` after significant work."
+                return 0
+            fi
+        else
+            # A store with nothing in it yet — every project's first session,
+            # now that init runs automatically. Preferences beat an advisory
+            # nobody reads.
+            append_zpc_preferences "$store_root" && return 0
+        fi
+    fi
+
+    CONTEXT="$CONTEXT
+
+---
+
+## ZPC Memory Available
+
+This project has ZPC memory at \`.zpc/\`. At session start:
+\`\`\`
+agent-do zpc status      # Memory health + counts
+agent-do zpc patterns    # Established conventions — read before coding
+\`\`\`
+Log lessons and decisions as you work. Run \`agent-do zpc harvest\` after significant work."
 }
 
 # --- Inject tooling reminder ---
@@ -517,23 +887,15 @@ agent-do dpt score /tmp/after.png            # 0-100 with per-layer breakdown
 Screenshots for evaluation. Snapshots for inventory. Both, in that order."
 fi
 
-# --- Detect ZPC project → mention memory ---
-if [ -n "$CWD" ] && [ -d "$CWD/.zpc" ]; then
-    CONTEXT="$CONTEXT
+# --- Detect ZPC project → embed memory (advisory fallback) ---
+# Auto-init first: the baseline and the memory block below both read the store
+# this may have just created. The toplevel is resolved once and feeds both
+# auto-init's placement and the store walk's ceiling.
+zpc_resolve_toplevel
+zpc_autoinit
+zpc_write_session_baseline
+append_zpc_memory
 
----
-
-## ZPC Memory Available
-
-This project has ZPC memory at \`.zpc/\`. At session start:
-\`\`\`
-agent-do zpc status      # Memory health + counts
-agent-do zpc patterns    # Established conventions — read before coding
-\`\`\`
-Log lessons and decisions as you work. Run \`agent-do zpc harvest\` after significant work."
-fi
-
-append_project_tooling
 append_bootstrap_prompt
 append_coord_context
 append_manna_board

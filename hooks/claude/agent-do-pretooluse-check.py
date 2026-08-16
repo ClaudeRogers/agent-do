@@ -11,6 +11,11 @@ to:
     "reason": nudge
 """
 
+# Hooks run under whatever python3 the harness resolves, which on macOS is the
+# system 3.9 where `X | None` in an annotation raises at import time. Deferring
+# annotations keeps this file loadable there; the repo still targets 3.10+.
+from __future__ import annotations
+
 import json
 import os
 import sys

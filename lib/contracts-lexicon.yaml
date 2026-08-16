@@ -52,6 +52,7 @@ exact:
   stats: {beats: [snapshot]}
   history: {beats: [snapshot]}
   logs: {beats: [snapshot]}
+  triage: {beats: [snapshot]}
   diff: {beats: [snapshot]}
   peers: {beats: [snapshot]}
   whoami: {beats: [snapshot]}
@@ -352,6 +353,10 @@ patterns:
 # These were seeded from the 2026-06-11 stress-test evidence and grow during
 # review. `skip: true` excludes a verb from proposing (manual review item).
 overrides:
+  gh:
+    portfolio add: {beats: [interact], attributes: [own_state]}     # writes only ~/.agent-do/gh/portfolio.yaml
+    portfolio remove: {beats: [interact], attributes: [own_state]}
+    portfolio list: {beats: [snapshot]}
   browse:
     check: {beats: [interact]}          # checks a checkbox, not a condition
     open: {beats: [connect]}
@@ -392,6 +397,10 @@ overrides:
     ensure: {beats: [connect], attributes: [composite, long_running]}
     advance: {beats: [interact], attributes: [composite]}
     probe: {beats: [snapshot], attributes: [composite]}
+  harness:
+    quantity: {beats: [snapshot]}   # reads models.yaml; writes nothing anywhere
+    census: {beats: [snapshot]}     # counts what exists; `rows` only runs verbs already declared read-only
+    bounds: {beats: [verify]}       # grades declared caps against the authority; `scan` only reads a tree
   context:
     maintain: {beats: [interact], attributes: [composite, destructive]}  # refresh + prune cache
   obsidian: {}                          # declared block preserved; overrides unused
@@ -400,8 +409,13 @@ overrides:
     send: {beats: [interact]}
   zpc:
     checkpoint: {beats: [interact], attributes: [composite]}
+    harvest: {beats: [snapshot, interact, save], attributes: [polymorphic]}  # --corrections mines past transcripts and persists mined lessons to the global store
     review: {beats: [snapshot, interact], attributes: [polymorphic]}
     query: {beats: [snapshot]}      # free-text/tag memory search; blind query→polymorphic rule wrong here
+    position: {beats: [snapshot, save], attributes: [polymorphic]}  # list/show read, add/flip persist the ledger
+    retract: {beats: [save]}        # appends a correction row; never edits or deletes the claim it corrects
+    inject: {beats: [snapshot, interact], attributes: [polymorphic]}  # emits the blob; --relitigate spends a model and can file challenges
+    counsel: {beats: [interact], attributes: [long_running, own_state]}  # spawns a fresh model; writes only its own access-log row
   coord:
     touch: {beats: [interact], attributes: [composite]}     # lease renewal returning a snapshot
     interrupts: {beats: [snapshot, interact], attributes: [polymorphic]}  # --mark-seen writes cursor

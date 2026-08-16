@@ -145,12 +145,180 @@ def load_bundled_registry() -> dict[str, Any]:
 
 
 def contracts_validate(strict: bool) -> dict[str, Any]:
+    """The gate: contract shape, full coverage, and now bound provenance.
+
+    Bounds ride in the same run rather than a second command, because a gate
+    nobody remembers to run is a doc line with a shebang. An undeclared bound
+    fails exactly where an undeclared contract already fails.
+    """
     sys.path.insert(0, str(REPO_ROOT / "lib"))
     from contracts import validate_gate  # noqa: WPS433
+    from bounds import validate_bounds  # noqa: WPS433
 
-    payload = validate_gate(load_bundled_registry(), strict=strict)
+    registry = load_bundled_registry()
+    payload = validate_gate(registry, strict=strict)
+    payload["bounds"] = validate_bounds(registry, REPO_ROOT)
+    payload["ok"] = payload["ok"] and payload["bounds"]["errors"] == 0
     payload["generated_at"] = now_iso()
     return payload
+
+
+def _bounds() -> Any:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import bounds  # noqa: WPS433
+
+    return bounds
+
+
+def bounds_drift(tool: str | None = None) -> dict[str, Any]:
+    """Every declared bound against the authority value it cites."""
+    registry = load_bundled_registry()
+    if tool:
+        tools = registry.get("tools") or {}
+        if tool not in tools:
+            raise ValueError(f"unknown tool: {tool}")
+        registry = {**registry, "tools": {tool: tools[tool]}}
+    payload = _bounds().drift_bounds(registry, REPO_ROOT)
+    payload["tool"] = "harness"
+    payload["command"] = "bounds drift"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def bounds_audit(tool: str | None = None, timeout: int | None = None) -> dict[str, Any]:
+    import tempfile  # noqa: WPS433
+
+    resolved = read_probe_timeout(timeout)
+    with tempfile.TemporaryDirectory(prefix="bounds-audit-") as scratch:
+        payload = _bounds().audit_bounds(
+            load_bundled_registry(),
+            REPO_ROOT,
+            lambda *args: agent_do_cmd(*args, cwd=Path(scratch), timeout=resolved),
+            only_tool=tool,
+        )
+    payload["tool"] = "harness"
+    payload["command"] = "bounds audit"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def bounds_scan(target: str) -> dict[str, Any]:
+    payload = _bounds().scan_project(Path(target))
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = "bounds scan"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def render_bounds_drift(payload: dict[str, Any]) -> None:
+    print("agent-do harness bounds drift")
+    floor = payload.get("floor")
+    if floor:
+        print(f"  Authority delivery floor: {floor['ratio']:.4g} (from {floor['from_record']})")
+        print(f"    {floor['derivation']}")
+    else:
+        print("  Authority delivery floor: none derivable — no record publishes both numbers")
+    print(f"  Findings: {len(payload['findings'])}")
+    for item in payload["findings"]:
+        where = f" {item['site']}" if item.get("site") else ""
+        print(f"  {item['code'].upper()} {item['tool']} {item['verb']}{where}")
+        print(f"    {item['message']}")
+    coverage = payload["coverage"]
+    print(f"  Router coverage: {'OK' if coverage['ok'] else 'FAIL'} — {coverage['message']}")
+
+
+def render_bounds_audit(payload: dict[str, Any]) -> None:
+    summary = payload["summary"]
+    print("agent-do harness bounds audit")
+    print(f"  Carrying totals: {summary['ok']}  Failing: {summary['fail']}  Unprobeable: {summary['skip']}")
+    for item in payload["results"]:
+        if item["outcome"] == "fail":
+            print(f"  FAIL {item['tool']} {item['verb']}: {item['reason']}")
+
+
+def render_bounds_scan(payload: dict[str, Any]) -> None:
+    print("agent-do harness bounds scan")
+    print(f"  Root: {payload['root']}  Files scanned: {payload['files_scanned']}")
+    print(f"  Bare bounding literals: {payload['total']} "
+          f"({payload['with_ceiling']} with a published ceiling)")
+    for item in payload["findings"]:
+        line = (f"  {item['file']}:{item['line']}  {item['parameter']}={item['value']} "
+                f"[{'/'.join(item['families'])}]")
+        ceiling = item.get("ceiling")
+        if ceiling:
+            line += f"  ceiling {ceiling['key']}={ceiling['value']} ({ceiling['ratio']:.4g} of it)"
+        for owed in item.get("ceiling_owed", []):
+            line += f"  NO AUTHORITY RECORD: {owed}"
+        print(line)
+    if payload["ceilings_owed"]:
+        print("  Ceilings owed (a lookup would refuse, and a literal must not stand in):")
+        for key in payload["ceilings_owed"]:
+            print(f"    - {key}")
+
+
+def _quantities() -> Any:
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import quantities  # noqa: WPS433
+
+    return quantities
+
+
+def quantity_lookup(key: str) -> dict[str, Any]:
+    """Resolve one authority key to its value and the record it came from."""
+    payload = dict(_quantities().lookup(key))
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = "quantity lookup"
+    payload["generated_at"] = now_iso()
+    return payload
+
+
+def quantity_keys(prefix: str | None = None) -> dict[str, Any]:
+    """Enumerate the authority — discovery is what makes reading cheaper than guessing."""
+    entries = _quantities().authority_entries()
+    if prefix:
+        entries = [item for item in entries if item["key"].startswith(prefix)]
+    return {
+        "ok": True,
+        "tool": "harness",
+        "command": "quantity keys",
+        "generated_at": now_iso(),
+        "prefix": prefix,
+        "total": len(entries),
+        "keys": entries,
+    }
+
+
+def census(args: Any) -> dict[str, Any]:
+    """Measure how many exist right now, or refuse to answer at all."""
+    module = _quantities()
+    if args.census_command == "lines":
+        payload = module.census_lines(args.target)
+    elif args.census_command == "entries":
+        payload = module.census_entries(args.target, glob=args.glob, recursive=args.recursive)
+    else:
+        payload = module.census_rows(args.via, path=args.path, timeout=read_probe_timeout(args.timeout))
+    payload = dict(payload)
+    payload["ok"] = True
+    payload["tool"] = "harness"
+    payload["command"] = f"census {args.census_command}"
+    payload["measured_at"] = now_iso()
+    return payload
+
+
+def render_quantity_lookup(payload: dict[str, Any]) -> None:
+    """Bare output is the number alone, so `$(...)` substitutes cleanly."""
+    print(payload["value"])
+
+
+def render_quantity_keys(payload: dict[str, Any]) -> None:
+    for item in payload["keys"]:
+        print(item["key"])
+
+
+def render_census(payload: dict[str, Any]) -> None:
+    print(payload["total"])
 
 
 def contracts_propose(tool: str | None = None) -> dict[str, Any]:
@@ -318,6 +486,28 @@ def render_contracts_validate(payload: dict[str, Any]) -> None:
         for warning in item["warnings"]:
             if warning["code"] != "missing_contracts":
                 print(f"  WARN  {item['tool']}: {warning['message']}")
+    render_bounds_gate(payload.get("bounds"))
+
+
+def render_bounds_gate(bounds_payload: dict[str, Any] | None) -> None:
+    if not bounds_payload:
+        return
+    print(f"  Bounds: {bounds_payload['gated_sites']} gated sites  "
+          f"Errors: {bounds_payload['errors']}  "
+          f"Ceilings owed: {bounds_payload['ceilings_owed']}")
+    print(f"    Gate reaches units the authority can answer in: "
+          f"{', '.join(bounds_payload['authority_units'])}")
+    for item in bounds_payload.get("results") or []:
+        for error in item["errors"]:
+            print(f"  BOUND {item['tool']}: {error['message']}")
+    if bounds_payload["ceilings_owed"]:
+        print(f"    {bounds_payload['ceilings_owed']} bounds in units the authority cannot yet "
+              f"answer ({', '.join(bounds_payload['ceilings_owed_units'])}) are inventoried, not "
+              f"suppressed — see `agent-do harness contracts validate --json`.")
+    if bounds_payload.get("shared_code_sites"):
+        print(f"    {bounds_payload['shared_code_sites']} caps in shared code "
+              f"({'/, '.join(('lib', 'bin'))}/) have no declaration home — the surface is a "
+              f"tool's registry entry, and these belong to no tool. Named, not gated.")
 
 
 def render_contracts_propose(payload: dict[str, Any]) -> None:
@@ -1031,6 +1221,22 @@ Commands:
                                                     Bounded behavioral probe of the declared read surface (tri-state)
   contracts audit --install-schedule [weekly|daily] Install launchd agent: audit + notify on failures
   contracts audit --uninstall-schedule              Remove the scheduled audit
+  bounds drift [--tool X] [--json]                  Declared bounds vs the authority they cite; router-coverage check
+  bounds audit [--tool X] [--json]                  Probe declared bounds: does output carry its total?
+  bounds scan <project-path> [--json] [--out FILE]  Report bare bounding literals in a project (never rewrites)
+  quantity lookup <key> [--json]                    Published ceiling + its provenance (bare: the number alone)
+  quantity keys [--prefix P] [--json]               Every authority key that can be looked up
+  census lines <file> [--json]                      Lines in a file, right now
+  census entries <dir> [--glob G] [--recursive]     Entries in a directory, right now
+  census rows --via "<agent-do read cmd>" [--path P]  Rows a read command returns, right now
+
+Quantities never estimate. An unknown key exits 1 naming the key; a census that
+cannot count exactly exits 2 with the reason and emits no total.
+
+Bounds declare where a cap came from, beside the contracts block in
+registry.yaml: {source: registry|derived|measured|none, ref, why}. `contracts
+validate` fails an undeclared bound in the same run that fails an undeclared
+contract, and reaches exactly the units the authority can answer in.
 
 Examples:
   agent-do harness inspect
@@ -1040,8 +1246,25 @@ Examples:
   agent-do harness manifest new email-hydration --component-type tool --file tools/agent-email
   agent-do harness contracts validate --json
   agent-do harness contracts propose --out .handoff/contracts-inventory-v2.md
+  agent-do harness bounds drift
+  agent-do harness bounds scan ~/Custom-Coding/some-project
+  agent-do harness quantity lookup anthropic.claude-sonnet-5.max_tokens
+  agent-do harness quantity keys --prefix anthropic --json
+  agent-do harness census lines registry.yaml
+  agent-do harness census entries tools --glob 'agent-*'
+  agent-do harness census rows --via "manna list --json"
 """
     )
+
+
+def read_probe_timeout(explicit: int | None) -> int:
+    """One bounded-read budget for every surface that runs a declared read verb.
+
+    Defined once in lib/quantities.py and resolved here at dispatch rather than
+    at parser-build time, so parsing `harness inspect` does not depend on the
+    quantity module importing cleanly.
+    """
+    return explicit if explicit is not None else _quantities().READ_PROBE_TIMEOUT_SECONDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1095,10 +1318,43 @@ def build_parser() -> argparse.ArgumentParser:
     contracts.add_argument("--json", action="store_true")
     contracts.add_argument("--include-network", action="store_true")
     contracts.add_argument("--schema-check", action="store_true")
-    contracts.add_argument("--timeout", type=int, default=15)
+    contracts.add_argument("--timeout", type=int, default=None)
     contracts.add_argument("--notify", action="store_true")
     contracts.add_argument("--install-schedule", nargs="?", const="weekly", choices=["weekly", "daily"])
     contracts.add_argument("--uninstall-schedule", action="store_true")
+
+    bounds_parser = sub.add_parser("bounds", add_help=False)
+    bounds_parser.add_argument("bounds_command", choices=["drift", "audit", "scan"])
+    bounds_parser.add_argument("target", nargs="?")
+    bounds_parser.add_argument("--tool")
+    bounds_parser.add_argument("--out")
+    bounds_parser.add_argument("--timeout", type=int, default=None)
+    bounds_parser.add_argument("--json", action="store_true")
+
+    quantity = sub.add_parser("quantity", add_help=False)
+    quantity_sub = quantity.add_subparsers(dest="quantity_command")
+    quantity_lookup_parser = quantity_sub.add_parser("lookup", add_help=False)
+    quantity_lookup_parser.add_argument("key")
+    quantity_lookup_parser.add_argument("--json", action="store_true")
+    quantity_keys_parser = quantity_sub.add_parser("keys", add_help=False)
+    quantity_keys_parser.add_argument("--prefix")
+    quantity_keys_parser.add_argument("--json", action="store_true")
+
+    census_parser = sub.add_parser("census", add_help=False)
+    census_sub = census_parser.add_subparsers(dest="census_command")
+    census_lines_parser = census_sub.add_parser("lines", add_help=False)
+    census_lines_parser.add_argument("target")
+    census_lines_parser.add_argument("--json", action="store_true")
+    census_entries_parser = census_sub.add_parser("entries", add_help=False)
+    census_entries_parser.add_argument("target")
+    census_entries_parser.add_argument("--glob")
+    census_entries_parser.add_argument("--recursive", action="store_true")
+    census_entries_parser.add_argument("--json", action="store_true")
+    census_rows_parser = census_sub.add_parser("rows", add_help=False)
+    census_rows_parser.add_argument("--via", required=True)
+    census_rows_parser.add_argument("--path")
+    census_rows_parser.add_argument("--timeout", type=int, default=None)
+    census_rows_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -1161,6 +1417,7 @@ def main(argv: list[str]) -> int:
                 payload = contracts_audit_schedule(args.install_schedule, args.uninstall_schedule)
                 print(json.dumps(payload, indent=2))
                 return 0 if payload["ok"] else 1
+            args.timeout = read_probe_timeout(args.timeout)
             payload = contracts_audit(args)
             if json_mode:
                 print(json.dumps(payload, indent=2))
@@ -1174,6 +1431,51 @@ def main(argv: list[str]) -> int:
             else:
                 render_contracts_drift(payload)
             return 0 if payload["ok"] else 1
+        if args.command == "bounds":
+            if args.bounds_command == "drift":
+                payload = bounds_drift(tool=args.tool)
+                renderer = render_bounds_drift
+            elif args.bounds_command == "audit":
+                payload = bounds_audit(tool=args.tool, timeout=args.timeout)
+                renderer = render_bounds_audit
+            else:
+                if not args.target:
+                    raise ValueError("bounds scan requires a project path")
+                payload = bounds_scan(args.target)
+                renderer = render_bounds_scan
+            if args.out:
+                out_path = Path(args.out).expanduser()
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+                payload["out"] = str(out_path)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                renderer(payload)
+                if payload.get("out"):
+                    print(f"  Report: {payload['out']}")
+            return 0 if payload["ok"] else 1
+        if args.command == "quantity" and args.quantity_command == "lookup":
+            payload = quantity_lookup(args.key)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_quantity_lookup(payload)
+            return 0
+        if args.command == "quantity" and args.quantity_command == "keys":
+            payload = quantity_keys(args.prefix)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_quantity_keys(payload)
+            return 0
+        if args.command == "census" and args.census_command in {"lines", "entries", "rows"}:
+            payload = census(args)
+            if json_mode:
+                print(json.dumps(payload, indent=2))
+            else:
+                render_census(payload)
+            return 0
         if args.command == "contracts" and args.contracts_command == "propose":
             payload = contracts_propose(tool=args.tool)
             if args.out:
@@ -1194,6 +1496,27 @@ def main(argv: list[str]) -> int:
                     print(f"Inventory written to {payload['out']}")
             return 0
     except Exception as exc:
+        # A refusal is not a crash. Census exits 2 — the same code zpc uses when
+        # it declines on principle — so a caller can tell "cannot count exactly"
+        # apart from "broke", and neither ever carries a total.
+        try:
+            refusal_type = _quantities().CensusRefusal
+        except Exception:  # noqa: BLE001 - a broken import must not mask the real error
+            refusal_type = ()
+        if refusal_type and isinstance(exc, refusal_type):
+            payload = {
+                "ok": False,
+                "tool": "harness",
+                "exact": False,
+                "refused": True,
+                "reason": exc.reason,
+                "detail": exc.detail,
+            }
+            if "--json" in argv:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Refused: cannot count exactly.\n  reason: {exc.reason}\n  {exc.detail}", file=sys.stderr)
+            return 2
         if "--json" in argv:
             print(json.dumps({"ok": False, "tool": "harness", "error": str(exc)}, indent=2))
         else:

@@ -6,20 +6,35 @@ cmd_harvest() {
     ensure_zpc
     mkdir -p "$ZPC_STATE_DIR"
 
-    local auto=false dry_run=false since=""
+    local auto=false dry_run=false since="" corrections=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --auto) auto=true; shift ;;
             --dry-run) dry_run=true; shift ;;
             --since) since="$2"; shift 2 ;;
+            --corrections) corrections=true; shift ;;
             --help|-h)
                 echo "Usage: agent-zpc harvest [--auto] [--dry-run] [--since last]"
+                echo "       agent-zpc harvest --corrections [--since YYYY-MM-DD] [--dry-run]"
+                echo
+                echo "  --corrections   Mine past sessions for corrections the user typed and"
+                echo "                  write them to the machine-wide store as dated preference"
+                echo "                  lessons, each carrying the sentence verbatim."
                 return 0
                 ;;
             *) shift ;;
         esac
     done
+
+    log_access "harvest"
+
+    # Consolidation reads this project's lessons; correction mining reads past
+    # transcripts and writes the global layer. Same verb, different corpus.
+    if [[ "$corrections" == true ]]; then
+        _harvest_corrections "$since" "$dry_run"
+        return $?
+    fi
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
@@ -51,7 +66,7 @@ PYTHON
 
     # Run harvest via python
     local result
-    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$patterns_file" "$since_line" "$auto" "$dry_run"
+    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$patterns_file" "$since_line" "$auto" "$dry_run" "$ZPC_LIB_DIR"
 import json, sys, os, re
 from collections import Counter
 
@@ -62,32 +77,43 @@ since_line = int(sys.argv[4])
 auto_mode = sys.argv[5] == "true"
 dry_run = sys.argv[6] == "true"
 
-# Read lessons
-lessons = []
+sys.path.insert(0, sys.argv[7])
+import epistemics
+
+# Read lessons. Retracted claims are dropped here rather than filtered later:
+# consolidation reads the living corpus, or it launders the corpse into a
+# pattern that outlives the row it came from.
 format_issues = []
-if os.path.exists(lessons_file):
-    with open(lessons_file) as f:
-        for i, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                lessons.append((i, obj))
-                required = ["date", "context", "problem", "solution", "takeaway", "tags"]
-                missing = [k for k in required if k not in obj]
-                if missing:
-                    format_issues.append({"line": i, "missing": missing})
-                elif not isinstance(obj.get("tags"), list):
-                    format_issues.append({"line": i, "missing": ["tags (not array)"]})
-            except json.JSONDecodeError:
-                format_issues.append({"line": i, "missing": ["INVALID JSON"]})
+for i, (_, parsed) in enumerate(epistemics.load(lessons_file), 1):
+    if parsed is None:
+        format_issues.append({"line": i, "missing": ["INVALID JSON"]})
+
+lessons = []
+for record in epistemics.analyze(lessons_file, "les-")["claims"]:
+    if record["retraction"] is not None:
+        continue
+    obj = record["row"]
+    lessons.append((len(lessons) + 1, obj))
+    required = ["date", "context", "problem", "solution", "takeaway", "tags"]
+    missing = [k for k in required if k not in obj]
+    if missing:
+        format_issues.append({"line": len(lessons), "missing": missing})
+    elif not isinstance(obj.get("tags"), list):
+        format_issues.append({"line": len(lessons), "missing": ["tags (not array)"]})
 
 # Count decisions
 decision_count = 0
 if os.path.exists(decisions_file):
     with open(decisions_file) as f:
-        decision_count = sum(1 for line in f if line.strip())
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if not epistemics.is_correction(json.loads(line)):
+                    decision_count += 1
+            except json.JSONDecodeError:
+                pass
 
 # Count patterns
 pattern_count = 0
@@ -113,29 +139,104 @@ for i, obj in lessons:
 gaps = []
 for tag, count in tag_counter.most_common():
     if count >= 3 and tag not in pattern_tags:
-        # Collect takeaways for this tag
-        takeaways = []
-        for _, obj in lessons:
-            if tag in obj.get("tags", []):
-                takeaways.append(obj.get("takeaway", ""))
-        gaps.append({"tag": tag, "count": count, "takeaways": takeaways})
+        gaps.append({"tag": tag, "count": count})
+
+# Machine-written sections carry this marker, and only they are ever rewritten.
+# A hand-written pattern is someone's judgment and stays exactly as typed.
+AUTO_MARK = "<!-- zpc:auto -->"
+
+
+def live_bullets(tag, limit=5):
+    """Takeaways still standing for a tag, oldest first, duplicates collapsed."""
+    seen = dict.fromkeys(
+        text
+        for _, obj in lessons
+        if tag in obj.get("tags", [])
+        for text in [epistemics.claim_text(obj)]
+        if text
+    )
+    return list(seen)[:limit]
+
+
+def draft_section(tag):
+    bullets = live_bullets(tag)
+    if not bullets:
+        return ""
+    return f"\n## {tag}\n{AUTO_MARK}\n" + "\n".join(f"- {b}" for b in bullets) + "\n"
+
 
 # Draft patterns for gaps
 drafts = []
 for gap in gaps:
-    bullets = list(set(t for t in gap["takeaways"] if t))[:5]
-    if bullets:
-        section = f"\n## {gap['tag']}\n" + "\n".join(f"- {b}" for b in bullets) + "\n"
+    section = draft_section(gap["tag"])
+    if section:
         drafts.append({"tag": gap["tag"], "count": gap["count"], "section": section})
+
+
+def refresh_auto_sections(path):
+    """Rebuild machine-written sections from the corpus as it stands today.
+
+    Retraction is only half a correction while the retracted takeaway survives
+    inside a consolidated pattern that every inject repeats. A section whose
+    every claim has been retracted is not emptied to a stub — it is removed,
+    because there is nothing left that it was consolidating.
+    """
+    try:
+        with open(path) as handle:
+            lines = handle.read().split("\n")
+    except OSError:
+        return [], []
+
+    blocks = []
+    current = None
+    for line in lines:
+        heading = re.match(r"^## (.+)$", line.strip())
+        if heading:
+            current = {"tag": heading.group(1).strip(), "lines": [line]}
+            blocks.append(current)
+        elif current is not None:
+            current["lines"].append(line)
+        else:
+            blocks.append({"tag": None, "lines": [line]})
+
+    refreshed, dropped = [], []
+    out = []
+    for block in blocks:
+        tag = block["tag"]
+        body = block["lines"]
+        is_auto = tag is not None and any(line.strip() == AUTO_MARK for line in body[:2])
+        if not is_auto:
+            out.extend(body)
+            continue
+        bullets = live_bullets(tag)
+        if not bullets:
+            dropped.append(tag)
+            continue
+        rebuilt = [f"## {tag}", AUTO_MARK] + [f"- {b}" for b in bullets]
+        trailing = [line for line in body[::-1] if not line.strip()]
+        rebuilt.extend(trailing)
+        if rebuilt != body:
+            refreshed.append(tag)
+        out.extend(rebuilt)
+
+    rebuilt_text = "\n".join(out)
+    if rebuilt_text != "\n".join(lines):
+        with open(path, "w") as handle:
+            handle.write(rebuilt_text)
+    return refreshed, dropped
+
 
 # Auto-write patterns with 5+ lessons
 auto_written = []
-if auto_mode and not dry_run and drafts:
-    with open(patterns_file, "a") as f:
-        for draft in drafts:
-            if draft["count"] >= 5:
-                f.write(draft["section"])
-                auto_written.append(draft["tag"])
+auto_refreshed, auto_dropped = [], []
+if auto_mode and not dry_run:
+    auto_refreshed, auto_dropped = refresh_auto_sections(patterns_file)
+    if drafts:
+        with open(patterns_file, "a") as f:
+            for draft in drafts:
+                if draft["count"] >= 5:
+                    f.write(draft["section"])
+                    auto_written.append(draft["tag"])
 
 output = {
     "lesson_count": len(lessons),
@@ -145,6 +246,8 @@ output = {
     "consolidation_gaps": [{"tag": g["tag"], "count": g["count"]} for g in gaps],
     "drafts": drafts,
     "auto_written": auto_written,
+    "auto_refreshed": auto_refreshed,
+    "auto_dropped": auto_dropped,
     "dry_run": dry_run
 }
 print(json.dumps(output))
@@ -197,6 +300,10 @@ for g in gaps:
     print(f"    {g['tag']} ({g['count']} lessons)")
 if data["auto_written"]:
     print(f"\n  Auto-written patterns: {', '.join(data['auto_written'])}")
+if data.get("auto_refreshed"):
+    print(f"  Rebuilt from live lessons: {', '.join(data['auto_refreshed'])}")
+if data.get("auto_dropped"):
+    print(f"  Dropped (every claim retracted): {', '.join(data['auto_dropped'])}")
 if data["drafts"]:
     print("\n--- Draft Patterns ---")
     for d in data["drafts"]:
@@ -204,6 +311,73 @@ if data["drafts"]:
             print(d["section"])
 PYTHON
     fi
+}
+
+# Where the transcripts live. Two sources because neither covers the other: the
+# agent-sessions index is every harness back to the beginning and is rebuilt on
+# a schedule, so it is always a little behind; the live Claude Code transcripts
+# are exactly the part it has not caught up to yet. Both are read-only — mining
+# never writes to another tool's store.
+ZPC_SESSIONS_DB="${AGENT_SESSIONS_DB:-$HOME/.cache/agent-sessions/sessions.db}"
+ZPC_TRANSCRIPT_ROOT="${AGENT_ZPC_TRANSCRIPT_ROOT:-$HOME/.claude/projects}"
+
+# Mine past corrections into the machine-wide layer.
+#
+# A correction is evidence, not a guess: the user already said what he wanted
+# and the transcript kept the sentence. Every mined lesson carries that sentence
+# verbatim, the day it was typed, one line naming what the assistant had just
+# done, and the session it happened in — and lands as a dated, retractable claim
+# like every other, never as a rule.
+_harvest_corrections() {
+    local since="$1" dry_run="$2"
+
+    ensure_global
+    local store="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
+
+    local args=("$ZPC_SESSIONS_DB" "$ZPC_TRANSCRIPT_ROOT" "$store" "$since")
+    [[ "$dry_run" == true ]] && args+=("--dry-run")
+
+    local result
+    result=$(python3 "$ZPC_LIB_DIR/corrections.py" "${args[@]}") || {
+        die "Correction mining failed; nothing was written."
+    }
+
+    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        json_result "$result"
+        return 0
+    fi
+
+    python3 << 'PYTHON' - "$result"
+import json, sys
+
+data = json.loads(sys.argv[1])
+prefix = "DRY RUN — " if data["dry_run"] else ""
+print(f"{prefix}ZPC CORRECTION MINING")
+index = data["index"]
+mark = index["watermark"] or "never"
+state = f"indexed through {mark}" if index["present"] else "absent"
+print(f"  Index:      {state}")
+print(f"  Live scan:  {data['live']['files_scanned']} transcript(s) past the watermark")
+print(f"  Candidates: {data['candidates']} (newest {data['selected']} considered)")
+
+# A cap that hides what it dropped is a silent truncation. Say the number.
+if data["beyond_cap"]:
+    print(f"  Beyond cap: {data['beyond_cap']} older correction(s) not mined this run")
+if data["dry_run"]:
+    print(f"  Would write: {sum(1 for r in data['found'] if r['status'] == 'new')}")
+else:
+    print(f"  Written:    {data['written']} ({data['already_mined']} already mined)")
+
+if data["found"]:
+    print()
+    for row in data["found"]:
+        flag = "+" if row["status"] == "new" else "="
+        print(f"  {flag} [{row['date']}] {row['id']} ({row['marker']}) {row['session'][:8]}")
+        print(f"      said: {row['quote'][:160]}")
+        print(f"      after: {row['preceded_by'][:120]}")
+else:
+    print("\n  No corrections matched. The lexicon is in lib/corrections.py.")
+PYTHON
 }
 
 cmd_query() {
@@ -227,17 +401,22 @@ cmd_query() {
         esac
     done
 
+    log_access "query"
+
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
     local global_lessons_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
 
     local result
-    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$global_lessons_file" "$tag" "$since" "$text" "$qtype" "$limit" "$include_global"
+    result=$(python3 << 'PYTHON' - "$lessons_file" "$decisions_file" "$global_lessons_file" "$tag" "$since" "$text" "$qtype" "$limit" "$include_global" "$ZPC_LIB_DIR"
 import json, sys, os
 
 lessons_file, decisions_file, global_lessons_file = sys.argv[1], sys.argv[2], sys.argv[3]
 tag, since, text, qtype, limit = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7], int(sys.argv[8])
 include_global = sys.argv[9] == "true"
+
+sys.path.insert(0, sys.argv[10])
+import epistemics
 
 def matches(obj, tag, since, text):
     if tag and tag not in obj.get("tags", []):
@@ -251,37 +430,37 @@ def matches(obj, tag, since, text):
             return False
     return True
 
+def local_claims(path, prefix, kind):
+    """Claims with their epistemic state attached, ids derived where absent.
+
+    Deriving here is what lets `query --text les-1a2b3c` find a row whose id has
+    not been written to disk yet: the id an agent read in an inject blob is the
+    id this search answers to, backfilled or not.
+    """
+    rows = []
+    for record in epistemics.analyze(path, prefix)["claims"]:
+        obj = dict(record["row"])
+        obj["_type"] = kind
+        obj["_scope"] = "project"
+        obj["_retracted"] = record["retraction"] is not None
+        if record["retraction"] is not None:
+            obj["_retraction"] = record["retraction"]
+        if record["challenges"]:
+            obj["_challenges"] = len(record["challenges"])
+        rows.append(obj)
+    return rows
+
 results = []
 
 if qtype in ("all", "lessons") and os.path.exists(lessons_file):
-    with open(lessons_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                obj["_type"] = "lesson"
-                obj["_scope"] = "project"
-                if matches(obj, tag, since, text):
-                    results.append(obj)
-            except:
-                pass
+    for obj in local_claims(lessons_file, "les-", "lesson"):
+        if matches(obj, tag, since, text):
+            results.append(obj)
 
 if qtype in ("all", "decisions") and os.path.exists(decisions_file):
-    with open(decisions_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                obj["_type"] = "decision"
-                obj["_scope"] = "project"
-                if matches(obj, tag, since, text):
-                    results.append(obj)
-            except:
-                pass
+    for obj in local_claims(decisions_file, "dec-", "decision"):
+        if matches(obj, tag, since, text):
+            results.append(obj)
 
 if include_global and qtype in ("all", "lessons") and os.path.exists(global_lessons_file):
     with open(global_lessons_file) as f:
@@ -319,18 +498,29 @@ else:
     for r in data["results"]:
         t = r.pop("_type", "unknown")
         scope = r.pop("_scope", "project")
+        retraction = r.pop("_retraction", None)
+        challenges = r.pop("_challenges", 0)
+        r.pop("_retracted", None)
         scope_label = "[global] " if scope == "global" else ""
         date = r.get("date", "?")
+        # A retracted row is still findable — the point of never deleting it is
+        # that its correction can be read beside it.
+        state = " [RETRACTED]" if retraction else (f" [challenged: {challenges}]" if challenges else "")
+        handle = f" {r['id']}" if r.get("id") else ""
         if t == "lesson":
-            print(f"{scope_label}[{date}] LESSON: {r.get('takeaway', '?')}")
+            print(f"{scope_label}[{date}]{handle} LESSON:{state} {r.get('takeaway', '?')}")
             print(f"  Context: {r.get('context', '')}")
             print(f"  Problem: {r.get('problem', '')}")
             print(f"  Tags: {', '.join(r.get('tags', []))}")
         elif t == "decision":
-            print(f"{scope_label}[{date}] DECISION: {r.get('chosen', '?')}")
+            print(f"{scope_label}[{date}]{handle} DECISION:{state} {r.get('chosen', '?')}")
             print(f"  Problem: {r.get('decision', '')}")
             print(f"  Rationale: {r.get('rationale', '')}")
             print(f"  Confidence: {r.get('confidence', '?')}")
+        if retraction:
+            print(f"  Retracted {retraction.get('ts', '')[:10]}: {retraction.get('evidence', '')}")
+            if retraction.get("takeaway"):
+                print(f"  Instead: {retraction['takeaway']}")
         print()
 PYTHON
     fi
@@ -351,6 +541,8 @@ cmd_patterns() {
             *) shift ;;
         esac
     done
+
+    log_access "patterns"
 
     local patterns_file="$ZPC_MEMORY_DIR/patterns.md"
 
@@ -405,7 +597,9 @@ try:
 except:
     pass
 
-# Count lessons per tag, split by pattern date
+# Count lessons per tag, split by pattern date. Corrections carry no tags and
+# no date of their own; counting them would score a pattern by how often it was
+# argued with rather than by how often it failed.
 lessons = []
 if os.path.exists(lessons_file):
     with open(lessons_file) as f:
@@ -414,7 +608,10 @@ if os.path.exists(lessons_file):
             if not line:
                 continue
             try:
-                lessons.append(json.loads(line))
+                obj = json.loads(line)
+                if "retracts" in obj or "challenges" in obj:
+                    continue
+                lessons.append(obj)
             except:
                 pass
 
@@ -810,22 +1007,30 @@ cmd_promote() {
     fi
 
     local result
-    result=$(python3 << 'PYTHON' - "$lessons_file" "$dest_file" "$source"
+    result=$(python3 << 'PYTHON' - "$lessons_file" "$dest_file" "$source" "$ZPC_LIB_DIR"
 import json, sys, os
 
 lessons_file, dest_file, source = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# Read source lessons
+sys.path.insert(0, sys.argv[4])
+import epistemics
+
+# Read source lessons. A retracted claim is not promoted to a wider audience,
+# and a correction row is not a lesson anyone can act on.
+retracted = {
+    record["id"]
+    for record in epistemics.analyze(lessons_file, "les-")["claims"]
+    if record["retraction"] is not None
+}
+
+entries, _ = epistemics.assign_ids(epistemics.load(lessons_file), "les-")
 lessons = []
-if os.path.exists(lessons_file):
-    with open(lessons_file) as f:
-        for i, line in enumerate(f, 1):
-            line = line.strip()
-            if line:
-                try:
-                    lessons.append((i, json.loads(line)))
-                except:
-                    pass
+for i, (_, obj) in enumerate(entries, 1):
+    if obj is None or epistemics.is_correction(obj):
+        continue
+    if obj.get("id") in retracted:
+        continue
+    lessons.append((i, obj))
 
 # Read existing dest for dedup
 existing = set()

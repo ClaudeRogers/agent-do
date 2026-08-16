@@ -272,6 +272,30 @@ def _provider_request(provider: str, url: str) -> dict[str, Any]:
     return payload
 
 
+def _declared_limit(provider: str, subject: str, name: str) -> int:
+    """Read a published ceiling from the `limits:` block instead of typing it.
+
+    Absent is loud, never a fallback: a request built on a guessed page size
+    can silently return a truncated listing, and a truncated listing is how
+    `models doctor` would decide a live model is retired.
+
+    Reads the block directly rather than calling `quantities.lookup`, which
+    imports this module; the key `anthropic.models_list.page_limit` addresses
+    the same record through the read surface.
+    """
+    record = (load_config().get("limits") or {}).get(f"{provider}/{subject}") or {}
+    declared = record.get(name) if isinstance(record, dict) else None
+    value = declared.get("value") if isinstance(declared, dict) else None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ProviderProbeError(
+            provider,
+            None,
+            f"limits.{provider}/{subject}.{name} is missing from {models_file()}; "
+            "add it with its source rather than assuming a page size",
+        )
+    return value
+
+
 def fetch_provider_models(provider: str) -> list[dict[str, Any]]:
     """Fetch a complete, bounded model listing from one provider."""
     if provider == "openai":
@@ -281,10 +305,11 @@ def fetch_provider_models(provider: str) -> list[dict[str, Any]]:
     if provider != "anthropic":
         raise ProviderProbeError(provider, None, f"unsupported provider: {provider}")
 
+    page_limit = _declared_limit(provider, "models_list", "page_limit")
     values: list[dict[str, Any]] = []
     after_id: str | None = None
     while True:
-        url = "https://api.anthropic.com/v1/models?limit=1000"
+        url = f"https://api.anthropic.com/v1/models?limit={page_limit}"
         if after_id:
             url += f"&after_id={quote(after_id)}"
         payload = _provider_request(provider, url)
