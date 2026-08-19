@@ -600,23 +600,28 @@ print(json.dumps({'ok': True, 'profiles': items, 'count': len(items)}, indent=2)
 }
 
 cmd_profile_add() {
-    local name="${1:-}"
-    local conn_string="${2:-}"
-
-    if [[ -z "$name" ]] || [[ -z "$conn_string" ]]; then
+    if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
         echo '{"ok": false, "error": "Usage: agent-psql profile add <name> <connection_string>"}'
         return 1
     fi
-
-    ensure_config_dir
+    # De-export ambient password holders before declaring locals. Bash locals
+    # inherit an existing variable's export attribute, so scrubbing afterward
+    # can still expose the caller's ambient value to an early child process.
+    if ! _prepare_keychain_child_environment; then
+        _emit_keychain_store_failure
+        return 1
+    fi
+    local name="$1"
+    local conn_string="$2"
 
     # The helper receives the raw URI only on stdin, parses its percent-encoded
     # password byte-exactly, stages a masked profile candidate, stores a new-name
     # credential, then atomically publishes the file under the shared lock.
-    # Existing names remain removal-first.
+    # Scrub before even the config-directory child: Bash locals can inherit an
+    # ambient variable's export attribute. Existing names remain removal-first.
     local helper_status=0
-    if ! _prepare_keychain_child_environment; then
-        helper_status=1
+    if ! ensure_config_dir; then
+        helper_status=2
     elif builtin printf '%s' "$conn_string" \
         | _run_keychain_helper --profile-uri "$name" "$PROFILES_FILE" \
             >/dev/null 2>&1; then

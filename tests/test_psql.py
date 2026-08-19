@@ -318,9 +318,12 @@ def main() -> int:
         with tempfile.TemporaryDirectory() as tmpdir:
             captured_argv = Path(tmpdir) / "argv"
             captured_stdin = Path(tmpdir) / "stdin"
+            captured_setup_env = Path(tmpdir) / "setup-env"
             script = f'''
 export AGENT_DO_HOME="{tmpdir}/agent-home"
+export conn_string=ambient-export-marker
 source "{TOOL}" help >/dev/null
+ensure_config_dir() {{ /usr/bin/env > "{captured_setup_env}"; }}
 _run_keychain_helper() {{
     builtin printf '%s\\0' "$@" > "{captured_argv}"
     cat > "{captured_stdin}"
@@ -337,6 +340,9 @@ cmd_profile_add profile '{raw_uri.decode()}' >/dev/null
                 f"profile helper mode drifted: {argv_bytes!r}",
             )
             require(captured_stdin.read_bytes() == raw_uri, "profile URI stdin was not byte-exact")
+            setup_env = captured_setup_env.read_bytes()
+            require(b"conn_string=" not in setup_env, "profile URI holder reached the setup child environment")
+            require(raw_uri not in setup_env, "raw profile URI reached the setup child environment")
 
     check(
         "profile URI stays on stdin and percent-decoded password bytes are exact",
