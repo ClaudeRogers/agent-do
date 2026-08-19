@@ -228,7 +228,8 @@ except:
     # Password comes from keychain or env
     _PG_PASSWORD="${PGPASSWORD:-}"
     if [[ -z "$_PG_PASSWORD" ]]; then
-        _PG_PASSWORD=$(_get_session_password 2>/dev/null || true)
+        local session_key="session-${_PG_HOST:-localhost}-${_PG_PORT:-5432}-${_PG_USER:-${USER:-unknown}}-${_PG_DATABASE:-default}"
+        _read_password_into _PG_PASSWORD "$session_key" 2>/dev/null || _PG_PASSWORD=""
     fi
     return 0
 }
@@ -253,36 +254,101 @@ with open(sys.argv[6], 'w') as f:
 }
 
 # Store password in macOS keychain
-_store_password() {
-    local profile_name="$1"
-    local password="$2"
-    if [[ "$(uname)" == "Darwin" ]]; then
-        security delete-generic-password -a "$profile_name" -s "agent-psql" 2>/dev/null || true
-        security add-generic-password -a "$profile_name" -s "agent-psql" -w "$password" 2>/dev/null
-    fi
+_actual_macos() {
+    [[ "$(/usr/bin/uname -s 2>/dev/null)" == "Darwin" ]]
 }
 
-# Get password from keychain
-_get_password() {
+_prepare_keychain_child_environment() {
+    # Bash locals inherit an existing variable's export attribute. Remove every
+    # supported password holder from child environments before spawning even a
+    # platform/helper process. A readonly PGPASSWORD fails closed.
+    if ! export -n PGPASSWORD password _PG_PASSWORD conn_string stored_pw keychain_secret pgpassword_value \
+        2>/dev/null; then
+        return 1
+    fi
+    if ! unset PGPASSWORD 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+_run_keychain_helper() {
+    python3 "${SCRIPT_DIR}/../lib/psql_keychain_store.py" "$@"
+}
+
+_store_password() {
     local profile_name="$1"
-    if [[ "$(uname)" == "Darwin" ]]; then
-        security find-generic-password -a "$profile_name" -s "agent-psql" -w 2>/dev/null || true
+    local keychain_secret="$2"
+    if ! _prepare_keychain_child_environment; then
+        return 1
+    fi
+
+    # Bash variables cannot carry NUL. All supported bytes travel to the helper
+    # on stdin and stay off child argv/environment. The helper uses sys.platform
+    # for the real OS decision, so an inherited OSTYPE cannot skip macOS storage.
+    if ! builtin printf '%s' "$keychain_secret" \
+        | _run_keychain_helper "$profile_name" \
+            >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+_emit_keychain_store_failure() {
+    printf '%s\n' '{"ok": false, "error": "Failed to store password in macOS Keychain"}'
+}
+
+# Read one password into a named shell variable without stripping terminal LFs.
+_read_password_into() {
+    local target_name="$1"
+    local profile_name="$2"
+    local framed=""
+
+    case "$target_name" in
+        _PG_PASSWORD|stored_pw) ;;
+        *) return 1 ;;
+    esac
+    if ! _prepare_keychain_child_environment; then
+        printf -v "$target_name" '%s' ""
+        return 1
+    fi
+    if ! _actual_macos; then
+        printf -v "$target_name" '%s' ""
+        return 1
+    fi
+
+    # The final non-newline frame byte prevents Bash command substitution from
+    # deleting any LFs that belong to the password. Remove exactly that byte
+    # only after capture; embedded and terminal frame bytes remain data.
+    if ! framed="$(
+        _run_keychain_helper --read "$profile_name" 2>/dev/null
+        helper_status=$?
+        builtin printf '\037'
+        exit "$helper_status"
+    )"; then
+        printf -v "$target_name" '%s' ""
+        return 1
+    fi
+    if [[ "$framed" != *$'\037' ]]; then
+        printf -v "$target_name" '%s' ""
+        return 1
+    fi
+    printf -v "$target_name" '%s' "${framed%$'\037'}"
+    if [[ -z "${!target_name}" ]]; then
+        return 1
     fi
 }
 
 # Build a composite session key to avoid collisions across hosts/users/databases
 _session_key() {
-    echo "session-${_PG_HOST:-localhost}-${_PG_PORT:-5432}-${_PG_USER:-$(whoami)}-${_PG_DATABASE:-default}"
-}
-
-# Get session password
-_get_session_password() {
-    _get_password "$(_session_key)"
+    printf '%s\n' "session-${_PG_HOST:-localhost}-${_PG_PORT:-5432}-${_PG_USER:-${USER:-unknown}}-${_PG_DATABASE:-default}"
 }
 
 # Store session password
 _store_session_password() {
-    _store_password "$(_session_key)" "$1"
+    local session_user="${_PG_USER:-${USER:-unknown}}"
+    local session_key="session-${_PG_HOST:-localhost}-${_PG_PORT:-5432}-${session_user}-${_PG_DATABASE:-default}"
+    _store_password "$session_key" "$1"
 }
 
 # Ensure we have an active connection. Exits with error if not.
@@ -337,40 +403,36 @@ cmd_connect() {
 
     # From profile
     if [[ -n "$profile_name" ]]; then
-        local profiles
-        profiles=$(_load_profiles)
-        local conn
-        conn=$(echo "$profiles" | python3 -c "
-import json, sys
-profiles = json.load(sys.stdin)
-name = sys.argv[1]
-if name not in profiles:
-    print('', end='')
-    sys.exit(1)
-print(profiles[name].get('connection_string', ''))
-" "$profile_name" 2>/dev/null) || true
-
-        if [[ -z "$conn" ]]; then
-            echo "{\"ok\": false, \"error\": \"Profile '$profile_name' not found\"}"
+        local conn=""
+        local profile_status=0
+        if ! _prepare_keychain_child_environment; then
+            _emit_profile_json unsafe-environment "$profile_name"
             exit 1
+        elif conn=$(_run_keychain_helper --profile-read "$profile_name" "$PROFILES_FILE" 2>/dev/null); then
+            profile_status=0
+        else
+            profile_status=$?
         fi
+        case "$profile_status" in
+            0|4) ;;
+            5)
+                _emit_profile_json not-found "$profile_name"
+                exit 1
+                ;;
+            *)
+                _emit_profile_json invalid "$profile_name"
+                exit 1
+                ;;
+        esac
         conn_string="$conn"
-        # Get password from keychain
-        local stored_pw
-        stored_pw=$(_get_password "$profile_name" 2>/dev/null || true)
-        if [[ -n "$stored_pw" ]]; then
-            # Inject password into connection string if it has a placeholder
-            conn_string=$(python3 -c "
-import sys
-from urllib.parse import urlparse, urlunparse
-u = urlparse(sys.argv[1])
-pw = sys.argv[2]
-if not u.password or u.password == '****':
-    netloc = f'{u.username}:{pw}@{u.hostname}' + (f':{u.port}' if u.port else '')
-    print(urlunparse(u._replace(netloc=netloc)))
-else:
-    print(sys.argv[1])
-" "$conn_string" "$stored_pw")
+        parse_connection_string "$conn_string"
+        if [[ "$profile_status" -eq 0 ]]; then
+            if ! _read_password_into _PG_PASSWORD "$profile_name"; then
+                _emit_profile_json credential-unavailable "$profile_name"
+                exit 1
+            fi
+        else
+            _PG_PASSWORD=""
         fi
     fi
 
@@ -380,14 +442,14 @@ else:
             _PG_HOST="${PGHOST}"
             _PG_PORT="${PGPORT:-5432}"
             _PG_DATABASE="${PGDATABASE}"
-            _PG_USER="${PGUSER:-$(whoami)}"
+            _PG_USER="${PGUSER:-${USER:-unknown}}"
             _PG_PASSWORD="${PGPASSWORD:-}"
             _PG_SSLMODE="${PGSSLMODE:-prefer}"
         else
             echo '{"ok": false, "error": "No connection string, profile, or PGHOST/PGDATABASE env vars provided"}'
             exit 1
         fi
-    else
+    elif [[ -z "$profile_name" ]]; then
         parse_connection_string "$conn_string"
     fi
 
@@ -401,16 +463,23 @@ print(json.dumps({'ok': False, 'error': 'Connection failed: ' + sys.argv[1]}))
         exit 1
     }
 
+    # Do not publish a session until its reconnect credential is durable.
+    if [[ -n "$_PG_PASSWORD" ]]; then
+        if ! _store_session_password "$_PG_PASSWORD"; then
+            _emit_keychain_store_failure
+            return 1
+        fi
+    fi
+
     # Store session
     save_session
 
-    # Store password in keychain for session reconnect
-    if [[ -n "$_PG_PASSWORD" ]]; then
-        _store_session_password "$_PG_PASSWORD"
-    fi
-
     local masked
-    masked=$(mask_connection_string "postgresql://${_PG_USER}:${_PG_PASSWORD}@${_PG_HOST}:${_PG_PORT}/${_PG_DATABASE}")
+    if [[ -n "$_PG_PASSWORD" ]]; then
+        masked="postgresql://${_PG_USER}:****@${_PG_HOST}:${_PG_PORT}/${_PG_DATABASE}"
+    else
+        masked="postgresql://${_PG_USER}:@${_PG_HOST}:${_PG_PORT}/${_PG_DATABASE}"
+    fi
 
     # Snapshot the connection event
     if type snapshot_begin &>/dev/null; then
@@ -476,6 +545,30 @@ _load_profiles() {
     fi
 }
 
+_emit_profile_json() {
+    local kind="$1"
+    local name="$2"
+    python3 -c '
+import json, sys
+kind, name = sys.argv[1], sys.argv[2]
+quoted_name = chr(39) + name + chr(39)
+messages = {
+    "saved-keychain": (True, "message", f"Profile {quoted_name} saved. Password stored in keychain."),
+    "saved-passwordless": (True, "message", f"Profile {quoted_name} saved. No password found in connection string."),
+    "exists": (False, "error", f"Profile {quoted_name} already exists. Remove it before replacing it."),
+    "removed": (True, "message", f"Profile {quoted_name} removed"),
+    "not-found": (False, "error", f"Profile {quoted_name} not found"),
+    "unsafe-environment": (False, "error", f"Profile {quoted_name} credential environment is unsafe"),
+    "invalid": (False, "error", f"Profile {quoted_name} is invalid or unavailable"),
+    "credential-unavailable": (False, "error", f"Profile {quoted_name} credential is unavailable"),
+}
+if kind not in messages:
+    raise SystemExit(1)
+ok, field, message = messages[kind]
+print(json.dumps({"ok": ok, field: message}))
+' "$kind" "$name"
+}
+
 cmd_profiles() {
     ensure_config_dir
     local profiles
@@ -517,45 +610,49 @@ cmd_profile_add() {
 
     ensure_config_dir
 
-    # Extract and store password separately
-    local password
-    password=$(python3 -c "
-from urllib.parse import urlparse
-import sys
-u = urlparse(sys.argv[1])
-print(u.password or '')
-" "$conn_string")
-
-    # Store password-stripped connection string
-    local stripped
-    stripped=$(python3 -c "
-from urllib.parse import urlparse, urlunparse
-import sys
-u = urlparse(sys.argv[1])
-if u.password:
-    netloc = f'{u.username}:****@{u.hostname}' + (f':{u.port}' if u.port else '')
-    print(urlunparse(u._replace(netloc=netloc)))
-else:
-    print(sys.argv[1])
-" "$conn_string")
-
-    # Update profiles file
-    local profiles
-    profiles=$(_load_profiles)
-    echo "$profiles" | python3 -c "
-import json, sys
-profiles = json.load(sys.stdin)
-profiles[sys.argv[1]] = {'connection_string': sys.argv[2]}
-with open(sys.argv[3], 'w') as f:
-    json.dump(profiles, f, indent=2)
-" "$name" "$stripped" "$PROFILES_FILE"
-
-    # Store password in keychain
-    if [[ -n "$password" ]]; then
-        _store_password "$name" "$password"
-        echo "{\"ok\": true, \"message\": \"Profile '$name' saved. Password stored in keychain.\"}"
+    # The helper receives the raw URI only on stdin, parses its percent-encoded
+    # password byte-exactly, stages a masked profile candidate, stores a new-name
+    # credential, then atomically publishes the file under the shared lock.
+    # Existing names remain removal-first.
+    local helper_status=0
+    if ! _prepare_keychain_child_environment; then
+        helper_status=1
+    elif builtin printf '%s' "$conn_string" \
+        | _run_keychain_helper --profile-uri "$name" "$PROFILES_FILE" \
+            >/dev/null 2>&1; then
+        helper_status=0
     else
-        echo "{\"ok\": true, \"message\": \"Profile '$name' saved. No password found in connection string.\"}"
+        helper_status=$?
+    fi
+
+    case "$helper_status" in
+        0|4) ;;
+        1)
+            _emit_keychain_store_failure
+            return 1
+            ;;
+        2)
+            printf '%s\n' '{"ok": false, "error": "Failed to stage or publish the local profile record"}'
+            return 1
+            ;;
+        3)
+            _emit_profile_json exists "$name"
+            return 1
+            ;;
+        6)
+            printf '%s\n' '{"ok": false, "error": "Profile state is busy; no changes were made"}'
+            return 1
+            ;;
+        *)
+            printf '%s\n' '{"ok": false, "error": "Unexpected Keychain helper failure"}'
+            return 1
+            ;;
+    esac
+
+    if [[ "$helper_status" -eq 0 ]]; then
+        _emit_profile_json saved-keychain "$name"
+    else
+        _emit_profile_json saved-passwordless "$name"
     fi
 }
 
@@ -566,25 +663,31 @@ cmd_profile_remove() {
         return 1
     fi
 
-    local profiles
-    profiles=$(_load_profiles)
-    echo "$profiles" | python3 -c "
-import json, sys
-profiles = json.load(sys.stdin)
-name = sys.argv[1]
-if name not in profiles:
-    print(json.dumps({'ok': False, 'error': f\"Profile '{name}' not found\"}))
-    sys.exit(1)
-del profiles[name]
-with open(sys.argv[2], 'w') as f:
-    json.dump(profiles, f, indent=2)
-print(json.dumps({'ok': True, 'message': f\"Profile '{name}' removed\"}))
-" "$name" "$PROFILES_FILE"
-
-    # Remove from keychain
-    if [[ "$(uname)" == "Darwin" ]]; then
-        security delete-generic-password -a "$name" -s "agent-psql" 2>/dev/null || true
+    local helper_status=0
+    if ! _prepare_keychain_child_environment; then
+        helper_status=1
+    elif _run_keychain_helper --profile-remove "$name" "$PROFILES_FILE" >/dev/null 2>&1; then
+        helper_status=0
+    else
+        helper_status=$?
     fi
+    case "$helper_status" in
+        0)
+            _emit_profile_json removed "$name"
+            ;;
+        5)
+            _emit_profile_json not-found "$name"
+            return 1
+            ;;
+        6)
+            printf '%s\n' '{"ok": false, "error": "Profile state is busy; no changes were made"}'
+            return 1
+            ;;
+        *)
+            printf '%s\n' '{"ok": false, "error": "Failed to remove the local profile record"}'
+            return 1
+            ;;
+    esac
 }
 
 # --- Schema Exploration Commands ---
