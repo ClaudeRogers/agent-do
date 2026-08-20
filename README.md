@@ -192,23 +192,35 @@ with a written reason). Commits that advance an item cite it with a
 agent-do manna init
 agent-do manna create "Fix auth redirect" --type item --track mn-a1b2c3 \
   --source "docs/auth-audit.md"
+agent-do manna handoff seal mn-d4e5f6   # after intentional handoff edits
 agent-do manna claim mn-d4e5f6
 agent-do manna done mn-d4e5f6
 ```
 
-Beyond title and status, issues carry four schema fields: `type` (track, item,
+Beyond title and status, issues carry five schema fields: `type` (track, item,
 dream), `track` (the parent track), `source` (where the work came from), and
-`prompt` (the repository-relative `.handoff/` work order paired with the item).
-On a strict board, `create` writes the handoff and pointer atomically. `claim`
-refuses to proceed if the file is missing, ignored, outside `.handoff/`, or
-does not contain exactly the matching claim command.
+`prompt` (the repository-relative `.handoff/` work order paired with the item),
+plus `handoff_digest` (the board-side SHA-256 binding over the canonical handoff,
+with its binding field normalized). Claimed rows also carry a digest of the
+session's private bearer token; the visible `claimed_by` label is not authority.
+On a strict board, `create` writes an HMAC-authenticated recoverable row/file
+transaction. Journal installation is atomic no-clobber, the signature includes
+the canonical project root, replay compares the complete board row, and
+recovery accepts only canonical `.handoff/` targets.
+`claim` validates and
+changes state under one board lock, so concurrent sessions have exactly one
+winner. It refuses missing, ignored, symlink-escaped, structurally invalid, or
+unsealed handoffs.
 
-`manna init` installs `.manna/workflow.yaml` and `.handoff/README.md` for new
-or empty boards. If a repository ignores `.manna/` or `.handoff/`, init adds
+`manna init` pins strict or legacy identity in `.manna/board.yaml`, then
+installs workflow version 2 and `.handoff/README.md` for strict boards. If a
+repository ignores `.manna/` or `.handoff/`, init adds
 the narrow unignore rules needed to keep workflow state in Git while leaving
-the runtime lock ignored. Nonempty boards made
-before this contract remain legacy until deliberately migrated, so upgrading
-agent-do never rewrites an active campaign behind the user's back.
+the runtime lock and transaction journal ignored. Removing `workflow.yaml`
+cannot disable strict validation; init restores it. Pre-workflow nonempty
+boards are classified explicitly as legacy and are not rearranged.
+Restoration and ordinary metadata updates never recalculate a handoff seal;
+only `handoff seal` can authorize edited contents.
 
 Raw ideas enter through `dream`, which files the spark on the nearest board up
 the directory tree, or the global inbox when no board exists:
@@ -230,23 +242,27 @@ agent-do manna reconcile --fix   # safe fixes: abandon dead claims,
 trailers, probes whether claiming sessions are still alive, and checks blockers
 against actual state instead of trusting what the board says about itself. On
 strict boards it also detects active claim commands or prompt pointers living
-in shadow roots such as `.handoffs/`, `.dev/session-prompts/`, or nested
-`handoff-prompts/` directories.
+in any claim-bearing Markdown outside `.handoff/`, including neutral or
+symlinked roots, plus orphan files under `.handoff/`. Those
+workflow-integrity findings exit 1; informational drift stays advisory.
 
 ## The Ambient Loop
 
 With the Claude Code hooks installed, board-driven work needs no ceremony:
 
 - **SessionStart** pins the session identity (`AGENT_DO_COORD_SESSION`,
-  `MANNA_SESSION_ID`) so coordination presence and board claims survive pid
-  recycling, then injects the current board into context. If the previous
+  `MANNA_SESSION_ID`, `MANNA_SESSION_TOKEN`) so coordination presence and board
+  claims survive pid recycling without making the public owner label a
+  credential, then injects the current board into context. If the previous
   session left unresolved drift, the greeting includes it.
 - **SessionEnd** retires coordination presence and runs a bounded
   `manna reconcile --write-drift` advisory, leaving findings in
   `.manna/drift.yaml` for the next session's greeting.
 
 Everything is presence-gated: repositories without a `.manna/` board see none
-of it.
+of it. Codex, whose SessionStart channel cannot persist environment exports,
+derives the same stable ownership proof from its opaque thread id and a
+machine-local key outside the repository.
 
 The wider hook model stays non-blocking by design: hooks suggest relevant tools
 at session start, route fuzzy user prompts to likely `agent-do` commands,

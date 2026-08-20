@@ -53,15 +53,26 @@ fi
 # --- Pin coord + manna identity to this Claude session ---
 # Every Bash call then derives the same coord agent identity, and the
 # SessionEnd hook can retire exactly that identity via the same session_id.
-# Manna gets the same anchor: claims made as the session_id survive pid
-# recycling, so reconcile can probe them meaningfully instead of always
-# finding a dead transient pid.
+# Manna gets the same public anchor plus a private token. The pair survives
+# separate shell invocations without turning the visible session_id into
+# lifecycle authority.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
 fi
-if [ -n "$SESSION_ID" ] && [ -z "${MANNA_SESSION_ID:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
-    echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+if [ -n "$SESSION_ID" ] && [ -n "$CLAUDE_ENV_FILE" ] && { [ -z "${MANNA_SESSION_ID:-}" ] || [ -z "${MANNA_SESSION_TOKEN:-}" ]; }; then
+    if command -v openssl >/dev/null 2>&1; then
+        MANNA_TOKEN=$(openssl rand -hex 32 2>/dev/null)
+    elif command -v uuidgen >/dev/null 2>&1; then
+        MANNA_TOKEN="$(uuidgen 2>/dev/null)$(uuidgen 2>/dev/null)"
+        MANNA_TOKEN=$(printf '%s' "$MANNA_TOKEN" | tr -d '-' | tr 'A-F' 'a-f')
+    else
+        MANNA_TOKEN=""
+    fi
+    if [ -n "$MANNA_TOKEN" ]; then
+        echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+        echo "export MANNA_SESSION_TOKEN=\"$MANNA_TOKEN\"" >> "$CLAUDE_ENV_FILE"
+    fi
 fi
 
 run_native_bootstrap_prompt() {

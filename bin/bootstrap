@@ -211,10 +211,30 @@ if [[ "$wants_zpc" == true ]] && { [[ "$force" == true ]] || [[ ! -d "$project_r
     pending_commands+=("agent-do zpc init")
 fi
 
+manna_strict_marker=false
+if { [[ -f "$project_root/.manna/board.yaml" ]] \
+        && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml"; } \
+    || [[ -e "$project_root/.manna/workflow.yaml" || -L "$project_root/.manna/workflow.yaml" \
+    || -e "$project_root/.handoff" || -L "$project_root/.handoff" ]] \
+    || { [[ -f "$project_root/.manna/issues.jsonl" ]] \
+        && grep -Eq '"(prompt|handoff_digest)":("\.handoff/|"sha256:)' "$project_root/.manna/issues.jsonl"; }; then
+    manna_strict_marker=true
+fi
+
+manna_workflow_healthy=false
+if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.yaml" \
+    && -f "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" \
+    && -f "$project_root/.handoff/README.md" && ! -L "$project_root/.handoff/README.md" ]] \
+    && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml" \
+    && grep -Eq '^version:[[:space:]]*2[[:space:]]*$' "$project_root/.manna/workflow.yaml"; then
+    manna_workflow_healthy=true
+fi
+
 if [[ "$wants_manna" == true ]] \
     && { [[ "$force" == true ]] \
         || [[ ! -d "$project_root/.manna" ]] \
-        || { [[ -f "$project_root/.manna/workflow.yaml" ]] && [[ ! -f "$project_root/.handoff/README.md" ]]; }; }; then
+        || [[ ! -f "$project_root/.manna/board.yaml" ]] \
+        || { [[ "$manna_strict_marker" == true ]] && [[ "$manna_workflow_healthy" != true ]]; }; }; then
     pending_actions+=("manna_init")
     pending_labels+=("manna + handoff workflow")
     pending_commands+=("agent-do manna init")
@@ -301,6 +321,26 @@ done
 
 verified=()
 
+# Re-read Manna state after bootstrap. The preflight booleans describe what
+# needed repair, not what the command just produced.
+manna_strict_marker=false
+if { [[ -f "$project_root/.manna/board.yaml" ]] \
+        && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml"; } \
+    || [[ -e "$project_root/.manna/workflow.yaml" || -L "$project_root/.manna/workflow.yaml" \
+    || -e "$project_root/.handoff" || -L "$project_root/.handoff" ]] \
+    || { [[ -f "$project_root/.manna/issues.jsonl" ]] \
+        && grep -Eq '"(prompt|handoff_digest)":("\.handoff/|"sha256:)' "$project_root/.manna/issues.jsonl"; }; then
+    manna_strict_marker=true
+fi
+manna_workflow_healthy=false
+if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.yaml" \
+    && -f "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" \
+    && -f "$project_root/.handoff/README.md" && ! -L "$project_root/.handoff/README.md" ]] \
+    && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml" \
+    && grep -Eq '^version:[[:space:]]*2[[:space:]]*$' "$project_root/.manna/workflow.yaml"; then
+    manna_workflow_healthy=true
+fi
+
 if [[ -d "$AGENT_DO_HOME/context" ]]; then
     verified+=("context")
 fi
@@ -308,8 +348,10 @@ if [[ -d "$project_root/.zpc" ]]; then
     verified+=("zpc")
 fi
 if [[ -d "$project_root/.manna" ]] \
-    && { [[ ! -f "$project_root/.manna/workflow.yaml" ]] \
-        || [[ -f "$project_root/.handoff/README.md" ]]; }; then
+    && [[ -f "$project_root/.manna/board.yaml" ]] \
+    && { { [[ "$manna_strict_marker" != true ]] \
+            && grep -Eq '^workflow:[[:space:]]*legacy[[:space:]]*$' "$project_root/.manna/board.yaml"; } \
+        || [[ "$manna_workflow_healthy" == true ]]; }; then
     verified+=("manna")
 fi
 

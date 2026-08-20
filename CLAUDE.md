@@ -227,7 +227,8 @@ The board (`.manna/`) is the single backlog; tracked `.handoff/` is the single w
 - **Dream gate:** dreams stay visible in `list` and `context`, every row marked `[DREAM: not claimable, needs conversion]`, and `claim` refuses one (exit 2, nothing written) until Erik converts it with `agent-do manna update <id> --type item`; the refusal is the gate, not hiding.
 - **Trailer rule:** any commit advancing an item carries a `Manna: mn-xxxxxx` trailer (same mechanic as `Co-Authored-By`).
 - **Single-truth rule:** memories and handoff docs point at mn- IDs; they never carry their own checklists.
-- **Pairing gate:** `manna create` generates the item handoff and reverse pointer; `claim` refuses broken, ignored, or mismatched pairs. `manna reconcile` reports legacy shadow roots as `workflow_sprawl`.
+- **Pairing gate:** `manna create` generates the item handoff and reverse pointer; `claim` refuses broken, ignored, or mismatched pairs. Only `handoff seal` authorizes document edits. `manna reconcile` reports any live claim-bearing Markdown outside `.handoff/` as `workflow_sprawl`.
+- **Ownership gate:** Claude/Cursor hooks pin `MANNA_SESSION_ID` plus secret `MANNA_SESSION_TOKEN`; Codex derives a proof from its opaque thread id under a machine-local key. The board stores only the proof digest. Scripted lanes export both. A public owner label alone has no lifecycle authority.
 - **This project's vocabulary** (data, not grammar): track rows mn-b7a0cc "Agentic Work OS" and mn-69368a "Companion / Second Chair"; item titles keep their program names ("Moon trunk A" through "Moon trunk G", "Companion: ...", "Charter Law N: ...", "Harness: ..."). The old title-prefix grammar built from those names was interim scaffolding; the typed fields replaced it, and prefixes surviving in titles are display only.
 
 ## Adding Tools
@@ -279,6 +280,7 @@ The second property the contracts machine holds: a command that caps its output 
 - `AGENT_DO_AUTO_DESTRUCTIVE`: Set to `1` to let natural-language routing execute destructive/sensitive verbs without asking; default asks via exit 2 clarification
 - `AGENT_DO_AI_MAX_TOKENS`: Defaults to `64000`, the API-required output ceiling
 - `MANNA_SESSION_ID`: Override session ID for agent-manna
+- `MANNA_SESSION_TOKEN`: Secret session bearer token for agent-manna ownership (32+ characters; hooks generate it)
 - `RENDER_API_KEY`: API key for agent-render (Render.com), or store with `agent-do creds store RENDER_API_KEY --stdin`
 - `VERCEL_ACCESS_TOKEN`: API token for agent-vercel (Vercel), or store with `agent-do creds store VERCEL_ACCESS_TOKEN --stdin`
 - `SUPABASE_ACCESS_TOKEN`: API token for agent-supabase (Supabase), or store with `agent-do creds store SUPABASE_ACCESS_TOKEN --stdin`

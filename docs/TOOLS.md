@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (96 tools)
+## Summary (99 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -29,13 +29,14 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [appleevents](#appleevents) | Control scriptable macOS apps through AppleEvents, AppleScript, and JXA | mixed | 9 |
 | [audio](#audio) | Audio processing | mixed | 3 |
 | [auth](#auth) | Site-level authentication orchestration over encrypted session bundles, browser import, and secure credentials | mixed | 13 |
+| [betterstack](#betterstack) | Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call | mixed | 14 |
 | [bluetooth](#bluetooth) | Bluetooth control | mixed | 3 |
 | [brief](#brief) | Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions, and git into ranked threads, a delta since last look, one-tap suggestions carried as data, and a receipts-grounded paragraph | mixed | 10 |
 | [browse](#browse) | AI-first headless browser automation with @ref element selection, SSO/MFA login handoff, persistent sessions | mixed | 20 |
 | [burp](#burp) | Burp Suite automation | mixed | 4 |
 | [cad](#cad) | CAD file operations | mixed | 4 |
 | [calendar](#calendar) | Control calendar | mixed | 3 |
-| [ci](#ci) | Control CI/CD pipelines | write | 3 |
+| [ci](#ci) | Control CI/CD pipelines | write | 4 |
 | [clerk](#clerk) | Clerk authentication platform — users, organizations, sessions, OAuth apps, enterprise SSO, JWT templates, roles | mixed | 14 |
 | [clipboard](#clipboard) | Cross-app clipboard management | mixed | 4 |
 | [cloud](#cloud) | Control cloud providers (AWS, GCP, Azure) | mixed | 3 |
@@ -44,6 +45,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
 | [coord](#coord) | Project-local agent state and interrupt broker | mixed | 22 |
 | [creds](#creds) | Secure credential storage and resolution for agent-do tools | mixed | 8 |
+| [cronitor](#cronitor) | Cronitor scheduled job and uptime monitoring | mixed | 11 |
 | [db](#db) | Control database clients | mixed | 5 |
 | [debug](#debug) | Control debuggers | read | 5 |
 | [discord](#discord) | Control Discord | mixed | 2 |
@@ -72,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 16 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 17 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -94,6 +96,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
+| [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
 | [sheets](#sheets) | Control Google Sheets | mixed | 3 |
@@ -450,6 +453,69 @@ agent-do auth advance github
 - long_running (daemon/stream/session; may never return): `ensure`
 - composite (one call performs several beats internally): `advance`, `ensure`, `import-browser`, `probe`
 
+### betterstack
+
+Better Stack Uptime monitoring, incidents, heartbeats, status pages, and on-call
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect uptime monitors
+- view monitor availability and response times
+- pause and resume monitors
+- list and manage incidents (acknowledge, resolve)
+- list heartbeats
+- list status pages
+- view on-call schedules
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info
+- `availability`: Monitor availability summary
+- `response-times`: Monitor response time data
+- `pause`: Pause a monitor
+- `resume`: Resume a monitor
+- `incidents`: List incidents (--active for unresolved)
+- `incident`: Detailed incident info
+- `ack`: Acknowledge an incident
+- `resolve`: Resolve an incident
+- `heartbeats`: List all heartbeats
+- `status-pages`: List all status pages
+- `on-call`: List on-call schedules
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my betterstack monitors
+agent-do betterstack monitors
+# show betterstack monitor details
+agent-do betterstack show vms-web
+# check active incidents in betterstack
+agent-do betterstack incidents --active
+# check uptime availability
+agent-do betterstack availability versova-chat
+# pause a betterstack monitor
+agent-do betterstack pause vms-web
+# acknowledge a betterstack incident
+agent-do betterstack ack 12345
+# get betterstack account snapshot
+agent-do betterstack snapshot
+```
+
+**Credentials**
+
+- Required: `BETTERSTACK_API_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `availability`, `heartbeats`, `incident`, `incidents`, `monitors`, `on-call`, `response-times`, `show`, `snapshot`, `status-pages`
+- Write (connect/interact/save): `ack`, `pause`, `resolve`, `resume`
+- composite (one call performs several beats internally): `ack`, `pause`, `resolve`, `resume`
+
 ### bluetooth
 
 Bluetooth control
@@ -739,17 +805,20 @@ Concurrency: `write`
 - `trigger`: Trigger build
 - `status`: View status
 - `logs`: View build logs
+- `triage`: Classify a failed run and draft a triage summary (dry-run)
 
 **Examples**
 
 ```bash
 # trigger deploy pipeline
 agent-do ci trigger deploy
+# triage a failed CI run
+agent-do ci triage 12345 --repo owner/repo
 ```
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `logs`, `status`
+- Read-only (snapshot/verify; safe to parallelize): `logs`, `status`, `triage`
 - Write (connect/interact/save): `trigger`
 
 ### clerk
@@ -1191,6 +1260,69 @@ agent-do creds check --tool vercel
 - Write (connect/interact/save): `delete`, `export`, `store`
 - destructive (irreversible data loss; confirm before auto-running): `delete`
 - sensitive (emits or persists secret material; guard output): `delete`, `store`
+
+### cronitor
+
+Cronitor scheduled job and uptime monitoring
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect monitors (jobs, heartbeats, checks)
+- view monitor details including schedule and assertions
+- create and delete monitors
+- pause and resume monitors for maintenance windows
+- send telemetry events (run, complete, fail, ok)
+- list and inspect issues (incidents)
+- list notification lists
+- full account snapshot as JSON
+
+**Commands**
+
+- `monitors`: List all monitors with status
+- `show`: Detailed monitor info by key
+- `create`: Create a monitor (JSON from stdin)
+- `delete`: Delete a monitor by key
+- `pause`: Pause a monitor (indefinitely or for N hours)
+- `resume`: Resume a paused monitor
+- `issues`: List issues (--open for unresolved only)
+- `issue`: Detailed issue info by key
+- `ping`: Send telemetry event (--state run|complete|fail|ok)
+- `notifications`: List notification lists
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list my cronitor monitors
+agent-do cronitor monitors
+# show cronitor monitor details
+agent-do cronitor show TuoCU3
+# check open cronitor issues
+agent-do cronitor issues --open
+# send a cronitor telemetry ping
+agent-do cronitor ping my-job --state complete
+# pause a cronitor monitor for maintenance
+agent-do cronitor pause my-job 4
+# resume a paused cronitor monitor
+agent-do cronitor resume my-job
+# get cronitor account snapshot
+agent-do cronitor snapshot
+# create a new cronitor monitor
+echo '{"type":"job","key":"my-job","schedules":["0 * * * *"]}' | agent-do cronitor create
+```
+
+**Credentials**
+
+- Required: `CRONITOR_API_KEY`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `issue`, `issues`, `monitors`, `notifications`, `show`, `snapshot`
+- Write (connect/interact/save): `create`, `delete`, `pause`, `ping`, `resume`
+- destructive (irreversible data loss; confirm before auto-running): `delete`
+- composite (one call performs several beats internally): `create`, `pause`, `ping`, `resume`
 
 ### db
 
@@ -2389,11 +2521,12 @@ Concurrency: `write`
 - `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
 - `abandon`: Release a claimed issue back to open
+- `handoff`: Seal and bind an intentional canonical handoff edit
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
 - `show`: Show issue details
-- `update`: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
+- `update`: Update issue metadata; lifecycle state changes require claim, done, abandon, block, or unblock
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
@@ -2422,7 +2555,7 @@ agent-do manna reconcile --write-drift
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `init`, `reconcile`, `unblock`, `update`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `reconcile`, `unblock`, `update`
 - destructive (irreversible data loss; confirm before auto-running): `delete`
 - polymorphic (beat decided by payload or flag at call time): `reconcile`
 
@@ -3475,6 +3608,66 @@ agent-do screen type 'hello world'
 
 - Read-only (snapshot/verify; safe to parallelize): `cursor`, `displays`, `elements`, `find`, `snapshot`
 - Write (connect/interact/save): `click`, `press`, `scroll`, `type`
+
+### sentry
+
+Sentry error tracking, issue management, alerts, and releases
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list and inspect projects
+- search and filter issues with Sentry query syntax
+- view issue details with assignee, level, and event count
+- resolve, unresolve, ignore, and assign issues
+- list alert rules across all projects
+- list recent releases
+- full account snapshot as JSON
+
+**Commands**
+
+- `projects`: List all projects with platforms
+- `project`: Detailed project info
+- `issues`: List issues (--project, --query, --sort, --limit)
+- `issue`: Detailed issue info by short ID
+- `resolve`: Resolve an issue
+- `unresolve`: Reopen a resolved issue
+- `ignore`: Mark an issue as ignored
+- `assign`: Assign an issue to a user by email
+- `alerts`: List alert rules
+- `alert`: Detailed alert rule info
+- `releases`: List recent releases (--project)
+- `snapshot`: Full account state as JSON
+
+**Examples**
+
+```bash
+# list sentry projects
+agent-do sentry projects
+# show unresolved sentry issues
+agent-do sentry issues
+# show sentry issues for versova-chat
+agent-do sentry issues --project versova-chat
+# get sentry issue details
+agent-do sentry issue VERSOVA-CHAT-B
+# resolve a sentry issue
+agent-do sentry resolve VERSOVA-CHAT-B
+# list sentry alert rules
+agent-do sentry alerts
+# get sentry account snapshot
+agent-do sentry snapshot
+```
+
+**Credentials**
+
+- Required: `SENTRY_AUTH_TOKEN`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `alert`, `alerts`, `issue`, `issues`, `project`, `projects`, `releases`, `snapshot`
+- Write (connect/interact/save): `assign`, `ignore`, `resolve`, `unresolve`
+- composite (one call performs several beats internally): `assign`, `ignore`, `resolve`, `unresolve`
 
 ### serial
 

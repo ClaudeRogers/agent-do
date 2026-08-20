@@ -52,6 +52,7 @@ exact:
   stats: {beats: [snapshot]}
   history: {beats: [snapshot]}
   logs: {beats: [snapshot]}
+  triage: {beats: [snapshot]}
   diff: {beats: [snapshot]}
   peers: {beats: [snapshot]}
   whoami: {beats: [snapshot]}

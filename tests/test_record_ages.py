@@ -195,8 +195,14 @@ def test_zpc_corrections_carry_their_age() -> None:
             }) + "\n")
 
         blob = run(["zpc", "inject"], project, env).stdout
+        # Delivery intentionally renders correction timestamps at date
+        # resolution. Derive the expected calendar age from that rendered date
+        # as well, especially across the UTC/local midnight boundary.
+        correction_day = date.fromisoformat(stamp[:10])
+        correction_offset = max(0, (date.today() - correction_day).days)
         require(
-            f"[{day(3)} (3d ago)] {target.group(0)} corrected to:" in blob,
+            f"[{correction_day} ({expected_age(correction_offset)})] "
+            f"{target.group(0)} corrected to:" in blob,
             f"a correction must say how long ago it was made:\n{blob}",
         )
 
@@ -265,14 +271,17 @@ def test_zpc_position_renders_its_age() -> None:
             "--falsifier", "a claim succeeds on a dream",
         ], project, env)
 
+        rows = (project / ".zpc" / "memory" / "positions.jsonl").read_text().strip().split("\n")
+        position = json.loads(rows[0])
+        recorded_day = date.fromisoformat(position["ts"][:10])
+        recorded_offset = max(0, (date.today() - recorded_day).days)
         listed = run(["zpc", "position", "list"], project, env).stdout
         require(
-            f"{day(0)} (today)" in listed,
+            f"{recorded_day} ({expected_age(recorded_offset)})" in listed,
             f"a position must say how long it has stood:\n{listed}",
         )
 
-        rows = (project / ".zpc" / "memory" / "positions.jsonl").read_text().strip().split("\n")
-        position_id = json.loads(rows[0])["id"]
+        position_id = position["id"]
         shown = run(["zpc", "position", "show", position_id], project, env).stdout
         recorded = next(line for line in shown.splitlines() if "recorded:" in line)
         # `show` holds the full timestamp, so its age answers at the ladder's
@@ -295,6 +304,7 @@ def manna_board(tmp: Path, offsets: list[int]) -> tuple[Path, dict[str, str]]:
     env = os.environ.copy()
     env["AGENT_DO_HOME"] = str(tmp / "agent-home")
     env["MANNA_SESSION_ID"] = "ages-test"
+    env["MANNA_SESSION_TOKEN"] = "ages-test-token-0123456789abcdef0123456789abcdef"
     board = tmp / "board"
     board.mkdir()
     run(["manna", "init"], board, env)

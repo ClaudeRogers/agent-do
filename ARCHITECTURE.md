@@ -291,47 +291,62 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 
 ### Storage and locking (src/store.rs)
 
-- `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log: start/claim/release/done/end), and `.manna/workflow.yaml` (strict workflow version and canonical handoff root)
-- `.handoff/README.md` plus `.handoff/mn-xxxxxx-<slug>.md` work orders. This directory is durable Git state, not scratch space
-- Appends take an exclusive `fs2` file lock; updates and deletes rewrite the whole file to a `.tmp` sibling and atomically rename
+- `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log), `.manna/board.yaml` (independent strict or legacy identity), and `.manna/workflow.yaml` (strict workflow version and canonical handoff root)
+- `.manna/transactions/` is an ignored write-ahead journal. Each intent is HMAC-authenticated by a private key outside the worktree, installed with atomic no-clobber semantics, and bound to the canonical project root, filename, complete rows, canonical handoff, archive path, and document payload
+- `.handoff/README.md`, `.handoff/mn-xxxxxx-<slug>.md`, and `.handoff/.archive/` are durable Git state, not scratch space
+- Every mutation takes the board-wide `fs2` lock across re-read, validation, state change, temp write, fsync, and atomic rename. File locks alone are insufficient because the JSONL rewrite replaces the inode
 - Malformed lines are skipped with a stderr warning, never fatal
 - Output is YAML by default (`success:` envelope), JSON with `--json`. Exit codes: 0 success, 1 user error, 2 system error (I/O, lock)
 
 ### Schema (src/issue.rs)
 
-`id` (`mn-` + 6 lowercase hex), `title` (1-500 chars), `status`, `description`, timestamps, `blocked_by`, `claimed_by`/`claimed_at`, plus the typed fields:
+`id` (`mn-` + 6 lowercase hex), `title` (1-500 chars), `status`, `description`, timestamps, `blocked_by`, `claimed_by`/`claimed_at`, `claim_token_hash`, plus the typed fields:
 
 - `type`: `track` | `item` (default, omitted on disk so v1 rows round-trip byte-identical) | `dream`
 - `track`: edge to a `type: track` issue; tracks cannot themselves carry a track edge (tracks don't nest)
 - `source`: where the issue came from (vault note, conversation, commit)
 - `prompt`: repository-relative `.handoff/` path paired with an actionable item on strict boards; legacy boards may retain older absolute pointers
+- `handoff_digest`: `sha256:<64 lowercase hex>` binding the canonical handoff document, with its self-referential binding field normalized, to the row
 
 ### Workflow scaffold (src/workflow.rs)
 
-`manna init` installs workflow version 1 on new or empty boards. It creates
-`.manna/workflow.yaml` and `.handoff/README.md`, and narrowly unignores the
-durable files in both roots when project-level Git rules would hide them. The
-runtime board lock stays ignored. Existing nonempty
-boards without a workflow file remain in legacy mode and are never silently
-rewritten.
+`manna init` classifies the board once in `.manna/board.yaml`. New or empty
+boards are strict; pre-workflow nonempty boards are explicitly legacy. Strict
+boards install workflow version 2 and `.handoff/README.md`, and narrowly
+unignore `board.yaml`, `workflow.yaml`, both JSONL files, and `.handoff/`.
+Removing `workflow.yaml` cannot downgrade the board because identity is stored
+separately; init restores it. Existing version-2 digests are monotonic markers:
+restoration or a forged version downgrade validates them and never re-enters
+the binding-creating migration path. The runtime lock and transaction journal
+stay ignored.
 
-On strict boards, creating an item allocates its id, generates
-`.handoff/<id>-<slug>.md`, writes that relative path into `prompt`, appends the
-board row, and then reads the pair back. A failed board append removes the new
-handoff. Tracks and dreams never receive handoffs. Item pointers are stable:
-agents edit the linked work order instead of repointing the board.
+On strict boards, creating an item writes a transaction intent, generates
+`.handoff/<id>-<slug>.md`, and installs the bound row under the board lock. A
+crash at any point leaves the authenticated intent for idempotent completion by
+the next Manna command. Recovery verifies the scaffold first, accepts only an
+exact complete-row replay, and cannot write outside `.handoff/`. Delete and item conversion archive the live handoff before
+clearing its pointer. Tracks and dreams never receive live handoffs.
 
-`claim` validates the scaffold and exact pair before changing status. The
-handoff must exist, be Git-visible, stay below `.handoff/`, and contain exactly
-one claim target matching the item. Broken continuity exits 2 with no claim.
+Handoff frontmatter binds workflow version, item, track, source, base commit,
+scope, inputs, and a SHA-256 of the canonical document with the binding field
+normalized. The same digest lives in
+the issue. `manna handoff seal <id>` is the only path that authorizes an edit.
+Metadata updates first verify the old seal, and config restoration never
+recomputes one.
+`claim` validates Git visibility, every path component (no symlinks), structured
+metadata, Claim section, and both digests after taking the board lock. Loose
+comments and claim-like strings have no authority. Broken continuity exits 2
+with no claim.
 
 ### State machine
 
-- `claim` requires status `open` and no claimant; sets `in_progress` with `claimed_by` = `MANNA_SESSION_ID` (or a generated `ses_pid<pid>_<ts>` fallback)
-- `done` requires `in_progress`: an issue cannot complete without having been claimed
-- `abandon` requires a claim and `in_progress`; returns to `open`
+- `claim` requires status `open` and no claimant; validation and transition are one locked operation, so concurrent claimers have exactly one winner
+- Once claimed, mutations require both the exact `claimed_by` session and its bearer-token proof. The board stores only `claim_token_hash`, so the visible owner string cannot impersonate the claim
+- `done` requires owner plus `in_progress` and revalidates the authoritative handoff seal and absence of shadow work orders under the board lock; the sole exception is closing an unclaimed dream, because dreams are deliberately unclaimable
+- `abandon` requires owner plus `in_progress`; returns to `open`
 - `block`/`unblock` maintain `blocked_by` and derive `blocked` status; completing a blocker does **not** auto-unblock dependents. That residue is deliberate: `reconcile` reports it (`blocker_desync`) and `reconcile --fix` clears it through the same state machine
-- Validation invariants: `in_progress` requires `claimed_by`; `claimed_by` and `claimed_at` come and go together
+- `update --status` is rejected. Status moves only through lifecycle verbs
+- Validation invariants: `in_progress` requires `claimed_by`; `claimed_by`, `claimed_at`, and `claim_token_hash` come and go together; handoff digests use the pinned SHA-256 shape
 
 ### Lint (`manna lint`)
 
@@ -343,24 +358,31 @@ Board-grammar gate: findings exit 1, clean exits 0. Rules:
 - `dream_status`: dreams only carry `open` or `done`
 - `prompt_file`: a prompt pointer on a non-done issue must resolve to a file
 - strict workflow rules: the scaffold exists, each active item has a canonical
-  `.handoff/` pointer, and the handoff carries the exact matching claim command
+  `.handoff/` pointer, the canonical document matches its authoritative digest,
+  no symlink escapes the project, no shadow workflow exists, and no canonical
+  handoff is orphaned
 
 ### Reconcile (`manna reconcile [--fix] [--write-drift] [--dream-age-days N]`)
 
-Drift detection between the board and reality. Advisory verb: findings alone never fail the run; only `--fix` failures exit nonzero. Checks run in a fixed order, and a check that cannot run records a `skipped` finding with the reason:
+Drift detection between the board and reality. Informational findings are
+advisory. `workflow_sprawl`, `orphan_handoff`, `prompt_pairing`, and `--fix`
+failures exit nonzero because they change which work order is authoritative.
+Checks run in a fixed order, and a check that cannot run records a `skipped`
+finding with the reason:
 
 1. `landed_open`: issues cited by `Manna:` trailers in the last 500 commits but not yet done (report-only; merge judgment stays human)
-2. `dead_claim`: claims held by provably-gone sessions. Default-format `ses_pid...` sessions are probed with `kill -0`; other session ids are matched against `agent-do coord peers --json` (bounded to 2s) and count as dead only when coord reports `dead`/`stale`/`stopped`. Absent from coord is inconclusive, not dead
+2. `dead_claim`: claims held by provably-gone sessions. A `--fix` release is compare-and-swap against the inspected complete row, so stale evidence cannot release a newer claim
 3. `blocker_desync`: `blocked` status out of sync with `blocked_by` (all blockers done or missing, or an empty list)
 4. `stale_dream`: open dreams strictly older than the threshold (default 14 days)
 5. `dangling_track`: track edges to missing or non-track issues
 6. `doc_reference`: `mn-` ids mentioned in `.handoff/`, `.dev/`, `.zpc/`, and the per-project Claude memory directory that do not exist on this board (files ≤ 1MB, symlinks skipped, deduplicated per file+id)
 7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a work-order file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. Strict boards scan `.handoff/**/*.md`; legacy boards retain the `.dev/session-prompts/` scan. A missing directory is a successful empty scan, and foreign-board ids are ignored
-8. `workflow_sprawl` on strict boards: an active local item is claimed from `.handoffs/`, `.dev/session-prompts/`, or a nested `handoff-prompts/` root, or its pointer leaves the canonical `.handoff/` root
+8. `workflow_sprawl` on strict boards: any live claim-bearing Markdown appears outside `.handoff/`; internal directory aliases are scanned, while external or handoff-like symlink roots fail closed
+9. `orphan_handoff`: a canonical handoff has no live actionable row, or does not match that row's pointer. `.handoff/.archive/` is excluded intentionally
 
 The prompt pointer itself comes from the `prompt` field, or as a blessed interim convention, a description whose first line is `PROMPT: <path>`.
 
-`--fix` applies only the safe subset through the existing state machine: releasing dead claims and removing resolved blockers. `--write-drift` serializes the findings to `.manna/drift.yaml` (atomic temp + rename, `generated_at` quoted so YAML 1.1 parsers keep it a string, `session` from `MANNA_SESSION_ID`). The SessionEnd hook writes this file; the next SessionStart greets with it.
+`--fix` applies only the safe subset through the existing state machine: releasing dead claims and removing resolved blockers. `--write-drift` serializes the findings to `.manna/drift.yaml` (atomic temp + rename, `generated_at` quoted so YAML 1.1 parsers keep it a string, `session` from the explicit or host-derived Manna identity). The SessionEnd hook writes this file; the next SessionStart greets with it.
 
 ### Trailer grammar
 
@@ -397,7 +419,7 @@ All four Claude hooks are advisory: they inject context or run cleanup, and neve
 Resolves agent-do (PATH → `~/.local/bin` symlink → breadcrumb → script-relative repo fallback for bare checkouts), then:
 
 - **PATH**: appends an export line to `CLAUDE_ENV_FILE` so every Bash call finds `agent-do`
-- **Identity pins**: exports `AGENT_DO_COORD_SESSION` and `MANNA_SESSION_ID` (both from the hook payload's `session_id`) into `CLAUDE_ENV_FILE`, so coord identity and manna claims anchor to the Claude session rather than transient pids, and SessionEnd retires exactly the same identity
+- **Identity pins**: exports `AGENT_DO_COORD_SESSION`, `MANNA_SESSION_ID`, and a random 256-bit `MANNA_SESSION_TOKEN` into `CLAUDE_ENV_FILE`. The public ids anchor to the Claude session; the private token proves claim ownership across shell invocations without entering the board
 - **Injected context sections**, each independently gated:
   - the tooling reminder (prefer agent-do over raw CLI; discovery commands)
   - project-scoped tooling (`suggest --project`, 3s bound): top likely tools with readiness fixes
@@ -431,6 +453,12 @@ Presence-gated cleanup, always exit 0. In repos whose git dir already has a coor
 ### Codex
 
 `hooks/codex/` carries SessionStart/UserPromptSubmit/PreToolUse equivalents plus an advisory Stop quality gate (`stop-quality-gate.sh` + `.py`) that DPT-scores the active `agent-do browse` page and reports it as `additionalContext`. Codex supports `hookSpecificOutput.additionalContext` on PreToolUse (May 2026 hooks release); it parses but does not enforce deny decisions, so block mode is effectively Claude-only.
+
+Codex does not expose a persistent environment-export channel from SessionStart.
+Manna therefore derives a stable ownership proof from `CODEX_THREAD_ID` under
+`$AGENT_DO_HOME/manna/session-identity.key`, a mode-0600 machine-local secret.
+The board stores only the compact coord-compatible owner label and a digest of
+that proof. The raw thread id and key never enter repository state.
 
 ## Framework Libraries
 

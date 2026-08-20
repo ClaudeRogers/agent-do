@@ -9,9 +9,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
+use rand::{rngs::OsRng, RngCore};
 
 use crate::error::{MannaError, Result};
-use crate::issue::{Issue, SessionEvent};
+use crate::issue::{Issue, SessionEvent, SessionIdentity};
 
 /// Directory name for Manna storage.
 const MANNA_DIR: &str = ".manna";
@@ -21,6 +22,9 @@ const ISSUES_FILE: &str = "issues.jsonl";
 
 /// Sessions JSONL file name.
 const SESSIONS_FILE: &str = "sessions.jsonl";
+
+/// Board-wide mutation lock file name.
+const BOARD_LOCK_FILE: &str = "board.lock";
 
 /// Manna storage backed by JSONL files.
 ///
@@ -57,10 +61,40 @@ impl MannaStore {
         self.manna_dir().join(SESSIONS_FILE)
     }
 
+    fn board_lock_path(&self) -> PathBuf {
+        self.manna_dir().join(BOARD_LOCK_FILE)
+    }
+
+    /// Refuse storage whose root or durable files are symlinks. Checking only
+    /// the leaf after opening it is too late: a symlinked `.manna/` redirects
+    /// every board mutation outside the project.
+    pub fn validate_storage_root(&self) -> Result<()> {
+        for path in [
+            self.manna_dir(),
+            self.issues_path(),
+            self.sessions_path(),
+            self.board_lock_path(),
+        ] {
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(MannaError::MutationRejected(format!(
+                        "refusing symlinked Manna storage path {}",
+                        path.display()
+                    )))
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Initialize storage by creating `.manna/` directory and JSONL files.
     ///
     /// This is idempotent - running twice does not error.
     pub fn init(&self) -> Result<()> {
+        self.validate_storage_root()?;
         let manna_dir = self.manna_dir();
 
         // Create .manna directory if it doesn't exist
@@ -85,13 +119,17 @@ impl MannaStore {
 
     /// Check if storage is initialized.
     pub fn is_initialized(&self) -> bool {
-        self.manna_dir().exists() && self.issues_path().exists() && self.sessions_path().exists()
+        self.validate_storage_root().is_ok()
+            && self.manna_dir().exists()
+            && self.issues_path().exists()
+            && self.sessions_path().exists()
     }
 
     /// Load all issues from issues.jsonl.
     ///
     /// Skips malformed lines with a warning to stderr.
     pub fn load_issues(&self) -> Result<Vec<Issue>> {
+        self.validate_storage_root()?;
         let path = self.issues_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
@@ -146,10 +184,12 @@ impl MannaStore {
     /// other (observed live 2026-07-22: a `done` lost to a description edit).
     /// The lock releases when the returned handle drops.
     fn lock_board(&self) -> Result<File> {
-        let lock_path = self.manna_dir().join("board.lock");
+        self.validate_storage_root()?;
+        let lock_path = self.board_lock_path();
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)?;
         lock_file
             .lock_exclusive()
@@ -164,6 +204,11 @@ impl MannaStore {
         }
 
         let _board_lock = self.lock_board()?;
+        let issues = self.load_issues()?;
+        if issues.iter().any(|existing| existing.id == issue.id) {
+            return Err(MannaError::IssueAlreadyExists(issue.id.clone()));
+        }
+
         let file = OpenOptions::new().append(true).open(&path)?;
 
         // Acquire exclusive lock
@@ -180,94 +225,340 @@ impl MannaStore {
         Ok(())
     }
 
-    /// Update an existing issue by rewriting the entire file atomically.
-    ///
-    /// Writes to a temp file then renames to prevent corruption.
-    pub fn update_issue(&self, updated_issue: &Issue) -> Result<()> {
+    fn write_issues_locked(&self, issues: &[Issue]) -> Result<()> {
         let path = self.issues_path();
-        if !path.exists() {
-            return Err(MannaError::NotInitialized);
-        }
-
-        // Hold the board lock across load, mutate, write, and rename — a
-        // stale load otherwise reverts concurrent writers at rename time.
-        let _board_lock = self.lock_board()?;
-
-        // Load all issues
-        let mut issues = self.load_issues()?;
-
-        // Find and update the issue
-        let mut found = false;
-        for issue in &mut issues {
-            if issue.id == updated_issue.id {
-                *issue = updated_issue.clone();
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            return Err(MannaError::IssueNotFound(updated_issue.id.clone()));
-        }
-
-        // Write to temp file
-        let temp_path = path.with_extension("jsonl.tmp");
+        let mut nonce = [0_u8; 16];
+        OsRng.fill_bytes(&mut nonce);
+        let suffix = nonce
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect::<String>();
+        let temp_path = self.manna_dir().join(format!(
+            ".issues.jsonl.{}.{}.tmp",
+            std::process::id(),
+            suffix
+        ));
         {
-            let temp_file = File::create(&temp_path)?;
+            let temp_file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp_path)?;
 
             // Acquire exclusive lock on temp file
-            temp_file
-                .lock_exclusive()
-                .map_err(|e| MannaError::LockFailed(e.to_string()))?;
-
-            let mut writer = std::io::BufWriter::new(&temp_file);
-            for issue in &issues {
-                serde_json::to_writer(&mut writer, issue)?;
-                writeln!(writer)?;
+            if let Err(error) = temp_file.lock_exclusive() {
+                let _ = fs::remove_file(&temp_path);
+                return Err(MannaError::LockFailed(error.to_string()));
             }
-            writer.flush()?;
+
+            let write_result = (|| -> Result<()> {
+                let mut writer = std::io::BufWriter::new(&temp_file);
+                for issue in issues {
+                    serde_json::to_writer(&mut writer, issue)?;
+                    writeln!(writer)?;
+                }
+                writer.flush()?;
+                temp_file.sync_all()?;
+                Ok(())
+            })();
+            if let Err(error) = write_result {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error);
+            }
         }
 
-        // Atomic rename
-        fs::rename(&temp_path, &path)?;
+        if let Err(error) = fs::rename(&temp_path, &path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+        if let Some(parent) = path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
 
         Ok(())
     }
 
-    /// Delete an issue by ID, rewriting issues.jsonl atomically.
-    pub fn delete_issue(&self, id: &str) -> Result<()> {
+    fn mutate_issue_locked<F>(&self, id: &str, mutation: F) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
         let path = self.issues_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
         }
 
-        // Same full-span board lock as update_issue: rewrite paths must not
-        // race each other or appends.
         let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let snapshot = issues.clone();
+        let issue = issues
+            .iter_mut()
+            .find(|issue| issue.id == id)
+            .ok_or_else(|| MannaError::IssueNotFound(id.to_string()))?;
+        mutation(issue, &snapshot).map_err(MannaError::MutationRejected)?;
+        issue.validate().map_err(MannaError::MutationRejected)?;
+        let updated = issue.clone();
+        self.write_issues_locked(&issues)?;
+        Ok(updated)
+    }
 
-        let issues = self.load_issues()?;
-        let remaining: Vec<Issue> = issues.into_iter().filter(|i| i.id != id).collect();
+    /// Claim an issue under one board lock. The row is reloaded only after
+    /// the lock is held, so exactly one contender can observe `open`.
+    pub fn claim_issue(&self, id: &str, session: &SessionIdentity) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| issue.claim(session))
+    }
 
-        // load_issues succeeded, so a missing id means it never existed.
-        let before = self.load_issues()?.len();
-        if remaining.len() == before {
-            return Err(MannaError::IssueNotFound(id.to_string()));
-        }
+    /// Claim with an integrity precondition evaluated after acquiring the
+    /// board lock and reloading the row. This closes the validate-then-claim
+    /// race as well as the open-then-write race.
+    pub fn claim_issue_checked<F>(
+        &self,
+        id: &str,
+        session: &SessionIdentity,
+        precondition: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce(&Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, |issue, issues| {
+            precondition(issue, issues)?;
+            issue.claim(session)
+        })
+    }
 
-        let temp_path = path.with_extension("jsonl.tmp");
-        {
-            let temp_file = File::create(&temp_path)?;
-            temp_file
-                .lock_exclusive()
-                .map_err(|e| MannaError::LockFailed(e.to_string()))?;
-            let mut writer = std::io::BufWriter::new(&temp_file);
-            for issue in &remaining {
-                serde_json::to_writer(&mut writer, issue)?;
-                writeln!(writer)?;
+    /// Complete a claimed issue only for the session that owns it.
+    pub fn complete_issue(&self, id: &str, session: &SessionIdentity) -> Result<Issue> {
+        self.complete_issue_checked(id, session, |_, _| Ok(()))
+    }
+
+    /// Complete only after rechecking an external integrity precondition under
+    /// the same board lock as the lifecycle transition. Strict workflows use
+    /// this to prevent `done` from hiding a handoff edit made after claim.
+    pub fn complete_issue_checked<F>(
+        &self,
+        id: &str,
+        session: &SessionIdentity,
+        precondition: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce(&Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, |issue, issues| {
+            if issue.issue_type == crate::issue::IssueType::Dream {
+                issue.close_dream(session)
+            } else {
+                precondition(issue, issues)?;
+                issue.complete(session)
             }
-            writer.flush()?;
+        })
+    }
+
+    /// Release a claimed issue only for the session that owns it.
+    pub fn release_issue(&self, id: &str, session: &SessionIdentity) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| issue.release(session))
+    }
+
+    /// Mutate metadata without allowing a caller to smuggle a lifecycle
+    /// transition through an update path.
+    pub fn mutate_issue_metadata<F>(
+        &self,
+        id: &str,
+        session: &SessionIdentity,
+        mutation: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, |issue, issues| {
+            issue.require_owner(session)?;
+            let lifecycle = (
+                issue.status.clone(),
+                issue.claimed_by.clone(),
+                issue.claimed_at,
+                issue.claim_token_hash.clone(),
+                issue.blocked_by.clone(),
+            );
+            mutation(issue, issues)?;
+            if lifecycle
+                != (
+                    issue.status.clone(),
+                    issue.claimed_by.clone(),
+                    issue.claimed_at,
+                    issue.claim_token_hash.clone(),
+                    issue.blocked_by.clone(),
+                )
+            {
+                return Err(
+                    "metadata update attempted to bypass a lifecycle transition".to_string()
+                );
+            }
+            Ok(())
+        })
+    }
+
+    pub fn add_blocker(
+        &self,
+        id: &str,
+        blocker_id: &str,
+        session: &SessionIdentity,
+    ) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, issues| {
+            issue.require_owner(session)?;
+            if !issues.iter().any(|candidate| candidate.id == blocker_id) {
+                return Err(format!("Blocker issue {} not found", blocker_id));
+            }
+            issue.add_blocker(blocker_id.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn remove_blocker(
+        &self,
+        id: &str,
+        blocker_id: &str,
+        session: &SessionIdentity,
+    ) -> Result<Issue> {
+        self.mutate_issue_locked(id, |issue, _| {
+            issue.require_owner(session)?;
+            issue.remove_blocker(blocker_id);
+            Ok(())
+        })
+    }
+
+    /// Reconcile-only mutation path. Callers must first prove the repair from
+    /// external evidence, such as a dead pinned session or a resolved blocker.
+    pub fn repair_issue<F>(&self, id: &str, mutation: F) -> Result<Issue>
+    where
+        F: FnOnce(&mut Issue, &[Issue]) -> std::result::Result<(), String>,
+    {
+        self.mutate_issue_locked(id, mutation)
+    }
+
+    /// Replace a row only when recovery can prove the existing record has the
+    /// same identity. Used by the pair transaction journal.
+    pub fn recover_issue(&self, expected: &Issue) -> Result<Issue> {
+        self.recover_issue_with(expected, || Ok(()))
+    }
+
+    pub fn recover_issue_with<F>(&self, expected: &Issue, commit_pair: F) -> Result<Issue>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
         }
-        fs::rename(&temp_path, &path)?;
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        if let Some(existing) = issues.iter().find(|issue| issue.id == expected.id) {
+            if existing == expected {
+                commit_pair().map_err(MannaError::MutationRejected)?;
+                return Ok(existing.clone());
+            }
+            return Err(MannaError::RecoveryConflict(format!(
+                "transaction recovery found a conflicting row for {}",
+                expected.id
+            )));
+        }
+        expected.validate().map_err(MannaError::MutationRejected)?;
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        issues.push(expected.clone());
+        self.write_issues_locked(&issues)?;
+        Ok(expected.clone())
+    }
+
+    /// Replace one row during a recoverable pair attach/detach operation.
+    pub fn recover_replace_issue(&self, expected_before: &Issue, after: &Issue) -> Result<Issue> {
+        self.recover_replace_issue_with(expected_before, after, || Ok(()))
+    }
+
+    pub fn recover_replace_issue_with<F>(
+        &self,
+        expected_before: &Issue,
+        after: &Issue,
+        commit_pair: F,
+    ) -> Result<Issue>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let row = issues
+            .iter_mut()
+            .find(|issue| issue.id == expected_before.id)
+            .ok_or_else(|| {
+                MannaError::RecoveryConflict(format!(
+                    "transaction recovery found no row for {}",
+                    expected_before.id
+                ))
+            })?;
+        if row != expected_before {
+            if row == after {
+                commit_pair().map_err(MannaError::MutationRejected)?;
+                return Ok(row.clone());
+            }
+            return Err(MannaError::RecoveryConflict(format!(
+                "transaction recovery found concurrent changes to {}",
+                expected_before.id
+            )));
+        }
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        *row = after.clone();
+        row.validate().map_err(MannaError::MutationRejected)?;
+        self.write_issues_locked(&issues)?;
+        Ok(after.clone())
+    }
+
+    /// Delete an issue under the board lock after enforcing current-session
+    /// ownership. Pair-aware callers archive the handoff first through the
+    /// workflow transaction journal.
+    pub fn delete_issue_owned(&self, id: &str, session: &SessionIdentity) -> Result<Issue> {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let index = issues
+            .iter()
+            .position(|issue| issue.id == id)
+            .ok_or_else(|| MannaError::IssueNotFound(id.to_string()))?;
+        issues[index]
+            .require_owner(session)
+            .map_err(MannaError::MutationRejected)?;
+        let removed = issues.remove(index);
+        self.write_issues_locked(&issues)?;
+        Ok(removed)
+    }
+
+    /// Delete an exact transaction row idempotently.
+    pub fn recover_delete_issue(&self, expected: &Issue) -> Result<()> {
+        self.recover_delete_issue_with(expected, || Ok(()))
+    }
+
+    pub fn recover_delete_issue_with<F>(&self, expected: &Issue, commit_pair: F) -> Result<()>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+        let _board_lock = self.lock_board()?;
+        let mut issues = self.load_issues()?;
+        let Some(index) = issues.iter().position(|issue| issue.id == expected.id) else {
+            commit_pair().map_err(MannaError::MutationRejected)?;
+            return Ok(());
+        };
+        let current = &issues[index];
+        if current != expected {
+            return Err(MannaError::RecoveryConflict(format!(
+                "transaction recovery found a conflicting row for {}",
+                expected.id
+            )));
+        }
+        commit_pair().map_err(MannaError::MutationRejected)?;
+        issues.remove(index);
+        self.write_issues_locked(&issues)?;
+
         Ok(())
     }
 
@@ -275,6 +566,7 @@ impl MannaStore {
     ///
     /// Skips malformed lines with a warning to stderr.
     pub fn load_sessions(&self) -> Result<Vec<SessionEvent>> {
+        self.validate_storage_root()?;
         let path = self.sessions_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
@@ -321,6 +613,7 @@ impl MannaStore {
 
     /// Append a session event to sessions.jsonl with exclusive file lock.
     pub fn append_session(&self, event: &SessionEvent) -> Result<()> {
+        self.validate_storage_root()?;
         let path = self.sessions_path();
         if !path.exists() {
             return Err(MannaError::NotInitialized);
@@ -346,9 +639,14 @@ impl MannaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
+
+    fn session(id: &str) -> SessionIdentity {
+        SessionIdentity::from_token(id, &format!("{}-0123456789abcdef0123456789abcdef", id))
+            .unwrap()
+    }
 
     fn setup_store() -> (TempDir, MannaStore) {
         let temp_dir = TempDir::new().unwrap();
@@ -387,6 +685,40 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn init_rejects_a_symlinked_manna_root() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), project.path().join(".manna")).unwrap();
+        let store = MannaStore::new(project.path());
+        let error = store.init().unwrap_err().to_string();
+        assert!(error.contains("symlinked Manna storage path"));
+        assert!(!outside.path().join("issues.jsonl").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mutation_rejects_a_symlinked_board_lock() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, store) = setup_store();
+        let outside = TempDir::new().unwrap();
+        let outside_lock = outside.path().join("outside.lock");
+        File::create(&outside_lock).unwrap();
+        symlink(&outside_lock, store.board_lock_path()).unwrap();
+        let issue = Issue::new("mn-lock01".to_string(), "Protected lock".to_string()).unwrap();
+        let error = store.append_issue(&issue).unwrap_err().to_string();
+        assert!(error.contains("symlinked Manna storage path"));
+        assert!(store
+            .load_issues()
+            .unwrap_err()
+            .to_string()
+            .contains("symlinked"));
+    }
+
+    #[test]
     fn test_append_and_load_issue() {
         let (_temp_dir, store) = setup_store();
 
@@ -422,11 +754,15 @@ mod tests {
     fn test_update_issue() {
         let (_temp_dir, store) = setup_store();
 
-        let mut issue = Issue::new("mn-update".to_string(), "Original".to_string()).unwrap();
+        let issue = Issue::new("mn-update".to_string(), "Original".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
 
-        issue.title = "Updated".to_string();
-        store.update_issue(&issue).unwrap();
+        store
+            .mutate_issue_metadata("mn-update", &session("ses-test"), |issue, _| {
+                issue.title = "Updated".to_string();
+                Ok(())
+            })
+            .unwrap();
 
         let issues = store.load_issues().unwrap();
         assert_eq!(issues.len(), 1);
@@ -437,9 +773,7 @@ mod tests {
     fn test_update_nonexistent_issue_fails() {
         let (_temp_dir, store) = setup_store();
 
-        let issue = Issue::new("mn-ghost".to_string(), "Ghost".to_string()).unwrap();
-
-        let result = store.update_issue(&issue);
+        let result = store.mutate_issue_metadata("mn-ghost", &session("ses-test"), |_, _| Ok(()));
         assert!(matches!(result, Err(MannaError::IssueNotFound(_))));
     }
 
@@ -525,6 +859,93 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_claims_have_exactly_one_winner() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = Arc::new(MannaStore::new(temp_dir.path()));
+        store.init().unwrap();
+        store
+            .append_issue(&Issue::new("mn-race01".to_string(), "Race".to_string()).unwrap())
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+        for contender in 0..12 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let identity = session(&format!("ses_{}", contender));
+                store.claim_issue("mn-race01", &identity).is_ok()
+            }));
+        }
+        let wins = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1);
+        let issue = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(issue.status, crate::issue::IssueStatus::InProgress);
+        assert!(issue.claimed_by.is_some());
+    }
+
+    #[test]
+    fn test_metadata_update_rejects_non_owner() {
+        let (_temp_dir, store) = setup_store();
+        store
+            .append_issue(&Issue::new("mn-owner1".to_string(), "Owned".to_string()).unwrap())
+            .unwrap();
+        store
+            .claim_issue("mn-owner1", &session("ses_owner"))
+            .unwrap();
+        let result =
+            store.mutate_issue_metadata("mn-owner1", &session("ses_intruder"), |issue, _| {
+                issue.title = "Hijacked".to_string();
+                Ok(())
+            });
+        assert!(matches!(result, Err(MannaError::MutationRejected(_))));
+        assert_eq!(store.load_issues().unwrap()[0].title, "Owned");
+    }
+
+    #[test]
+    fn transaction_create_replay_requires_the_complete_row() {
+        let (_temp, store) = setup_store();
+        let mut existing = Issue::new("mn-row001".to_string(), "Original".to_string()).unwrap();
+        existing.prompt = Some(".handoff/mn-row001-original.md".to_string());
+        existing.handoff_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        store.append_issue(&existing).unwrap();
+
+        let mut forged = existing.clone();
+        forged.title = "Different metadata".to_string();
+        let mut pair_committed = false;
+        let result = store.recover_issue_with(&forged, || {
+            pair_committed = true;
+            Ok(())
+        });
+        assert!(matches!(result, Err(MannaError::RecoveryConflict(_))));
+        assert!(!pair_committed);
+        assert_eq!(store.load_issues().unwrap()[0], existing);
+    }
+
+    #[test]
+    fn transaction_update_replay_requires_the_complete_after_row() {
+        let (_temp, store) = setup_store();
+        let mut before = Issue::new("mn-row002".to_string(), "Before".to_string()).unwrap();
+        before.prompt = Some(".handoff/mn-row002-before.md".to_string());
+        before.handoff_digest = Some(format!("sha256:{}", "b".repeat(64)));
+        store.append_issue(&before).unwrap();
+        let mut after = before.clone();
+        after.title = "After".to_string();
+        after.updated_at = chrono::Utc::now();
+        store.recover_replace_issue(&before, &after).unwrap();
+
+        let mut forged_after = after.clone();
+        forged_after.description = Some("metadata omitted by the old replay check".to_string());
+        let result = store.recover_replace_issue(&before, &forged_after);
+        assert!(matches!(result, Err(MannaError::RecoveryConflict(_))));
+        assert_eq!(store.load_issues().unwrap()[0], after);
+    }
+
+    #[test]
     fn test_concurrent_mutations_lose_no_writes() {
         // The 2026-07-22 incident class: rewrite paths (update/delete) built
         // from a stale load used to revert concurrent writers at rename time.
@@ -545,14 +966,13 @@ mod tests {
             let store_clone = Arc::clone(&store);
             handles.push(thread::spawn(move || {
                 for round in 1..=20 {
-                    let mut issue = store_clone
-                        .load_issues()
-                        .unwrap()
-                        .into_iter()
-                        .find(|i| i.id == format!("mn-mut{:03}", t))
+                    let id = format!("mn-mut{:03}", t);
+                    store_clone
+                        .mutate_issue_metadata(&id, &session("ses-test"), |issue, _| {
+                            issue.title = format!("Mutator {} round {}", t, round);
+                            Ok(())
+                        })
                         .unwrap();
-                    issue.title = format!("Mutator {} round {}", t, round);
-                    store_clone.update_issue(&issue).unwrap();
                 }
             }));
         }
@@ -575,7 +995,12 @@ mod tests {
         }
 
         let issues = store.load_issues().unwrap();
-        assert_eq!(issues.len(), 30, "lost rows: expected 30, got {}", issues.len());
+        assert_eq!(
+            issues.len(),
+            30,
+            "lost rows: expected 30, got {}",
+            issues.len()
+        );
         for t in 0..10 {
             let issue = issues
                 .iter()

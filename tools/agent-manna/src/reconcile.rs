@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::issue::{Issue, IssueStatus, IssueType};
 
 /// Drift finding kinds, pinned by the `.manna/drift.yaml` contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     LandedOpen,
@@ -23,6 +23,7 @@ pub enum FindingKind {
     DocReference,
     PromptPairing,
     WorkflowSprawl,
+    OrphanHandoff,
     Skipped,
 }
 
@@ -64,7 +65,9 @@ pub struct LintFinding {
 pub fn is_manna_id(s: &str) -> bool {
     s.len() == 9
         && s.starts_with("mn-")
-        && s.bytes().skip(3).all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && s.bytes()
+            .skip(3)
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Extract `Manna: mn-xxxxxx` trailer IDs from a commit body.
@@ -99,7 +102,7 @@ pub fn extract_manna_ids(line: &str) -> Vec<String> {
         {
             let followed_by_hex = bytes
                 .get(candidate_end)
-                .map_or(false, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                .is_some_and(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
             if !followed_by_hex {
                 ids.push(line[candidate_start..candidate_end].to_string());
             }
@@ -133,7 +136,7 @@ pub fn claim_command_ids(text: &str) -> Vec<String> {
             {
                 let followed_by_hex = bytes
                     .get(id_end)
-                    .map_or(false, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                    .is_some_and(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
                 if !followed_by_hex {
                     ids.push(line[id_start..id_end].to_string());
                 }
@@ -150,7 +153,12 @@ pub fn claim_command_ids(text: &str) -> Vec<String> {
 /// `PROMPT: <path>` (the blessed interim convention) supplies it. Both
 /// sources are trimmed; an empty pointer is no pointer.
 pub fn prompt_pointer(issue: &Issue) -> Option<String> {
-    if let Some(field) = issue.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(field) = issue
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         return Some(field.to_string());
     }
     let first_line = issue.description.as_deref()?.lines().next()?.trim();
@@ -158,7 +166,7 @@ pub fn prompt_pointer(issue: &Issue) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// Parse a pid out of the default `ses_pid{pid}_{ts}` session-id format.
+/// Parse a pid out of the pre-authentication `ses_pid{pid}_{ts}` legacy format.
 pub fn parse_session_pid(session_id: &str) -> Option<u32> {
     let rest = session_id.strip_prefix("ses_pid")?;
     let (pid, ts) = rest.split_once('_')?;
@@ -182,8 +190,11 @@ pub fn check_landed_open(issues: &[Issue], landed: &HashMap<String, Vec<String>>
             continue;
         }
         if let Some(shas) = landed.get(&issue.id) {
-            let mut evidence: Vec<String> =
-                shas.iter().take(3).map(|s| s.chars().take(12).collect()).collect();
+            let mut evidence: Vec<String> = shas
+                .iter()
+                .take(3)
+                .map(|s| s.chars().take(12).collect())
+                .collect();
             if shas.len() > 3 {
                 evidence.push(format!("+{} more", shas.len() - 3));
             }
@@ -237,7 +248,7 @@ pub fn check_blocker_desync(issues: &[Issue]) -> Vec<Finding> {
         let all_resolved = issue.blocked_by.iter().all(|b| {
             by_id
                 .get(b.as_str())
-                .map_or(true, |blocker| blocker.status == IssueStatus::Done)
+                .is_none_or(|blocker| blocker.status == IssueStatus::Done)
         });
         if all_resolved {
             findings.push(Finding {
@@ -362,6 +373,12 @@ pub fn lint_board(issues: &[Issue]) -> Vec<LintFinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::issue::SessionIdentity;
+
+    fn session(id: &str) -> SessionIdentity {
+        SessionIdentity::from_token(id, &format!("{}-0123456789abcdef0123456789abcdef", id))
+            .unwrap()
+    }
 
     fn issue(id: &str, title: &str) -> Issue {
         Issue::new(id.to_string(), title.to_string()).unwrap()
@@ -387,7 +404,10 @@ mod tests {
         // The real-world trigger: U+FFFD replacement chars from lossy reads.
         assert!(extract_manna_ids("mn-ab\u{FFFD}cdef").is_empty());
         // A valid id after multibyte prose still parses.
-        assert_eq!(extract_manna_ids("☉ glyphs then mn-abc123 ok"), vec!["mn-abc123"]);
+        assert_eq!(
+            extract_manna_ids("☉ glyphs then mn-abc123 ok"),
+            vec!["mn-abc123"]
+        );
     }
 
     // ── ID and trailer parsing ──────────────────────────────────────────
@@ -499,14 +519,17 @@ mod tests {
     #[test]
     fn test_check_landed_open() {
         let mut done = issue("mn-aaa111", "Landed and closed");
-        done.claim("ses_x".to_string()).unwrap();
-        done.complete().unwrap();
+        done.claim(&session("ses_x")).unwrap();
+        done.complete(&session("ses_x")).unwrap();
         let open = issue("mn-bbb222", "Landed but open");
         let untouched = issue("mn-ccc333", "Never landed");
 
         let mut landed = HashMap::new();
         landed.insert("mn-aaa111".to_string(), vec!["sha1".to_string()]);
-        landed.insert("mn-bbb222".to_string(), vec!["sha2".to_string(), "sha3".to_string()]);
+        landed.insert(
+            "mn-bbb222".to_string(),
+            vec!["sha2".to_string(), "sha3".to_string()],
+        );
 
         let findings = check_landed_open(&[done, open, untouched], &landed);
         assert_eq!(findings.len(), 1);
@@ -520,8 +543,8 @@ mod tests {
     #[test]
     fn test_blocker_desync_all_done() {
         let mut blocker = issue("mn-aaa111", "Blocker");
-        blocker.claim("ses_x".to_string()).unwrap();
-        blocker.complete().unwrap();
+        blocker.claim(&session("ses_x")).unwrap();
+        blocker.complete(&session("ses_x")).unwrap();
         let mut blocked = issue("mn-bbb222", "Blocked");
         blocked.add_blocker("mn-aaa111".to_string());
         assert_eq!(blocked.status, IssueStatus::Blocked);
@@ -575,8 +598,7 @@ mod tests {
         old_item.created_at = Utc::now() - Duration::days(30);
 
         let now = Utc::now();
-        let findings =
-            check_stale_dream(&[old_dream, fresh_dream, done_dream, old_item], now, 14);
+        let findings = check_stale_dream(&[old_dream, fresh_dream, done_dream, old_item], now, 14);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, FindingKind::StaleDream);
         assert_eq!(findings[0].issue_id.as_deref(), Some("mn-aaa111"));
@@ -663,6 +685,7 @@ mod tests {
         d.status = IssueStatus::InProgress;
         d.claimed_by = Some("ses_x".to_string());
         d.claimed_at = Some(Utc::now());
+        d.claim_token_hash = Some(format!("sha256:{}", "a".repeat(64)));
         let findings = lint_board(&[d]);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "dream_status");

@@ -56,6 +56,19 @@ check_output() {
     fi
 }
 
+check_error_output() {
+    local desc="$1"
+    local pattern="$2"
+    shift 2
+    local output rc
+    output=$("$@" 2>&1); rc=$?
+    if [[ $rc -eq 1 ]] && echo "$output" | grep -q "$pattern"; then
+        pass "$desc"
+    else
+        fail "$desc" "expected exit 1 and pattern '$pattern', rc=$rc, got: $(echo "$output" | head -3)"
+    fi
+}
+
 find_macos_test_python() {
     # Dependency tests use the active Python environment. The macOS integration
     # test must instead use an interpreter that owns the platform frameworks.
@@ -148,6 +161,7 @@ check_cmd "psql tests" python3 "$SCRIPT_DIR/tests/test_psql.py"
 check_cmd "vector tests" python3 "$SCRIPT_DIR/tests/test_vector.py"
 check_output "vector --help" "today" "$AGENT_DO" vector --help
 check_cmd "gh tests" python3 "$SCRIPT_DIR/tests/test_gh.py"
+check_cmd "ci triage tests" python3 "$SCRIPT_DIR/tests/test_ci_triage.py"
 check_cmd "git guardrail tests" python3 "$SCRIPT_DIR/tests/test_git_guardrails.py"
 check_cmd "worktree binding tests" python3 "$SCRIPT_DIR/tests/test_worktree_binding.py"
 check_cmd "hardware tests" python3 "$SCRIPT_DIR/tests/test_hardware.py"
@@ -297,6 +311,11 @@ cat > "$BOOTSTRAP_PROJECT/CLAUDE.md" <<'EOF'
 Use `agent-do context`
 Use `agent-do zpc`
 EOF
+
+# --- agent-sentry ---
+check_output "sentry help includes PROJECTS header" "PROJECTS" "$AGENT_DO" sentry --help
+check_output "sentry help lists snapshot command" "snapshot" "$AGENT_DO" sentry --help
+check_error_output "sentry unknown command exits with error" "Unknown command" "$AGENT_DO" sentry bogus-command-xyz
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
 check_output "bootstrap initializes context, zpc, and workflow" "Initialized: context, zpc, manna" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
