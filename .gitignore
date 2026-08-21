@@ -51,3 +51,16 @@ tools/streamdeck/
 # Tool-local test boards never ship
 tools/agent-manna/.manna/
 .manna/board.lock
+
+# agent-do workflow: .manna and .handoff are durable state
+!.manna/
+.manna/*
+!.manna/issues.jsonl
+!.manna/sessions.jsonl
+!.manna/board.yaml
+!.manna/workflow.yaml
+!.manna/drift.yaml
+.manna/board.lock
+.manna/transactions/
+!.handoff/
+!.handoff/**
