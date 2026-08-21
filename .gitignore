@@ -64,3 +64,4 @@ tools/agent-manna/.manna/
 .manna/transactions/
 !.handoff/
 !.handoff/**
+!.manna/handoff-order.yaml
