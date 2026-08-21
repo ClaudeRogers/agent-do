@@ -49,8 +49,9 @@ Rules:
 - Create work through `agent-do manna create`; do not hand-build parallel
   prompt roots such as `.handoffs/`, `.dev/session-prompts/`, or
   `<campaign>/handoff-prompts/`.
-- The Manna item `prompt` field points to
-  `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` after synchronization.
+- The Manna item `prompt` field points to a board-wide fixed-width name,
+  `.handoff/<NN...>[b<MM...>]-mn-xxxxxx-<slug>.md`, after synchronization.
+  Width is at least two digits and expands when the active plan exceeds 99.
 - Frontmatter identifies the item, track, source, base commit, scope, inputs,
   and SHA-256 binding for the complete document.
 - Edit a work order, then run `agent-do manna handoff seal mn-xxxxxx` before
@@ -59,8 +60,9 @@ Rules:
   deliverables, and verification, never a second backlog.
 - Priority lives in `.manna/handoff-order.yaml`. Run `agent-do manna sync`
   after board changes; never hand-maintain numbered filenames or this index.
-- A bare numbered filename is safe to launch. `bMM` means the item is held
-  until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- A bare numbered filename is safe to launch. `bMM...` means the item is held
+  until that numbered priority closes. The full dependency truth remains
+  `blocked_by`.
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
@@ -934,24 +936,26 @@ fn ordered_name_parts(issue_id: &str, path: &str) -> Option<(usize, Option<usize
         return None;
     }
     let name = relative.file_name()?.to_str()?;
-    let bytes = name.as_bytes();
-    if bytes.len() < 3 || !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() {
+    let number_end = name.find(['b', '-'])?;
+    let number_text = &name[..number_end];
+    if number_text.len() < 2 || !number_text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let number = name[..2].parse::<usize>().ok()?;
-    let (gate, suffix) = if bytes.get(2) == Some(&b'b') {
-        if bytes.len() < 6
-            || !bytes[3].is_ascii_digit()
-            || !bytes[4].is_ascii_digit()
-            || bytes[5] != b'-'
-        {
+    let number = number_text.parse::<usize>().ok()?;
+    let remainder = &name[number_end..];
+    let (gate, suffix) = if let Some(gated) = remainder.strip_prefix('b') {
+        let gate_end = gated.find('-')?;
+        let gate_text = &gated[..gate_end];
+        if gate_text.len() < 2 || !gate_text.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
-        (Some(name[3..5].parse::<usize>().ok()?), &name[6..])
-    } else if bytes.get(2) == Some(&b'-') {
-        (None, &name[3..])
+        (
+            Some(gate_text.parse::<usize>().ok()?),
+            &gated[gate_end + 1..],
+        )
     } else {
-        return None;
+        let suffix = remainder.strip_prefix('-')?;
+        (None, suffix)
     };
     suffix
         .strip_prefix(issue_id)
@@ -959,12 +963,20 @@ fn ordered_name_parts(issue_id: &str, path: &str) -> Option<(usize, Option<usize
         .then_some((number, gate))
 }
 
-fn ordered_handoff_path(issue: &Issue, number: usize, blocker: Option<usize>) -> String {
-    let gate = blocker.map_or_else(String::new, |number| format!("b{:02}", number));
+fn priority_width(count: usize) -> usize {
+    count.to_string().len().max(2)
+}
+
+fn ordered_handoff_path(
+    issue: &Issue,
+    number: usize,
+    blocker: Option<usize>,
+    width: usize,
+) -> String {
+    let gate = blocker.map_or_else(String::new, |number| format!("b{number:0width$}"));
     format!(
-        "{}/{:02}{}-{}-{}.md",
+        "{}/{number:0width$}{}-{}-{}.md",
         HANDOFF_DIR,
-        number,
         gate,
         issue.id,
         slugify(&issue.title)
@@ -985,6 +997,7 @@ fn assigned_priorities(
     order: &HandoffOrder,
 ) -> Result<(HashMap<String, usize>, HashSet<String>), String> {
     let count = order.items.len();
+    let width = priority_width(count);
     let desired = order
         .items
         .iter()
@@ -1013,8 +1026,8 @@ fn assigned_priorities(
         if let Some(number) = current {
             if !reserved.insert(number) {
                 return Err(format!(
-                    "claimed handoff priority {:02} is occupied more than once",
-                    number
+                    "claimed handoff priority {:0width$} is occupied more than once",
+                    number,
                 ));
             }
             assigned.insert(id.clone(), number);
@@ -1057,7 +1070,7 @@ fn assigned_priorities(
     Ok((assigned, held_without_number))
 }
 
-fn render_handoff_index(entries: &[HandoffOrderEntry], issues: &[Issue]) -> String {
+fn render_handoff_index(entries: &[HandoffOrderEntry], issues: &[Issue], width: usize) -> String {
     let by_id = issues
         .iter()
         .map(|issue| (issue.id.as_str(), issue))
@@ -1088,7 +1101,7 @@ fn render_handoff_index(entries: &[HandoffOrderEntry], issues: &[Issue]) -> Stri
             format!("`{}`", entry.expected_path)
         };
         rendered.push_str(&format!(
-            "| {:02} | `{}` | {} | {} | {} |\n",
+            "| {:0width$} | `{}` | {} | {} | {} |\n",
             entry.priority, issue.id, issue.status, blockers, handoff
         ));
     }
@@ -1101,12 +1114,7 @@ fn build_presentation_plan(
     stored: Option<&HandoffOrder>,
 ) -> Result<PresentationPlan, String> {
     let order = normalize_order(issues, stored)?;
-    if order.items.len() > 99 {
-        return Err(format!(
-            "ordered handoffs support at most 99 paired items, found {}",
-            order.items.len()
-        ));
-    }
+    let width = priority_width(order.items.len());
     let issues_by_id = issues
         .iter()
         .map(|issue| (issue.id.as_str(), issue))
@@ -1141,7 +1149,7 @@ fn build_presentation_plan(
                     Some(highest_open.map_or(*number, |current: usize| current.max(*number)));
             }
         }
-        let path = ordered_handoff_path(issue, assigned[id], highest_open);
+        let path = ordered_handoff_path(issue, assigned[id], highest_open, width);
         if !expected_paths.insert(path.clone()) {
             return Err(format!("handoff priority derives duplicate path {}", path));
         }
@@ -1226,7 +1234,7 @@ fn build_presentation_plan(
         row.prompt = Some(to);
     }
     entries.sort_by_key(|entry| entry.priority);
-    let readme = render_handoff_index(&entries, &after);
+    let readme = render_handoff_index(&entries, &after, width);
     Ok(PresentationPlan {
         order,
         entries,
@@ -1266,6 +1274,7 @@ fn render_unsynchronized_index(order: &HandoffOrder, issues: &[Issue], error: &s
     ));
     rendered.push_str("| Priority | Manna ID | Status | Full blocker list | Current handoff |\n");
     rendered.push_str("| ---: | --- | --- | --- | --- |\n");
+    let width = priority_width(order.items.len());
     for (index, id) in order.items.iter().enumerate() {
         let Some(issue) = by_id.get(id.as_str()) else {
             continue;
@@ -1281,7 +1290,7 @@ fn render_unsynchronized_index(order: &HandoffOrder, issues: &[Issue], error: &s
                 .join(", ")
         };
         rendered.push_str(&format!(
-            "| {:02} | `{}` | {} | {} | `{}` |\n",
+            "| {:0width$} | `{}` | {} | {} | `{}` |\n",
             index + 1,
             issue.id,
             issue.status,
@@ -6238,6 +6247,59 @@ mod tests {
         assert!(handoff_presentation_drift(temp.path(), &rows)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn sync_expands_fixed_width_for_a_hundred_item_plan() {
+        let (temp, store, config) = setup();
+        let mut items = Vec::new();
+        for number in 1..=100 {
+            let id = format!("mn-l{number:05}");
+            let title = format!("Large plan {number}");
+            items.push(
+                create_paired_issue(temp.path(), &store, &config, &issue(&id, &title), None)
+                    .unwrap(),
+            );
+        }
+        let owner = SessionIdentity::from_token(
+            "ses-large-order",
+            "large-order-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        store
+            .add_blocker(&items[99].id, &items[0].id, &owner)
+            .unwrap();
+
+        let result = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert_eq!(result.ordered_items, 100);
+        assert_eq!(result.renamed, 100);
+        let rows = store.load_issues_strict().unwrap();
+        assert_eq!(
+            rows[0].prompt.as_deref(),
+            Some(".handoff/001-mn-l00001-large-plan-1.md")
+        );
+        assert_eq!(
+            rows[98].prompt.as_deref(),
+            Some(".handoff/099-mn-l00099-large-plan-99.md")
+        );
+        assert_eq!(
+            rows[99].prompt.as_deref(),
+            Some(".handoff/100b001-mn-l00100-large-plan-100.md")
+        );
+        assert_eq!(
+            ordered_name_parts(&items[99].id, rows[99].prompt.as_deref().unwrap()),
+            Some((100, Some(1)))
+        );
+        let index = fs::read_to_string(temp.path().join(HANDOFF_README)).unwrap();
+        assert!(index.contains("| 001 | `mn-l00001` | open | none |"));
+        assert!(index.contains("| 100 | `mn-l00100` | blocked | `mn-l00001` |"));
+        assert!(handoff_presentation_drift(temp.path(), &rows)
+            .unwrap()
+            .is_empty());
+
+        let replay = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert!(!replay.changed);
+        assert_eq!(replay.renamed, 0);
     }
 
     #[test]

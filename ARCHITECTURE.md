@@ -340,10 +340,12 @@ clearing its pointer. Tracks and dreams never receive live handoffs.
 
 Ordered presentation is a derived build product over board truth. The ordered
 ID list in `.manna/handoff-order.yaml` is the priority authority; every
-dependency remains an explicit `blocked_by` edge. `manna sync` assigns dense
-two-digit priorities, derives one `bMM` marker from the highest-numbered
-still-open blocker, repoints rows, and regenerates `.handoff/README.md` from
-the same snapshot. A bare name is the launch signal. `manna order <id>
+dependency remains an explicit `blocked_by` edge. `manna sync` assigns dense,
+board-wide fixed-width priorities with a two-digit minimum, expanding the
+whole plan to three digits at 100 items, and derives one same-width blocker
+marker from the highest-numbered still-open blocker. It repoints rows and
+regenerates `.handoff/README.md` from the same snapshot. A bare name is the
+launch signal. `manna order <id>
 <position>` changes the ordered list and performs that sync immediately.
 Claimed handoffs are immovable and keep their current numbers reserved until
 release. The `Rename` pair transaction stages all moves before installing any

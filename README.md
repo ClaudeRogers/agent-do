@@ -234,9 +234,11 @@ only `handoff seal` can authorize edited contents.
 
 Priority is a first-class ordered list in `.manna/handoff-order.yaml`, not an
 inference from dependencies or filenames. `manna order <id> <position>` moves
-one paired item and synchronizes immediately. `manna sync` re-derives dense
-`01..N` filenames after any other board mutation and regenerates the README
-index from the same snapshot. A bare name is safe to launch; `bMM` means the
+one paired item and synchronizes immediately. `manna sync` re-derives dense,
+fixed-width filenames after any other board mutation and regenerates the README
+index from the same snapshot. Width is at least two digits (`01..N`) and grows
+for the entire plan at 100 or more items (`001..N`); blocker markers use the
+same width. A bare name is safe to launch; `bMM...` means the
 item is held by the highest-numbered still-open blocker, while the complete
 dependency list remains in `blocked_by`. Claimed work orders never move. Their
 current number stays reserved until release, after which one sync converges.

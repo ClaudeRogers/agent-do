@@ -208,11 +208,13 @@ agent-do manna order mn-abc123 1
 agent-do manna sync
 ```
 
-Both paths use the native recoverable rename transaction. Sync assigns dense
-`01..N` priorities, derives the single `bMM` launch gate from the
-highest-numbered still-open blocker, repoints every moved row, and regenerates
-`.handoff/README.md`. Dependencies remain in `blocked_by`; filenames are never
-authority. Claimed handoffs do not move, and their current number stays
+Both paths use the native recoverable rename transaction. Sync assigns dense,
+board-wide fixed-width priorities with a two-digit minimum (`01..N`) and
+expands the whole plan at 100 or more items (`001..N`). It derives the single
+same-width blocker launch gate from the highest-numbered still-open blocker,
+repoints every moved row, and regenerates `.handoff/README.md`. Dependencies
+remain in `blocked_by`; filenames are never authority. Claimed handoffs do not
+move, and their current number stays
 reserved until release. Completed pairs return to unnumbered sealed history on
 sync, so every bare numbered handoff remains a truthful launch signal.
 
@@ -446,7 +448,7 @@ Manna stores canonical board state in `.manna/` and durable work orders in
 └── transactions/    # Ignored crash-recovery journal
 .handoff/
 ├── README.md        # Generated workflow contract and index
-├── NN[bMM]-mn-*.md  # Dense priority and launch-gate presentation
+├── NN...[bMM...]-mn-*.md  # Fixed-width priority and launch-gate presentation
 └── .archive/        # Retired work orders
 ```
 

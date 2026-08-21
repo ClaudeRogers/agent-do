@@ -16,7 +16,8 @@ All data is stored in `.manna/` directory:
 
 Durable work orders live in tracked `.handoff/`:
 - `.handoff/README.md` - Generated ownership contract and board-derived index
-- `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` - Synchronized work-order presentation
+- `.handoff/<NN...>[b<MM...>]-mn-xxxxxx-<slug>.md` - Synchronized fixed-width
+  work-order presentation
 - `.handoff/.archive/` - Retired handoffs preserved by delete and item conversion
 - `.handoff/.archive/legacy-sources/*.source` - Exact non-Markdown evidence for imported in-project legacy work orders retired during migration
 
@@ -84,16 +85,18 @@ items:
 ```
 
 `manna order <id> <position>` mutates that ordered list and synchronizes it.
-`manna sync` normalizes the list to current paired items, assigns dense
-two-digit priorities `01..N`, renames each work order, repoints `prompt`, and
-regenerates `.handoff/README.md` from one board snapshot. Priority never
-encodes dependency. Every dependency remains in `blocked_by`.
+`manna sync` normalizes the list to current paired items, assigns dense,
+board-wide fixed-width priorities, renames each work order, repoints `prompt`,
+and regenerates `.handoff/README.md` from one board snapshot. Width is at least
+two digits (`01..N`) and expands for the whole plan at 100 or more items
+(`001..N`). Priority never encodes dependency. Every dependency remains in
+`blocked_by`.
 
-A bare filename is safe to launch. `bMM` means the item is held by its
-highest-numbered still-open blocker; the README preserves the full blocker
-list. Closing blockers updates or removes the marker on the next sync.
-Claimed work orders are never renamed. Their existing number remains reserved
-until release, and lint/reconcile report any held filename drift.
+A bare filename is safe to launch. The same-width `bMM...` field means the item
+is held by its highest-numbered still-open blocker; the README preserves the
+full blocker list. Closing blockers updates or removes the marker on the next
+sync. Claimed work orders are never renamed. Their existing number remains
+reserved until release, and lint/reconcile report any held filename drift.
 
 The native `Rename` pair transaction HMAC-binds exact before/after board rows,
 all moves, priority YAML, and README bytes. It stages every source before
