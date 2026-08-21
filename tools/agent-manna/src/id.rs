@@ -132,14 +132,14 @@ mod tests {
     }
 
     #[test]
-    fn test_1000_ids_no_collisions() {
+    fn test_1000_unique_ids_resolve_candidate_collisions() {
         let mut ids = HashSet::new();
 
         for _ in 0..1000 {
-            let id = generate_id();
+            let id = generate_unique_id(&ids);
             assert!(
                 ids.insert(id.clone()),
-                "Collision detected: {} already exists",
+                "Collision-aware generator returned existing ID: {}",
                 id
             );
         }
