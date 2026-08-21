@@ -9,8 +9,9 @@ Rules:
 - Create work through `agent-do manna create`; do not hand-build parallel
   prompt roots such as `.handoffs/`, `.dev/session-prompts/`, or
   `<campaign>/handoff-prompts/`.
-- The Manna item `prompt` field points to
-  `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` after synchronization.
+- The Manna item `prompt` field points to a board-wide fixed-width name,
+  `.handoff/<NN...>[b<MM...>]-mn-xxxxxx-<slug>.md`, after synchronization.
+  Width is at least two digits and expands when the active plan exceeds 99.
 - Frontmatter identifies the item, track, source, base commit, scope, inputs,
   and SHA-256 binding for the complete document.
 - Edit a work order, then run `agent-do manna handoff seal mn-xxxxxx` before
@@ -19,8 +20,9 @@ Rules:
   deliverables, and verification, never a second backlog.
 - Priority lives in `.manna/handoff-order.yaml`. Run `agent-do manna sync`
   after board changes; never hand-maintain numbered filenames or this index.
-- A bare numbered filename is safe to launch. `bMM` means the item is held
-  until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- A bare numbered filename is safe to launch. `bMM...` means the item is held
+  until that numbered priority closes. The full dependency truth remains
+  `blocked_by`.
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
@@ -59,4 +61,4 @@ Rules:
 | 27 | `mn-ee7d1e` | open | none | `.handoff/27-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
 | 28 | `mn-65fae2` | open | none | `.handoff/28-mn-65fae2-manna-init-atomicity-a-half-fired-init-left-a-project-board-iden.md` |
 | 29 | `mn-898c08` | open | none | `.handoff/29-mn-898c08-manna-legacy-board-discoverability-misrouted-error-text-bootstra.md` |
-| 30 | `mn-79291c` | in_progress | none | `.handoff/30-mn-79291c-manna-migrate-convergence-gaps-round-2-strict-lookalike-handoffs.md` |
+| 30 | `mn-ba8db6` | open | none | `.handoff/30-mn-ba8db6-strict-board-deadlock-ownership-proof-orphaned-by-process-restar.md` |
