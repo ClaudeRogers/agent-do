@@ -251,7 +251,16 @@ struct MigrationDocument {
     handoff: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_document: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_document: Option<String>,
     document: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MigrationSource {
+    project_relative: Option<PathBuf>,
+    provenance: String,
+    document: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1719,18 +1728,21 @@ fn generated_body(issue: &Issue) -> String {
     )
 }
 
-fn adopted_body(issue: &Issue, legacy: &str) -> String {
+fn adopted_body(issue: &Issue, legacy: &str, provenance: &str) -> String {
     let inputs = if let Some(source) = issue.source.as_deref() {
         format!("- {}", source)
     } else {
         "- None declared.".to_string()
     };
+    let provenance = serde_json::to_string(provenance)
+        .expect("serializing a legacy pointer as a JSON string cannot fail");
     format!(
-        "\n# Handoff: {}\n\nBoard state is canonical in `.manna/`. This file is the work order for one item only.\n\n## Claim\n\n```bash\nagent-do manna claim {}\n```\n\n## Scope\n\n{}\n\n## Inputs\n\n{}\n\n## Work order\n\n{}\n\n## Completion\n\n1. Produce the scoped deliverables and verification receipts.\n2. Update this handoff only when continuation context changed.\n3. Seal changes with `agent-do manna handoff seal {}`.\n4. Commit with `Manna: {}` and run `agent-do manna done {}` only after the work is verified.\n",
+        "\n# Handoff: {}\n\nBoard state is canonical in `.manna/`. This file is the work order for one item only.\n\n## Claim\n\n```bash\nagent-do manna claim {}\n```\n\n## Scope\n\n{}\n\n## Inputs\n\n{}\n\n## Work order\n\n> Legacy migration source: {}\n\n{}\n\n## Completion\n\n1. Produce the scoped deliverables and verification receipts.\n2. Update this handoff only when continuation context changed.\n3. Seal changes with `agent-do manna handoff seal {}`.\n4. Commit with `Manna: {}` and run `agent-do manna done {}` only after the work is verified.\n",
         issue.title,
         issue.id,
         issue.title,
         inputs,
+        provenance,
         legacy,
         issue.id,
         issue.id,
@@ -1755,8 +1767,36 @@ pub fn render_handoff(base: &Path, issue: &Issue) -> Result<String, String> {
     render_document(&frontmatter_for(base, issue), &generated_body(issue))
 }
 
-fn render_adopted_handoff(base: &Path, issue: &Issue, legacy: &str) -> Result<String, String> {
-    render_document(&frontmatter_for(base, issue), &adopted_body(issue, legacy))
+fn render_adopted_handoff(
+    base: &Path,
+    issue: &Issue,
+    legacy: &str,
+    provenance: &str,
+) -> Result<String, String> {
+    render_document(
+        &frontmatter_for(base, issue),
+        &adopted_body(issue, legacy, provenance),
+    )
+}
+
+fn required_section_positions(body: &str) -> Result<Vec<usize>, String> {
+    let mut positions = Vec::new();
+    let mut search_from = 0;
+    for section in ["## Claim", "## Scope", "## Inputs", "## Work order"] {
+        let needle = format!("{}\n", section);
+        let relative = body[search_from..]
+            .find(&needle)
+            .ok_or_else(|| format!("handoff is missing required section {}", section))?;
+        let position = search_from + relative;
+        positions.push(position);
+        search_from = position + needle.len();
+    }
+    let completion = body
+        .rfind("## Completion\n")
+        .filter(|position| *position >= search_from)
+        .ok_or_else(|| "handoff is missing required section ## Completion".to_string())?;
+    positions.push(completion);
+    Ok(positions)
 }
 
 fn validate_document(issue: &Issue, text: &str) -> Result<String, String> {
@@ -1788,26 +1828,15 @@ fn validate_document(issue: &Issue, text: &str) -> Result<String, String> {
     if frontmatter.base_commit.trim().is_empty() {
         return Err("handoff base_commit cannot be empty".to_string());
     }
-    let expected_claim = format!(
-        "## Claim\n\n```bash\nagent-do manna claim {}\n```",
-        issue.id
-    );
-    if !body.contains(&expected_claim)
-        || body
-            .lines()
-            .filter(|line| line.trim() == format!("agent-do manna claim {}", issue.id))
-            .count()
-            != 1
-    {
+    let sections = required_section_positions(body)?;
+    let claim_heading = "## Claim\n";
+    let claim_body = body[sections[0] + claim_heading.len()..sections[1]].trim();
+    let expected_claim = format!("```bash\nagent-do manna claim {}\n```", issue.id);
+    if claim_body != expected_claim {
         return Err(format!(
             "handoff Claim section must contain exactly `agent-do manna claim {}`",
             issue.id
         ));
-    }
-    for section in ["## Scope", "## Inputs", "## Work order", "## Completion"] {
-        if !body.contains(section) {
-            return Err(format!("handoff is missing required section {}", section));
-        }
     }
     let calculated = calculate_binding(text)?;
     if frontmatter.binding != calculated {
@@ -1984,8 +2013,23 @@ fn validate_legacy_migration_transaction(
                 migration_document.issue_id
             ));
         }
-        if let Some(previous) = migration_document.previous_document.as_deref() {
-            if !migration_document.document.contains(previous) {
+        if strict_pass_through && migration_document.source_document.is_some() {
+            return Err(format!(
+                "strict handoff {} cannot carry a legacy source document",
+                migration_document.issue_id
+            ));
+        }
+        if migrated_pair
+            && migration_document.previous_document.is_some()
+            && migration_document.previous_document != migration_document.source_document
+        {
+            return Err(format!(
+                "adopted handoff {} would replace target bytes it did not import",
+                migration_document.issue_id
+            ));
+        }
+        if let Some(source) = migration_document.source_document.as_deref() {
+            if !migration_document.document.contains(source) {
                 return Err(format!(
                     "adopted handoff {} does not preserve its legacy work-order content",
                     migration_document.issue_id
@@ -3752,32 +3796,98 @@ fn migration_annotation_matches(issue: &Issue) -> bool {
     }
 }
 
-fn read_migration_source(base: &Path, pointer: &str) -> Result<Option<(PathBuf, String)>, String> {
-    let raw = Path::new(pointer);
-    let relative = if raw.is_absolute() {
-        let root = base
-            .canonicalize()
-            .map_err(|error| format!("failed to resolve project root: {}", error))?;
-        raw.strip_prefix(&root)
-            .map_err(|_| format!("legacy handoff pointer is outside the project: {}", pointer))?
-            .to_path_buf()
-    } else {
-        normalize_relative(raw)?
+fn path_contains_git_metadata(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(value) if value == std::ffi::OsStr::new(".git")
+        )
+    })
+}
+
+fn read_optional_migration_document(path: &Path, pointer: &str) -> Result<Option<String>, String> {
+    reject_symlink(path, "legacy handoff pointer")?;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to read {}: {}", pointer, error)),
     };
-    let relative = safe_relative_path(base, &relative, true)?;
-    if relative.starts_with(".git") {
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {}", pointer, error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "legacy handoff pointer is not a regular file: {}",
+            pointer
+        ));
+    }
+    let mut document = String::new();
+    file.read_to_string(&mut document)
+        .map_err(|error| format!("failed to read {} as UTF-8 Markdown: {}", pointer, error))?;
+    Ok(Some(document))
+}
+
+fn read_migration_source(base: &Path, pointer: &str) -> Result<MigrationSource, String> {
+    let raw = Path::new(pointer);
+    let root = base
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root: {}", error))?;
+    let resolved_absolute = if raw.is_absolute() {
+        reject_symlink(raw, "legacy handoff pointer")?;
+        Some(resolve_missing_leaf(raw.to_path_buf())?)
+    } else {
+        None
+    };
+    let local = if let Some(resolved) = resolved_absolute.as_deref() {
+        resolved
+            .strip_prefix(&root)
+            .ok()
+            .or_else(|| raw.strip_prefix(base).ok())
+    } else {
+        Some(raw)
+    };
+    if let Some(relative) = local {
+        let relative = safe_relative_path(base, &normalize_relative(relative)?, true)?;
+        if path_contains_git_metadata(&relative) {
+            return Err(format!(
+                "legacy handoff pointer cannot read Git metadata: {}",
+                pointer
+            ));
+        }
+        let path = base.join(&relative);
+        let document = read_optional_migration_document(&path, pointer)?;
+        return Ok(MigrationSource {
+            provenance: relative.to_string_lossy().into_owned(),
+            project_relative: Some(relative),
+            document,
+        });
+    }
+
+    if raw
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_none_or(|extension| !extension.eq_ignore_ascii_case("md"))
+    {
+        return Err(format!(
+            "cross-project legacy handoff pointer must name a Markdown file: {}",
+            pointer
+        ));
+    }
+    if path_contains_git_metadata(raw)
+        || resolved_absolute
+            .as_deref()
+            .is_some_and(path_contains_git_metadata)
+    {
         return Err(format!(
             "legacy handoff pointer cannot read Git metadata: {}",
             pointer
         ));
     }
-    let path = base.join(&relative);
-    reject_symlink(&path, "legacy handoff")?;
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(Some((relative, text))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("failed to read {}: {}", path.display(), error)),
-    }
+    Ok(MigrationSource {
+        project_relative: None,
+        provenance: pointer.to_string(),
+        document: read_optional_migration_document(raw, pointer)?,
+    })
 }
 
 fn strict_migration_document(
@@ -3815,6 +3925,7 @@ fn strict_migration_document(
         issue_id: issue.id.clone(),
         handoff: relative.to_string_lossy().into_owned(),
         previous_document: Some(document.clone()),
+        source_document: None,
         document,
     })
 }
@@ -3863,7 +3974,8 @@ fn build_legacy_migration(
         }
 
         let mut issue = original.clone();
-        let previous_prompt = prompt_pointer(original);
+        let raw_previous_prompt = prompt_pointer(original);
+        let mut previous_prompt = raw_previous_prompt.clone();
         let released_owner = original.claimed_by.clone();
         let released = release_invalid_legacy_claim(&mut issue);
         if released {
@@ -3879,14 +3991,28 @@ fn build_legacy_migration(
             issue.handoff_digest = None;
             LegacyMigrationDisposition::Exempt
         } else {
-            let existing = previous_prompt
+            // A row binding is the strict authority marker. Frontmatter-like
+            // source text without one remains legacy input and is wrapped,
+            // never interpreted as an already-admitted work order.
+            let source = raw_previous_prompt
                 .as_deref()
                 .map(|pointer| read_migration_source(base, pointer))
-                .transpose()?
-                .flatten();
-            let requested = previous_prompt.as_deref().and_then(|pointer| {
-                canonical_handoff_path(base, &config, &issue, Some(pointer)).ok()
-            });
+                .transpose()?;
+            if let Some(source) = source.as_ref() {
+                previous_prompt = Some(source.provenance.clone());
+            }
+            let requested = source
+                .as_ref()
+                .and_then(|source| source.project_relative.as_ref())
+                .and_then(|pointer| {
+                    canonical_handoff_path(
+                        base,
+                        &config,
+                        &issue,
+                        Some(pointer.to_string_lossy().as_ref()),
+                    )
+                    .ok()
+                });
             let generated = canonical_handoff_path(base, &config, &issue, None)?;
             let relative = requested
                 .filter(|path| !document_paths.contains(path.to_string_lossy().as_ref()))
@@ -3899,21 +4025,29 @@ fn build_legacy_migration(
             }
             preflight_handoff(base, &relative)?;
             issue.prompt = Some(relative.to_string_lossy().into_owned());
-            let previous_document = existing
+            let previous_document = source
                 .as_ref()
-                .filter(|(source, _)| source == &relative)
-                .map(|(_, text)| text.clone());
-            let document = if let Some((_, legacy)) = existing.as_ref() {
-                render_adopted_handoff(base, &issue, legacy)?
-            } else {
-                render_handoff(base, &issue)?
-            };
+                .filter(|source| source.project_relative.as_ref() == Some(&relative))
+                .and_then(|source| source.document.clone());
+            let source_document = source.as_ref().and_then(|source| source.document.clone());
+            let document =
+                if let Some(source) = source.as_ref().filter(|source| source.document.is_some()) {
+                    render_adopted_handoff(
+                        base,
+                        &issue,
+                        source.document.as_deref().unwrap(),
+                        &source.provenance,
+                    )?
+                } else {
+                    render_handoff(base, &issue)?
+                };
             issue.handoff_digest = Some(calculate_binding(&document)?);
             validate_document(&issue, &document)?;
             documents.push(MigrationDocument {
                 issue_id: issue.id.clone(),
                 handoff: relative.to_string_lossy().into_owned(),
                 previous_document,
+                source_document,
                 document,
             });
             LegacyMigrationDisposition::Paired
@@ -4552,6 +4686,135 @@ mod tests {
     }
 
     #[test]
+    fn migration_adopts_partial_frontmatter_with_a_legacy_claim_section() {
+        let (temp, store, _) = setup();
+        let mut legacy = issue("mn-a00014", "Partial frontmatter work order");
+        legacy.source = Some("estate sweep fixture".to_string());
+        legacy.prompt = Some(".handoff/partial-frontmatter.md".to_string());
+        let legacy_text = format!(
+            "---\nmanna: {}\ntrack: null\nsource: estate sweep fixture\n---\n\n# Existing work order\n\n## Claim\n\n```bash\nagent-do manna claim {}\n```\n\nPreserve this body exactly.\n",
+            legacy.id, legacy.id
+        );
+        fs::write(
+            temp.path().join(legacy.prompt.as_deref().unwrap()),
+            &legacy_text,
+        )
+        .unwrap();
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        let row = store.load_issues_strict().unwrap().remove(0);
+        let document =
+            fs::read_to_string(temp.path().join(row.prompt.as_deref().unwrap())).unwrap();
+        assert!(document.contains(&legacy_text));
+        assert_eq!(
+            document
+                .lines()
+                .filter(|line| line.trim() == format!("agent-do manna claim {}", row.id))
+                .count(),
+            2
+        );
+        validate_document(&row, &document).unwrap();
+    }
+
+    #[test]
+    fn migration_ingests_absolute_sources_and_normalizes_project_provenance() {
+        let (temp, store, _) = setup();
+        let external = TempDir::new().unwrap();
+        let external_path = external.path().join("cross-project-work-order.md");
+        let external_text = "# Cross-project work order\n\nPreserve the external source.\n";
+        fs::write(&external_path, external_text).unwrap();
+
+        let project_source = temp
+            .path()
+            .join(".dev/session-prompts/in-project-work-order.md");
+        fs::create_dir_all(project_source.parent().unwrap()).unwrap();
+        let project_text = "# In-project work order\n\nPreserve the local source.\n";
+        fs::write(&project_source, project_text).unwrap();
+
+        let mut outside = issue("mn-a00015", "Cross-project absolute pointer");
+        outside.prompt = Some(external_path.to_string_lossy().into_owned());
+        let mut inside = issue("mn-a00016", "In-project absolute pointer");
+        inside.prompt = Some(project_source.to_string_lossy().into_owned());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        for row in [&outside, &inside] {
+            serde_json::to_writer(&mut board, row).unwrap();
+            writeln!(board).unwrap();
+        }
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        let rows = store.load_issues_strict().unwrap();
+        let outside = rows.iter().find(|row| row.id == outside.id).unwrap();
+        let inside = rows.iter().find(|row| row.id == inside.id).unwrap();
+        for (row, original, provenance) in [
+            (
+                outside,
+                external_text,
+                external_path.to_string_lossy().into_owned(),
+            ),
+            (
+                inside,
+                project_text,
+                ".dev/session-prompts/in-project-work-order.md".to_string(),
+            ),
+        ] {
+            let prompt = row.prompt.as_deref().unwrap();
+            assert!(prompt.starts_with(".handoff/"));
+            let document = fs::read_to_string(temp.path().join(prompt)).unwrap();
+            assert!(document.contains(original));
+            assert!(document.contains(&format!(
+                "> Legacy migration source: {}",
+                serde_json::to_string(&provenance).unwrap()
+            )));
+            assert_eq!(
+                row.legacy_migration
+                    .as_ref()
+                    .unwrap()
+                    .previous_prompt
+                    .as_deref(),
+                Some(provenance.as_str())
+            );
+            validate_document(row, &document).unwrap();
+        }
+    }
+
+    #[test]
+    fn migration_refuses_non_markdown_cross_project_sources_without_writing() {
+        let (temp, store, _) = setup();
+        let external = TempDir::new().unwrap();
+        let external_path = external.path().join("not-a-work-order.txt");
+        fs::write(&external_path, "not an admissible handoff\n").unwrap();
+        let mut legacy = issue("mn-a00017", "Non-Markdown external pointer");
+        legacy.prompt = Some(external_path.to_string_lossy().into_owned());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+        let board_before = fs::read(temp.path().join(".manna/issues.jsonl")).unwrap();
+
+        let error = migrate_legacy_board(temp.path(), &store).unwrap_err();
+        assert!(error.contains("cross-project legacy handoff pointer must name a Markdown file"));
+        assert_eq!(
+            fs::read(temp.path().join(".manna/issues.jsonl")).unwrap(),
+            board_before
+        );
+        assert!(!legacy_migration_path(temp.path()).exists());
+    }
+
+    #[test]
     fn mixed_migration_splits_duplicate_legacy_targets_without_losing_content() {
         let (temp, store, _) = setup();
         let legacy_text = "# Shared legacy work order\n\nPreserve the shared source.\n";
@@ -4709,6 +4972,32 @@ mod tests {
         let error = migrate_legacy_board(temp.path(), &store).unwrap_err();
         assert!(error.contains("invalid authoritative handoff"));
         assert_eq!(store.load_issues().unwrap()[0].handoff_digest, digest);
+    }
+
+    #[test]
+    fn migrate_never_adopts_a_strict_row_after_its_binding_is_deleted() {
+        let (temp, store, config) = setup();
+        let paired = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00018", "Strict binding deletion"),
+            None,
+        )
+        .unwrap();
+        let path = temp.path().join(paired.prompt.as_deref().unwrap());
+        let text = fs::read_to_string(&path).unwrap();
+        let without_binding = text
+            .lines()
+            .filter(|line| !line.starts_with("binding:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, without_binding).unwrap();
+
+        let error = migrate_legacy_board(temp.path(), &store).unwrap_err();
+        assert!(error.contains("invalid authoritative handoff"));
+        assert_eq!(store.load_issues().unwrap(), vec![paired]);
+        assert!(!legacy_migration_path(temp.path()).exists());
     }
 
     #[test]

@@ -133,15 +133,28 @@ does not rearrange those boards implicitly. `manna migrate` is the explicit
 admission path for both pure legacy and mixed legacy/strict boards. It uses one
 authenticated whole-board transaction to verify and preserve existing strict
 pairs, create and seal every legacy active item pair, adopt the exact contents
-of malformed `.handoff/` work orders, annotate done rows as pointer-free
-history, annotate active tracks and dreams as exempt, release unauthenticated
-claims, and publish strict board identity last. Unique handmade number prefixes
-seed priority only when they are unambiguous; `.manna/handoff-order.yaml` and
-`manna sync` own presentation after admission. Recovery accepts only the
-complete before or complete after board, so a concurrent mutation is never
-overwritten. Replaying a completed migration is byte-stable. The annotation
-records how a legacy row entered strict mode; it does not prevent later status
-or type transitions.
+of malformed `.handoff/` work orders, import active absolute cross-project
+Markdown pointers, annotate done rows as pointer-free history, annotate active
+tracks and dreams as exempt, release unauthenticated claims, and publish strict
+board identity last. Partial frontmatter and old Claim sections in imported
+text are inert content; strict authority comes from the row digest and the one
+canonical Claim section. In-project absolute source paths normalize to
+repository-relative provenance, while a cross-project source retains its
+original absolute path in the sealed document. The transaction authenticates
+source bytes separately from target-before bytes so recovery cannot substitute
+or overwrite unimported content. Unique handmade number prefixes seed priority
+only when they are unambiguous; `.manna/handoff-order.yaml` and `manna sync`
+own presentation after admission. Recovery accepts only the complete before or
+complete after board, so a concurrent mutation is never overwritten. Replaying
+a completed migration is byte-stable. The annotation records how a legacy row
+entered strict mode; it does not prevent later status or type transitions.
+
+Cross-project import is deliberately narrow: the pointer must name a regular,
+UTF-8 Markdown file, the file itself cannot be a symlink, and the resolved path
+cannot enter Git metadata. This read-only admission exception never makes an
+external path authoritative. The resulting row points only at its canonical local handoff.
+A row that already carries `handoff_digest` is still strict; a missing or
+deleted document binding is tampering and migration refuses it.
 
 Grandfathered done history without pairs is exempt. A done row that owns a
 strict pair keeps that sealed pair, but sync removes it from priority and the

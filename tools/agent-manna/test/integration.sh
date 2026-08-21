@@ -1102,6 +1102,92 @@ cd "$TEST_DIR"
 rm -rf "$MIXED_DIR"
 
 # ----------------------------------------------------------------------------
+# Test G7e: strict-lookalike and cross-project legacy sources converge
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7e: legacy source ingestion"
+ADOPTION_DIR=$(mktemp -d)
+ADOPTION_EXTERNAL_DIR=$(mktemp -d)
+ADOPTION_EXTERNAL_SOURCE="$ADOPTION_EXTERNAL_DIR/cross-project-work-order.md"
+cd "$ADOPTION_DIR"
+git init -q
+printf '.manna/\n' > .gitignore
+mkdir -p .manna .handoff .dev/session-prompts
+touch .manna/sessions.jsonl
+ADOPTION_PROJECT_SOURCE="$ADOPTION_DIR/.dev/session-prompts/in-project-work-order.md"
+printf '%s\n' \
+    '{"id":"mn-b30001","title":"Partial frontmatter work order","status":"open","source":"estate sweep fixture","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"prompt":".handoff/partial-lookalike.md"}' \
+    "{\"id\":\"mn-b30002\",\"title\":\"Cross-project absolute pointer\",\"status\":\"open\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"blocked_by\":[],\"prompt\":\"$ADOPTION_EXTERNAL_SOURCE\"}" \
+    "{\"id\":\"mn-b30003\",\"title\":\"In-project absolute pointer\",\"status\":\"open\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"blocked_by\":[],\"prompt\":\"$ADOPTION_PROJECT_SOURCE\"}" \
+    > .manna/issues.jsonl
+cat > .handoff/partial-lookalike.md <<'EOF'
+---
+manna: mn-b30001
+track: null
+source: estate sweep fixture
+---
+
+# Existing partial work order
+
+## Claim
+
+```bash
+agent-do manna claim mn-b30001
+```
+
+Preserve the strict-lookalike body exactly.
+EOF
+printf '# Cross-project work order\n\nPreserve external content exactly.\n' > "$ADOPTION_EXTERNAL_SOURCE"
+printf '# In-project work order\n\nPreserve local content exactly.\n' > "$ADOPTION_PROJECT_SOURCE"
+
+adoption_exit=0
+output=$("$MANNA" migrate 2>&1) || adoption_exit=$?
+check_exit 0 "$adoption_exit" "migrate ingests strict-lookalike and absolute legacy sources"
+check_yaml "$output" "paired_items: 3" "source-ingestion migration pairs every active row"
+partial_adopted=$(grep -rl '^manna: mn-b30001$' .handoff | head -1)
+external_adopted=$(grep -rl '^manna: mn-b30002$' .handoff | head -1)
+project_adopted=$(grep -rl '^manna: mn-b30003$' .handoff | head -1)
+grep -Fq 'Preserve the strict-lookalike body exactly.' "$partial_adopted" \
+    && pass "partial frontmatter body survives canonical wrapping" \
+    || fail "partial frontmatter body survives canonical wrapping" "legacy body missing"
+partial_claim_count=$(grep -c '^agent-do manna claim mn-b30001$' "$partial_adopted")
+check_exit 2 "$partial_claim_count" "preserved legacy Claim text is not mistaken for canonical authority"
+grep -Fq 'Preserve external content exactly.' "$external_adopted" \
+    && pass "cross-project work-order content is imported" \
+    || fail "cross-project work-order content is imported" "external content missing"
+grep -Fq "> Legacy migration source: \"$ADOPTION_EXTERNAL_SOURCE\"" "$external_adopted" \
+    && pass "cross-project provenance records the original absolute path" \
+    || fail "cross-project provenance records the original absolute path" "provenance note missing"
+grep -Fq 'Preserve local content exactly.' "$project_adopted" \
+    && pass "absolute in-project work-order content is imported" \
+    || fail "absolute in-project work-order content is imported" "local content missing"
+grep -Fq '> Legacy migration source: ".dev/session-prompts/in-project-work-order.md"' "$project_adopted" \
+    && pass "in-project provenance is normalized to a repository-relative path" \
+    || fail "in-project provenance is normalized to a repository-relative path" "normalized note missing"
+grep -Fq '"previous_prompt":".dev/session-prompts/in-project-work-order.md"' .manna/issues.jsonl \
+    && pass "board annotation stores normalized in-project provenance" \
+    || fail "board annotation stores normalized in-project provenance" "annotation stayed absolute"
+
+adoption_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "migrated: false" "source-ingestion migration is an idempotent no-op"
+adoption_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+[[ "$adoption_state_before" == "$adoption_state_after" ]] \
+    && pass "source-ingestion replay preserves every durable byte" \
+    || fail "source-ingestion replay preserves every durable byte" "$adoption_state_before -> $adoption_state_after"
+transaction_files=$(find .manna/transactions -type f 2>/dev/null | wc -l | tr -d ' ')
+check_exit 0 "$transaction_files" "source-ingestion recovery directory is empty at rest"
+sync_exit=0
+output=$("$MANNA" sync 2>&1) || sync_exit=$?
+check_exit 0 "$sync_exit" "sync converges imported source presentation"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "imported source fixture has no lint findings"
+
+cd "$TEST_DIR"
+rm -rf "$ADOPTION_DIR" "$ADOPTION_EXTERNAL_DIR"
+
+# ----------------------------------------------------------------------------
 # Test G7d: ordered handoff presentation and live-claim rename hold
 # ----------------------------------------------------------------------------
 echo ""

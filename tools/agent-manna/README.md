@@ -119,17 +119,27 @@ claims that lack ownership proofs. Existing strict pairs are verified and
 passed through byte-for-byte with their seals and ownership intact. A legacy
 Markdown work order under `.handoff/` is adopted in place: migration wraps its
 original contents in canonical frontmatter and required sections instead of
-discarding it. Unique hand-numbered prefixes seed first-class priority once;
-`manna sync` owns every name afterward. Board identity is published last, so
-interruption leaves a recoverable journal instead of a half-strict board.
-Repeating the command after success is a byte-stable no-op.
+discarding it. Partial legacy frontmatter and old Claim sections remain inert
+work-order content; only the canonical Claim section is authoritative. Active
+absolute pointers inside the project are normalized to repository-relative
+provenance. An absolute pointer outside the project may import one regular
+UTF-8 Markdown file when the file itself is not a symlink and the resolved path
+does not enter Git metadata; its original path is recorded in the sealed
+handoff. Imported source bytes are authenticated
+separately from any target bytes the transaction may replace. Unique
+hand-numbered prefixes seed first-class priority once; `manna sync` owns every
+name afterward. Board identity is published last, so interruption leaves a
+recoverable journal instead of a half-strict board. Repeating the command after
+success is a byte-stable no-op.
 
 ```bash
 agent-do manna migrate
 ```
 
 Ordinary strict writes never invoke migration and retain the same fail-closed
-pair, ownership, Git visibility, and symlink checks.
+pair, ownership, Git visibility, and symlink checks. A row carrying a strict
+handoff digest remains strict even if someone deletes its document binding;
+`migrate` refuses that tampering instead of adopting or resealing it.
 
 ### `status`
 
