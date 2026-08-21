@@ -60,4 +60,3 @@ Rules:
 | 28 | `mn-65fae2` | open | none | `.handoff/28-mn-65fae2-manna-init-atomicity-a-half-fired-init-left-a-project-board-iden.md` |
 | 29 | `mn-898c08` | open | none | `.handoff/29-mn-898c08-manna-legacy-board-discoverability-misrouted-error-text-bootstra.md` |
 | 30 | `mn-79291c` | in_progress | none | `.handoff/30-mn-79291c-manna-migrate-convergence-gaps-round-2-strict-lookalike-handoffs.md` |
-| 31 | `mn-300dae` | open | none | `.handoff/31-mn-300dae-manna-dream-needs-description-a-spark-is-a-title-not-the-whole-i.md` |
