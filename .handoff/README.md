@@ -21,6 +21,8 @@ Rules:
   after board changes; never hand-maintain numbered filenames or this index.
 - A bare numbered filename is safe to launch. `bMM` means the item is held
   until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- Completed pairs return to unnumbered sealed history on sync, so no numbered
+  filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
   `.manna/issues.jsonl`, and `.handoff/`.
 
@@ -55,4 +57,3 @@ Rules:
 | 25 | `mn-3086f2` | open | none | `.handoff/25-mn-3086f2-docs-estate-wide-refresh-to-as-is-state-readme-integration-archi.md` |
 | 26 | `mn-8b4a1c` | open | none | `.handoff/26-mn-8b4a1c-tests-suite-can-hang-forever-on-the-bootstrap-gui-dialog-pin-age.md` |
 | 27 | `mn-ee7d1e` | open | none | `.handoff/27-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
-| 28 | `mn-dd027f` | done | none | `.handoff/28-mn-dd027f-manna-ordered-handoff-names-nn-bmm-prefix-as-a-derived-build-pro.md` |
