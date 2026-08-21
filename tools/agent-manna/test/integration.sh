@@ -1138,7 +1138,8 @@ agent-do manna claim mn-b30001
 Preserve the strict-lookalike body exactly.
 EOF
 printf '# Cross-project work order\n\nPreserve external content exactly.\n' > "$ADOPTION_EXTERNAL_SOURCE"
-printf '# In-project work order\n\nPreserve local content exactly.\n' > "$ADOPTION_PROJECT_SOURCE"
+printf '# In-project work order\n\nagent-do manna claim mn-b30003\n\nPreserve local content exactly.\n' > "$ADOPTION_PROJECT_SOURCE"
+ADOPTION_PROJECT_HASH=$(git hash-object "$ADOPTION_PROJECT_SOURCE")
 
 adoption_exit=0
 output=$("$MANNA" migrate 2>&1) || adoption_exit=$?
@@ -1167,11 +1168,43 @@ grep -Fq '> Legacy migration source: ".dev/session-prompts/in-project-work-order
 grep -Fq '"previous_prompt":".dev/session-prompts/in-project-work-order.md"' .manna/issues.jsonl \
     && pass "board annotation stores normalized in-project provenance" \
     || fail "board annotation stores normalized in-project provenance" "annotation stayed absolute"
+[[ -f "$ADOPTION_EXTERNAL_SOURCE" ]] \
+    && pass "cross-project source remains owned by its original project" \
+    || fail "cross-project source remains owned by its original project" "external source was moved"
+[[ ! -e "$ADOPTION_PROJECT_SOURCE" ]] \
+    && pass "in-project shadow work order is retired transactionally" \
+    || fail "in-project shadow work order is retired transactionally" "source still exists"
+ADOPTION_ARCHIVE=$(find .handoff/.archive/legacy-sources -type f -name '*.source' | head -1)
+adoption_archive_count=$(find .handoff/.archive/legacy-sources -type f -name '*.source' | wc -l | tr -d ' ')
+check_exit 1 "$adoption_archive_count" "one imported local source produces one durable archive"
+[[ -n "$ADOPTION_ARCHIVE" && "$(git hash-object "$ADOPTION_ARCHIVE")" == "$ADOPTION_PROJECT_HASH" ]] \
+    && pass "legacy source archive preserves the exact imported bytes" \
+    || fail "legacy source archive preserves the exact imported bytes" "archive content changed"
 
-adoption_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+# Reproduce a board admitted by the preceding release, where the canonical
+# pair exists but the local source was never retired. One migrate invocation
+# must repair that reachable state without touching strict rows or seals.
+mv "$ADOPTION_ARCHIVE" "$ADOPTION_PROJECT_SOURCE"
+adoption_board_before_repair=$(git hash-object .manna/issues.jsonl)
+adoption_handoffs_before_repair=$({ find .handoff -maxdepth 1 -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "migrated: true" "migrate repairs a previously admitted unretired source"
+[[ ! -e "$ADOPTION_PROJECT_SOURCE" ]] \
+    && pass "repair pass retires the resurrected shadow source" \
+    || fail "repair pass retires the resurrected shadow source" "source still exists after repair"
+check_exit 0 "$(find .handoff/.archive/legacy-sources -type f -name '*.source' ! -path "$ADOPTION_ARCHIVE" | wc -l | tr -d ' ')" "repair reuses the deterministic archive path"
+[[ "$(git hash-object .manna/issues.jsonl)" == "$adoption_board_before_repair" ]] \
+    && pass "archive-only repair preserves strict board bytes" \
+    || fail "archive-only repair preserves strict board bytes" "board changed"
+adoption_handoffs_after_repair=$({ find .handoff -maxdepth 1 -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+[[ "$adoption_handoffs_before_repair" == "$adoption_handoffs_after_repair" ]] \
+    && pass "archive-only repair preserves every sealed handoff byte" \
+    || fail "archive-only repair preserves every sealed handoff byte" "handoffs changed"
+
+adoption_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 output=$("$MANNA" migrate 2>&1) || true
 check_yaml "$output" "migrated: false" "source-ingestion migration is an idempotent no-op"
-adoption_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+adoption_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 [[ "$adoption_state_before" == "$adoption_state_after" ]] \
     && pass "source-ingestion replay preserves every durable byte" \
     || fail "source-ingestion replay preserves every durable byte" "$adoption_state_before -> $adoption_state_after"

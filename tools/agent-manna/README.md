@@ -126,7 +126,13 @@ provenance. An absolute pointer outside the project may import one regular
 UTF-8 Markdown file when the file itself is not a symlink and the resolved path
 does not enter Git metadata; its original path is recorded in the sealed
 handoff. Imported source bytes are authenticated
-separately from any target bytes the transaction may replace. Unique
+separately from any target bytes the transaction may replace. Once those exact
+bytes exist in every consuming sealed handoff, an in-project source outside
+`.handoff/` moves to a deterministic
+`.handoff/.archive/legacy-sources/*.source` evidence file in the same journaled
+transaction. Cross-project sources remain untouched. Rerunning `migrate`
+repairs boards admitted before source retirement existed while preserving
+strict row and handoff bytes. Unique
 hand-numbered prefixes seed first-class priority once; `manna sync` owns every
 name afterward. Board identity is published last, so interruption leaves a
 recoverable journal instead of a half-strict board. Repeating the command after

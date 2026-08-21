@@ -30,6 +30,7 @@ pub const BOARD_FILE: &str = ".manna/board.yaml";
 pub const HANDOFF_ORDER_FILE: &str = ".manna/handoff-order.yaml";
 pub const HANDOFF_README: &str = ".handoff/README.md";
 pub const HANDOFF_ARCHIVE_DIR: &str = ".handoff/.archive";
+const LEGACY_SOURCE_ARCHIVE_DIR: &str = ".handoff/.archive/legacy-sources";
 const HANDOFF_SYNC_STAGE_DIR: &str = ".handoff/.sync";
 const TRANSACTION_DIR: &str = ".manna/transactions";
 const LEGACY_MIGRATION_TRANSACTION: &str = ".manna/transactions/legacy-board-migration.yaml";
@@ -256,6 +257,15 @@ struct MigrationDocument {
     document: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationSourceArchive {
+    source: String,
+    archive: String,
+    document: String,
+    issue_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MigrationSource {
     project_relative: Option<PathBuf>,
@@ -270,6 +280,8 @@ struct LegacyBoardTransaction {
     before: Vec<Issue>,
     after: Vec<Issue>,
     documents: Vec<MigrationDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_archives: Vec<MigrationSourceArchive>,
     gitignore_before: Option<String>,
     gitignore_after: String,
     board_before: Option<String>,
@@ -2053,6 +2065,113 @@ fn validate_legacy_migration_transaction(
         }
         validate_document(issue, &migration_document.document)?;
     }
+
+    let documents_by_id = transaction
+        .documents
+        .iter()
+        .map(|document| (document.issue_id.as_str(), document))
+        .collect::<HashMap<_, _>>();
+    let mut archive_sources = HashSet::new();
+    let mut archive_targets = HashSet::new();
+    let mut archived_issue_ids = HashSet::new();
+    for source_archive in &transaction.source_archives {
+        let source = safe_relative_path(base, Path::new(&source_archive.source), true)?;
+        if source.starts_with(HANDOFF_DIR) || path_contains_git_metadata(&source) {
+            return Err(format!(
+                "legacy source archive has an invalid source path: {}",
+                source.display()
+            ));
+        }
+        let archive = safe_relative_path(base, Path::new(&source_archive.archive), true)?;
+        if !archive.starts_with(LEGACY_SOURCE_ARCHIVE_DIR)
+            || archive.extension().and_then(|extension| extension.to_str()) != Some("source")
+            || archive != legacy_source_archive_path(&source)
+        {
+            return Err(format!(
+                "legacy source archive has a non-canonical target: {}",
+                archive.display()
+            ));
+        }
+        if !archive_sources.insert(source.clone()) || !archive_targets.insert(archive) {
+            return Err(format!(
+                "legacy migration carries a duplicate source archive for {}",
+                source.display()
+            ));
+        }
+        let mut canonical_issue_ids = source_archive.issue_ids.clone();
+        canonical_issue_ids.sort();
+        canonical_issue_ids.dedup();
+        if canonical_issue_ids.is_empty() || canonical_issue_ids != source_archive.issue_ids {
+            return Err(format!(
+                "legacy source archive {} has a non-canonical issue set",
+                source.display()
+            ));
+        }
+        for issue_id in &source_archive.issue_ids {
+            if !archived_issue_ids.insert(issue_id.clone()) {
+                return Err(format!(
+                    "legacy migration links {} to more than one source archive",
+                    issue_id
+                ));
+            }
+            let issue = rows.get(issue_id.as_str()).ok_or_else(|| {
+                format!(
+                    "legacy source archive {} targets missing issue {}",
+                    source.display(),
+                    issue_id
+                )
+            })?;
+            let annotation = issue.legacy_migration.as_ref().ok_or_else(|| {
+                format!(
+                    "legacy source archive targets unannotated issue {}",
+                    issue_id
+                )
+            })?;
+            if annotation.disposition != LegacyMigrationDisposition::Paired
+                || annotation.previous_prompt.as_deref() != Some(source_archive.source.as_str())
+            {
+                return Err(format!(
+                    "legacy source archive {} does not match provenance on {}",
+                    source.display(),
+                    issue_id
+                ));
+            }
+            let document = documents_by_id.get(issue_id.as_str()).ok_or_else(|| {
+                format!("legacy source archive targets missing handoff {}", issue_id)
+            })?;
+            if !document.document.contains(&source_archive.document) {
+                return Err(format!(
+                    "canonical handoff {} does not preserve archived source {}",
+                    document.handoff,
+                    source.display()
+                ));
+            }
+            if document
+                .source_document
+                .as_deref()
+                .is_some_and(|source| source != source_archive.document)
+            {
+                return Err(format!(
+                    "legacy source archive bytes do not match imported source for {}",
+                    issue_id
+                ));
+            }
+        }
+    }
+    for migration_document in &transaction.documents {
+        if migration_document.source_document.is_none() {
+            continue;
+        }
+        let issue = rows[migration_document.issue_id.as_str()];
+        if local_legacy_source(issue, base)?.is_some()
+            && !archived_issue_ids.contains(&migration_document.issue_id)
+        {
+            return Err(format!(
+                "imported local source for {} is not retired by the migration transaction",
+                migration_document.issue_id
+            ));
+        }
+    }
     for (original, issue) in transaction.before.iter().zip(&transaction.after) {
         let requires_document = original.handoff_digest.is_some()
             || issue.legacy_migration.as_ref().is_some_and(|migration| {
@@ -2730,6 +2849,66 @@ fn check_migration_document_state(
     }
 }
 
+fn check_legacy_source_archive_state(
+    base: &Path,
+    source_archive: &MigrationSourceArchive,
+) -> Result<(), String> {
+    let source = safe_relative_path(base, Path::new(&source_archive.source), true)?;
+    let archive = safe_relative_path(base, Path::new(&source_archive.archive), true)?;
+    let source_document =
+        read_optional_migration_document(&base.join(&source), source.to_string_lossy().as_ref())?;
+    let archive_document =
+        read_optional_migration_document(&base.join(&archive), archive.to_string_lossy().as_ref())?;
+    match (source_document.as_deref(), archive_document.as_deref()) {
+        (Some(source), None) if source == source_archive.document => Ok(()),
+        (None, Some(archive)) if archive == source_archive.document => Ok(()),
+        (Some(_), Some(_)) => Err(format!(
+            "legacy source {} and archive {} both exist",
+            source_archive.source, source_archive.archive
+        )),
+        (None, None) => Err(format!(
+            "legacy source {} and archive {} are both missing",
+            source_archive.source, source_archive.archive
+        )),
+        (Some(_), None) => Err(format!(
+            "legacy source changed after migration was prepared: {}",
+            source_archive.source
+        )),
+        (None, Some(_)) => Err(format!(
+            "legacy source archive changed after migration was prepared: {}",
+            source_archive.archive
+        )),
+    }
+}
+
+fn retire_legacy_source(
+    base: &Path,
+    source_archive: &MigrationSourceArchive,
+) -> Result<(), String> {
+    check_legacy_source_archive_state(base, source_archive)?;
+    let source = safe_relative_path(base, Path::new(&source_archive.source), true)?;
+    let archive = safe_relative_path(base, Path::new(&source_archive.archive), true)?;
+    let source_path = base.join(&source);
+    let archive_path = base.join(&archive);
+    if !source_path.exists() {
+        return Ok(());
+    }
+    let archive_parent = archive
+        .parent()
+        .ok_or_else(|| format!("legacy source archive has no parent: {}", archive.display()))?;
+    safe_create_dir_all(base, archive_parent)?;
+    fs::rename(&source_path, &archive_path).map_err(|error| {
+        format!(
+            "failed to retire legacy source {} as {}: {}",
+            source.display(),
+            archive.display(),
+            error
+        )
+    })?;
+    sync_parent(&source_path)?;
+    sync_parent(&archive_path)
+}
+
 fn apply_legacy_migration_files(
     base: &Path,
     transaction: &LegacyBoardTransaction,
@@ -2770,6 +2949,9 @@ fn apply_legacy_migration_files(
     for migration_document in &transaction.documents {
         check_migration_document_state(base, migration_document)?;
     }
+    for source_archive in &transaction.source_archives {
+        check_legacy_source_archive_state(base, source_archive)?;
+    }
 
     install_managed_text(
         &gitignore,
@@ -2806,13 +2988,26 @@ fn apply_legacy_migration_files(
             &migration_document.document,
         )?;
     }
+    for source_archive in &transaction.source_archives {
+        retire_legacy_source(base, source_archive)?;
+    }
 
-    for relative in durable_paths().into_iter().map(Path::new).chain(
-        transaction
-            .documents
-            .iter()
-            .map(|document| Path::new(document.handoff.as_str())),
-    ) {
+    for relative in durable_paths()
+        .into_iter()
+        .map(Path::new)
+        .chain(
+            transaction
+                .documents
+                .iter()
+                .map(|document| Path::new(document.handoff.as_str())),
+        )
+        .chain(
+            transaction
+                .source_archives
+                .iter()
+                .map(|archive| Path::new(archive.archive.as_str())),
+        )
+    {
         if git_path_ignored(base, relative)? {
             return Err(format!(
                 "legacy migration durable state is ignored by Git: {}",
@@ -3890,6 +4085,132 @@ fn read_migration_source(base: &Path, pointer: &str) -> Result<MigrationSource, 
     })
 }
 
+fn legacy_source_archive_path(source: &Path) -> PathBuf {
+    let digest = Sha256::digest(source.to_string_lossy().as_bytes());
+    Path::new(LEGACY_SOURCE_ARCHIVE_DIR).join(format!("{:x}.source", digest))
+}
+
+fn local_legacy_source(issue: &Issue, base: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(annotation) = issue.legacy_migration.as_ref() else {
+        return Ok(None);
+    };
+    if annotation.disposition != LegacyMigrationDisposition::Paired {
+        return Ok(None);
+    }
+    let Some(pointer) = annotation.previous_prompt.as_deref() else {
+        return Ok(None);
+    };
+    let raw = Path::new(pointer);
+    if raw.is_absolute() {
+        // External sources are evidence owned by another project. Migration
+        // imports their bytes but never mutates that project.
+        return Ok(None);
+    }
+    let relative = safe_relative_path(base, &normalize_relative(raw)?, true)?;
+    if relative.starts_with(HANDOFF_DIR) {
+        // A legacy file already inside `.handoff/` either becomes the
+        // canonical target in place or remains canonical input for one of a
+        // shared set. It is not a shadow root and must not be retired.
+        return Ok(None);
+    }
+    if path_contains_git_metadata(&relative) {
+        return Err(format!(
+            "legacy handoff pointer cannot archive Git metadata: {}",
+            pointer
+        ));
+    }
+    Ok(Some(relative))
+}
+
+fn collect_legacy_source_archives(
+    base: &Path,
+    issues: &[Issue],
+    documents: &[MigrationDocument],
+) -> Result<Vec<MigrationSourceArchive>, String> {
+    let documents_by_id = documents
+        .iter()
+        .map(|document| (document.issue_id.as_str(), document))
+        .collect::<HashMap<_, _>>();
+    let mut grouped: HashMap<PathBuf, (String, Vec<String>)> = HashMap::new();
+
+    for issue in issues {
+        let Some(source) = local_legacy_source(issue, base)? else {
+            continue;
+        };
+        let migration_document = documents_by_id.get(issue.id.as_str()).ok_or_else(|| {
+            format!(
+                "legacy source {} has no canonical handoff document for {}",
+                source.display(),
+                issue.id
+            )
+        })?;
+        let archive = legacy_source_archive_path(&source);
+        let source_path = base.join(&source);
+        let archive_path = base.join(&archive);
+        let source_document =
+            read_optional_migration_document(&source_path, source.to_string_lossy().as_ref())?;
+
+        let Some(source_document) = source_document else {
+            if let Some(archived) =
+                read_optional_migration_document(&archive_path, archive.to_string_lossy().as_ref())?
+            {
+                if !migration_document.document.contains(&archived) {
+                    return Err(format!(
+                        "archived legacy source {} is not preserved by canonical handoff {}",
+                        source.display(),
+                        migration_document.handoff
+                    ));
+                }
+            }
+            continue;
+        };
+        if !migration_document.document.contains(&source_document) {
+            return Err(format!(
+                "legacy source {} changed after admission and is not preserved by canonical handoff {}",
+                source.display(),
+                migration_document.handoff
+            ));
+        }
+        if archive_path.exists() {
+            return Err(format!(
+                "legacy source {} and its canonical archive {} both exist; resolve the duplicate before migration",
+                source.display(),
+                archive.display()
+            ));
+        }
+        match grouped.entry(source) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().0 != source_document {
+                    return Err(
+                        "legacy source changed while migration was being prepared".to_string()
+                    );
+                }
+                entry.get_mut().1.push(issue.id.clone());
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((source_document, vec![issue.id.clone()]));
+            }
+        }
+    }
+
+    let mut archives = grouped
+        .into_iter()
+        .map(|(source, (document, mut issue_ids))| {
+            issue_ids.sort();
+            MigrationSourceArchive {
+                archive: legacy_source_archive_path(&source)
+                    .to_string_lossy()
+                    .into_owned(),
+                source: source.to_string_lossy().into_owned(),
+                document,
+                issue_ids,
+            }
+        })
+        .collect::<Vec<_>>();
+    archives.sort_by(|left, right| left.source.cmp(&right.source));
+    Ok(archives)
+}
+
 fn strict_migration_document(
     base: &Path,
     config: &WorkflowConfig,
@@ -4074,10 +4395,24 @@ fn build_legacy_migration(
         Err(error) => render_unsynchronized_index(&order, &after, &error),
     };
 
-    let mut board = BoardConfig::strict();
-    board.migrated_from_legacy_at = Some(migration_time);
-    let board_after = serde_yaml::to_string(&board)
-        .map_err(|error| format!("failed to serialize migrated board identity: {}", error))?;
+    let source_archives = collect_legacy_source_archives(base, &after, &documents)?;
+    let board_before = read_optional_text(&base.join(BOARD_FILE), "board identity")?;
+    let board_after = match board_before.as_deref() {
+        Some(existing)
+            if serde_yaml::from_str::<BoardConfig>(existing).is_ok_and(|board| {
+                board.workflow == BoardMode::Strict && board.migrated_from_legacy_at.is_some()
+            }) =>
+        {
+            existing.to_string()
+        }
+        _ => {
+            let mut board = BoardConfig::strict();
+            board.migrated_from_legacy_at = Some(migration_time);
+            serde_yaml::to_string(&board).map_err(|error| {
+                format!("failed to serialize migrated board identity: {}", error)
+            })?
+        }
+    };
     let workflow_after = serde_yaml::to_string(&config)
         .map_err(|error| format!("failed to serialize workflow config: {}", error))?;
     let gitignore_before = read_optional_text(&base.join(".gitignore"), ".gitignore")?;
@@ -4091,9 +4426,10 @@ fn build_legacy_migration(
         before,
         after,
         documents,
+        source_archives,
         gitignore_before,
         gitignore_after,
-        board_before: read_optional_text(&base.join(BOARD_FILE), "board identity")?,
+        board_before,
         board_after,
         workflow_before: read_optional_text(&base.join(WORKFLOW_FILE), "workflow config")?,
         workflow_after,
@@ -4120,15 +4456,20 @@ pub fn migrate_legacy_board(
         .load_issues_strict()
         .map_err(|error| error.to_string())?;
     let board = load_board_config(base)?;
+    let mut prepared_transaction = None;
 
     if let Some(identity) = board.as_ref() {
         if identity.workflow == BoardMode::Strict
             && identity.migrated_from_legacy_at.is_some()
             && validate_migrated_board(base, &issues).is_ok()
         {
-            return Ok(legacy_migration_result(&issues, recovered, recovered));
+            let transaction = build_legacy_migration(base, issues.clone())?;
+            if transaction.source_archives.is_empty() {
+                return Ok(legacy_migration_result(&issues, recovered, recovered));
+            }
+            prepared_transaction = Some(transaction);
         }
-        if identity.workflow == BoardMode::Strict {
+        if prepared_transaction.is_none() && identity.workflow == BoardMode::Strict {
             let active_items = issues.iter().filter(|issue| {
                 issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done
             });
@@ -4146,7 +4487,10 @@ pub fn migrate_legacy_board(
         }
     }
 
-    let transaction = build_legacy_migration(base, issues)?;
+    let transaction = match prepared_transaction {
+        Some(transaction) => transaction,
+        None => build_legacy_migration(base, issues)?,
+    };
     let migrated_rows = transaction.after.clone();
     run_legacy_migration_transaction(base, store, transaction)?;
     validate_migrated_board(base, &migrated_rows)?;
@@ -4735,7 +5079,7 @@ mod tests {
             .path()
             .join(".dev/session-prompts/in-project-work-order.md");
         fs::create_dir_all(project_source.parent().unwrap()).unwrap();
-        let project_text = "# In-project work order\n\nPreserve the local source.\n";
+        let project_text = "# In-project work order\n\nagent-do manna claim mn-a00016\n\nPreserve the local source.\n";
         fs::write(&project_source, project_text).unwrap();
 
         let mut outside = issue("mn-a00015", "Cross-project absolute pointer");
@@ -4786,6 +5130,122 @@ mod tests {
             );
             validate_document(row, &document).unwrap();
         }
+        assert!(external_path.is_file());
+        assert!(!project_source.exists());
+        let archived = temp.path().join(legacy_source_archive_path(Path::new(
+            ".dev/session-prompts/in-project-work-order.md",
+        )));
+        assert_eq!(fs::read_to_string(archived).unwrap(), project_text);
+    }
+
+    #[test]
+    fn migration_repairs_an_admitted_board_with_an_unretired_local_source() {
+        let (temp, store, _) = setup();
+        let source = Path::new(".dev/session-prompts/pre-fix-work-order.md");
+        fs::create_dir_all(temp.path().join(source).parent().unwrap()).unwrap();
+        let source_text =
+            "# Pre-fix work order\n\nagent-do manna claim mn-a00018\n\nPreserve me.\n";
+        fs::write(temp.path().join(source), source_text).unwrap();
+        let mut legacy = issue("mn-a00018", "Pre-fix admitted item");
+        legacy.prompt = Some(source.to_string_lossy().into_owned());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        let archive = legacy_source_archive_path(source);
+        fs::rename(temp.path().join(&archive), temp.path().join(source)).unwrap();
+        let board_before = fs::read(temp.path().join(".manna/issues.jsonl")).unwrap();
+        let row = store.load_issues_strict().unwrap().remove(0);
+        let handoff = temp.path().join(row.prompt.as_deref().unwrap());
+        let handoff_before = fs::read(&handoff).unwrap();
+
+        let repaired = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(repaired.migrated);
+        assert!(!temp.path().join(source).exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join(&archive)).unwrap(),
+            source_text
+        );
+        assert_eq!(
+            fs::read(temp.path().join(".manna/issues.jsonl")).unwrap(),
+            board_before
+        );
+        assert_eq!(fs::read(&handoff).unwrap(), handoff_before);
+        assert!(!migrate_legacy_board(temp.path(), &store).unwrap().migrated);
+    }
+
+    #[test]
+    fn shared_local_source_is_archived_once_for_every_adopted_item() {
+        let (temp, store, _) = setup();
+        let source = Path::new(".dev/session-prompts/shared-work-order.md");
+        fs::create_dir_all(temp.path().join(source).parent().unwrap()).unwrap();
+        let source_text = "# Shared local source\n\nPreserve this for both items.\n";
+        fs::write(temp.path().join(source), source_text).unwrap();
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        for mut row in [
+            issue("mn-a00019", "First local source user"),
+            issue("mn-a00020", "Second local source user"),
+        ] {
+            row.prompt = Some(source.to_string_lossy().into_owned());
+            serde_json::to_writer(&mut board, &row).unwrap();
+            writeln!(board).unwrap();
+        }
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(!temp.path().join(source).exists());
+        let archives = fs::read_dir(temp.path().join(LEGACY_SOURCE_ARCHIVE_DIR))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(fs::read_to_string(archives[0].path()).unwrap(), source_text);
+        for row in store.load_issues_strict().unwrap() {
+            let handoff = fs::read_to_string(temp.path().join(row.prompt.unwrap())).unwrap();
+            assert!(handoff.contains(source_text));
+        }
+    }
+
+    #[test]
+    fn migration_recovery_accepts_an_already_retired_local_source() {
+        let (temp, store, _) = setup();
+        let source = Path::new(".dev/session-prompts/interrupted-work-order.md");
+        fs::create_dir_all(temp.path().join(source).parent().unwrap()).unwrap();
+        let source_text = "# Interrupted source\n\nPreserve across recovery.\n";
+        fs::write(temp.path().join(source), source_text).unwrap();
+        let mut legacy = issue("mn-a00021", "Interrupted source migration");
+        legacy.prompt = Some(source.to_string_lossy().into_owned());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+
+        let transaction =
+            build_legacy_migration(temp.path(), store.load_issues().unwrap()).unwrap();
+        assert_eq!(transaction.source_archives.len(), 1);
+        write_legacy_migration_transaction(temp.path(), &transaction).unwrap();
+        let archive = Path::new(&transaction.source_archives[0].archive);
+        safe_create_dir_all(temp.path(), archive.parent().unwrap()).unwrap();
+        fs::rename(temp.path().join(source), temp.path().join(archive)).unwrap();
+
+        assert_eq!(recover_legacy_migration(temp.path(), &store).unwrap(), 1);
+        assert!(!legacy_migration_path(temp.path()).exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join(archive)).unwrap(),
+            source_text
+        );
+        validate_migrated_board(temp.path(), &store.load_issues_strict().unwrap()).unwrap();
     }
 
     #[test]

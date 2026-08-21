@@ -18,6 +18,7 @@ Durable work orders live in tracked `.handoff/`:
 - `.handoff/README.md` - Generated ownership contract and board-derived index
 - `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` - Synchronized work-order presentation
 - `.handoff/.archive/` - Retired handoffs preserved by delete and item conversion
+- `.handoff/.archive/legacy-sources/*.source` - Exact non-Markdown evidence for imported in-project legacy work orders retired during migration
 
 ## issues.jsonl
 
@@ -142,8 +143,14 @@ canonical Claim section. In-project absolute source paths normalize to
 repository-relative provenance, while a cross-project source retains its
 original absolute path in the sealed document. The transaction authenticates
 source bytes separately from target-before bytes so recovery cannot substitute
-or overwrite unimported content. Unique handmade number prefixes seed priority
-only when they are unambiguous; `.manna/handoff-order.yaml` and `manna sync`
+or overwrite unimported content. After every consuming handoff preserves those
+exact bytes, a local source outside `.handoff/` is atomically moved to the
+deterministic `.handoff/.archive/legacy-sources/` evidence root. Its `.source`
+suffix keeps preserved claim text from becoming a second executable Markdown
+workflow. Shared sources archive once, external sources are never mutated, and
+`migrate` repairs already-admitted boards whose local sources were left behind
+without changing strict rows or handoff seals. Unique handmade number prefixes
+seed priority only when they are unambiguous; `.manna/handoff-order.yaml` and `manna sync`
 own presentation after admission. Recovery accepts only the complete before or
 complete after board, so a concurrent mutation is never overwritten. Replaying
 a completed migration is byte-stable. The annotation records how a legacy row
