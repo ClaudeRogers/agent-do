@@ -242,7 +242,10 @@ contract as a board gate. `manna reconcile` checks both directions under
 id mentions are data, not claims; only `manna claim <id>` command lines bind.
 
 Nonempty boards created before workflow version 1 remain legacy until an
-explicit migration. Their absolute pointers, `PROMPT:` description fallback,
+explicit `agent-do manna migrate`. The migration creates sealed handoffs for
+active items, grandfathers done rows, exempts tracks and dreams, releases
+claims without ownership proofs, and publishes strict identity last in one
+recoverable transaction. Their absolute pointers, `PROMPT:` description fallback,
 and `.dev/session-prompts/` reverse scan keep working. This compatibility path
 prevents an agent-do upgrade from rearranging a live campaign silently.
 

@@ -99,6 +99,29 @@ pub fn is_default_type(issue_type: &IssueType) -> bool {
     *issue_type == IssueType::Item
 }
 
+/// How an existing row entered the strict handoff workflow. This annotation
+/// is written only by the explicit legacy-board migration command; ordinary
+/// strict-board rows do not need it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyMigrationDisposition {
+    Paired,
+    History,
+    Exempt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyMigrationAnnotation {
+    pub version: u32,
+    pub disposition: LegacyMigrationDisposition,
+    pub migrated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_claimed_by: Option<String>,
+}
+
 /// Marker rendered beside every dream in `list` and `context`.
 ///
 /// Dreams stay visible on purpose; the marker is what makes the visibility
@@ -182,6 +205,11 @@ pub struct Issue {
     /// claim, so a syntactic claim mention cannot impersonate a work order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_digest: Option<String>,
+
+    /// Auditable disposition assigned by `manna migrate` when a pre-workflow
+    /// board is admitted into strict mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_migration: Option<LegacyMigrationAnnotation>,
 }
 
 impl Issue {
@@ -218,6 +246,7 @@ impl Issue {
             source: None,
             prompt: None,
             handoff_digest: None,
+            legacy_migration: None,
         })
     }
 
@@ -477,6 +506,15 @@ impl Issue {
             }
             if self.prompt.is_none() {
                 return Err("Issue with handoff_digest must have a prompt pointer".to_string());
+            }
+        }
+
+        if let Some(migration) = self.legacy_migration.as_ref() {
+            if migration.version != 1 {
+                return Err(format!(
+                    "unsupported legacy migration annotation version {}",
+                    migration.version
+                ));
             }
         }
 

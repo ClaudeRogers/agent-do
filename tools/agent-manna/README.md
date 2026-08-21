@@ -56,6 +56,9 @@ falls back to `target/debug/manna-core`, and can also use a `manna-core` binary 
 # Initialize manna in current directory
 agent-do manna init
 
+# Admit an existing nonempty board into strict pairing
+agent-do manna migrate
+
 # Create an issue
 agent-do manna create "Fix authentication bug" "Users can't login with SSO"
 
@@ -101,6 +104,23 @@ recovered_transactions: 0
 upgraded_items: 0
 restored_config: false
 ```
+
+### `migrate`
+
+Explicitly admit a nonempty legacy board into strict workflow version 2. One
+authenticated write-ahead transaction establishes the board identity, creates
+and seals canonical handoffs for every active item, annotates done rows as
+grandfathered history, exempts tracks and dreams, and releases claims that
+lack ownership proofs. Board identity is published last, so interruption
+leaves a recoverable journal instead of a half-strict board. Repeating the
+command after success is a no-op.
+
+```bash
+agent-do manna migrate
+```
+
+Ordinary strict writes never invoke migration and retain the same fail-closed
+pair, ownership, Git visibility, and symlink checks.
 
 ### `status`
 

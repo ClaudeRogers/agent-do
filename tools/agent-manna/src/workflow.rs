@@ -4,6 +4,7 @@
 //! state, `.handoff/` owns bound work orders, and an ignored transaction
 //! journal closes the small crash window between those two filesystems.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -15,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::MannaError;
-use crate::issue::{Issue, IssueStatus, IssueType, SessionIdentity};
+use crate::issue::{
+    Issue, IssueStatus, IssueType, LegacyMigrationAnnotation, LegacyMigrationDisposition,
+    SessionIdentity,
+};
+use crate::reconcile::prompt_pointer;
 use crate::store::MannaStore;
 
 pub const WORKFLOW_VERSION: u32 = 2;
@@ -25,6 +30,8 @@ pub const BOARD_FILE: &str = ".manna/board.yaml";
 pub const HANDOFF_README: &str = ".handoff/README.md";
 pub const HANDOFF_ARCHIVE_DIR: &str = ".handoff/.archive";
 const TRANSACTION_DIR: &str = ".manna/transactions";
+const LEGACY_MIGRATION_TRANSACTION: &str = ".manna/transactions/legacy-board-migration.yaml";
+const LEGACY_MIGRATION_VERSION: u32 = 1;
 
 const README_CONTENT: &str = r#"# agent-do handoffs
 
@@ -65,6 +72,8 @@ enum BoardMode {
 struct BoardConfig {
     version: u32,
     workflow: BoardMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migrated_from_legacy_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl BoardConfig {
@@ -72,6 +81,7 @@ impl BoardConfig {
         BoardConfig {
             version: 1,
             workflow: BoardMode::Strict,
+            migrated_from_legacy_at: None,
         }
     }
 
@@ -79,6 +89,7 @@ impl BoardConfig {
         BoardConfig {
             version: 1,
             workflow: BoardMode::Legacy,
+            migrated_from_legacy_at: None,
         }
     }
 }
@@ -165,6 +176,42 @@ struct PairTransaction {
     archive: Option<String>,
     document: Option<String>,
     integrity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationDocument {
+    issue_id: String,
+    handoff: String,
+    document: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyBoardTransaction {
+    version: u32,
+    before: Vec<Issue>,
+    after: Vec<Issue>,
+    documents: Vec<MigrationDocument>,
+    gitignore_before: Option<String>,
+    gitignore_after: String,
+    board_before: Option<String>,
+    board_after: String,
+    workflow_before: Option<String>,
+    workflow_after: String,
+    readme_before: Option<String>,
+    readme_after: String,
+    integrity: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyMigrationResult {
+    pub migrated: bool,
+    pub recovered_transaction: bool,
+    pub paired_items: usize,
+    pub historical_rows: usize,
+    pub exempt_rows: usize,
+    pub released_claims: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -394,15 +441,14 @@ pub fn load_workflow(base: &Path) -> Result<Option<WorkflowConfig>, String> {
     Ok(Some(config))
 }
 
-pub fn workflow_markers_present(base: &Path, issues: &[Issue]) -> bool {
-    path_exists(&base.join(HANDOFF_DIR))
-        || issues.iter().any(|issue| {
-            issue.handoff_digest.is_some()
-                || issue.prompt.as_deref().is_some_and(|pointer| {
-                    normalize_relative(Path::new(pointer))
-                        .is_ok_and(|path| path.starts_with(HANDOFF_DIR))
-                })
-        })
+pub fn workflow_markers_present(_base: &Path, issues: &[Issue]) -> bool {
+    issues.iter().any(|issue| {
+        issue.handoff_digest.is_some()
+            || issue.prompt.as_deref().is_some_and(|pointer| {
+                normalize_relative(Path::new(pointer))
+                    .is_ok_and(|path| path.starts_with(HANDOFF_DIR))
+            })
+    })
 }
 
 /// Load the board mode without permitting deletion of one config file to
@@ -429,7 +475,7 @@ pub fn load_workflow_for_board(
         BoardMode::Legacy => {
             if load_workflow(base)?.is_some() || workflow_markers_present(base, issues) {
                 return Err(
-                    "legacy board identity conflicts with strict workflow state; run `agent-do manna init`"
+                    "legacy board identity conflicts with strict workflow state; run `agent-do manna migrate`"
                         .to_string(),
                 );
             }
@@ -470,6 +516,36 @@ fn durable_paths() -> [&'static str; 5] {
     ]
 }
 
+fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>, String> {
+    reject_symlink(path, label)?;
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {}", path.display(), error)),
+    }
+}
+
+fn workflow_gitignore_content(existing: &str) -> String {
+    let marker = "# agent-do workflow: .manna and .handoff are durable state";
+    if existing.contains(marker) && existing.lines().any(|line| line == "!.manna/board.yaml") {
+        return existing.to_string();
+    }
+
+    let mut updated = existing.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    if !existing.contains(marker) {
+        updated.push_str(&format!(
+            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n",
+            marker
+        ));
+    } else {
+        updated.push_str("!.manna/board.yaml\n.manna/transactions/\n");
+    }
+    updated
+}
+
 fn ensure_workflow_tracked(base: &Path) -> Result<bool, String> {
     let ignored_before = durable_paths()
         .into_iter()
@@ -482,29 +558,9 @@ fn ensure_workflow_tracked(base: &Path) -> Result<bool, String> {
     let gitignore = base.join(".gitignore");
     reject_symlink(&gitignore, ".gitignore")?;
     let existing = fs::read_to_string(&gitignore).unwrap_or_default();
-    let marker = "# agent-do workflow: .manna and .handoff are durable state";
-    if !existing.contains(marker) {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&gitignore)
-            .map_err(|error| format!("failed to update {}: {}", gitignore.display(), error))?;
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            writeln!(file).map_err(|error| error.to_string())?;
-        }
-        writeln!(
-            file,
-            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**",
-            marker
-        )
-        .map_err(|error| format!("failed to update {}: {}", gitignore.display(), error))?;
-    } else if !existing.lines().any(|line| line == "!.manna/board.yaml") {
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&gitignore)
-            .map_err(|error| format!("failed to update {}: {}", gitignore.display(), error))?;
-        writeln!(file, "!.manna/board.yaml\n.manna/transactions/")
-            .map_err(|error| format!("failed to update {}: {}", gitignore.display(), error))?;
+    let updated = workflow_gitignore_content(&existing);
+    if updated != existing {
+        atomic_write_replace(&gitignore, &updated)?;
     }
     let still_ignored: Vec<&str> = durable_paths()
         .into_iter()
@@ -752,6 +808,49 @@ fn transaction_signature(
     transaction: &PairTransaction,
 ) -> Result<String, String> {
     let digest = hmac_sha256(key, &transaction_material(base, transaction)?);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    Ok(format!("hmac-sha256:{}", hex))
+}
+
+fn legacy_migration_path(base: &Path) -> PathBuf {
+    base.join(LEGACY_MIGRATION_TRANSACTION)
+}
+
+fn legacy_migration_material(
+    base: &Path,
+    transaction: &LegacyBoardTransaction,
+) -> Result<Vec<u8>, String> {
+    let mut unsigned = transaction.clone();
+    unsigned.integrity.clear();
+    let project = base.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve project root {}: {}",
+            base.display(),
+            error
+        )
+    })?;
+    let payload = serde_json::to_vec(&unsigned).map_err(|error| {
+        format!(
+            "failed to serialize legacy migration integrity material: {}",
+            error
+        )
+    })?;
+    let mut material = b"agent-do/manna/legacy-migration/v1\0".to_vec();
+    material.extend_from_slice(project.to_string_lossy().as_bytes());
+    material.push(0);
+    material.extend_from_slice(&payload);
+    Ok(material)
+}
+
+fn legacy_migration_signature(
+    base: &Path,
+    key: &[u8],
+    transaction: &LegacyBoardTransaction,
+) -> Result<String, String> {
+    let digest = hmac_sha256(key, &legacy_migration_material(base, transaction)?);
     let hex = digest
         .iter()
         .map(|byte| format!("{:02x}", byte))
@@ -1140,6 +1239,165 @@ fn same_lifecycle(before: &Issue, after: &Issue) -> bool {
         && before.claim_token_hash == after.claim_token_hash
 }
 
+fn validate_legacy_migration_transaction(
+    base: &Path,
+    path: &Path,
+    transaction: &LegacyBoardTransaction,
+    key: &[u8],
+) -> Result<WorkflowConfig, String> {
+    if transaction.version != LEGACY_MIGRATION_VERSION {
+        return Err(format!(
+            "unsupported legacy migration transaction version {}",
+            transaction.version
+        ));
+    }
+    let expected_path = legacy_migration_path(base);
+    if path != expected_path {
+        return Err(format!(
+            "legacy migration transaction path {} is not {}",
+            path.display(),
+            expected_path.display()
+        ));
+    }
+    let expected_signature = legacy_migration_signature(base, key, transaction)?;
+    if !constant_time_eq(
+        transaction.integrity.as_bytes(),
+        expected_signature.as_bytes(),
+    ) {
+        return Err(format!(
+            "legacy migration transaction {} failed HMAC authentication",
+            path.display()
+        ));
+    }
+    if transaction.before.len() != transaction.after.len() {
+        return Err("legacy migration cannot add or delete board rows".to_string());
+    }
+    let mut row_ids = HashSet::new();
+    for (before, after) in transaction.before.iter().zip(&transaction.after) {
+        if before.id != after.id || !row_ids.insert(after.id.clone()) {
+            return Err(
+                "legacy migration must preserve one unique row for every issue id".to_string(),
+            );
+        }
+        after
+            .validate()
+            .map_err(|error| format!("invalid migrated row {}: {}", after.id, error))?;
+        if after.legacy_migration.is_none() {
+            return Err(format!(
+                "migrated row {} has no legacy migration annotation",
+                after.id
+            ));
+        }
+        match after.legacy_migration.as_ref().unwrap().disposition {
+            LegacyMigrationDisposition::Paired
+                if after.issue_type != IssueType::Item
+                    || after.status == IssueStatus::Done
+                    || after.prompt.is_none()
+                    || after.handoff_digest.is_none() =>
+            {
+                return Err(format!(
+                    "migrated paired row {} is not an active item with a bound handoff",
+                    after.id
+                ));
+            }
+            LegacyMigrationDisposition::History
+                if after.status != IssueStatus::Done
+                    || after.prompt.is_some()
+                    || after.handoff_digest.is_some() =>
+            {
+                return Err(format!(
+                    "migrated history row {} is not closed, pointer-free history",
+                    after.id
+                ));
+            }
+            LegacyMigrationDisposition::Exempt
+                if after.status == IssueStatus::Done
+                    || after.issue_type == IssueType::Item
+                    || after.prompt.is_some()
+                    || after.handoff_digest.is_some() =>
+            {
+                return Err(format!(
+                    "migrated exempt row {} is not an active track or dream",
+                    after.id
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let board: BoardConfig = serde_yaml::from_str(&transaction.board_after)
+        .map_err(|error| format!("invalid migrated board identity: {}", error))?;
+    if board.version != 1
+        || board.workflow != BoardMode::Strict
+        || board.migrated_from_legacy_at.is_none()
+    {
+        return Err(
+            "legacy migration must publish a strict, migration-stamped board identity".to_string(),
+        );
+    }
+    let config: WorkflowConfig = serde_yaml::from_str(&transaction.workflow_after)
+        .map_err(|error| format!("invalid migrated workflow config: {}", error))?;
+    config.validate()?;
+    if transaction.readme_after != README_CONTENT {
+        return Err("legacy migration README is not the canonical generated content".to_string());
+    }
+    let expected_gitignore =
+        workflow_gitignore_content(transaction.gitignore_before.as_deref().unwrap_or_default());
+    if transaction.gitignore_after != expected_gitignore {
+        return Err("legacy migration Git visibility update is not canonical".to_string());
+    }
+
+    let rows = transaction
+        .after
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+    let mut document_ids = HashSet::new();
+    for migration_document in &transaction.documents {
+        if !document_ids.insert(migration_document.issue_id.clone()) {
+            return Err(format!(
+                "legacy migration carries duplicate handoff documents for {}",
+                migration_document.issue_id
+            ));
+        }
+        let issue = rows
+            .get(migration_document.issue_id.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "legacy migration handoff targets missing issue {}",
+                    migration_document.issue_id
+                )
+            })?;
+        if issue.issue_type != IssueType::Item || issue.status == IssueStatus::Done {
+            return Err(format!(
+                "legacy migration handoff {} does not target an active item",
+                migration_document.issue_id
+            ));
+        }
+        let canonical = canonical_handoff_path(base, &config, issue, issue.prompt.as_deref())?;
+        let supplied = normalize_relative(Path::new(&migration_document.handoff))?;
+        if supplied != canonical {
+            return Err(format!(
+                "legacy migration handoff {} is not authoritative path {}",
+                supplied.display(),
+                canonical.display()
+            ));
+        }
+        validate_document(issue, &migration_document.document)?;
+    }
+    for issue in &transaction.after {
+        let requires_document =
+            issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done;
+        if requires_document != document_ids.contains(&issue.id) {
+            return Err(format!(
+                "legacy migration document set does not match active item {}",
+                issue.id
+            ));
+        }
+    }
+    Ok(config)
+}
+
 fn validate_transaction(
     base: &Path,
     config: &WorkflowConfig,
@@ -1380,6 +1638,130 @@ fn install_transaction_document(
     atomic_write_replace(&target, document)
 }
 
+fn check_managed_text_state(
+    path: &Path,
+    before: Option<&str>,
+    after: &str,
+    label: &str,
+) -> Result<(), String> {
+    let current = read_optional_text(path, label)?;
+    if current.as_deref() != before && current.as_deref() != Some(after) {
+        return Err(format!(
+            "{} changed after legacy migration was prepared: {}",
+            label,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn install_managed_text(
+    path: &Path,
+    before: Option<&str>,
+    after: &str,
+    label: &str,
+) -> Result<(), String> {
+    check_managed_text_state(path, before, after, label)?;
+    if read_optional_text(path, label)?.as_deref() == Some(after) {
+        return Ok(());
+    }
+    atomic_write_replace(path, after)
+}
+
+fn check_migration_document_state(
+    base: &Path,
+    migration_document: &MigrationDocument,
+) -> Result<(), String> {
+    let relative = safe_relative_path(base, Path::new(&migration_document.handoff), true)?;
+    let target = base.join(relative);
+    reject_symlink(&target, "legacy migration handoff")?;
+    match fs::read_to_string(&target) {
+        Ok(existing) if existing == migration_document.document => Ok(()),
+        Ok(_) => Err(format!(
+            "legacy migration refuses to overwrite existing handoff {}",
+            migration_document.handoff
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to read {}: {}", target.display(), error)),
+    }
+}
+
+fn apply_legacy_migration_files(
+    base: &Path,
+    transaction: &LegacyBoardTransaction,
+) -> Result<(), String> {
+    let gitignore = base.join(".gitignore");
+    let workflow = base.join(WORKFLOW_FILE);
+    let readme = base.join(HANDOFF_README);
+
+    // Validate every compare-and-swap precondition before the first write so
+    // a concurrent human edit cannot leave a partly applied file set.
+    check_managed_text_state(
+        &gitignore,
+        transaction.gitignore_before.as_deref(),
+        &transaction.gitignore_after,
+        ".gitignore",
+    )?;
+    check_managed_text_state(
+        &workflow,
+        transaction.workflow_before.as_deref(),
+        &transaction.workflow_after,
+        "workflow config",
+    )?;
+    check_managed_text_state(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )?;
+    for migration_document in &transaction.documents {
+        check_migration_document_state(base, migration_document)?;
+    }
+
+    install_managed_text(
+        &gitignore,
+        transaction.gitignore_before.as_deref(),
+        &transaction.gitignore_after,
+        ".gitignore",
+    )?;
+    safe_create_dir_all(base, Path::new(HANDOFF_DIR))?;
+    safe_create_dir_all(base, Path::new(".manna"))?;
+    install_managed_text(
+        &workflow,
+        transaction.workflow_before.as_deref(),
+        &transaction.workflow_after,
+        "workflow config",
+    )?;
+    install_managed_text(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )?;
+    for migration_document in &transaction.documents {
+        install_transaction_document(
+            base,
+            Path::new(&migration_document.handoff),
+            &migration_document.document,
+        )?;
+    }
+
+    for relative in durable_paths().into_iter().map(Path::new).chain(
+        transaction
+            .documents
+            .iter()
+            .map(|document| Path::new(document.handoff.as_str())),
+    ) {
+        if git_path_ignored(base, relative)? {
+            return Err(format!(
+                "legacy migration durable state is ignored by Git: {}",
+                relative.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn archive_handoff(base: &Path, handoff: &Path, archive: &Path) -> Result<(), String> {
     let handoff = safe_relative_path(base, handoff, true)?;
     let archive = safe_relative_path(base, archive, true)?;
@@ -1485,6 +1867,138 @@ fn execute_transaction(
     Ok(())
 }
 
+fn execute_legacy_migration(
+    base: &Path,
+    store: &MannaStore,
+    transaction: &LegacyBoardTransaction,
+) -> Result<(), MannaError> {
+    let board_path = base.join(BOARD_FILE);
+    store.recover_replace_board_with(
+        &transaction.before,
+        &transaction.after,
+        || apply_legacy_migration_files(base, transaction),
+        || {
+            // Board identity is the commit point. Until this succeeds, every
+            // ordinary write remains legacy or fail-closed; no reader can see
+            // a strict identity backed by only part of the migrated state.
+            install_managed_text(
+                &board_path,
+                transaction.board_before.as_deref(),
+                &transaction.board_after,
+                "board identity",
+            )
+        },
+    )
+}
+
+fn write_legacy_migration_transaction(
+    base: &Path,
+    transaction: &LegacyBoardTransaction,
+) -> Result<PathBuf, String> {
+    safe_create_dir_all(base, Path::new(TRANSACTION_DIR))?;
+    let path = legacy_migration_path(base);
+    let key = load_recovery_key(base, true)?;
+    let mut signed = transaction.clone();
+    signed.integrity = legacy_migration_signature(base, &key, &signed)?;
+    validate_legacy_migration_transaction(base, &path, &signed, &key)?;
+    let yaml = serde_yaml::to_string(&signed)
+        .map_err(|error| format!("failed to serialize legacy migration: {}", error))?;
+    atomic_write(&path, yaml.as_bytes(), false).map_err(|error| {
+        format!(
+            "{}; a legacy-board migration is already pending; rerun `agent-do manna migrate`",
+            error
+        )
+    })?;
+    Ok(path)
+}
+
+fn complete_legacy_migration_path(
+    base: &Path,
+    store: &MannaStore,
+    path: &Path,
+    key: &[u8],
+) -> Result<TransactionOutcome, String> {
+    safe_relative_path(
+        base,
+        path.strip_prefix(base).map_err(|_| {
+            format!(
+                "legacy migration path is outside project: {}",
+                path.display()
+            )
+        })?,
+        false,
+    )?;
+    reject_symlink(path, "legacy migration transaction")?;
+    let mut file = File::open(path)
+        .map_err(|error| format!("failed to open {}: {}", path.display(), error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {}", path.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "legacy migration transaction is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    let transaction: LegacyBoardTransaction = serde_yaml::from_str(&text).map_err(|error| {
+        format!(
+            "invalid legacy migration transaction {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    validate_legacy_migration_transaction(base, path, &transaction, key)?;
+    match execute_legacy_migration(base, store, &transaction) {
+        Ok(()) => {
+            remove_transaction_if_unchanged(path, &metadata, &text)?;
+            Ok(TransactionOutcome::Applied)
+        }
+        Err(MannaError::RecoveryConflict(reason)) => {
+            remove_transaction_if_unchanged(path, &metadata, &text)?;
+            Ok(TransactionOutcome::DiscardedConflict(reason))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub fn recover_legacy_migration(base: &Path, store: &MannaStore) -> Result<usize, String> {
+    let path = legacy_migration_path(base);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let key = load_recovery_key(base, false)?;
+    match complete_legacy_migration_path(base, store, &path, &key)? {
+        TransactionOutcome::Applied => Ok(1),
+        TransactionOutcome::DiscardedConflict(reason) => Err(format!(
+            "legacy-board migration lost a concurrent update and was discarded safely: {}",
+            reason
+        )),
+    }
+}
+
+fn run_legacy_migration_transaction(
+    base: &Path,
+    store: &MannaStore,
+    transaction: LegacyBoardTransaction,
+) -> Result<(), String> {
+    let path = write_legacy_migration_transaction(base, &transaction)?;
+    let key = load_recovery_key(base, false)?;
+    match complete_legacy_migration_path(base, store, &path, &key) {
+        Ok(TransactionOutcome::Applied) => Ok(()),
+        Ok(TransactionOutcome::DiscardedConflict(reason)) => Err(format!(
+            "legacy-board migration lost a concurrent board update and was discarded safely: {}. Reload and retry.",
+            reason
+        )),
+        Err(error) => Err(format!(
+            "legacy-board migration is pending recovery: {}. Rerun `agent-do manna migrate`.",
+            error
+        )),
+    }
+}
+
 fn complete_transaction_path(
     base: &Path,
     store: &MannaStore,
@@ -1568,7 +2082,11 @@ pub fn recover_pair_transactions(
         .map_err(|error| format!("failed to inspect {}: {}", directory.display(), error))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("yaml"))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("mn-") && name.ends_with(".yaml"))
+        })
         .collect::<Vec<_>>();
     paths.sort();
     if paths.is_empty() {
@@ -1846,6 +2364,252 @@ fn upgrade_legacy_handoff(
     Ok(after)
 }
 
+fn valid_claim_token_hash(value: Option<&str>) -> bool {
+    value.is_some_and(|proof| {
+        proof.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    })
+}
+
+fn release_invalid_legacy_claim(issue: &mut Issue) -> bool {
+    let has_claim_state = issue.claimed_by.is_some()
+        || issue.claimed_at.is_some()
+        || issue.claim_token_hash.is_some()
+        || issue.status == IssueStatus::InProgress;
+    let coherent_live_claim = issue.status != IssueStatus::Done
+        && issue.claimed_by.is_some()
+        && issue.claimed_at.is_some()
+        && valid_claim_token_hash(issue.claim_token_hash.as_deref());
+    if !has_claim_state || coherent_live_claim {
+        return false;
+    }
+
+    issue.claimed_by = None;
+    issue.claimed_at = None;
+    issue.claim_token_hash = None;
+    if issue.status != IssueStatus::Done {
+        issue.status = if issue.blocked_by.is_empty() {
+            IssueStatus::Open
+        } else {
+            IssueStatus::Blocked
+        };
+    }
+    true
+}
+
+fn legacy_migration_result(
+    issues: &[Issue],
+    migrated: bool,
+    recovered: bool,
+) -> LegacyMigrationResult {
+    let paired_items = issues
+        .iter()
+        .filter(|issue| {
+            issue.legacy_migration.as_ref().is_some_and(|migration| {
+                migration.disposition == LegacyMigrationDisposition::Paired
+            })
+        })
+        .count();
+    let historical_rows = issues
+        .iter()
+        .filter(|issue| {
+            issue.legacy_migration.as_ref().is_some_and(|migration| {
+                migration.disposition == LegacyMigrationDisposition::History
+            })
+        })
+        .count();
+    let exempt_rows = issues
+        .iter()
+        .filter(|issue| {
+            issue.legacy_migration.as_ref().is_some_and(|migration| {
+                migration.disposition == LegacyMigrationDisposition::Exempt
+            })
+        })
+        .count();
+    let released_claims = issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .legacy_migration
+                .as_ref()
+                .is_some_and(|migration| migration.released_claimed_by.is_some())
+        })
+        .count();
+    LegacyMigrationResult {
+        migrated,
+        recovered_transaction: recovered,
+        paired_items,
+        historical_rows,
+        exempt_rows,
+        released_claims,
+    }
+}
+
+fn validate_migrated_board(base: &Path, issues: &[Issue]) -> Result<WorkflowConfig, String> {
+    let config = load_workflow(base)?
+        .ok_or_else(|| format!("migrated board is missing {}", WORKFLOW_FILE))?;
+    config.validate()?;
+    validate_scaffold(base, &config)?;
+    for issue in issues
+        .iter()
+        .filter(|issue| issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done)
+    {
+        validate_handoff(base, &config, issue).map_err(|error| {
+            format!(
+                "migrated item {} has an invalid authoritative handoff: {}",
+                issue.id, error
+            )
+        })?;
+    }
+    Ok(config)
+}
+
+fn build_legacy_migration(
+    base: &Path,
+    before: Vec<Issue>,
+) -> Result<LegacyBoardTransaction, String> {
+    if before.is_empty() {
+        return Err(
+            "the Manna board is empty; run `agent-do manna init` instead of legacy migration"
+                .to_string(),
+        );
+    }
+    if before.iter().any(|issue| issue.legacy_migration.is_some()) {
+        return Err(
+            "legacy migration annotations are incomplete or inconsistent; refusing to reseal rows"
+                .to_string(),
+        );
+    }
+    if before.iter().any(|issue| issue.handoff_digest.is_some()) {
+        return Err(
+            "board mixes strict handoff bindings with legacy rows; repair the strict workflow instead of migrating it again"
+                .to_string(),
+        );
+    }
+
+    let migration_time = Utc::now();
+    let config = WorkflowConfig::default();
+    let mut after = Vec::with_capacity(before.len());
+    let mut documents = Vec::new();
+    for original in &before {
+        let mut issue = original.clone();
+        let previous_prompt = prompt_pointer(original);
+        let released_owner = original.claimed_by.clone();
+        let released = release_invalid_legacy_claim(&mut issue);
+        if released {
+            issue.updated_at = migration_time;
+        }
+
+        let disposition = if issue.status == IssueStatus::Done {
+            issue.prompt = None;
+            issue.handoff_digest = None;
+            LegacyMigrationDisposition::History
+        } else if issue.issue_type != IssueType::Item {
+            issue.prompt = None;
+            issue.handoff_digest = None;
+            LegacyMigrationDisposition::Exempt
+        } else {
+            let relative = canonical_handoff_path(base, &config, &issue, None)?;
+            issue.prompt = Some(relative.to_string_lossy().into_owned());
+            let document = render_handoff(base, &issue)?;
+            issue.handoff_digest = Some(calculate_binding(&document)?);
+            validate_document(&issue, &document)?;
+            documents.push(MigrationDocument {
+                issue_id: issue.id.clone(),
+                handoff: relative.to_string_lossy().into_owned(),
+                document,
+            });
+            LegacyMigrationDisposition::Paired
+        };
+        issue.legacy_migration = Some(LegacyMigrationAnnotation {
+            version: LEGACY_MIGRATION_VERSION,
+            disposition,
+            migrated_at: migration_time,
+            previous_prompt,
+            released_claimed_by: released.then_some(released_owner).flatten(),
+        });
+        issue
+            .validate()
+            .map_err(|error| format!("cannot migrate {}: {}", issue.id, error))?;
+        after.push(issue);
+    }
+
+    let mut board = BoardConfig::strict();
+    board.migrated_from_legacy_at = Some(migration_time);
+    let board_after = serde_yaml::to_string(&board)
+        .map_err(|error| format!("failed to serialize migrated board identity: {}", error))?;
+    let workflow_after = serde_yaml::to_string(&config)
+        .map_err(|error| format!("failed to serialize workflow config: {}", error))?;
+    let gitignore_before = read_optional_text(&base.join(".gitignore"), ".gitignore")?;
+    let gitignore_after =
+        workflow_gitignore_content(gitignore_before.as_deref().unwrap_or_default());
+    for document in &documents {
+        check_migration_document_state(base, document)?;
+    }
+    Ok(LegacyBoardTransaction {
+        version: LEGACY_MIGRATION_VERSION,
+        before,
+        after,
+        documents,
+        gitignore_before,
+        gitignore_after,
+        board_before: read_optional_text(&base.join(BOARD_FILE), "board identity")?,
+        board_after,
+        workflow_before: read_optional_text(&base.join(WORKFLOW_FILE), "workflow config")?,
+        workflow_after,
+        readme_before: read_optional_text(&base.join(HANDOFF_README), "handoff README")?,
+        readme_after: README_CONTENT.to_string(),
+        integrity: String::new(),
+    })
+}
+
+/// Admit a pre-workflow board into strict mode as one authenticated,
+/// recoverable transaction. Ordinary strict writes never call this operation
+/// or relax their pair validation.
+pub fn migrate_legacy_board(
+    base: &Path,
+    store: &MannaStore,
+) -> Result<LegacyMigrationResult, String> {
+    store
+        .validate_storage_root()
+        .map_err(|error| error.to_string())?;
+    let recovered = recover_legacy_migration(base, store)? > 0;
+    let issues = store
+        .load_issues_strict()
+        .map_err(|error| error.to_string())?;
+    let board = load_board_config(base)?;
+
+    if let Some(identity) = board.as_ref() {
+        if identity.workflow == BoardMode::Strict && identity.migrated_from_legacy_at.is_some() {
+            validate_migrated_board(base, &issues)?;
+            return Ok(legacy_migration_result(&issues, recovered, recovered));
+        }
+        if identity.workflow == BoardMode::Strict {
+            let active_items = issues.iter().filter(|issue| {
+                issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done
+            });
+            let fully_strict = active_items
+                .clone()
+                .all(|issue| issue.prompt.is_some() && issue.handoff_digest.is_some());
+            let has_strict_binding = issues.iter().any(|issue| issue.handoff_digest.is_some());
+            if fully_strict && has_strict_binding && load_workflow(base)?.is_some() {
+                validate_migrated_board(base, &issues)?;
+                return Ok(legacy_migration_result(&issues, false, recovered));
+            }
+        }
+    }
+
+    let transaction = build_legacy_migration(base, issues)?;
+    let migrated_rows = transaction.after.clone();
+    run_legacy_migration_transaction(base, store, transaction)?;
+    validate_migrated_board(base, &migrated_rows)?;
+    Ok(legacy_migration_result(&migrated_rows, true, recovered))
+}
+
 pub fn initialize_workflow(
     base: &Path,
     store: &MannaStore,
@@ -1853,6 +2617,7 @@ pub fn initialize_workflow(
     store
         .validate_storage_root()
         .map_err(|error| error.to_string())?;
+    let recovered_migration = recover_legacy_migration(base, store)?;
     let initial_issues = store.load_issues().map_err(|error| error.to_string())?;
     let existing = load_workflow(base)?;
     let strict_markers = workflow_markers_present(base, &initial_issues);
@@ -1905,7 +2670,8 @@ pub fn initialize_workflow(
     // Recovery begins only after board identity, scaffold paths, Git
     // visibility, and journal authentication can all be checked. A planted
     // journal is never the input that decides where validation occurs.
-    let recovered_transactions = recover_pair_transactions(base, store, &config)?;
+    let recovered_transactions =
+        recovered_migration + recover_pair_transactions(base, store, &config)?;
     let issues = store.load_issues().map_err(|error| error.to_string())?;
 
     let old_workflow = existing
@@ -2035,7 +2801,13 @@ pub fn find_orphan_handoffs(base: &Path, issues: &[Issue]) -> Vec<(PathBuf, Stri
                 stack.push(path);
             } else if path.extension().and_then(|extension| extension.to_str()) == Some("md") {
                 let text = fs::read_to_string(&path).unwrap_or_default();
-                match handoff_manna_id(&text).and_then(|id| by_id.get(id.as_str()).copied()) {
+                let Some(manna_id) = handoff_manna_id(&text) else {
+                    // `.handoff/` is also the durable home for research and
+                    // session-continuation documents. Only structured Manna
+                    // work orders participate in the orphan invariant.
+                    continue;
+                };
+                match by_id.get(manna_id.as_str()).copied() {
                     None => findings.push((path, "handoff has no live Manna item".to_string())),
                     Some(issue) if issue.issue_type != IssueType::Item => findings.push((
                         path,
@@ -2096,6 +2868,281 @@ mod tests {
 
     fn issue(id: &str, title: &str) -> Issue {
         Issue::new(id.to_string(), title.to_string()).unwrap()
+    }
+
+    fn legacy_board() -> (TempDir, MannaStore, Vec<Issue>) {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let store = MannaStore::new(temp.path());
+        store.init().unwrap();
+        fs::create_dir(temp.path().join(HANDOFF_DIR)).unwrap();
+        fs::write(
+            temp.path().join(HANDOFF_DIR).join("legacy-research.md"),
+            "Research context, not a strict work order.\n",
+        )
+        .unwrap();
+
+        let track = {
+            let mut row = issue("mn-a00001", "Legacy track");
+            row.issue_type = IssueType::Track;
+            row
+        };
+        let active = {
+            let mut row = issue("mn-a00002", "Unpaired active item");
+            row.track = Some(track.id.clone());
+            row
+        };
+        let blocked = {
+            let mut row = issue("mn-a00003", "Blocked unpaired item");
+            row.track = Some(track.id.clone());
+            row.blocked_by = vec![active.id.clone()];
+            row.status = IssueStatus::Blocked;
+            row
+        };
+        let claimed = {
+            let mut row = issue("mn-a00004", "Claim without proof");
+            row.track = Some(track.id.clone());
+            row.status = IssueStatus::InProgress;
+            row.claimed_by = Some("legacy-session".to_string());
+            row.claimed_at = Some(Utc::now());
+            row
+        };
+        let done = {
+            let mut row = issue("mn-a00005", "Historical item");
+            row.track = Some(track.id.clone());
+            row.status = IssueStatus::Done;
+            row.prompt = Some(".dev/session-prompts/deleted.md".to_string());
+            row.claimed_by = Some("legacy-history".to_string());
+            row.claimed_at = Some(Utc::now());
+            row
+        };
+        let dream = {
+            let mut row = issue("mn-a00006", "Parked dream");
+            row.issue_type = IssueType::Dream;
+            row.track = Some(track.id.clone());
+            row
+        };
+        let rows = vec![track, active, blocked, claimed, done, dream];
+        for row in &rows {
+            store.append_issue(row).unwrap();
+        }
+        (temp, store, rows)
+    }
+
+    #[test]
+    fn preexisting_handoff_directory_does_not_misclassify_a_legacy_board() {
+        let (temp, store, _) = legacy_board();
+        let initialized = initialize_workflow(temp.path(), &store).unwrap();
+        assert!(initialized.is_none());
+        assert_eq!(
+            load_board_config(temp.path()).unwrap().unwrap().workflow,
+            BoardMode::Legacy
+        );
+    }
+
+    #[test]
+    fn legacy_migration_pairs_history_and_exemptions_in_one_idempotent_pass() {
+        let (temp, store, _) = legacy_board();
+        assert!(initialize_workflow(temp.path(), &store).unwrap().is_none());
+
+        let migrated = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(migrated.migrated);
+        assert!(!migrated.recovered_transaction);
+        assert_eq!(migrated.paired_items, 3);
+        assert_eq!(migrated.historical_rows, 1);
+        assert_eq!(migrated.exempt_rows, 2);
+        assert_eq!(migrated.released_claims, 2);
+
+        let rows = store.load_issues().unwrap();
+        let config = validate_migrated_board(temp.path(), &rows).unwrap();
+        for row in rows
+            .iter()
+            .filter(|row| row.issue_type == IssueType::Item && row.status != IssueStatus::Done)
+        {
+            validate_handoff(temp.path(), &config, row).unwrap();
+        }
+        let released = rows.iter().find(|row| row.id == "mn-a00004").unwrap();
+        assert_eq!(released.status, IssueStatus::Open);
+        assert!(released.claimed_by.is_none());
+        assert_eq!(
+            released
+                .legacy_migration
+                .as_ref()
+                .unwrap()
+                .released_claimed_by
+                .as_deref(),
+            Some("legacy-session")
+        );
+        let history = rows.iter().find(|row| row.id == "mn-a00005").unwrap();
+        assert!(history.prompt.is_none());
+        assert_eq!(
+            history
+                .legacy_migration
+                .as_ref()
+                .unwrap()
+                .previous_prompt
+                .as_deref(),
+            Some(".dev/session-prompts/deleted.md")
+        );
+        let dream = rows.iter().find(|row| row.id == "mn-a00006").unwrap();
+        assert!(dream.prompt.is_none());
+        assert_eq!(
+            dream.legacy_migration.as_ref().unwrap().disposition,
+            LegacyMigrationDisposition::Exempt
+        );
+
+        let rows_before_replay = rows.clone();
+        let documents_before_replay = rows
+            .iter()
+            .filter_map(|row| row.prompt.as_deref())
+            .map(|path| {
+                (
+                    path.to_string(),
+                    fs::read_to_string(temp.path().join(path)).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let replay = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(!replay.migrated);
+        assert!(!replay.recovered_transaction);
+        assert_eq!(store.load_issues().unwrap(), rows_before_replay);
+        for (path, contents) in documents_before_replay {
+            assert_eq!(
+                fs::read_to_string(temp.path().join(path)).unwrap(),
+                contents
+            );
+        }
+        initialize_workflow(temp.path(), &store).unwrap().unwrap();
+    }
+
+    #[test]
+    fn stale_legacy_writer_cannot_bypass_the_migrated_strict_board() {
+        let (temp, store, _) = legacy_board();
+        initialize_workflow(temp.path(), &store).unwrap();
+        let legacy_snapshot = store.load_issues().unwrap();
+        assert!(load_workflow_for_board(temp.path(), &legacy_snapshot)
+            .unwrap()
+            .is_none());
+        migrate_legacy_board(temp.path(), &store).unwrap();
+
+        let unpaired = issue("mn-a00007", "Stale legacy create");
+        let error = store.append_issue(&unpaired).unwrap_err().to_string();
+        assert!(error.contains("missing its authoritative handoff pair"));
+
+        let current = store
+            .load_issues()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == "mn-a00002")
+            .unwrap();
+        let session = SessionIdentity::from_token(
+            "migration-race",
+            "migration-race-token-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let error = store
+            .mutate_issue_metadata(&current.id, &session, |row, _| {
+                row.title = "Stale legacy metadata".to_string();
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("handoff transaction"));
+        let error = store
+            .delete_issue_owned(&current.id, &session)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("archive through the handoff transaction"));
+
+        let handoff = temp.path().join(current.prompt.as_deref().unwrap());
+        let mut text = fs::read_to_string(&handoff).unwrap();
+        text.push_str("\nTampered after a stale legacy read.\n");
+        fs::write(&handoff, text).unwrap();
+        let error = store
+            .claim_issue_checked(&current.id, &session, |row, board| {
+                let config = load_workflow_for_board(temp.path(), board)?
+                    .ok_or_else(|| "expected strict board".to_string())?;
+                validate_handoff(temp.path(), &config, row)?;
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("binding is stale"));
+    }
+
+    #[test]
+    fn pending_legacy_migration_recovers_before_pair_journals() {
+        let (temp, store, _) = legacy_board();
+        initialize_workflow(temp.path(), &store).unwrap();
+        let before = store.load_issues().unwrap();
+        let transaction = build_legacy_migration(temp.path(), before).unwrap();
+        write_legacy_migration_transaction(temp.path(), &transaction).unwrap();
+
+        assert_eq!(
+            recover_pair_transactions(temp.path(), &store, &WorkflowConfig::default()).unwrap(),
+            0
+        );
+        assert_eq!(recover_legacy_migration(temp.path(), &store).unwrap(), 1);
+        assert!(!legacy_migration_path(temp.path()).exists());
+        let rows = store.load_issues().unwrap();
+        validate_migrated_board(temp.path(), &rows).unwrap();
+    }
+
+    #[test]
+    fn tampered_legacy_migration_journal_cannot_mutate_the_board() {
+        let (temp, store, original) = legacy_board();
+        initialize_workflow(temp.path(), &store).unwrap();
+        let transaction = build_legacy_migration(temp.path(), original.clone()).unwrap();
+        let path = write_legacy_migration_transaction(temp.path(), &transaction).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(&path, text.replace("hmac-sha256:", "hmac-sha256:00")).unwrap();
+
+        let error = recover_legacy_migration(temp.path(), &store).unwrap_err();
+        assert!(error.contains("failed HMAC authentication"));
+        assert_eq!(store.load_issues().unwrap(), original);
+        assert!(path.is_file());
+        assert!(!temp.path().join(WORKFLOW_FILE).exists());
+    }
+
+    #[test]
+    fn legacy_migration_refuses_to_rewrite_a_board_with_a_malformed_line() {
+        let (temp, store, _) = legacy_board();
+        initialize_workflow(temp.path(), &store).unwrap();
+        let board_path = temp.path().join(".manna/issues.jsonl");
+        let mut original = fs::read_to_string(&board_path).unwrap();
+        original.push_str("{not valid json}\n");
+        fs::write(&board_path, &original).unwrap();
+
+        let error = migrate_legacy_board(temp.path(), &store).unwrap_err();
+        assert!(error.contains("cannot migrate malformed board line"));
+        assert_eq!(fs::read_to_string(&board_path).unwrap(), original);
+        assert!(!legacy_migration_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn migrate_never_reseals_a_tampered_strict_handoff() {
+        let (temp, store, config) = setup();
+        let paired = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00001", "Already strict"),
+            None,
+        )
+        .unwrap();
+        let digest = paired.handoff_digest.clone();
+        let path = temp.path().join(paired.prompt.as_deref().unwrap());
+        let mut text = fs::read_to_string(&path).unwrap();
+        text.push_str("\nUnsealed strict edit.\n");
+        fs::write(&path, text).unwrap();
+
+        let error = migrate_legacy_board(temp.path(), &store).unwrap_err();
+        assert!(error.contains("invalid authoritative handoff"));
+        assert_eq!(store.load_issues().unwrap()[0].handoff_digest, digest);
     }
 
     #[test]
@@ -2516,6 +3563,28 @@ mod tests {
     }
 
     #[test]
+    fn freeform_handoff_research_is_not_an_orphan_work_order() {
+        let (temp, _store, _config) = setup();
+        fs::write(
+            temp.path().join(HANDOFF_DIR).join("62-research.md"),
+            "Research protocol without Manna frontmatter.\n",
+        )
+        .unwrap();
+        assert!(find_orphan_handoffs(temp.path(), &[]).is_empty());
+
+        let orphan = issue("mn-a00001", "Structured orphan");
+        let document = render_handoff(temp.path(), &orphan).unwrap();
+        fs::write(
+            temp.path().join(HANDOFF_DIR).join("mn-a00001-orphan.md"),
+            document,
+        )
+        .unwrap();
+        let findings = find_orphan_handoffs(temp.path(), &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].1.contains("no live Manna item"));
+    }
+
+    #[test]
     fn strict_scaffold_checks_the_board_file_visibility() {
         let temp = TempDir::new().unwrap();
         Command::new("git")
@@ -2558,7 +3627,9 @@ mod tests {
     fn missing_workflow_config_is_corruption_not_legacy() {
         let (temp, store, _config) = setup();
         let item = issue("mn-abc123", "Strict marker");
-        store.append_issue(&item).unwrap();
+        // Manufacture the impossible row through the recovery fixture path;
+        // the public append path now correctly rejects unpaired strict items.
+        store.recover_issue(&item).unwrap();
         fs::remove_file(temp.path().join(WORKFLOW_FILE)).unwrap();
         let issues = store.load_issues().unwrap();
         assert!(load_workflow_for_board(temp.path(), &issues).is_err());

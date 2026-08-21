@@ -920,6 +920,92 @@ rm -rf "$PAIR_DIR"
 rm -rf "$LEGACY_DIR"
 
 # ----------------------------------------------------------------------------
+# Test G7b: journaled migration unlocks a partially initialized legacy board
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7b: legacy board migration"
+MIGRATION_DIR=$(mktemp -d)
+cd "$MIGRATION_DIR"
+git init -q
+printf '.handoff/\n.manna/\n' > .gitignore
+mkdir -p .manna .handoff
+touch .manna/sessions.jsonl
+printf 'Legacy research context.\n' > .handoff/legacy-research.md
+printf '%s\n' \
+    '{"id":"mn-a10001","title":"Legacy track","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"type":"track"}' \
+    '{"id":"mn-a10002","title":"Unpaired active item","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"track":"mn-a10001"}' \
+    '{"id":"mn-a10003","title":"Blocked unpaired item","status":"blocked","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":["mn-a10002"],"track":"mn-a10001"}' \
+    '{"id":"mn-a10004","title":"Legacy claim without proof","status":"in_progress","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"claimed_by":"legacy-session","claimed_at":"2026-01-02T00:00:00Z","track":"mn-a10001"}' \
+    '{"id":"mn-a10005","title":"Historical item","status":"done","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"claimed_by":"legacy-history","claimed_at":"2026-01-02T00:00:00Z","track":"mn-a10001","prompt":".dev/session-prompts/deleted.md"}' \
+    '{"id":"mn-a10006","title":"Parked dream","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"type":"dream","track":"mn-a10001"}' \
+    > .manna/issues.jsonl
+
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "workflow: legacy" "legacy .handoff content does not imply strict board identity"
+rm -f .handoff/legacy-research.md
+
+# Reproduce the Stage 0 partial state: identity was published before the old
+# rows had authoritative pairs, so init restores scaffolding and then fails.
+printf 'version: 1\nworkflow: strict\n' > .manna/board.yaml
+init_exit=0
+output=$("$MANNA" init 2>&1) || init_exit=$?
+check_exit 2 "$init_exit" "partial strict identity reproduces the legacy-board write lock"
+check_yaml "$output" "missing its authoritative handoff pair" "init names the unpaired legacy row"
+
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "success: true" "migrate admits the legacy board"
+check_yaml "$output" "migrated: true" "first migration reports a state change"
+check_yaml "$output" "paired_items: 3" "migration generates every active item handoff"
+check_yaml "$output" "historical_rows: 1" "migration grandfathers done history"
+check_yaml "$output" "exempt_rows: 2" "migration exempts tracks and dreams"
+check_yaml "$output" "released_claims: 2" "migration releases unauthenticated legacy claims"
+[[ ! -e .manna/transactions/legacy-board-migration.yaml ]] && pass "migration journal retires after commit" || fail "migration journal retires after commit" "journal still exists"
+handoff_count=$(find .handoff -maxdepth 1 -name 'mn-*.md' -type f | wc -l | tr -d ' ')
+check_exit 3 "$handoff_count" "migration creates exactly one handoff per active item"
+check_yaml "$(cat .manna/board.yaml)" "migrated_from_legacy_at:" "strict identity records legacy admission"
+
+output=$("$MANNA" show mn-a10004 2>&1) || true
+check_yaml "$output" "status: open" "legacy in-progress claim returns to open"
+check_yaml "$output" "released_claimed_by: legacy-session" "released owner remains auditable"
+output=$("$MANNA" show mn-a10005 2>&1) || true
+check_yaml "$output" "disposition: history" "done row is marked as grandfathered history"
+check_yaml "$output" "previous_prompt: .dev/session-prompts/deleted.md" "historical pointer is retained as annotation"
+if [[ "$output" != *$'\nprompt:'* ]]; then
+    pass "dead historical pointer is no longer authoritative"
+else
+    fail "dead historical pointer is no longer authoritative" "$output"
+fi
+output=$("$MANNA" show mn-a10006 2>&1) || true
+check_yaml "$output" "disposition: exempt" "dream remains exempt from handoff pairing"
+
+migration_state_before=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name 'mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "migrated: false" "second migration is an idempotent no-op"
+migration_state_after=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name 'mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+if [[ "$migration_state_before" == "$migration_state_after" ]]; then
+    pass "idempotent migration preserves board and handoff bytes"
+else
+    fail "idempotent migration preserves board and handoff bytes" "$migration_state_before -> $migration_state_after"
+fi
+
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "workflow: strict" "init succeeds after migration"
+output=$("$MANNA" update mn-a10002 --description "Writable after migration" 2>&1) || true
+check_yaml "$output" "success: true" "metadata writes work after migration"
+claim_exit=0
+"$MANNA" claim mn-a10002 >/dev/null 2>&1 || claim_exit=$?
+check_exit 0 "$claim_exit" "claim works after migration"
+done_exit=0
+"$MANNA" done mn-a10002 >/dev/null 2>&1 || done_exit=$?
+check_exit 0 "$done_exit" "done works after migration"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "migrated fixture has no lint findings"
+
+cd "$TEST_DIR"
+rm -rf "$MIGRATION_DIR"
+
+# ----------------------------------------------------------------------------
 # Test G8: dreams are visible and inert until converted
 # ----------------------------------------------------------------------------
 echo ""

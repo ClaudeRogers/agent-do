@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
-use crate::issue::{Issue, IssueStatus, IssueType};
+use crate::issue::{Issue, IssueStatus, IssueType, LegacyMigrationDisposition};
 
 /// Drift finding kinds, pinned by the `.manna/drift.yaml` contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -329,7 +329,15 @@ pub fn lint_board(issues: &[Issue]) -> Vec<LintFinding> {
             });
         }
 
-        if has_tracks && issue.issue_type == IssueType::Item && issue.track.is_none() {
+        let grandfathered_history = issue
+            .legacy_migration
+            .as_ref()
+            .is_some_and(|migration| migration.disposition == LegacyMigrationDisposition::History);
+        if has_tracks
+            && issue.issue_type == IssueType::Item
+            && issue.track.is_none()
+            && !grandfathered_history
+        {
             findings.push(LintFinding {
                 issue_id: issue.id.clone(),
                 rule: "untracked_item".to_string(),
@@ -656,6 +664,21 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "untracked_item");
         assert_eq!(findings[0].issue_id, "mn-ccc333");
+    }
+
+    #[test]
+    fn test_lint_grandfathers_untracked_legacy_history() {
+        let t = track("mn-aaa111", "Track");
+        let mut history = issue("mn-bbb222", "Legacy history");
+        history.status = IssueStatus::Done;
+        history.legacy_migration = Some(crate::issue::LegacyMigrationAnnotation {
+            version: 1,
+            disposition: LegacyMigrationDisposition::History,
+            migrated_at: Utc::now(),
+            previous_prompt: Some(".dev/session-prompts/old.md".to_string()),
+            released_claimed_by: None,
+        });
+        assert!(lint_board(&[t, history]).is_empty());
     }
 
     #[test]

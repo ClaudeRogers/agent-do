@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 17 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 18 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2516,6 +2516,7 @@ Concurrency: `write`
 **Commands**
 
 - `init`: Initialize .manna plus the tracked .handoff workflow scaffold
+- `migrate`: Atomically admit a legacy board into strict paired workflow state
 - `status`: Show current session and claimed issues
 - `create`: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
 - `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
@@ -2538,6 +2539,8 @@ Concurrency: `write`
 ```bash
 # initialize manna
 agent-do manna init
+# migrate a legacy manna board
+agent-do manna migrate
 # create a new issue
 agent-do manna create 'Fix login bug'
 # list all issues
@@ -2555,9 +2558,10 @@ agent-do manna reconcile --write-drift
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `reconcile`, `unblock`, `update`
-- destructive (irreversible data loss; confirm before auto-running): `delete`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `migrate`, `reconcile`, `unblock`, `update`
+- destructive (irreversible data loss; confirm before auto-running): `delete`, `migrate`
 - polymorphic (beat decided by payload or flag at call time): `reconcile`
+- composite (one call performs several beats internally): `migrate`
 
 ### meet
 

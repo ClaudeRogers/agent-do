@@ -25,6 +25,7 @@ const SESSIONS_FILE: &str = "sessions.jsonl";
 
 /// Board-wide mutation lock file name.
 const BOARD_LOCK_FILE: &str = "board.lock";
+const BOARD_IDENTITY_FILE: &str = "board.yaml";
 
 /// Manna storage backed by JSONL files.
 ///
@@ -65,6 +66,60 @@ impl MannaStore {
         self.manna_dir().join(BOARD_LOCK_FILE)
     }
 
+    fn board_is_strict(&self) -> Result<bool> {
+        let path = self.manna_dir().join(BOARD_IDENTITY_FILE);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let text = fs::read_to_string(&path)?;
+        let identity: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|error| {
+            MannaError::MutationRejected(format!(
+                "invalid board identity {}: {}",
+                path.display(),
+                error
+            ))
+        })?;
+        match identity.get("workflow").and_then(serde_yaml::Value::as_str) {
+            Some("strict") => Ok(true),
+            Some("legacy") => Ok(false),
+            Some(mode) => Err(MannaError::MutationRejected(format!(
+                "unsupported board workflow mode {}",
+                mode
+            ))),
+            None => Err(MannaError::MutationRejected(
+                "board identity has no workflow mode".to_string(),
+            )),
+        }
+    }
+
+    fn validate_strict_row_shapes(issues: &[Issue]) -> Result<()> {
+        for issue in issues
+            .iter()
+            .filter(|issue| issue.status != crate::issue::IssueStatus::Done)
+        {
+            match issue.issue_type {
+                crate::issue::IssueType::Item
+                    if issue.prompt.is_none() || issue.handoff_digest.is_none() =>
+                {
+                    return Err(MannaError::MutationRejected(format!(
+                        "strict workflow item {} is missing its authoritative handoff pair",
+                        issue.id
+                    )));
+                }
+                crate::issue::IssueType::Track | crate::issue::IssueType::Dream
+                    if issue.prompt.is_some() || issue.handoff_digest.is_some() =>
+                {
+                    return Err(MannaError::MutationRejected(format!(
+                        "strict workflow {} {} cannot carry an item handoff",
+                        issue.issue_type, issue.id
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Refuse storage whose root or durable files are symlinks. Checking only
     /// the leaf after opening it is too late: a symlinked `.manna/` redirects
     /// every board mutation outside the project.
@@ -74,6 +129,7 @@ impl MannaStore {
             self.issues_path(),
             self.sessions_path(),
             self.board_lock_path(),
+            self.manna_dir().join(BOARD_IDENTITY_FILE),
         ] {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -129,6 +185,17 @@ impl MannaStore {
     ///
     /// Skips malformed lines with a warning to stderr.
     pub fn load_issues(&self) -> Result<Vec<Issue>> {
+        self.load_issues_internal(true)
+    }
+
+    /// Load the complete board without dropping an unreadable record.
+    /// Whole-board transactions use this path because rewriting after a
+    /// skipped line would silently convert corruption into data loss.
+    pub fn load_issues_strict(&self) -> Result<Vec<Issue>> {
+        self.load_issues_internal(false)
+    }
+
+    fn load_issues_internal(&self, skip_malformed: bool) -> Result<Vec<Issue>> {
         self.validate_storage_root()?;
         let path = self.issues_path();
         if !path.exists() {
@@ -143,6 +210,14 @@ impl MannaStore {
             let line = match line_result {
                 Ok(l) => l,
                 Err(e) => {
+                    if !skip_malformed {
+                        return Err(MannaError::MutationRejected(format!(
+                            "cannot read complete board line {} in {}: {}",
+                            line_num + 1,
+                            path.display(),
+                            e
+                        )));
+                    }
                     eprintln!(
                         "Warning: Failed to read line {} in {}: {}",
                         line_num + 1,
@@ -161,6 +236,14 @@ impl MannaStore {
             match serde_json::from_str::<Issue>(&line) {
                 Ok(issue) => issues.push(issue),
                 Err(e) => {
+                    if !skip_malformed {
+                        return Err(MannaError::MutationRejected(format!(
+                            "cannot migrate malformed board line {} in {}: {}",
+                            line_num + 1,
+                            path.display(),
+                            e
+                        )));
+                    }
                     eprintln!(
                         "Warning: Skipping malformed line {} in {}: {}",
                         line_num + 1,
@@ -207,6 +290,11 @@ impl MannaStore {
         let issues = self.load_issues()?;
         if issues.iter().any(|existing| existing.id == issue.id) {
             return Err(MannaError::IssueAlreadyExists(issue.id.clone()));
+        }
+        if self.board_is_strict()? {
+            let mut proposed = issues.clone();
+            proposed.push(issue.clone());
+            Self::validate_strict_row_shapes(&proposed)?;
         }
 
         let file = OpenOptions::new().append(true).open(&path)?;
@@ -296,6 +384,9 @@ impl MannaStore {
         mutation(issue, &snapshot).map_err(MannaError::MutationRejected)?;
         issue.validate().map_err(MannaError::MutationRejected)?;
         let updated = issue.clone();
+        if self.board_is_strict()? {
+            Self::validate_strict_row_shapes(&issues)?;
+        }
         self.write_issues_locked(&issues)?;
         Ok(updated)
     }
@@ -369,6 +460,15 @@ impl MannaStore {
     {
         self.mutate_issue_locked(id, |issue, issues| {
             issue.require_owner(session)?;
+            let binding_metadata = (
+                issue.issue_type,
+                issue.title.clone(),
+                issue.description.clone(),
+                issue.track.clone(),
+                issue.source.clone(),
+                issue.prompt.clone(),
+                issue.handoff_digest.clone(),
+            );
             let lifecycle = (
                 issue.status.clone(),
                 issue.claimed_by.clone(),
@@ -377,6 +477,23 @@ impl MannaStore {
                 issue.blocked_by.clone(),
             );
             mutation(issue, issues)?;
+            if binding_metadata.5.is_some()
+                && binding_metadata.6.is_some()
+                && binding_metadata
+                    != (
+                        issue.issue_type,
+                        issue.title.clone(),
+                        issue.description.clone(),
+                        issue.track.clone(),
+                        issue.source.clone(),
+                        issue.prompt.clone(),
+                        issue.handoff_digest.clone(),
+                    )
+            {
+                return Err(
+                    "bound item metadata must change through the handoff transaction".to_string(),
+                );
+            }
             if lifecycle
                 != (
                     issue.status.clone(),
@@ -507,6 +624,45 @@ impl MannaStore {
         Ok(after.clone())
     }
 
+    /// Replace the complete board under one lock while a workflow transaction
+    /// prepares its file side and publishes board identity last. Recovery may
+    /// observe either the exact before or exact after board; any third state is
+    /// a concurrent change and is never overwritten.
+    pub fn recover_replace_board_with<Prepare, Publish>(
+        &self,
+        expected_before: &[Issue],
+        after: &[Issue],
+        prepare_files: Prepare,
+        publish_identity: Publish,
+    ) -> Result<()>
+    where
+        Prepare: FnOnce() -> std::result::Result<(), String>,
+        Publish: FnOnce() -> std::result::Result<(), String>,
+    {
+        let path = self.issues_path();
+        if !path.exists() {
+            return Err(MannaError::NotInitialized);
+        }
+        for issue in after {
+            issue.validate().map_err(MannaError::MutationRejected)?;
+        }
+
+        let _board_lock = self.lock_board()?;
+        let current = self.load_issues_strict()?;
+        if current != expected_before && current != after {
+            return Err(MannaError::RecoveryConflict(
+                "board transaction recovery found concurrent row changes".to_string(),
+            ));
+        }
+
+        prepare_files().map_err(MannaError::MutationRejected)?;
+        if current == expected_before {
+            self.write_issues_locked(after)?;
+        }
+        publish_identity().map_err(MannaError::MutationRejected)?;
+        Ok(())
+    }
+
     /// Delete an issue under the board lock after enforcing current-session
     /// ownership. Pair-aware callers archive the handoff first through the
     /// workflow transaction journal.
@@ -524,6 +680,15 @@ impl MannaStore {
         issues[index]
             .require_owner(session)
             .map_err(MannaError::MutationRejected)?;
+        if self.board_is_strict()?
+            && issues[index].issue_type == crate::issue::IssueType::Item
+            && (issues[index].prompt.is_some() || issues[index].handoff_digest.is_some())
+        {
+            return Err(MannaError::MutationRejected(
+                "bound strict item deletion must archive through the handoff transaction"
+                    .to_string(),
+            ));
+        }
         let removed = issues.remove(index);
         self.write_issues_locked(&issues)?;
         Ok(removed)

@@ -96,6 +96,11 @@ verified during staging, the integration contract pinned character for
 character across every lane that consumes it, numbered verification, and the
 completion block.
 
+If `manna init` classifies an existing nonempty board as legacy, do not create
+pairs by hand. Run `agent-do manna migrate` once with the repository owner’s
+authorization. It admits the complete board through the recoverable migration
+journal; all later work uses the same strict create, seal, claim, and done path.
+
 Manna creates the pair in both directions: the item points at the generated
 handoff and the handoff opens with the exact claim command. `manna claim`
 refuses a broken pair; `agent-do manna reconcile` also reports shadow roots.

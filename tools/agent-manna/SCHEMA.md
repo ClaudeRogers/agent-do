@@ -11,6 +11,7 @@ All data is stored in `.manna/` directory:
 - `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 - `.manna/workflow.yaml` - Strict workflow version and canonical handoff root
 - `.manna/transactions/` - Ignored write-ahead journal for interrupted pair changes
+- `.manna/transactions/legacy-board-migration.yaml` - Authenticated whole-board admission journal, present only while migration is pending
 
 Durable work orders live in tracked `.handoff/`:
 - `.handoff/README.md` - Generated ownership and usage contract
@@ -45,6 +46,7 @@ Each line is a complete JSON object representing one issue.
 | `source` | String or null | No | Free text (note path, URL, conversation) | Where this issue came from |
 | `prompt` | String or null | No | Strict boards require repository-relative Markdown below `.handoff/` | Work-order file paired with this item |
 | `handoff_digest` | String or null | No | `sha256:<64 lowercase hex>` | Board-side binding for the canonical handoff with its binding field normalized |
+| `legacy_migration` | Object or null | No | Version 1 annotation written only by `migrate` | Historical admission disposition (`paired`, `history`, or `exempt`), migration time, prior pointer, and released legacy owner when applicable |
 
 v1 rows carry none of the new optional fields (`type`, `track`, `source`,
 `prompt`, `handoff_digest`, `claim_token_hash`); they deserialize as `type: item` and re-serialize unchanged (lazy
@@ -88,14 +90,23 @@ board unchanged. `lint` applies the same contract, and
 Strict reconcile reports `workflow_sprawl` for live claim-bearing Markdown
 anywhere outside `.handoff/`. Internal directory aliases are scanned; external
 and handoff-like symlink roots fail closed. It reports
-`orphan_handoff` for canonical files with no live actionable item. These
+`orphan_handoff` for structured Manna work orders with no live actionable item.
+Freeform research and session-continuation Markdown may share `.handoff/`
+without impersonating a generated work order. These
 integrity findings make reconcile exit 1; informational drift remains
 advisory.
 
 Boards explicitly classified as legacy keep
 the prior absolute-pointer behavior, the description-first-line
 `PROMPT: <path>` fallback, and the `.dev/session-prompts/` reverse scan. Init
-does not rearrange those boards implicitly.
+does not rearrange those boards implicitly. `manna migrate` is the explicit
+admission path. It uses one authenticated whole-board transaction to create
+and seal every active item pair, annotate done rows as pointer-free history,
+annotate active tracks and dreams as exempt, release unauthenticated claims,
+and publish strict board identity last. Recovery accepts only the complete
+before or complete after board, so a concurrent mutation is never overwritten.
+Replaying a completed migration is byte-stable. The annotation records how a
+row entered strict mode; it does not prevent later status or type transitions.
 
 Done issues are exempt from all of it, so archived or renamed prompts never
 nag history.
@@ -216,6 +227,8 @@ If a line cannot be parsed as valid JSON:
 - Continue processing remaining lines
 
 This allows recovery from partial writes or corruption.
+Whole-board migration is deliberately stricter: any malformed line aborts
+without writing, because skipping it and rewriting the board would lose data.
 
 ## Concurrency
 

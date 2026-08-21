@@ -26,9 +26,10 @@ use manna_core::store::MannaStore;
 use manna_core::workflow::{
     attach_handoff, canonical_handoff_path, create_paired_issue, delete_paired_issue,
     detach_handoff, find_orphan_handoffs, handoff_manna_id, initialize_workflow,
-    load_workflow_for_board, rebind_handoff_metadata, recover_pair_transactions,
-    runtime_session_identity, runtime_session_label, seal_handoff, validate_handoff,
-    validate_scaffold, WorkflowConfig, HANDOFF_DIR,
+    load_workflow_for_board, migrate_legacy_board, rebind_handoff_metadata,
+    recover_legacy_migration, recover_pair_transactions, runtime_session_identity,
+    runtime_session_label, seal_handoff, validate_handoff, validate_scaffold, WorkflowConfig,
+    HANDOFF_DIR,
 };
 
 /// Exit codes
@@ -52,6 +53,9 @@ struct Cli {
 enum Commands {
     /// Initialize .manna/ plus the tracked .handoff/ workflow
     Init,
+
+    /// Admit a legacy board into the enforced handoff workflow
+    Migrate,
 
     /// Show current session status
     Status,
@@ -371,6 +375,17 @@ struct InitData {
 }
 
 #[derive(Serialize)]
+struct MigrationData {
+    migrated: bool,
+    recovered_transaction: bool,
+    workflow: String,
+    paired_items: usize,
+    historical_rows: usize,
+    exempt_rows: usize,
+    released_claims: usize,
+}
+
+#[derive(Serialize)]
 struct DreamData {
     issue: Issue,
     /// Which board received the dream (directory containing .manna/)
@@ -638,6 +653,12 @@ fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig
     if let Err(error) = store.validate_storage_root() {
         handle_manna_error(error);
     }
+    if let Err(error) = recover_legacy_migration(Path::new("."), store) {
+        output_error(
+            &format!("Cannot recover Manna legacy migration: {}", error),
+            EXIT_SYSTEM_ERROR,
+        );
+    }
     let mut issues = match store.load_issues() {
         Ok(issues) => issues,
         Err(error) => handle_manna_error(error),
@@ -697,6 +718,26 @@ fn cmd_init() -> ! {
             .map_or(0, |state| state.recovered_transactions),
         upgraded_items: workflow.as_ref().map_or(0, |state| state.upgraded_items),
         restored_config: workflow.as_ref().is_some_and(|state| state.restored_config),
+    });
+}
+
+fn cmd_migrate() -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if let Err(error) = store.init() {
+        handle_manna_error(error);
+    }
+    let result = match migrate_legacy_board(Path::new("."), &store) {
+        Ok(result) => result,
+        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+    };
+    output_success(MigrationData {
+        migrated: result.migrated,
+        recovered_transaction: result.recovered_transaction,
+        workflow: "strict".to_string(),
+        paired_items: result.paired_items,
+        historical_rows: result.historical_rows,
+        exempt_rows: result.exempt_rows,
+        released_claims: result.released_claims,
     });
 }
 
@@ -837,7 +878,7 @@ fn cmd_claim(id: String) -> ! {
 
     let session = require_session_identity();
 
-    let (issues, workflow) = load_board_workflow(&store);
+    let (issues, _) = load_board_workflow(&store);
 
     // Find issue
     let issue = find_issue(&issues, &id);
@@ -852,7 +893,8 @@ fn cmd_claim(id: String) -> ! {
         if current.issue_type == IssueType::Dream {
             return Err(dream_claim_refusal(&current.id));
         }
-        if let Some(config) = workflow
+        let current_workflow = load_workflow_for_board(Path::new("."), current_board)?;
+        if let Some(config) = current_workflow
             .as_ref()
             .filter(|_| current.issue_type == IssueType::Item)
         {
@@ -896,10 +938,11 @@ fn cmd_done(id: String) -> ! {
         );
     }
 
-    let (_, workflow) = load_board_workflow(&store);
+    let _ = load_board_workflow(&store);
     let session = require_session_identity();
     let issue = match store.complete_issue_checked(&id, &session, |current, current_board| {
-        if let Some(config) = workflow
+        let current_workflow = load_workflow_for_board(Path::new("."), current_board)?;
+        if let Some(config) = current_workflow
             .as_ref()
             .filter(|_| current.issue_type == IssueType::Item)
         {
@@ -2630,6 +2673,7 @@ fn main() {
 
     match cli.command {
         Commands::Init => cmd_init(),
+        Commands::Migrate => cmd_migrate(),
         Commands::Status => cmd_status(),
         Commands::Create {
             title,

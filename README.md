@@ -190,6 +190,7 @@ with a written reason). Commits that advance an item cite it with a
 
 ```bash
 agent-do manna init
+agent-do manna migrate   # once, for an existing legacy board
 agent-do manna create "Fix auth redirect" --type item --track mn-a1b2c3 \
   --source "docs/auth-audit.md"
 agent-do manna handoff seal mn-d4e5f6   # after intentional handoff edits
@@ -219,6 +220,12 @@ the narrow unignore rules needed to keep workflow state in Git while leaving
 the runtime lock and transaction journal ignored. Removing `workflow.yaml`
 cannot disable strict validation; init restores it. Pre-workflow nonempty
 boards are classified explicitly as legacy and are not rearranged.
+`manna migrate` performs that rearrangement only when explicitly requested. A
+single authenticated whole-board journal creates sealed pairs for active
+items, grandfathers done history, exempts tracks and dreams, releases legacy
+claims without ownership proofs, and publishes strict identity last. The
+operation is crash-recoverable and idempotent; normal strict writes keep every
+Stage 0 fail-closed check.
 Restoration and ordinary metadata updates never recalculate a handoff seal;
 only `handoff seal` can authorize edited contents.
 

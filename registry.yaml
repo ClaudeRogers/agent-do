@@ -4650,6 +4650,7 @@ tools:
     - query issue history
     commands:
       init: Initialize .manna plus the tracked .handoff workflow scaffold
+      migrate: Atomically admit a legacy board into strict paired workflow state
       status: Show current session and claimed issues
       create: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
       claim: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
@@ -4669,6 +4670,8 @@ tools:
     examples:
     - intent: initialize manna
       command: agent-manna init
+    - intent: migrate a legacy manna board
+      command: agent-manna migrate
     - intent: create a new issue
       command: agent-manna create 'Fix login bug'
     - intent: list all issues
@@ -4690,6 +4693,7 @@ tools:
       - context
       - status
       interact:
+      - migrate
       - create
       - update
       - delete
@@ -4705,6 +4709,9 @@ tools:
       - lint
       - reconcile
       attributes:
+        migrate:
+        - destructive
+        - composite
         delete:
         - destructive
         reconcile:

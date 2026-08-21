@@ -293,6 +293,7 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 
 - `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log), `.manna/board.yaml` (independent strict or legacy identity), and `.manna/workflow.yaml` (strict workflow version and canonical handoff root)
 - `.manna/transactions/` is an ignored write-ahead journal. Each intent is HMAC-authenticated by a private key outside the worktree, installed with atomic no-clobber semantics, and bound to the canonical project root, filename, complete rows, canonical handoff, archive path, and document payload
+- `legacy-board-migration.yaml` is the one whole-board journal: it binds exact before and after rows plus every generated handoff and scaffold file, then publishes strict identity last
 - `.handoff/README.md`, `.handoff/mn-xxxxxx-<slug>.md`, and `.handoff/.archive/` are durable Git state, not scratch space
 - Every mutation takes the board-wide `fs2` lock across re-read, validation, state change, temp write, fsync, and atomic rename. File locks alone are insufficient because the JSONL rewrite replaces the inode
 - Malformed lines are skipped with a stderr warning, never fatal
@@ -319,6 +320,15 @@ separately; init restores it. Existing version-2 digests are monotonic markers:
 restoration or a forged version downgrade validates them and never re-enters
 the binding-creating migration path. The runtime lock and transaction journal
 stay ignored.
+
+`manna migrate` is the explicit bridge for a nonempty legacy board, including
+a board left behind a premature strict identity. Under one board lock, its
+authenticated transaction generates sealed handoffs for all active items,
+records done rows as grandfathered history, records tracks and dreams as
+exempt, and releases ownership state that has no valid token proof. Recovery
+accepts only the exact before or exact after board. Strict identity is the
+commit point, and a completed migration replays as a no-op. Ordinary strict
+commands cannot enter this path or use it to reseal a damaged pair.
 
 On strict boards, creating an item writes a transaction intent, generates
 `.handoff/<id>-<slug>.md`, and installs the bound row under the board lock. A
@@ -378,7 +388,7 @@ finding with the reason:
 6. `doc_reference`: `mn-` ids mentioned in `.handoff/`, `.dev/`, `.zpc/`, and the per-project Claude memory directory that do not exist on this board (files ≤ 1MB, symlinks skipped, deduplicated per file+id)
 7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a work-order file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. Strict boards scan `.handoff/**/*.md`; legacy boards retain the `.dev/session-prompts/` scan. A missing directory is a successful empty scan, and foreign-board ids are ignored
 8. `workflow_sprawl` on strict boards: any live claim-bearing Markdown appears outside `.handoff/`; internal directory aliases are scanned, while external or handoff-like symlink roots fail closed
-9. `orphan_handoff`: a canonical handoff has no live actionable row, or does not match that row's pointer. `.handoff/.archive/` is excluded intentionally
+9. `orphan_handoff`: a structured Manna work order under `.handoff/` has no live actionable row, or does not match that row's pointer. Freeform research and continuation Markdown is not a work order; `.handoff/.archive/` is excluded intentionally
 
 The prompt pointer itself comes from the `prompt` field, or as a blessed interim convention, a description whose first line is `PROMPT: <path>`.
 
