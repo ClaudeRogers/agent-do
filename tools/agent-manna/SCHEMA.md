@@ -130,13 +130,18 @@ Boards explicitly classified as legacy keep
 the prior absolute-pointer behavior, the description-first-line
 `PROMPT: <path>` fallback, and the `.dev/session-prompts/` reverse scan. Init
 does not rearrange those boards implicitly. `manna migrate` is the explicit
-admission path. It uses one authenticated whole-board transaction to create
-and seal every active item pair, annotate done rows as pointer-free history,
-annotate active tracks and dreams as exempt, release unauthenticated claims,
-and publish strict board identity last. Recovery accepts only the complete
-before or complete after board, so a concurrent mutation is never overwritten.
-Replaying a completed migration is byte-stable. The annotation records how a
-row entered strict mode; it does not prevent later status or type transitions.
+admission path for both pure legacy and mixed legacy/strict boards. It uses one
+authenticated whole-board transaction to verify and preserve existing strict
+pairs, create and seal every legacy active item pair, adopt the exact contents
+of malformed `.handoff/` work orders, annotate done rows as pointer-free
+history, annotate active tracks and dreams as exempt, release unauthenticated
+claims, and publish strict board identity last. Unique handmade number prefixes
+seed priority only when they are unambiguous; `.manna/handoff-order.yaml` and
+`manna sync` own presentation after admission. Recovery accepts only the
+complete before or complete after board, so a concurrent mutation is never
+overwritten. Replaying a completed migration is byte-stable. The annotation
+records how a legacy row entered strict mode; it does not prevent later status
+or type transitions.
 
 Grandfathered done history without pairs is exempt. A done row that owns a
 strict pair keeps that sealed pair, but sync removes it from priority and the

@@ -971,8 +971,8 @@ check_yaml "$output" "historical_rows: 1" "migration grandfathers done history"
 check_yaml "$output" "exempt_rows: 2" "migration exempts tracks and dreams"
 check_yaml "$output" "released_claims: 2" "migration releases unauthenticated legacy claims"
 [[ ! -e .manna/transactions/legacy-board-migration.yaml ]] && pass "migration journal retires after commit" || fail "migration journal retires after commit" "journal still exists"
-handoff_count=$(find .handoff -maxdepth 1 -name '*-mn-*.md' -type f | wc -l | tr -d ' ')
-check_exit 3 "$handoff_count" "migration creates exactly one handoff per active item"
+handoff_count=$(find .handoff -maxdepth 1 -name 'mn-*.md' -type f | wc -l | tr -d ' ')
+check_exit 3 "$handoff_count" "migration creates exactly one unnumbered handoff per active item"
 check_yaml "$(cat .manna/board.yaml)" "migrated_from_legacy_at:" "strict identity records legacy admission"
 
 output=$("$MANNA" show mn-a10004 2>&1) || true
@@ -1018,10 +1018,94 @@ cd "$TEST_DIR"
 rm -rf "$MIGRATION_DIR"
 
 # ----------------------------------------------------------------------------
-# Test G7c: ordered handoff presentation and live-claim rename hold
+# Test G7c: a v2 create on a legacy board still has one-command convergence
 # ----------------------------------------------------------------------------
 echo ""
-echo "Test G7c: ordered handoff presentation"
+echo "Test G7c: mixed legacy and strict board migration"
+MIXED_DIR=$(mktemp -d)
+cd "$MIXED_DIR"
+git init -q
+printf '.handoff/\n.manna/\n' > .gitignore
+mkdir -p .manna .handoff/campaigns
+touch .manna/sessions.jsonl
+printf '%s\n' \
+    '{"id":"mn-b20001","title":"Legacy first priority","status":"in_progress","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"claimed_by":"legacy-pid-owner","claimed_at":"2026-01-02T00:00:00Z","prompt":".handoff/01-mn-b20001-legacy-first-priority.md"}' \
+    '{"id":"mn-b20002","title":"Legacy blocked priority","status":"blocked","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":["mn-b20001"],"prompt":".handoff/02b01-mn-b20002-legacy-blocked-priority.md"}' \
+    '{"id":"mn-b20003","title":"Legacy completed history","status":"done","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"claimed_by":"legacy-history","claimed_at":"2026-01-02T00:00:00Z","prompt":".dev/session-prompts/deleted.md"}' \
+    > .manna/issues.jsonl
+printf '# Legacy first\n\nPreserve alpha work-order content exactly.\n' > .handoff/01-mn-b20001-legacy-first-priority.md
+printf '# Legacy blocked\n\nPreserve beta work-order content exactly.\n' > .handoff/02b01-mn-b20002-legacy-blocked-priority.md
+
+# Reproduce the reachable production state: a strict marker exists over old
+# rows, init restores the v2 scaffold but cannot finish, and v2 create still
+# adds one fully sealed pair before migration runs.
+printf 'version: 1\nworkflow: strict\n' > .manna/board.yaml
+init_exit=0
+"$MANNA" init >/dev/null 2>&1 || init_exit=$?
+check_exit 2 "$init_exit" "mixed fixture reproduces the partial strict init failure"
+output=$("$MANNA" create "Strict native campaign" --prompt .handoff/campaigns/strict-native.md 2>&1) || true
+check_yaml "$output" "success: true" "v2 create produces the strict side of a mixed board"
+MIXED_STRICT_ID=$(extract_id "$output")
+MIXED_STRICT_LINE_BEFORE=$(grep -F "\"id\":\"$MIXED_STRICT_ID\"" .manna/issues.jsonl)
+MIXED_STRICT_HASH_BEFORE=$(git hash-object .handoff/campaigns/strict-native.md)
+
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "success: true" "migrate converges a mixed board"
+check_yaml "$output" "migrated: true" "mixed migration reports a state change"
+check_yaml "$output" "paired_items: 2" "mixed migration adopts only the two legacy active items"
+check_yaml "$output" "historical_rows: 1" "mixed migration grandfathers legacy history"
+check_yaml "$output" "released_claims: 2" "mixed migration releases only unauthenticated legacy claims"
+MIXED_STRICT_LINE_AFTER=$(grep -F "\"id\":\"$MIXED_STRICT_ID\"" .manna/issues.jsonl)
+MIXED_STRICT_HASH_AFTER=$(git hash-object .handoff/campaigns/strict-native.md)
+if [[ "$MIXED_STRICT_LINE_BEFORE" == "$MIXED_STRICT_LINE_AFTER" && "$MIXED_STRICT_HASH_BEFORE" == "$MIXED_STRICT_HASH_AFTER" ]]; then
+    pass "mixed migration preserves strict row and handoff bytes"
+else
+    fail "mixed migration preserves strict row and handoff bytes" "strict state changed during migration"
+fi
+grep -Fq 'Preserve alpha work-order content exactly.' .handoff/01-mn-b20001-legacy-first-priority.md \
+    && pass "mixed migration preserves first legacy work order" \
+    || fail "mixed migration preserves first legacy work order" "legacy content missing"
+grep -Fq 'Preserve beta work-order content exactly.' .handoff/02b01-mn-b20002-legacy-blocked-priority.md \
+    && pass "mixed migration preserves blocked legacy work order" \
+    || fail "mixed migration preserves blocked legacy work order" "legacy content missing"
+check_yaml "$(cat .manna/handoff-order.yaml)" "- mn-b20001" "unique handmade prefixes seed first-class priority"
+
+mixed_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+output=$("$MANNA" migrate 2>&1) || true
+check_yaml "$output" "migrated: false" "second mixed migration is an idempotent no-op"
+mixed_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+if [[ "$mixed_state_before" == "$mixed_state_after" ]]; then
+    pass "second mixed migration preserves every durable byte"
+else
+    fail "second mixed migration preserves every durable byte" "$mixed_state_before -> $mixed_state_after"
+fi
+transaction_files=$(find .manna/transactions -type f 2>/dev/null | wc -l | tr -d ' ')
+check_exit 0 "$transaction_files" "mixed migration recovery directory is empty at rest"
+
+sync_exit=0
+output=$("$MANNA" sync 2>&1) || sync_exit=$?
+check_exit 0 "$sync_exit" "sync converges adopted and strict handoff names"
+check_yaml "$output" "changed: true" "sync reports mixed presentation convergence"
+[[ -f .handoff/01-mn-b20001-legacy-first-priority.md ]] \
+    && pass "seeded first priority remains dense" \
+    || fail "seeded first priority remains dense" "expected first handoff missing"
+[[ -f .handoff/02b01-mn-b20002-legacy-blocked-priority.md ]] \
+    && pass "blocked marker is re-derived from board edges" \
+    || fail "blocked marker is re-derived from board edges" "expected blocked handoff missing"
+strict_sync_count=$(find .handoff -maxdepth 1 -type f -name "03-$MIXED_STRICT_ID-*.md" | wc -l | tr -d ' ')
+check_exit 1 "$strict_sync_count" "strict native handoff joins the generated dense plan"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "synchronized mixed fixture has no lint findings"
+
+cd "$TEST_DIR"
+rm -rf "$MIXED_DIR"
+
+# ----------------------------------------------------------------------------
+# Test G7d: ordered handoff presentation and live-claim rename hold
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7d: ordered handoff presentation"
 ORDER_DIR=$(mktemp -d)
 cd "$ORDER_DIR"
 git init -q

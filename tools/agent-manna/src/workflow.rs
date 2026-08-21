@@ -249,6 +249,8 @@ pub struct HandoffPresentationDrift {
 struct MigrationDocument {
     issue_id: String,
     handoff: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_document: Option<String>,
     document: String,
 }
 
@@ -843,6 +845,58 @@ fn normalize_order(
             if candidate_ids.contains(id.as_str()) && seen.insert(id.clone()) {
                 items.push(id.clone());
             }
+        }
+    }
+    for issue in candidates {
+        if seen.insert(issue.id.clone()) {
+            items.push(issue.id.clone());
+        }
+    }
+    Ok(canonical_order(items))
+}
+
+fn migration_order(
+    before: &[Issue],
+    after: &[Issue],
+    stored: Option<&HandoffOrder>,
+) -> Result<HandoffOrder, String> {
+    let candidates = planned_items(after);
+    let candidate_ids = candidates
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut items = Vec::with_capacity(candidates.len());
+    let mut seen = HashSet::new();
+    if let Some(stored) = stored {
+        for id in &stored.items {
+            if candidate_ids.contains(id.as_str()) && seen.insert(id.clone()) {
+                items.push(id.clone());
+            }
+        }
+    }
+
+    // A hand-numbered legacy filename is not authority, but a unique prefix
+    // is useful admission evidence when no first-class priority exists yet.
+    // Preserve that relative intent once, then let handoff-order.yaml own it.
+    let mut numbered = before
+        .iter()
+        .filter(|issue| candidate_ids.contains(issue.id.as_str()) && !seen.contains(&issue.id))
+        .filter_map(|issue| {
+            let (number, _) = prompt_pointer(issue)
+                .as_deref()
+                .and_then(|path| ordered_name_parts(&issue.id, path))?;
+            (number > 0).then_some((number, issue.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut counts = HashMap::new();
+    for (number, _) in &numbered {
+        *counts.entry(*number).or_insert(0_usize) += 1;
+    }
+    numbered.retain(|(number, _)| counts[number] == 1);
+    numbered.sort_by_key(|(number, _)| *number);
+    for (_, id) in numbered {
+        if seen.insert(id.clone()) {
+            items.push(id);
         }
     }
     for issue in candidates {
@@ -1665,6 +1719,25 @@ fn generated_body(issue: &Issue) -> String {
     )
 }
 
+fn adopted_body(issue: &Issue, legacy: &str) -> String {
+    let inputs = if let Some(source) = issue.source.as_deref() {
+        format!("- {}", source)
+    } else {
+        "- None declared.".to_string()
+    };
+    format!(
+        "\n# Handoff: {}\n\nBoard state is canonical in `.manna/`. This file is the work order for one item only.\n\n## Claim\n\n```bash\nagent-do manna claim {}\n```\n\n## Scope\n\n{}\n\n## Inputs\n\n{}\n\n## Work order\n\n{}\n\n## Completion\n\n1. Produce the scoped deliverables and verification receipts.\n2. Update this handoff only when continuation context changed.\n3. Seal changes with `agent-do manna handoff seal {}`.\n4. Commit with `Manna: {}` and run `agent-do manna done {}` only after the work is verified.\n",
+        issue.title,
+        issue.id,
+        issue.title,
+        inputs,
+        legacy,
+        issue.id,
+        issue.id,
+        issue.id
+    )
+}
+
 fn frontmatter_for(base: &Path, issue: &Issue) -> HandoffFrontmatter {
     HandoffFrontmatter {
         workflow: WORKFLOW_VERSION,
@@ -1680,6 +1753,10 @@ fn frontmatter_for(base: &Path, issue: &Issue) -> HandoffFrontmatter {
 
 pub fn render_handoff(base: &Path, issue: &Issue) -> Result<String, String> {
     render_document(&frontmatter_for(base, issue), &generated_body(issue))
+}
+
+fn render_adopted_handoff(base: &Path, issue: &Issue, legacy: &str) -> Result<String, String> {
+    render_document(&frontmatter_for(base, issue), &adopted_body(issue, legacy))
 }
 
 fn validate_document(issue: &Issue, text: &str) -> Result<String, String> {
@@ -1807,46 +1884,25 @@ fn validate_legacy_migration_transaction(
         after
             .validate()
             .map_err(|error| format!("invalid migrated row {}: {}", after.id, error))?;
-        if after.legacy_migration.is_none() {
+        let pass_through = before.handoff_digest.is_some() || before.legacy_migration.is_some();
+        if pass_through {
+            if before != after {
+                return Err(format!(
+                    "legacy migration changed already-admitted row {}",
+                    after.id
+                ));
+            }
+            if before.handoff_digest.is_none() && !migration_annotation_matches(before) {
+                return Err(format!(
+                    "legacy migration annotation on {} is incomplete or inconsistent",
+                    before.id
+                ));
+            }
+        } else if !migration_annotation_matches(after) {
             return Err(format!(
-                "migrated row {} has no legacy migration annotation",
+                "migrated row {} has no consistent legacy migration annotation",
                 after.id
             ));
-        }
-        match after.legacy_migration.as_ref().unwrap().disposition {
-            LegacyMigrationDisposition::Paired
-                if after.issue_type != IssueType::Item
-                    || after.status == IssueStatus::Done
-                    || after.prompt.is_none()
-                    || after.handoff_digest.is_none() =>
-            {
-                return Err(format!(
-                    "migrated paired row {} is not an active item with a bound handoff",
-                    after.id
-                ));
-            }
-            LegacyMigrationDisposition::History
-                if after.status != IssueStatus::Done
-                    || after.prompt.is_some()
-                    || after.handoff_digest.is_some() =>
-            {
-                return Err(format!(
-                    "migrated history row {} is not closed, pointer-free history",
-                    after.id
-                ));
-            }
-            LegacyMigrationDisposition::Exempt
-                if after.status == IssueStatus::Done
-                    || after.issue_type == IssueType::Item
-                    || after.prompt.is_some()
-                    || after.handoff_digest.is_some() =>
-            {
-                return Err(format!(
-                    "migrated exempt row {} is not an active track or dream",
-                    after.id
-                ));
-            }
-            _ => {}
         }
     }
 
@@ -1885,7 +1941,13 @@ fn validate_legacy_migration_transaction(
         .iter()
         .map(|issue| (issue.id.as_str(), issue))
         .collect::<HashMap<_, _>>();
+    let original_rows = transaction
+        .before
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
     let mut document_ids = HashSet::new();
+    let mut document_paths = HashSet::new();
     for migration_document in &transaction.documents {
         if !document_ids.insert(migration_document.issue_id.clone()) {
             return Err(format!(
@@ -1901,14 +1963,43 @@ fn validate_legacy_migration_transaction(
                     migration_document.issue_id
                 )
             })?;
-        if issue.issue_type != IssueType::Item || issue.status == IssueStatus::Done {
+        let original = original_rows[migration_document.issue_id.as_str()];
+        let strict_pass_through = original.handoff_digest.is_some();
+        let migrated_pair = !strict_pass_through
+            && issue.legacy_migration.as_ref().is_some_and(|migration| {
+                migration.disposition == LegacyMigrationDisposition::Paired
+            });
+        if issue.issue_type != IssueType::Item || (!strict_pass_through && !migrated_pair) {
             return Err(format!(
-                "legacy migration handoff {} does not target an active item",
+                "legacy migration handoff {} does not target a strict or newly paired item",
                 migration_document.issue_id
             ));
         }
+        if strict_pass_through
+            && migration_document.previous_document.as_deref()
+                != Some(migration_document.document.as_str())
+        {
+            return Err(format!(
+                "strict handoff {} must preserve its exact existing bytes",
+                migration_document.issue_id
+            ));
+        }
+        if let Some(previous) = migration_document.previous_document.as_deref() {
+            if !migration_document.document.contains(previous) {
+                return Err(format!(
+                    "adopted handoff {} does not preserve its legacy work-order content",
+                    migration_document.issue_id
+                ));
+            }
+        }
         let canonical = canonical_handoff_path(base, &config, issue, issue.prompt.as_deref())?;
         let supplied = normalize_relative(Path::new(&migration_document.handoff))?;
+        if !document_paths.insert(supplied.clone()) {
+            return Err(format!(
+                "legacy migration carries duplicate handoff target {}",
+                supplied.display()
+            ));
+        }
         if supplied != canonical {
             return Err(format!(
                 "legacy migration handoff {} is not authoritative path {}",
@@ -1918,9 +2009,11 @@ fn validate_legacy_migration_transaction(
         }
         validate_document(issue, &migration_document.document)?;
     }
-    for issue in &transaction.after {
-        let requires_document =
-            issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done;
+    for (original, issue) in transaction.before.iter().zip(&transaction.after) {
+        let requires_document = original.handoff_digest.is_some()
+            || issue.legacy_migration.as_ref().is_some_and(|migration| {
+                migration.disposition == LegacyMigrationDisposition::Paired
+            });
         if requires_document != document_ids.contains(&issue.id) {
             return Err(format!(
                 "legacy migration document set does not match active item {}",
@@ -2570,11 +2663,25 @@ fn check_migration_document_state(
     reject_symlink(&target, "legacy migration handoff")?;
     match fs::read_to_string(&target) {
         Ok(existing) if existing == migration_document.document => Ok(()),
+        Ok(existing)
+            if migration_document.previous_document.as_deref() == Some(existing.as_str()) =>
+        {
+            Ok(())
+        }
         Ok(_) => Err(format!(
-            "legacy migration refuses to overwrite existing handoff {}",
+            "legacy migration handoff changed after admission was prepared: {}",
             migration_document.handoff
         )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && migration_document.previous_document.is_none() =>
+        {
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "legacy migration handoff disappeared after admission was prepared: {}",
+            migration_document.handoff
+        )),
         Err(error) => Err(format!("failed to read {}: {}", target.display(), error)),
     }
 }
@@ -3596,10 +3703,17 @@ fn validate_migrated_board(base: &Path, issues: &[Issue]) -> Result<WorkflowConf
         .ok_or_else(|| format!("migrated board is missing {}", WORKFLOW_FILE))?;
     config.validate()?;
     validate_scaffold(base, &config)?;
-    for issue in issues
-        .iter()
-        .filter(|issue| issue.issue_type == IssueType::Item && issue.status != IssueStatus::Done)
-    {
+    for issue in issues {
+        issue
+            .validate()
+            .map_err(|error| format!("invalid strict row {}: {}", issue.id, error))?;
+    }
+    for issue in issues.iter().filter(|issue| {
+        issue.issue_type == IssueType::Item
+            && (issue.status != IssueStatus::Done
+                || issue.prompt.is_some()
+                || issue.handoff_digest.is_some())
+    }) {
         validate_handoff(base, &config, issue).map_err(|error| {
             format!(
                 "migrated item {} has an invalid authoritative handoff: {}",
@@ -3608,6 +3722,101 @@ fn validate_migrated_board(base: &Path, issues: &[Issue]) -> Result<WorkflowConf
         })?;
     }
     Ok(config)
+}
+
+fn migration_annotation_matches(issue: &Issue) -> bool {
+    let Some(annotation) = issue.legacy_migration.as_ref() else {
+        return false;
+    };
+    if annotation.version != LEGACY_MIGRATION_VERSION {
+        return false;
+    }
+    match annotation.disposition {
+        LegacyMigrationDisposition::Paired => {
+            issue.issue_type == IssueType::Item
+                && issue.status != IssueStatus::Done
+                && issue.prompt.is_some()
+                && issue.handoff_digest.is_some()
+        }
+        LegacyMigrationDisposition::History => {
+            issue.status == IssueStatus::Done
+                && issue.prompt.is_none()
+                && issue.handoff_digest.is_none()
+        }
+        LegacyMigrationDisposition::Exempt => {
+            issue.status != IssueStatus::Done
+                && issue.issue_type != IssueType::Item
+                && issue.prompt.is_none()
+                && issue.handoff_digest.is_none()
+        }
+    }
+}
+
+fn read_migration_source(base: &Path, pointer: &str) -> Result<Option<(PathBuf, String)>, String> {
+    let raw = Path::new(pointer);
+    let relative = if raw.is_absolute() {
+        let root = base
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve project root: {}", error))?;
+        raw.strip_prefix(&root)
+            .map_err(|_| format!("legacy handoff pointer is outside the project: {}", pointer))?
+            .to_path_buf()
+    } else {
+        normalize_relative(raw)?
+    };
+    let relative = safe_relative_path(base, &relative, true)?;
+    if relative.starts_with(".git") {
+        return Err(format!(
+            "legacy handoff pointer cannot read Git metadata: {}",
+            pointer
+        ));
+    }
+    let path = base.join(&relative);
+    reject_symlink(&path, "legacy handoff")?;
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some((relative, text))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {}", path.display(), error)),
+    }
+}
+
+fn strict_migration_document(
+    base: &Path,
+    config: &WorkflowConfig,
+    issue: &Issue,
+) -> Result<MigrationDocument, String> {
+    issue
+        .validate()
+        .map_err(|error| format!("invalid strict row {}: {}", issue.id, error))?;
+    if issue.issue_type != IssueType::Item {
+        return Err(format!(
+            "strict handoff binding on {} does not belong to an item",
+            issue.id
+        ));
+    }
+    let relative = canonical_handoff_path(base, config, issue, issue.prompt.as_deref())?;
+    preflight_handoff(base, &relative)?;
+    let path = base.join(&relative);
+    reject_symlink(&path, "strict migration handoff")?;
+    let document = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "failed to read strict handoff {}: {}",
+            relative.display(),
+            error
+        )
+    })?;
+    validate_document(issue, &document).map_err(|error| {
+        format!(
+            "strict item {} has an invalid authoritative handoff: {}",
+            issue.id, error
+        )
+    })?;
+    Ok(MigrationDocument {
+        issue_id: issue.id.clone(),
+        handoff: relative.to_string_lossy().into_owned(),
+        previous_document: Some(document.clone()),
+        document,
+    })
 }
 
 fn build_legacy_migration(
@@ -3620,24 +3829,39 @@ fn build_legacy_migration(
                 .to_string(),
         );
     }
-    if before.iter().any(|issue| issue.legacy_migration.is_some()) {
-        return Err(
-            "legacy migration annotations are incomplete or inconsistent; refusing to reseal rows"
-                .to_string(),
-        );
-    }
-    if before.iter().any(|issue| issue.handoff_digest.is_some()) {
-        return Err(
-            "board mixes strict handoff bindings with legacy rows; repair the strict workflow instead of migrating it again"
-                .to_string(),
-        );
-    }
 
     let migration_time = Utc::now();
     let config = WorkflowConfig::default();
     let mut after = Vec::with_capacity(before.len());
     let mut documents = Vec::new();
+    let mut document_paths = HashSet::new();
     for original in &before {
+        if original.handoff_digest.is_some() {
+            let document = strict_migration_document(base, &config, original)?;
+            if !document_paths.insert(document.handoff.clone()) {
+                return Err(format!(
+                    "strict handoff path is shared by more than one row: {}",
+                    document.handoff
+                ));
+            }
+            documents.push(document);
+            after.push(original.clone());
+            continue;
+        }
+        if original.legacy_migration.is_some() {
+            original.validate().map_err(|error| {
+                format!("invalid previously migrated row {}: {}", original.id, error)
+            })?;
+            if !migration_annotation_matches(original) {
+                return Err(format!(
+                    "legacy migration annotation on {} is incomplete or inconsistent",
+                    original.id
+                ));
+            }
+            after.push(original.clone());
+            continue;
+        }
+
         let mut issue = original.clone();
         let previous_prompt = prompt_pointer(original);
         let released_owner = original.claimed_by.clone();
@@ -3655,14 +3879,41 @@ fn build_legacy_migration(
             issue.handoff_digest = None;
             LegacyMigrationDisposition::Exempt
         } else {
-            let relative = canonical_handoff_path(base, &config, &issue, None)?;
+            let existing = previous_prompt
+                .as_deref()
+                .map(|pointer| read_migration_source(base, pointer))
+                .transpose()?
+                .flatten();
+            let requested = previous_prompt.as_deref().and_then(|pointer| {
+                canonical_handoff_path(base, &config, &issue, Some(pointer)).ok()
+            });
+            let generated = canonical_handoff_path(base, &config, &issue, None)?;
+            let relative = requested
+                .filter(|path| !document_paths.contains(path.to_string_lossy().as_ref()))
+                .unwrap_or(generated);
+            if !document_paths.insert(relative.to_string_lossy().into_owned()) {
+                return Err(format!(
+                    "legacy handoff target is shared by more than one row: {}",
+                    relative.display()
+                ));
+            }
+            preflight_handoff(base, &relative)?;
             issue.prompt = Some(relative.to_string_lossy().into_owned());
-            let document = render_handoff(base, &issue)?;
+            let previous_document = existing
+                .as_ref()
+                .filter(|(source, _)| source == &relative)
+                .map(|(_, text)| text.clone());
+            let document = if let Some((_, legacy)) = existing.as_ref() {
+                render_adopted_handoff(base, &issue, legacy)?
+            } else {
+                render_handoff(base, &issue)?
+            };
             issue.handoff_digest = Some(calculate_binding(&document)?);
             validate_document(&issue, &document)?;
             documents.push(MigrationDocument {
                 issue_id: issue.id.clone(),
                 handoff: relative.to_string_lossy().into_owned(),
+                previous_document,
                 document,
             });
             LegacyMigrationDisposition::Paired
@@ -3680,23 +3931,12 @@ fn build_legacy_migration(
         after.push(issue);
     }
 
-    let order = normalize_order(&after, None)?;
+    let order_before = read_order_text(base)?;
+    let stored_order = order_before.as_deref().map(parse_order).transpose()?;
+    let order = migration_order(&before, &after, stored_order.as_ref())?;
     let order_after = serialize_order(&order)?;
     let readme_after = match build_presentation_plan(base, &after, Some(&order)) {
-        Ok(presentation) => {
-            let destinations = presentation
-                .renames
-                .iter()
-                .map(|rename| (rename.issue_id.as_str(), rename.to.as_str()))
-                .collect::<HashMap<_, _>>();
-            for document in &mut documents {
-                if let Some(destination) = destinations.get(document.issue_id.as_str()) {
-                    document.handoff = (*destination).to_string();
-                }
-            }
-            after = presentation.after;
-            presentation.readme
-        }
+        Ok(presentation) => presentation.readme,
         Err(error) => render_unsynchronized_index(&order, &after, &error),
     };
 
@@ -3723,7 +3963,7 @@ fn build_legacy_migration(
         board_after,
         workflow_before: read_optional_text(&base.join(WORKFLOW_FILE), "workflow config")?,
         workflow_after,
-        order_before: read_optional_text(&base.join(HANDOFF_ORDER_FILE), "handoff priority")?,
+        order_before,
         order_after: Some(order_after),
         readme_before: read_optional_text(&base.join(HANDOFF_README), "handoff README")?,
         readme_after,
@@ -3748,8 +3988,10 @@ pub fn migrate_legacy_board(
     let board = load_board_config(base)?;
 
     if let Some(identity) = board.as_ref() {
-        if identity.workflow == BoardMode::Strict && identity.migrated_from_legacy_at.is_some() {
-            validate_migrated_board(base, &issues)?;
+        if identity.workflow == BoardMode::Strict
+            && identity.migrated_from_legacy_at.is_some()
+            && validate_migrated_board(base, &issues).is_ok()
+        {
             return Ok(legacy_migration_result(&issues, recovered, recovered));
         }
         if identity.workflow == BoardMode::Strict {
@@ -3760,8 +4002,11 @@ pub fn migrate_legacy_board(
                 .clone()
                 .all(|issue| issue.prompt.is_some() && issue.handoff_digest.is_some());
             let has_strict_binding = issues.iter().any(|issue| issue.handoff_digest.is_some());
-            if fully_strict && has_strict_binding && load_workflow(base)?.is_some() {
-                validate_migrated_board(base, &issues)?;
+            if fully_strict
+                && has_strict_binding
+                && load_workflow(base)?.is_some()
+                && validate_migrated_board(base, &issues).is_ok()
+            {
                 return Ok(legacy_migration_result(&issues, false, recovered));
             }
         }
@@ -4214,6 +4459,130 @@ mod tests {
             );
         }
         initialize_workflow(temp.path(), &store).unwrap().unwrap();
+    }
+
+    #[test]
+    fn mixed_migration_preserves_strict_rows_and_adopts_legacy_work_orders() {
+        let (temp, store, config) = setup();
+        let strict = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00010", "Strict native item"),
+            None,
+        )
+        .unwrap();
+        let owner = SessionIdentity::from_token(
+            "mixed-owner",
+            "mixed-owner-token-0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let strict = store
+            .claim_issue_checked(&strict.id, &owner, |row, _| {
+                validate_handoff(temp.path(), &config, row).map(|_| ())
+            })
+            .unwrap();
+        let strict_path = temp.path().join(strict.prompt.as_deref().unwrap());
+        let strict_document = fs::read_to_string(&strict_path).unwrap();
+
+        let legacy_text = "# Legacy launch order\n\nKeep this exact work order.\n";
+        let mut legacy = issue("mn-a00011", "Legacy numbered item");
+        legacy.status = IssueStatus::InProgress;
+        legacy.claimed_by = Some("legacy-pid-owner".to_string());
+        legacy.claimed_at = Some(Utc::now());
+        legacy.prompt = Some(".handoff/01-mn-a00011-legacy-numbered-item.md".to_string());
+        fs::write(
+            temp.path().join(legacy.prompt.as_deref().unwrap()),
+            legacy_text,
+        )
+        .unwrap();
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+
+        let migrated = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.paired_items, 1);
+        assert_eq!(migrated.released_claims, 1);
+        let rows = store.load_issues_strict().unwrap();
+        let strict_after = rows.iter().find(|row| row.id == strict.id).unwrap();
+        assert_eq!(strict_after, &strict);
+        assert_eq!(fs::read_to_string(&strict_path).unwrap(), strict_document);
+        let legacy_after = rows.iter().find(|row| row.id == legacy.id).unwrap();
+        assert_eq!(legacy_after.status, IssueStatus::Open);
+        assert!(legacy_after.claimed_by.is_none());
+        assert_eq!(legacy_after.prompt, legacy.prompt);
+        let adopted =
+            fs::read_to_string(temp.path().join(legacy_after.prompt.as_deref().unwrap())).unwrap();
+        assert!(adopted.contains(legacy_text));
+        validate_document(legacy_after, &adopted).unwrap();
+
+        let order = parse_order(&fs::read_to_string(temp.path().join(HANDOFF_ORDER_FILE)).unwrap())
+            .unwrap();
+        assert_eq!(order.items, vec![legacy.id.clone(), strict.id.clone()]);
+
+        let board_before_replay = fs::read(temp.path().join(".manna/issues.jsonl")).unwrap();
+        let strict_before_replay = fs::read(&strict_path).unwrap();
+        let adopted_before_replay =
+            fs::read(temp.path().join(legacy_after.prompt.as_deref().unwrap())).unwrap();
+        let replay = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(!replay.migrated);
+        assert_eq!(
+            fs::read(temp.path().join(".manna/issues.jsonl")).unwrap(),
+            board_before_replay
+        );
+        assert_eq!(fs::read(&strict_path).unwrap(), strict_before_replay);
+        assert_eq!(
+            fs::read(temp.path().join(legacy_after.prompt.as_deref().unwrap())).unwrap(),
+            adopted_before_replay
+        );
+        assert!(!legacy_migration_path(temp.path()).exists());
+
+        store.release_issue(&strict.id, &owner).unwrap();
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let synchronized = store.load_issues_strict().unwrap();
+        validate_migrated_board(temp.path(), &synchronized).unwrap();
+        assert!(handoff_presentation_drift(temp.path(), &synchronized)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mixed_migration_splits_duplicate_legacy_targets_without_losing_content() {
+        let (temp, store, _) = setup();
+        let legacy_text = "# Shared legacy work order\n\nPreserve the shared source.\n";
+        let shared = ".handoff/01-mn-a00012-shared-work-order.md";
+        fs::write(temp.path().join(shared), legacy_text).unwrap();
+        let mut first = issue("mn-a00012", "First shared item");
+        first.prompt = Some(shared.to_string());
+        let mut second = issue("mn-a00013", "Second shared item");
+        second.prompt = Some(shared.to_string());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        for row in [&first, &second] {
+            serde_json::to_writer(&mut board, row).unwrap();
+            writeln!(board).unwrap();
+        }
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        let rows = store.load_issues_strict().unwrap();
+        let first = rows.iter().find(|row| row.id == first.id).unwrap();
+        let second = rows.iter().find(|row| row.id == second.id).unwrap();
+        assert_ne!(first.prompt, second.prompt);
+        for row in [first, second] {
+            let text =
+                fs::read_to_string(temp.path().join(row.prompt.as_deref().unwrap())).unwrap();
+            assert!(text.contains(legacy_text));
+            validate_document(row, &text).unwrap();
+        }
+        validate_migrated_board(temp.path(), &rows).unwrap();
     }
 
     #[test]

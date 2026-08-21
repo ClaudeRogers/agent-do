@@ -111,13 +111,18 @@ restored_config: false
 
 ### `migrate`
 
-Explicitly admit a nonempty legacy board into strict workflow version 2. One
-authenticated write-ahead transaction establishes the board identity, creates
-and seals canonical handoffs for every active item, annotates done rows as
-grandfathered history, exempts tracks and dreams, and releases claims that
-lack ownership proofs. Board identity is published last, so interruption
-leaves a recoverable journal instead of a half-strict board. Repeating the
-command after success is a no-op.
+Explicitly admit a nonempty legacy or mixed board into strict workflow version
+2. One authenticated write-ahead transaction establishes the board identity,
+creates and seals canonical handoffs for every legacy active item, annotates
+done rows as grandfathered history, exempts tracks and dreams, and releases
+claims that lack ownership proofs. Existing strict pairs are verified and
+passed through byte-for-byte with their seals and ownership intact. A legacy
+Markdown work order under `.handoff/` is adopted in place: migration wraps its
+original contents in canonical frontmatter and required sections instead of
+discarding it. Unique hand-numbered prefixes seed first-class priority once;
+`manna sync` owns every name afterward. Board identity is published last, so
+interruption leaves a recoverable journal instead of a half-strict board.
+Repeating the command after success is a byte-stable no-op.
 
 ```bash
 agent-do manna migrate
