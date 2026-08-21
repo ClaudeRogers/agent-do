@@ -550,6 +550,22 @@ output=$("$MANNA" show "$DREAM_ID" 2>&1) || true
 check_yaml "$output" "A spark from below" "dream landed on the walk-up board"
 
 # ----------------------------------------------------------------------------
+# Test G2b: dream carries its substance in --description
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G2b: dream --description"
+output=$("$MANNA" dream "Titled spark" --description "The full substance of the idea lives here, not in the title." 2>&1) || true
+check_yaml "$output" "success: true" "dream with --description succeeds"
+DESC_DREAM_ID=$(extract_id "$output")
+output=$("$MANNA" show "$DESC_DREAM_ID" 2>&1) || true
+check_yaml "$output" "The full substance of the idea lives here" "dream description landed on the row"
+
+long_spark=$(printf 'x%.0s' $(seq 1 501))
+output=$("$MANNA" dream "$long_spark" 2>&1) || true
+check_yaml "$output" "success: false" "oversized spark is refused"
+check_yaml "$output" "put the substance in --description" "oversized spark error teaches the split"
+
+# ----------------------------------------------------------------------------
 # Test G3: dream global inbox fallback
 # ----------------------------------------------------------------------------
 echo ""

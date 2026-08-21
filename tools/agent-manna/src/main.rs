@@ -220,6 +220,10 @@ enum Commands {
         /// The spark (issue title)
         spark: String,
 
+        /// The substance of the idea (the spark stays a short title)
+        #[arg(long)]
+        description: Option<String>,
+
         /// Track to attach to (must be an existing issue with type track)
         #[arg(long)]
         track: Option<String>,
@@ -1724,12 +1728,23 @@ fn resolve_dream_board() -> (PathBuf, bool) {
     (home.join("inbox"), true)
 }
 
-fn cmd_dream(spark: String, track: Option<String>, source: Option<String>) -> ! {
-    if spark.is_empty() || spark.len() > 500 {
+fn cmd_dream(
+    spark: String,
+    description: Option<String>,
+    track: Option<String>,
+    source: Option<String>,
+) -> ! {
+    if spark.len() > 500 {
         output_error(
-            &format!("Title must be 1-500 characters, got {}", spark.len()),
+            &format!(
+                "A spark is a title (1-500 characters, got {}) — put the substance in --description",
+                spark.len()
+            ),
             EXIT_USER_ERROR,
         );
+    }
+    if spark.is_empty() {
+        output_error("Title must be 1-500 characters, got 0", EXIT_USER_ERROR);
     }
 
     let (board_dir, is_inbox) = resolve_dream_board();
@@ -1776,6 +1791,9 @@ fn cmd_dream(spark: String, track: Option<String>, source: Option<String>) -> ! 
         Err(e) => output_error(&e, EXIT_USER_ERROR),
     };
     issue.issue_type = IssueType::Dream;
+    issue.description = description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
     issue.track = track;
     issue.source = source;
 
@@ -2834,9 +2852,10 @@ fn main() {
         Commands::Context { max_tokens, json } => cmd_context(max_tokens, json),
         Commands::Dream {
             spark,
+            description,
             track,
             source,
-        } => cmd_dream(spark, track, source),
+        } => cmd_dream(spark, description, track, source),
         Commands::Lint { json } => cmd_lint(json),
         Commands::Reconcile {
             fix,
