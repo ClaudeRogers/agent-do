@@ -596,14 +596,6 @@ fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>, String
 
 fn workflow_gitignore_content(existing: &str) -> String {
     let marker = "# agent-do workflow: .manna and .handoff are durable state";
-    if existing.contains(marker)
-        && existing
-            .lines()
-            .any(|line| line == "!.manna/handoff-order.yaml")
-    {
-        return existing.to_string();
-    }
-
     let mut updated = existing.to_string();
     if !updated.is_empty() && !updated.ends_with('\n') {
         updated.push('\n');
@@ -614,7 +606,16 @@ fn workflow_gitignore_content(existing: &str) -> String {
             marker
         ));
     } else {
-        updated.push_str("!.manna/board.yaml\n!.manna/handoff-order.yaml\n.manna/transactions/\n");
+        for rule in [
+            "!.manna/board.yaml",
+            "!.manna/handoff-order.yaml",
+            ".manna/transactions/",
+        ] {
+            if !updated.lines().any(|line| line == rule) {
+                updated.push_str(rule);
+                updated.push('\n');
+            }
+        }
     }
     updated
 }
@@ -3941,6 +3942,35 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
+
+    #[test]
+    fn stage_zero_gitignore_upgrade_adds_only_the_missing_order_rule() {
+        let existing = "# agent-do workflow: .manna and .handoff are durable state\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n";
+        let updated = workflow_gitignore_content(existing);
+
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| *line == "!.manna/board.yaml")
+                .count(),
+            1
+        );
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| *line == ".manna/transactions/")
+                .count(),
+            1
+        );
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| *line == "!.manna/handoff-order.yaml")
+                .count(),
+            1
+        );
+        assert_eq!(workflow_gitignore_content(&updated), updated);
+    }
 
     #[test]
     fn hmac_sha256_matches_rfc_4231_case_one() {
