@@ -240,6 +240,8 @@ index from the same snapshot. A bare name is safe to launch; `bMM` means the
 item is held by the highest-numbered still-open blocker, while the complete
 dependency list remains in `blocked_by`. Claimed work orders never move. Their
 current number stays reserved until release, after which one sync converges.
+Completed pairs leave the numbered plan on sync and return to unnumbered,
+sealed history, so a bare numbered filename always means launchable work.
 Renames, prompt repoints, priority state, and the index share one authenticated,
 recoverable transaction; filenames are presentation and never authority.
 
