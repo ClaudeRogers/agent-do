@@ -151,8 +151,17 @@ pub fn claim_command_ids(text: &str) -> Vec<String> {
 /// Resolve an issue's work-order prompt pointer.
 ///
 /// The `prompt` field wins; otherwise a description whose FIRST line is
-/// `PROMPT: <path>` (the blessed interim convention) supplies it. Both
-/// sources are trimmed; an empty pointer is no pointer.
+/// `PROMPT: <path>` (the blessed interim convention) supplies it. Historical
+/// descriptions may append ` — <note>` after the path; that prose is context,
+/// never part of the filename. Both sources are trimmed; an empty pointer is
+/// no pointer.
+pub fn strip_prompt_annotation(pointer: &str) -> &str {
+    pointer
+        .split_once(" — ")
+        .map_or(pointer, |(path, _)| path)
+        .trim()
+}
+
 pub fn prompt_pointer(issue: &Issue) -> Option<String> {
     if let Some(field) = issue
         .prompt
@@ -164,6 +173,7 @@ pub fn prompt_pointer(issue: &Issue) -> Option<String> {
     }
     let first_line = issue.description.as_deref()?.lines().next()?.trim();
     let path = first_line.strip_prefix("PROMPT:")?.trim();
+    let path = strip_prompt_annotation(path);
     (!path.is_empty()).then(|| path.to_string())
 }
 
@@ -506,6 +516,9 @@ mod tests {
     fn test_prompt_pointer_from_description_first_line() {
         let mut i = issue("mn-aaa111", "Prompted");
         i.description = Some("PROMPT:   /desc/path.md \nmore detail".to_string());
+        assert_eq!(prompt_pointer(&i).as_deref(), Some("/desc/path.md"));
+
+        i.description = Some("PROMPT: /desc/path.md — read this before starting\nbody".to_string());
         assert_eq!(prompt_pointer(&i).as_deref(), Some("/desc/path.md"));
     }
 

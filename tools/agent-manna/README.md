@@ -121,6 +121,12 @@ Markdown work order under `.handoff/` is adopted in place: migration wraps its
 original contents in canonical frontmatter and required sections instead of
 discarding it. Partial legacy frontmatter and old Claim sections remain inert
 work-order content; only the canonical Claim section is authoritative. Active
+description-first pointers may append ` — <note>` after the Markdown path;
+that note remains row context and is never treated as part of the filename.
+If an earlier migration admitted that malformed pointer, rerunning `migrate`
+adds the exact source and provenance to the existing sealed handoff without
+discarding its authorized body, then rebinds the row through the same journal.
+Active
 absolute pointers inside the project are normalized to repository-relative
 provenance. An absolute pointer outside the project may import one regular
 UTF-8 Markdown file when the file itself is not a symlink and the resolved path
@@ -132,7 +138,7 @@ bytes exist in every consuming sealed handoff, an in-project source outside
 `.handoff/.archive/legacy-sources/*.source` evidence file in the same journaled
 transaction. Cross-project sources remain untouched. Rerunning `migrate`
 repairs boards admitted before source retirement existed while preserving
-strict row and handoff bytes. Unique
+unaffected strict row and handoff bytes. Unique
 hand-numbered prefixes seed first-class priority once; `manna sync` owns every
 name afterward. Board identity is published last, so interruption leaves a
 recoverable journal instead of a half-strict board. Repeating the command after

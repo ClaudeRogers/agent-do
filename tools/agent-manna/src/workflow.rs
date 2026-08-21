@@ -20,7 +20,7 @@ use crate::issue::{
     Issue, IssueStatus, IssueType, LegacyMigrationAnnotation, LegacyMigrationDisposition,
     SessionIdentity,
 };
-use crate::reconcile::prompt_pointer;
+use crate::reconcile::{prompt_pointer, strip_prompt_annotation};
 use crate::store::MannaStore;
 
 pub const WORKFLOW_VERSION: u32 = 2;
@@ -1791,6 +1791,22 @@ fn render_adopted_handoff(
     )
 }
 
+fn append_adopted_source(document: &str, legacy: &str, provenance: &str) -> Result<String, String> {
+    let (frontmatter, body) = split_handoff(document)?;
+    let positions = required_section_positions(body)?;
+    let completion = positions[4];
+    let provenance = serde_json::to_string(provenance)
+        .expect("serializing a legacy pointer as a JSON string cannot fail");
+    let repaired = format!(
+        "{}> Legacy migration source: {}\n\n{}\n\n{}",
+        &body[..completion],
+        provenance,
+        legacy,
+        &body[completion..]
+    );
+    render_document(&frontmatter, &repaired)
+}
+
 fn required_section_positions(body: &str) -> Result<Vec<usize>, String> {
     let mut positions = Vec::new();
     let mut search_from = 0;
@@ -1916,6 +1932,7 @@ fn validate_legacy_migration_transaction(
         return Err("legacy migration cannot add or delete board rows".to_string());
     }
     let mut row_ids = HashSet::new();
+    let mut annotated_pointer_repairs = HashSet::new();
     for (before, after) in transaction.before.iter().zip(&transaction.after) {
         if before.id != after.id || !row_ids.insert(after.id.clone()) {
             return Err(
@@ -1926,12 +1943,16 @@ fn validate_legacy_migration_transaction(
             .validate()
             .map_err(|error| format!("invalid migrated row {}: {}", after.id, error))?;
         let pass_through = before.handoff_digest.is_some() || before.legacy_migration.is_some();
+        let pointer_repair = annotated_pointer_repair_matches(base, before, after)?;
         if pass_through {
-            if before != after {
+            if before != after && !pointer_repair {
                 return Err(format!(
                     "legacy migration changed already-admitted row {}",
                     after.id
                 ));
+            }
+            if pointer_repair {
+                annotated_pointer_repairs.insert(after.id.clone());
             }
             if before.handoff_digest.is_none() && !migration_annotation_matches(before) {
                 return Err(format!(
@@ -2006,6 +2027,7 @@ fn validate_legacy_migration_transaction(
             })?;
         let original = original_rows[migration_document.issue_id.as_str()];
         let strict_pass_through = original.handoff_digest.is_some();
+        let pointer_repair = annotated_pointer_repairs.contains(&migration_document.issue_id);
         let migrated_pair = !strict_pass_through
             && issue.legacy_migration.as_ref().is_some_and(|migration| {
                 migration.disposition == LegacyMigrationDisposition::Paired
@@ -2017,6 +2039,7 @@ fn validate_legacy_migration_transaction(
             ));
         }
         if strict_pass_through
+            && !pointer_repair
             && migration_document.previous_document.as_deref()
                 != Some(migration_document.document.as_str())
         {
@@ -2025,11 +2048,54 @@ fn validate_legacy_migration_transaction(
                 migration_document.issue_id
             ));
         }
-        if strict_pass_through && migration_document.source_document.is_some() {
+        if strict_pass_through && !pointer_repair && migration_document.source_document.is_some() {
             return Err(format!(
                 "strict handoff {} cannot carry a legacy source document",
                 migration_document.issue_id
             ));
+        }
+        if pointer_repair {
+            let previous = migration_document
+                .previous_document
+                .as_deref()
+                .ok_or_else(|| {
+                    format!(
+                        "annotated pointer repair {} has no previous handoff bytes",
+                        migration_document.issue_id
+                    )
+                })?;
+            validate_document(original, previous).map_err(|error| {
+                format!(
+                    "annotated pointer repair {} does not start from its sealed handoff: {}",
+                    migration_document.issue_id, error
+                )
+            })?;
+            let source = migration_document
+                .source_document
+                .as_deref()
+                .ok_or_else(|| {
+                    format!(
+                        "annotated pointer repair {} has no source bytes",
+                        migration_document.issue_id
+                    )
+                })?;
+            let provenance = issue
+                .legacy_migration
+                .as_ref()
+                .and_then(|migration| migration.previous_prompt.as_deref())
+                .ok_or_else(|| {
+                    format!(
+                        "annotated pointer repair {} has no normalized provenance",
+                        migration_document.issue_id
+                    )
+                })?;
+            let expected = append_adopted_source(previous, source, provenance)?;
+            if migration_document.document != expected {
+                return Err(format!(
+                    "annotated pointer repair {} is not the canonical content-preserving rebind",
+                    migration_document.issue_id
+                ));
+            }
         }
         if migrated_pair
             && migration_document.previous_document.is_some()
@@ -4251,6 +4317,86 @@ fn strict_migration_document(
     })
 }
 
+fn repair_annotated_legacy_pair(
+    base: &Path,
+    config: &WorkflowConfig,
+    issue: &Issue,
+) -> Result<Option<(Issue, MigrationDocument)>, String> {
+    let Some(annotation) = issue.legacy_migration.as_ref() else {
+        return Ok(None);
+    };
+    if annotation.disposition != LegacyMigrationDisposition::Paired {
+        return Ok(None);
+    }
+    let Some(previous_prompt) = annotation.previous_prompt.as_deref() else {
+        return Ok(None);
+    };
+    let normalized = strip_prompt_annotation(previous_prompt);
+    if normalized == previous_prompt || normalized.is_empty() {
+        return Ok(None);
+    }
+    let source = read_migration_source(base, normalized)?;
+    let Some(source_document) = source.document.as_deref() else {
+        return Ok(None);
+    };
+
+    let previous = strict_migration_document(base, config, issue)?;
+    let document = append_adopted_source(&previous.document, source_document, &source.provenance)?;
+    let mut after = issue.clone();
+    after
+        .legacy_migration
+        .as_mut()
+        .expect("paired migration annotation exists")
+        .previous_prompt = Some(source.provenance);
+    after.handoff_digest = Some(calculate_binding(&document)?);
+    after
+        .validate()
+        .map_err(|error| format!("cannot repair migrated row {}: {}", after.id, error))?;
+    validate_document(&after, &document)?;
+    Ok(Some((
+        after,
+        MigrationDocument {
+            issue_id: issue.id.clone(),
+            handoff: previous.handoff,
+            previous_document: Some(previous.document),
+            source_document: Some(source_document.to_string()),
+            document,
+        },
+    )))
+}
+
+fn annotated_pointer_repair_matches(
+    base: &Path,
+    before: &Issue,
+    after: &Issue,
+) -> Result<bool, String> {
+    if before.handoff_digest.is_none() || after.handoff_digest.is_none() {
+        return Ok(false);
+    }
+    let Some(annotation) = before.legacy_migration.as_ref() else {
+        return Ok(false);
+    };
+    if annotation.disposition != LegacyMigrationDisposition::Paired {
+        return Ok(false);
+    }
+    let Some(previous_prompt) = annotation.previous_prompt.as_deref() else {
+        return Ok(false);
+    };
+    let normalized = strip_prompt_annotation(previous_prompt);
+    if normalized == previous_prompt || normalized.is_empty() {
+        return Ok(false);
+    }
+    let source = read_migration_source(base, normalized)?;
+    let mut expected = before.clone();
+    expected
+        .legacy_migration
+        .as_mut()
+        .expect("paired migration annotation exists")
+        .previous_prompt = Some(source.provenance);
+    expected.handoff_digest = after.handoff_digest.clone();
+    Ok(&expected == after)
+}
+
 fn build_legacy_migration(
     base: &Path,
     before: Vec<Issue>,
@@ -4269,7 +4415,13 @@ fn build_legacy_migration(
     let mut document_paths = HashSet::new();
     for original in &before {
         if original.handoff_digest.is_some() {
-            let document = strict_migration_document(base, &config, original)?;
+            let (issue, document) = match repair_annotated_legacy_pair(base, &config, original)? {
+                Some(repair) => repair,
+                None => (
+                    original.clone(),
+                    strict_migration_document(base, &config, original)?,
+                ),
+            };
             if !document_paths.insert(document.handoff.clone()) {
                 return Err(format!(
                     "strict handoff path is shared by more than one row: {}",
@@ -4277,7 +4429,7 @@ fn build_legacy_migration(
                 ));
             }
             documents.push(document);
-            after.push(original.clone());
+            after.push(issue);
             continue;
         }
         if original.legacy_migration.is_some() {
@@ -4464,7 +4616,7 @@ pub fn migrate_legacy_board(
             && validate_migrated_board(base, &issues).is_ok()
         {
             let transaction = build_legacy_migration(base, issues.clone())?;
-            if transaction.source_archives.is_empty() {
+            if transaction.before == transaction.after && transaction.source_archives.is_empty() {
                 return Ok(legacy_migration_result(&issues, recovered, recovered));
             }
             prepared_transaction = Some(transaction);
@@ -5085,7 +5237,10 @@ mod tests {
         let mut outside = issue("mn-a00015", "Cross-project absolute pointer");
         outside.prompt = Some(external_path.to_string_lossy().into_owned());
         let mut inside = issue("mn-a00016", "In-project absolute pointer");
-        inside.prompt = Some(project_source.to_string_lossy().into_owned());
+        inside.description = Some(format!(
+            "PROMPT: {} — ratified design; read before starting\nAdditional context.",
+            project_source.display()
+        ));
         let mut board = OpenOptions::new()
             .append(true)
             .open(temp.path().join(".manna/issues.jsonl"))
@@ -5176,6 +5331,74 @@ mod tests {
             board_before
         );
         assert_eq!(fs::read(&handoff).unwrap(), handoff_before);
+        assert!(!migrate_legacy_board(temp.path(), &store).unwrap().migrated);
+    }
+
+    #[test]
+    fn migration_repairs_a_previously_admitted_annotated_pointer() {
+        let (temp, store, _) = setup();
+        let source = Path::new(".dev/session-prompts/annotated-work-order.md");
+        fs::create_dir_all(temp.path().join(source).parent().unwrap()).unwrap();
+        let source_text = "# Annotated work order\n\nPreserve the ratified design.\n";
+        fs::write(temp.path().join(source), source_text).unwrap();
+        let annotated = format!(
+            "{} — ratified design; read before starting",
+            source.display()
+        );
+        let mut legacy = issue("mn-a00022", "Previously annotated pointer");
+        // A prompt field is intentionally literal. This manufactures the
+        // exact malformed annotation written by the preceding migration
+        // release before description annotations were normalized.
+        legacy.prompt = Some(annotated.clone());
+        let mut board = OpenOptions::new()
+            .append(true)
+            .open(temp.path().join(".manna/issues.jsonl"))
+            .unwrap();
+        serde_json::to_writer(&mut board, &legacy).unwrap();
+        writeln!(board).unwrap();
+        board.sync_all().unwrap();
+
+        migrate_legacy_board(temp.path(), &store).unwrap();
+        let admitted = store.load_issues_strict().unwrap().remove(0);
+        assert_eq!(
+            admitted
+                .legacy_migration
+                .as_ref()
+                .unwrap()
+                .previous_prompt
+                .as_deref(),
+            Some(annotated.as_str())
+        );
+        let handoff_path = temp.path().join(admitted.prompt.as_deref().unwrap());
+        let handoff_before = fs::read_to_string(&handoff_path).unwrap();
+        assert!(!handoff_before.contains(source_text));
+        assert!(temp.path().join(source).is_file());
+
+        let repaired = migrate_legacy_board(temp.path(), &store).unwrap();
+        assert!(repaired.migrated);
+        let repaired = store.load_issues_strict().unwrap().remove(0);
+        assert_eq!(
+            repaired
+                .legacy_migration
+                .as_ref()
+                .unwrap()
+                .previous_prompt
+                .as_deref(),
+            Some(source.to_string_lossy().as_ref())
+        );
+        let handoff_after = fs::read_to_string(&handoff_path).unwrap();
+        assert!(handoff_after.contains(source_text));
+        let (_, body_before) = split_handoff(&handoff_before).unwrap();
+        let completion = required_section_positions(body_before).unwrap()[4];
+        let (_, body_after) = split_handoff(&handoff_after).unwrap();
+        assert!(body_after.starts_with(&body_before[..completion]));
+        assert!(body_after.ends_with(&body_before[completion..]));
+        validate_document(&repaired, &handoff_after).unwrap();
+        assert!(!temp.path().join(source).exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join(legacy_source_archive_path(source))).unwrap(),
+            source_text
+        );
         assert!(!migrate_legacy_board(temp.path(), &store).unwrap().migrated);
     }
 

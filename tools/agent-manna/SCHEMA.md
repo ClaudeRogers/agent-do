@@ -139,7 +139,11 @@ Markdown pointers, annotate done rows as pointer-free history, annotate active
 tracks and dreams as exempt, release unauthenticated claims, and publish strict
 board identity last. Partial frontmatter and old Claim sections in imported
 text are inert content; strict authority comes from the row digest and the one
-canonical Claim section. In-project absolute source paths normalize to
+canonical Claim section. A description-first `PROMPT: path.md — note` line
+ends its pointer at the em-dash separator; the remaining note stays contextual
+prose. A board admitted by the preceding parser is repaired on the next
+`migrate` through a content-preserving authenticated rebind. In-project
+absolute source paths normalize to
 repository-relative provenance, while a cross-project source retains its
 original absolute path in the sealed document. The transaction authenticates
 source bytes separately from target-before bytes so recovery cannot substitute
@@ -149,7 +153,7 @@ deterministic `.handoff/.archive/legacy-sources/` evidence root. Its `.source`
 suffix keeps preserved claim text from becoming a second executable Markdown
 workflow. Shared sources archive once, external sources are never mutated, and
 `migrate` repairs already-admitted boards whose local sources were left behind
-without changing strict rows or handoff seals. Unique handmade number prefixes
+without changing unaffected strict rows or handoff seals. Unique handmade number prefixes
 seed priority only when they are unambiguous; `.manna/handoff-order.yaml` and `manna sync`
 own presentation after admission. Recovery accepts only the complete before or
 complete after board, so a concurrent mutation is never overwritten. Replaying

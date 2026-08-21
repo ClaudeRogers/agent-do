@@ -1118,7 +1118,7 @@ ADOPTION_PROJECT_SOURCE="$ADOPTION_DIR/.dev/session-prompts/in-project-work-orde
 printf '%s\n' \
     '{"id":"mn-b30001","title":"Partial frontmatter work order","status":"open","source":"estate sweep fixture","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"prompt":".handoff/partial-lookalike.md"}' \
     "{\"id\":\"mn-b30002\",\"title\":\"Cross-project absolute pointer\",\"status\":\"open\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"blocked_by\":[],\"prompt\":\"$ADOPTION_EXTERNAL_SOURCE\"}" \
-    "{\"id\":\"mn-b30003\",\"title\":\"In-project absolute pointer\",\"status\":\"open\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"blocked_by\":[],\"prompt\":\"$ADOPTION_PROJECT_SOURCE\"}" \
+    "{\"id\":\"mn-b30003\",\"title\":\"In-project absolute pointer\",\"status\":\"open\",\"description\":\"PROMPT: $ADOPTION_PROJECT_SOURCE — ratified design; read before starting\",\"created_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"blocked_by\":[]}" \
     > .manna/issues.jsonl
 cat > .handoff/partial-lookalike.md <<'EOF'
 ---
