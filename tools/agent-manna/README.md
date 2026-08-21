@@ -186,7 +186,8 @@ Both paths use the native recoverable rename transaction. Sync assigns dense
 highest-numbered still-open blocker, repoints every moved row, and regenerates
 `.handoff/README.md`. Dependencies remain in `blocked_by`; filenames are never
 authority. Claimed handoffs do not move, and their current number stays
-reserved until release.
+reserved until release. Completed pairs return to unnumbered sealed history on
+sync, so every bare numbered handoff remains a truthful launch signal.
 
 ```yaml
 success: true

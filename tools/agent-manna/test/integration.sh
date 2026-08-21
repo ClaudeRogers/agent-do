@@ -1088,8 +1088,15 @@ fi
 [[ -f ".handoff/01b02-$ORDER_THREE-third-priority.md" ]] && pass "gate updates when one blocker edge closes" || fail "gate updates when one blocker edge closes" "01b02 handoff missing"
 "$MANNA" claim "$ORDER_ONE" >/dev/null 2>&1
 "$MANNA" done "$ORDER_ONE" >/dev/null 2>&1
-"$MANNA" sync >/dev/null 2>&1
+output=$("$MANNA" sync 2>&1) || true
 [[ -f ".handoff/01-$ORDER_THREE-third-priority.md" ]] && pass "last closed blocker removes the launch gate" || fail "last closed blocker removes the launch gate" "bare launch handoff missing"
+check_yaml "$output" "ordered_items: 2" "completed work leaves the active priority denominator"
+[[ -f ".handoff/$ORDER_ONE-first-priority.md" ]] && pass "completed work returns to unnumbered history" || fail "completed work returns to unnumbered history" "historical handoff missing"
+if [[ "$(cat .manna/handoff-order.yaml)" != *"$ORDER_ONE"* ]] && ! grep -qE "^\\| [0-9]{2} \\| .$ORDER_ONE. \\|" .handoff/README.md; then
+    pass "completed work is absent from launch order and index"
+else
+    fail "completed work is absent from launch order and index" "$ORDER_ONE remains in generated launch presentation"
+fi
 
 cd "$TEST_DIR"
 rm -rf "$ORDER_DIR"

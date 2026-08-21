@@ -60,6 +60,8 @@ Rules:
   after board changes; never hand-maintain numbered filenames or this index.
 - A bare numbered filename is safe to launch. `bMM` means the item is held
   until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- Completed pairs return to unnumbered sealed history on sync, so no numbered
+  filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
   `.manna/issues.jsonl`, and `.handoff/`.
 "#;
@@ -777,6 +779,13 @@ fn paired_items(issues: &[Issue]) -> Vec<&Issue> {
         .collect()
 }
 
+fn planned_items(issues: &[Issue]) -> Vec<&Issue> {
+    paired_items(issues)
+        .into_iter()
+        .filter(|issue| issue.status != IssueStatus::Done)
+        .collect()
+}
+
 fn has_live_claim(issue: &Issue) -> bool {
     issue.status != IssueStatus::Done && issue.claimed_by.is_some()
 }
@@ -822,7 +831,7 @@ fn normalize_order(
     issues: &[Issue],
     stored: Option<&HandoffOrder>,
 ) -> Result<HandoffOrder, String> {
-    let candidates = paired_items(issues);
+    let candidates = planned_items(issues);
     let candidate_ids = candidates
         .iter()
         .map(|issue| issue.id.as_str())
@@ -1104,6 +1113,42 @@ fn build_presentation_plan(
             actual_path: actual,
             held_claimed: held_claimed || held_without_number.contains(id),
         });
+    }
+
+    // A completed item is durable history, not launchable work. If it still
+    // wears a numbered plan name, return it to the ordinary unnumbered pair
+    // path in the same transaction that removes it from priority and index.
+    for issue in paired_items(issues)
+        .into_iter()
+        .filter(|issue| issue.status == IssueStatus::Done)
+    {
+        let from = issue
+            .prompt
+            .clone()
+            .expect("paired item has an authoritative handoff pointer");
+        if ordered_name_parts(&issue.id, &from).is_none() {
+            continue;
+        }
+        let to = canonical_handoff_path(base, &WorkflowConfig::default(), issue, None)?
+            .to_string_lossy()
+            .into_owned();
+        if !expected_paths.insert(to.clone()) {
+            return Err(format!(
+                "completed handoff derives duplicate historical path {}",
+                to
+            ));
+        }
+        canonical_handoff_path(base, &WorkflowConfig::default(), issue, Some(&from))?;
+        renames.push(HandoffRename {
+            issue_id: issue.id.clone(),
+            from,
+            to: to.clone(),
+        });
+        let row = after
+            .iter_mut()
+            .find(|row| row.id == issue.id)
+            .expect("completed paired item exists in board snapshot");
+        row.prompt = Some(to);
     }
     entries.sort_by_key(|entry| entry.priority);
     let readme = render_handoff_index(&entries, &after);
@@ -3149,7 +3194,7 @@ pub fn handoff_presentation_drift(
             issue_id: None,
             rule: "handoff_order",
             detail: format!(
-                "{} is not normalized to the current paired item set",
+                "{} is not normalized to the current active paired item set",
                 HANDOFF_ORDER_FILE
             ),
         });
@@ -3172,6 +3217,25 @@ pub fn handoff_presentation_drift(
                 ),
             });
         }
+    }
+    let planned_ids = plan
+        .entries
+        .iter()
+        .map(|entry| entry.issue_id.as_str())
+        .collect::<HashSet<_>>();
+    for rename in plan
+        .renames
+        .iter()
+        .filter(|rename| !planned_ids.contains(rename.issue_id.as_str()))
+    {
+        findings.push(HandoffPresentationDrift {
+            issue_id: Some(rename.issue_id.clone()),
+            rule: "handoff_filename",
+            detail: format!(
+                "completed handoff path is {}, expected unnumbered history path {}",
+                rename.from, rename.to
+            ),
+        });
     }
     let readme = read_optional_text(&base.join(HANDOFF_README), "handoff README")?;
     if readme.as_deref() != Some(plan.readme.as_str()) {
@@ -4833,6 +4897,63 @@ mod tests {
         assert!(handoff_presentation_drift(temp.path(), &rows)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn completed_pair_leaves_the_numbered_launch_plan() {
+        let (temp, store, config) = setup();
+        let item = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00001", "Finished task"),
+            None,
+        )
+        .unwrap();
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let numbered = ".handoff/01-mn-a00001-finished-task.md";
+        assert!(temp.path().join(numbered).is_file());
+
+        let owner =
+            SessionIdentity::from_token("ses-done", "done-0123456789abcdef0123456789abcdef")
+                .unwrap();
+        store.claim_issue(&item.id, &owner).unwrap();
+        store.complete_issue(&item.id, &owner).unwrap();
+
+        let drift = handoff_presentation_drift(temp.path(), &store.load_issues().unwrap()).unwrap();
+        assert!(drift.iter().any(|finding| {
+            finding.issue_id.as_deref() == Some(item.id.as_str())
+                && finding.detail.contains("unnumbered history path")
+        }));
+        let result = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert_eq!(result.renamed, 1);
+        assert_eq!(result.ordered_items, 0);
+
+        let completed = store.load_issues().unwrap().into_iter().next().unwrap();
+        assert_eq!(
+            completed.prompt.as_deref(),
+            Some(".handoff/mn-a00001-finished-task.md")
+        );
+        assert!(!temp.path().join(numbered).exists());
+        assert!(temp
+            .path()
+            .join(".handoff/mn-a00001-finished-task.md")
+            .is_file());
+        validate_handoff(temp.path(), &config, &completed).unwrap();
+        assert!(
+            parse_order(&fs::read_to_string(temp.path().join(HANDOFF_ORDER_FILE)).unwrap())
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(!fs::read_to_string(temp.path().join(HANDOFF_README))
+            .unwrap()
+            .contains(&item.id));
+        assert!(
+            handoff_presentation_drift(temp.path(), &store.load_issues().unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

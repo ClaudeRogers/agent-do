@@ -351,6 +351,8 @@ destination, so swaps and longer cycles cannot clobber files; exact before and
 after boards, priority YAML, README bytes, and all source/destination paths are
 HMAC-bound for idempotent crash recovery. Content bindings exclude paths, so a
 native rename preserves the seal without authorizing any document edit.
+Completed pairs leave the launch plan on the next sync: their sealed handoffs
+return to unnumbered paths, while the board and Git history retain provenance.
 
 Handoff frontmatter binds workflow version, item, track, source, base commit,
 scope, inputs, and a SHA-256 of the canonical document with the binding field

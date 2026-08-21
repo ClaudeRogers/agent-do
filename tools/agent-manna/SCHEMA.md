@@ -138,8 +138,9 @@ before or complete after board, so a concurrent mutation is never overwritten.
 Replaying a completed migration is byte-stable. The annotation records how a
 row entered strict mode; it does not prevent later status or type transitions.
 
-Grandfathered done history without pairs is exempt. Done rows that still own a
-strict pair remain in ordered presentation and the generated index.
+Grandfathered done history without pairs is exempt. A done row that owns a
+strict pair keeps that sealed pair, but sync removes it from priority and the
+generated index and returns its handoff to an unnumbered historical path.
 
 ### Status Transitions
 
