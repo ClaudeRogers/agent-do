@@ -228,10 +228,13 @@ complete inspected row still matches.
 
 **Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for every
 detected project. New boards receive `.manna/workflow.yaml` and a tracked
-`.handoff/` root. `manna create` generates one
-`.handoff/<mn-id>-<slug>.md` work order for each actionable item and stores the
-same repository-relative path in the issue's `prompt` field. Tracks and dreams
-remain board-only.
+`.handoff/` root. `manna create` generates one initial work order for each
+actionable item and stores the same repository-relative path in the issue's
+`prompt` field. `.manna/handoff-order.yaml` owns priority. `manna sync`
+transactionally derives dense `.handoff/<NN>[b<MM>]-<mn-id>-<slug>.md` names
+and the README index from board state. A bare filename is safe to launch;
+`bMM` names the highest-numbered still-open blocker. Tracks and dreams remain
+board-only.
 
 The handoff contains exactly one claim target for its item. `manna claim`
 checks the file, pointer, claim command, canonical root, and Git visibility
@@ -240,6 +243,9 @@ contract as a board gate. `manna reconcile` checks both directions under
 `.handoff/` and reports `workflow_sprawl` when active local work appears under
 `.handoffs/`, `.dev/session-prompts/`, or nested `handoff-prompts/` roots. Bare
 id mentions are data, not claims; only `manna claim <id>` command lines bind.
+`manna lint` and `manna reconcile` also report filename/index drift with
+`agent-do manna sync` as the repair. A live claimed handoff is never renamed;
+its number stays reserved until release.
 
 Nonempty boards created before workflow version 1 remain legacy until an
 explicit `agent-do manna migrate`. The migration creates sealed handoffs for

@@ -193,6 +193,8 @@ agent-do manna init
 agent-do manna migrate   # once, for an existing legacy board
 agent-do manna create "Fix auth redirect" --type item --track mn-a1b2c3 \
   --source "docs/auth-audit.md"
+agent-do manna order mn-d4e5f6 1      # first-class board priority
+agent-do manna sync                    # derive names and the index
 agent-do manna handoff seal mn-d4e5f6   # after intentional handoff edits
 agent-do manna claim mn-d4e5f6
 agent-do manna done mn-d4e5f6
@@ -214,7 +216,8 @@ winner. It refuses missing, ignored, symlink-escaped, structurally invalid, or
 unsealed handoffs.
 
 `manna init` pins strict or legacy identity in `.manna/board.yaml`, then
-installs workflow version 2 and `.handoff/README.md` for strict boards. If a
+installs workflow version 2, `.manna/handoff-order.yaml`, and
+`.handoff/README.md` for strict boards. If a
 repository ignores `.manna/` or `.handoff/`, init adds
 the narrow unignore rules needed to keep workflow state in Git while leaving
 the runtime lock and transaction journal ignored. Removing `workflow.yaml`
@@ -229,6 +232,17 @@ Stage 0 fail-closed check.
 Restoration and ordinary metadata updates never recalculate a handoff seal;
 only `handoff seal` can authorize edited contents.
 
+Priority is a first-class ordered list in `.manna/handoff-order.yaml`, not an
+inference from dependencies or filenames. `manna order <id> <position>` moves
+one paired item and synchronizes immediately. `manna sync` re-derives dense
+`01..N` filenames after any other board mutation and regenerates the README
+index from the same snapshot. A bare name is safe to launch; `bMM` means the
+item is held by the highest-numbered still-open blocker, while the complete
+dependency list remains in `blocked_by`. Claimed work orders never move. Their
+current number stays reserved until release, after which one sync converges.
+Renames, prompt repoints, priority state, and the index share one authenticated,
+recoverable transaction; filenames are presentation and never authority.
+
 Raw ideas enter through `dream`, which files the spark on the nearest board up
 the directory tree, or the global inbox when no board exists:
 
@@ -240,6 +254,7 @@ Two commands keep the board honest:
 
 ```bash
 agent-do manna lint              # board grammar check; findings exit 1
+agent-do manna sync              # converge generated handoff presentation
 agent-do manna reconcile         # drift between the board and reality
 agent-do manna reconcile --fix   # safe fixes: abandon dead claims,
                                  # unblock resolved blockers

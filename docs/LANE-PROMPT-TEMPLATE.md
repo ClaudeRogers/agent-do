@@ -1,8 +1,9 @@
 # Lane NN: <one line naming the lane's territory and what changes in it>
 
 <!--
-CANONICAL LANE WORK-ORDER BODY. First create the Manna item. Manna generates
-`.handoff/<mn-ID>-<slug>.md` and its reverse pointer. Expand THAT file in place
+CANONICAL LANE WORK-ORDER BODY. First create the Manna item, then run
+`agent-do manna sync`. Manna generates the pair and derives
+`.handoff/<NN>[b<MM>]-<mn-ID>-<slug>.md`. Expand THAT file in place
 with this structure, preserving its generated frontmatter and replacing every
 <ANGLE BRACKET> placeholder. Never copy the lane into `.dev/`, `.handoffs/`, or
 a campaign-local prompt tree. Delete no section: a section with nothing to say

@@ -296,9 +296,9 @@ impl Issue {
 
         self.require_owner(session)?;
 
-        if self.status != IssueStatus::InProgress {
+        if !matches!(self.status, IssueStatus::InProgress | IssueStatus::Blocked) {
             return Err(format!(
-                "Cannot release issue with status '{}', must be 'in_progress'",
+                "Cannot release issue with status '{}', must be 'in_progress' or 'blocked'",
                 self.status
             ));
         }
@@ -306,7 +306,11 @@ impl Issue {
         self.claimed_by = None;
         self.claimed_at = None;
         self.claim_token_hash = None;
-        self.status = IssueStatus::Open;
+        self.status = if self.blocked_by.is_empty() {
+            IssueStatus::Open
+        } else {
+            IssueStatus::Blocked
+        };
         self.updated_at = Utc::now();
 
         Ok(())
@@ -698,6 +702,21 @@ mod tests {
         assert_eq!(issue.status, IssueStatus::Open);
         assert!(issue.claimed_by.is_none());
         assert!(issue.claimed_at.is_none());
+    }
+
+    #[test]
+    fn release_blocked_claim_clears_owner_without_dropping_dependency() {
+        let mut issue = Issue::new("mn-abc123".to_string(), "Test".to_string()).unwrap();
+        let owner = session("ses_123");
+        issue.claim(&owner).unwrap();
+        issue.add_blocker("mn-def456".to_string());
+        assert_eq!(issue.status, IssueStatus::Blocked);
+        issue.release(&owner).unwrap();
+        assert_eq!(issue.status, IssueStatus::Blocked);
+        assert_eq!(issue.blocked_by, vec!["mn-def456"]);
+        assert!(issue.claimed_by.is_none());
+        assert!(issue.claimed_at.is_none());
+        assert!(issue.claim_token_hash.is_none());
     }
 
     #[test]

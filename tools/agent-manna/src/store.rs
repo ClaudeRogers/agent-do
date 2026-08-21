@@ -663,6 +663,30 @@ impl MannaStore {
         Ok(())
     }
 
+    /// Roll back the file half of a whole-board transaction only while the
+    /// board is provably in a third, concurrently advanced state. The lock
+    /// prevents another board writer from racing between that proof and the
+    /// rollback. If the board returned to either authenticated transaction
+    /// state, recovery must retry instead of undoing a valid commit.
+    pub fn recover_rollback_board_files<Rollback>(
+        &self,
+        expected_before: &[Issue],
+        expected_after: &[Issue],
+        rollback_files: Rollback,
+    ) -> Result<()>
+    where
+        Rollback: FnOnce() -> std::result::Result<(), String>,
+    {
+        let _board_lock = self.lock_board()?;
+        let current = self.load_issues_strict()?;
+        if current == expected_before || current == expected_after {
+            return Err(MannaError::RecoveryConflict(
+                "board returned to an authenticated transaction state during rollback".to_string(),
+            ));
+        }
+        rollback_files().map_err(MannaError::MutationRejected)
+    }
+
     /// Delete an issue under the board lock after enforcing current-session
     /// ownership. Pair-aware callers archive the handoff first through the
     /// workflow transaction journal.

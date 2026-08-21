@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 18 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 20 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2521,6 +2521,8 @@ Concurrency: `write`
 - `create`: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
 - `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
+- `order`: Move a paired item to a dense one-based handoff priority and synchronize generated presentation
+- `sync`: Derive numbered handoff filenames, blocker launch gates, and the README index from board state
 - `abandon`: Release a claimed issue back to open
 - `handoff`: Seal and bind an intentional canonical handoff edit
 - `block`: Add a blocker dependency
@@ -2553,15 +2555,19 @@ agent-do manna dream 'Unify the auth flows'
 agent-do manna update mn-abc123 --type item
 # check the board for drift
 agent-do manna reconcile --write-drift
+# move an item to the top of the handoff plan
+agent-do manna order mn-abc123 1
+# synchronize handoff filenames after a board change
+agent-do manna sync
 ```
 
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `migrate`, `reconcile`, `unblock`, `update`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `sync`, `unblock`, `update`
 - destructive (irreversible data loss; confirm before auto-running): `delete`, `migrate`
 - polymorphic (beat decided by payload or flag at call time): `reconcile`
-- composite (one call performs several beats internally): `migrate`
+- composite (one call performs several beats internally): `migrate`, `order`, `sync`
 
 ### meet
 

@@ -25,11 +25,11 @@ use manna_core::reconcile::{
 use manna_core::store::MannaStore;
 use manna_core::workflow::{
     attach_handoff, canonical_handoff_path, create_paired_issue, delete_paired_issue,
-    detach_handoff, find_orphan_handoffs, handoff_manna_id, initialize_workflow,
-    load_workflow_for_board, migrate_legacy_board, rebind_handoff_metadata,
+    detach_handoff, find_orphan_handoffs, handoff_manna_id, handoff_presentation_drift,
+    initialize_workflow, load_workflow_for_board, migrate_legacy_board, rebind_handoff_metadata,
     recover_legacy_migration, recover_pair_transactions, runtime_session_identity,
-    runtime_session_label, seal_handoff, validate_handoff, validate_scaffold, WorkflowConfig,
-    HANDOFF_DIR,
+    runtime_session_label, seal_handoff, set_handoff_priority, sync_handoff_presentation,
+    validate_handoff, validate_scaffold, HandoffSyncResult, WorkflowConfig, HANDOFF_DIR,
 };
 
 /// Exit codes
@@ -96,6 +96,18 @@ enum Commands {
         /// Issue ID (e.g., mn-abc123)
         id: String,
     },
+
+    /// Move a paired item to a one-based handoff priority and synchronize presentation
+    Order {
+        /// Issue ID (e.g., mn-abc123)
+        id: String,
+
+        /// Dense one-based priority position
+        position: usize,
+    },
+
+    /// Synchronize numbered handoff filenames and the generated index from board state
+    Sync,
 
     /// Abandon/release a claimed issue
     Abandon {
@@ -383,6 +395,26 @@ struct MigrationData {
     historical_rows: usize,
     exempt_rows: usize,
     released_claims: usize,
+}
+
+#[derive(Serialize)]
+struct HandoffSyncData {
+    changed: bool,
+    renamed: usize,
+    ordered_items: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    held_claimed: Vec<String>,
+}
+
+impl From<HandoffSyncResult> for HandoffSyncData {
+    fn from(result: HandoffSyncResult) -> Self {
+        HandoffSyncData {
+            changed: result.changed,
+            renamed: result.renamed,
+            ordered_items: result.ordered_items,
+            held_claimed: result.held_claimed,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -967,6 +999,52 @@ fn cmd_done(id: String) -> ! {
         age: (&issue).into(),
         issue,
     });
+}
+
+fn cmd_order(id: String, position: usize) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _session = require_session_identity();
+    let (_, workflow) = load_board_workflow(&store);
+    let config = workflow.as_ref().unwrap_or_else(|| {
+        output_error(
+            "Legacy boards do not have ordered handoff presentation",
+            EXIT_USER_ERROR,
+        )
+    });
+    let result = match set_handoff_priority(Path::new("."), &store, config, &id, position) {
+        Ok(result) => result,
+        Err(error) => output_error(&error, EXIT_USER_ERROR),
+    };
+    output_success(HandoffSyncData::from(result));
+}
+
+fn cmd_sync() -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _session = require_session_identity();
+    let (_, workflow) = load_board_workflow(&store);
+    let config = workflow.as_ref().unwrap_or_else(|| {
+        output_error(
+            "Legacy boards do not have ordered handoff presentation",
+            EXIT_USER_ERROR,
+        )
+    });
+    let result = match sync_handoff_presentation(Path::new("."), &store, config) {
+        Ok(result) => result,
+        Err(error) => output_error(&error, EXIT_USER_ERROR),
+    };
+    output_success(HandoffSyncData::from(result));
 }
 
 fn cmd_abandon(id: String) -> ! {
@@ -1727,6 +1805,18 @@ fn cmd_lint(json: bool) -> ! {
     findings.extend(lint_prompt_files(&issues));
     if let Some(config) = workflow.as_ref() {
         findings.extend(lint_strict_workflow(&issues, config));
+        match handoff_presentation_drift(Path::new("."), &issues) {
+            Ok(drift) => findings.extend(drift.into_iter().map(|finding| LintFinding {
+                issue_id: finding.issue_id.unwrap_or_else(|| "board".to_string()),
+                rule: finding.rule.to_string(),
+                detail: finding.detail,
+            })),
+            Err(error) => findings.push(LintFinding {
+                issue_id: "board".to_string(),
+                rule: "handoff_order".to_string(),
+                detail: error,
+            }),
+        }
         findings.extend(
             check_workflow_sprawl(Path::new("."), &issues, config)
                 .into_iter()
@@ -2598,6 +2688,24 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
             &issues,
             Path::new(&config.handoff_dir),
         ));
+        match handoff_presentation_drift(Path::new("."), &issues) {
+            Ok(drift) => findings.extend(drift.into_iter().map(|finding| Finding {
+                kind: FindingKind::HandoffPresentation,
+                issue_id: finding.issue_id,
+                detail: finding.detail,
+                evidence: Some(finding.rule.to_string()),
+                proposed_fix: Some("agent-do manna sync".to_string()),
+            })),
+            Err(error) => findings.push(Finding {
+                kind: FindingKind::HandoffPresentation,
+                issue_id: None,
+                detail: error,
+                evidence: Some("handoff_order".to_string()),
+                proposed_fix: Some(
+                    "repair priority state, then run `agent-do manna sync`".to_string(),
+                ),
+            }),
+        }
         findings.extend(check_workflow_sprawl(Path::new("."), &issues, config));
         findings.extend(
             find_orphan_handoffs(Path::new("."), &issues)
@@ -2644,7 +2752,10 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
     let integrity_failure = findings.iter().any(|finding| {
         matches!(
             finding.kind,
-            FindingKind::WorkflowSprawl | FindingKind::OrphanHandoff | FindingKind::PromptPairing
+            FindingKind::WorkflowSprawl
+                | FindingKind::OrphanHandoff
+                | FindingKind::PromptPairing
+                | FindingKind::HandoffPresentation
         )
     });
     let exit_code = if !fix_failures.is_empty() || integrity_failure {
@@ -2685,6 +2796,8 @@ fn main() {
         } => cmd_create(title, description, issue_type, track, source, prompt),
         Commands::Claim { id } => cmd_claim(id),
         Commands::Done { id } => cmd_done(id),
+        Commands::Order { id, position } => cmd_order(id, position),
+        Commands::Sync => cmd_sync(),
         Commands::Abandon { id } => cmd_abandon(id),
         Commands::Handoff { command } => match command {
             HandoffCommands::Seal { id } => cmd_handoff_seal(id),

@@ -574,6 +574,7 @@ rm -rf "$INBOX_HOME" "$NOBOARD_DIR"
 echo ""
 echo "Test G4: lint"
 # Board so far: track + tracked item + open dream (untracked dreams are fine)
+"$MANNA" sync >/dev/null 2>&1
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "lint exits 0 on a clean board"
@@ -588,6 +589,7 @@ check_yaml "$output" "untracked_item" "lint names the untracked_item rule"
 check_yaml "$output" "$LOOSE_ID" "lint names the loose item"
 
 "$MANNA" update "$LOOSE_ID" --track "$TRACK_ID" >/dev/null 2>&1 || true
+"$MANNA" sync >/dev/null 2>&1
 lint_exit=0
 output=$("$MANNA" lint --json 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "lint exits 0 after attaching the item"
@@ -606,6 +608,7 @@ B_ID=$(extract_id "$output")
 "$MANNA" block "$B_ID" "$A_ID" >/dev/null 2>&1
 "$MANNA" claim "$A_ID" >/dev/null 2>&1
 "$MANNA" done "$A_ID" >/dev/null 2>&1
+"$MANNA" sync >/dev/null 2>&1
 
 rec_exit=0
 output=$("$MANNA" reconcile 2>&1) || rec_exit=$?
@@ -717,6 +720,7 @@ check_yaml "$output" "workflow: strict" "new board enables the strict workflow"
 check_yaml "$output" "gitignore_updated: true" "init repairs a local .handoff ignore rule"
 [[ -f .manna/workflow.yaml ]] && pass "init creates .manna/workflow.yaml" || fail "init creates .manna/workflow.yaml" "File not found"
 [[ -f .manna/board.yaml ]] && pass "init pins strict board identity separately" || fail "init pins strict board identity separately" "File not found"
+[[ -f .manna/handoff-order.yaml ]] && pass "init creates board-owned handoff priority" || fail "init creates board-owned handoff priority" "File not found"
 [[ -f .handoff/README.md ]] && pass "init creates .handoff/README.md" || fail "init creates .handoff/README.md" "File not found"
 ignore_exit=0
 git check-ignore --quiet -- .handoff/README.md || ignore_exit=$?
@@ -740,6 +744,13 @@ claim_count=$(grep -c "agent-do manna claim $PAIR_ID" "$PROMPT_A" || true)
 check_exit 1 "$claim_count" "handoff carries exactly one claim command"
 check_yaml "$(sed -n '1,14p' "$PROMPT_A")" "base_commit:" "handoff binds its base commit"
 check_yaml "$(sed -n '1,14p' "$PROMPT_A")" "binding: sha256:" "handoff carries its content binding"
+
+output=$("$MANNA" sync 2>&1) || true
+check_yaml "$output" "renamed: 1" "sync derives the first numbered handoff"
+PROMPT_A=".handoff/01-$PAIR_ID-paired-work.md"
+output=$("$MANNA" show "$PAIR_ID" 2>&1) || true
+check_yaml "$output" "prompt: $PROMPT_A" "sync transaction repoints the board"
+[[ -f "$PROMPT_A" ]] && pass "sync installs the numbered handoff" || fail "sync installs the numbered handoff" "File not found"
 
 rm -f .manna/workflow.yaml
 claim_exit=0
@@ -960,7 +971,7 @@ check_yaml "$output" "historical_rows: 1" "migration grandfathers done history"
 check_yaml "$output" "exempt_rows: 2" "migration exempts tracks and dreams"
 check_yaml "$output" "released_claims: 2" "migration releases unauthenticated legacy claims"
 [[ ! -e .manna/transactions/legacy-board-migration.yaml ]] && pass "migration journal retires after commit" || fail "migration journal retires after commit" "journal still exists"
-handoff_count=$(find .handoff -maxdepth 1 -name 'mn-*.md' -type f | wc -l | tr -d ' ')
+handoff_count=$(find .handoff -maxdepth 1 -name '*-mn-*.md' -type f | wc -l | tr -d ' ')
 check_exit 3 "$handoff_count" "migration creates exactly one handoff per active item"
 check_yaml "$(cat .manna/board.yaml)" "migrated_from_legacy_at:" "strict identity records legacy admission"
 
@@ -978,10 +989,10 @@ fi
 output=$("$MANNA" show mn-a10006 2>&1) || true
 check_yaml "$output" "disposition: exempt" "dream remains exempt from handoff pairing"
 
-migration_state_before=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name 'mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+migration_state_before=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name '*-mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 output=$("$MANNA" migrate 2>&1) || true
 check_yaml "$output" "migrated: false" "second migration is an idempotent no-op"
-migration_state_after=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name 'mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+migration_state_after=$({ git hash-object .manna/issues.jsonl; find .handoff -maxdepth 1 -name '*-mn-*.md' -type f | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 if [[ "$migration_state_before" == "$migration_state_after" ]]; then
     pass "idempotent migration preserves board and handoff bytes"
 else
@@ -998,12 +1009,90 @@ check_exit 0 "$claim_exit" "claim works after migration"
 done_exit=0
 "$MANNA" done mn-a10002 >/dev/null 2>&1 || done_exit=$?
 check_exit 0 "$done_exit" "done works after migration"
+"$MANNA" sync >/dev/null 2>&1
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "migrated fixture has no lint findings"
 
 cd "$TEST_DIR"
 rm -rf "$MIGRATION_DIR"
+
+# ----------------------------------------------------------------------------
+# Test G7c: ordered handoff presentation and live-claim rename hold
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G7c: ordered handoff presentation"
+ORDER_DIR=$(mktemp -d)
+cd "$ORDER_DIR"
+git init -q
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "First priority" 2>&1) || true
+ORDER_ONE=$(extract_id "$output")
+output=$("$MANNA" create "Second priority" 2>&1) || true
+ORDER_TWO=$(extract_id "$output")
+output=$("$MANNA" create "Third priority" 2>&1) || true
+ORDER_THREE=$(extract_id "$output")
+
+output=$("$MANNA" sync 2>&1) || true
+check_yaml "$output" "renamed: 3" "one sync numbers every new work order"
+[[ -f ".handoff/01-$ORDER_ONE-first-priority.md" ]] && pass "priority 01 filename is dense" || fail "priority 01 filename is dense" "missing first handoff"
+[[ -f ".handoff/02-$ORDER_TWO-second-priority.md" ]] && pass "priority 02 filename is dense" || fail "priority 02 filename is dense" "missing second handoff"
+[[ -f ".handoff/03-$ORDER_THREE-third-priority.md" ]] && pass "priority 03 filename is dense" || fail "priority 03 filename is dense" "missing third handoff"
+
+"$MANNA" claim "$ORDER_TWO" >/dev/null 2>&1
+"$MANNA" block "$ORDER_TWO" "$ORDER_ONE" >/dev/null 2>&1
+output=$("$MANNA" sync 2>&1) || true
+check_yaml "$output" "$ORDER_TWO" "sync reports a claimed handoff held from rename"
+[[ -f ".handoff/02-$ORDER_TWO-second-priority.md" ]] && pass "live claim keeps its bare filename" || fail "live claim keeps its bare filename" "claimed handoff moved"
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint flags filename drift held by a live claim"
+check_yaml "$output" "handoff_filename" "lint names the filename rule"
+reconcile_exit=0
+output=$("$MANNA" reconcile --json 2>&1) || reconcile_exit=$?
+check_exit 1 "$reconcile_exit" "reconcile enforces launch-gate drift"
+check_yaml "$output" "handoff_presentation" "reconcile classifies presentation drift"
+check_yaml "$output" "agent-do manna sync" "reconcile proposes the native repair"
+
+abandon_exit=0
+"$MANNA" abandon "$ORDER_TWO" >/dev/null 2>&1 || abandon_exit=$?
+check_exit 0 "$abandon_exit" "owner can release a claimed item after it becomes blocked"
+"$MANNA" sync >/dev/null 2>&1
+[[ -f ".handoff/02b01-$ORDER_TWO-second-priority.md" ]] && pass "release publishes the blocker launch gate" || fail "release publishes the blocker launch gate" "b01 handoff missing"
+
+"$MANNA" block "$ORDER_THREE" "$ORDER_ONE" >/dev/null 2>&1
+"$MANNA" block "$ORDER_THREE" "$ORDER_TWO" >/dev/null 2>&1
+"$MANNA" sync >/dev/null 2>&1
+[[ -f ".handoff/03b02-$ORDER_THREE-third-priority.md" ]] && pass "gate selects the highest still-open blocker" || fail "gate selects the highest still-open blocker" "b02 handoff missing"
+
+output=$("$MANNA" order "$ORDER_THREE" 1 2>&1) || true
+check_yaml "$output" "success: true" "order mutates priority and synchronizes in one transaction"
+[[ -f ".handoff/01b03-$ORDER_THREE-third-priority.md" ]] && pass "dependency marker re-derives after priority move" || fail "dependency marker re-derives after priority move" "01b03 handoff missing"
+[[ -f ".handoff/02-$ORDER_ONE-first-priority.md" ]] && pass "priority move keeps numbering dense" || fail "priority move keeps numbering dense" "priority 02 missing"
+[[ -f ".handoff/03b02-$ORDER_TWO-second-priority.md" ]] && pass "blocker chain reads through reordered names" || fail "blocker chain reads through reordered names" "03b02 handoff missing"
+check_yaml "$(cat .handoff/README.md)" "| 01 | \`$ORDER_THREE\` | blocked | \`$ORDER_ONE\`, \`$ORDER_TWO\` |" "README index carries full blocker truth"
+check_yaml "$(cat .manna/handoff-order.yaml)" "- $ORDER_THREE" "board file owns priority order"
+
+state_before=$({ git hash-object .manna/issues.jsonl; git hash-object .manna/handoff-order.yaml; git hash-object .handoff/README.md; } | git hash-object --stdin)
+output=$("$MANNA" sync 2>&1) || true
+check_yaml "$output" "changed: false" "converged sync is idempotent"
+state_after=$({ git hash-object .manna/issues.jsonl; git hash-object .manna/handoff-order.yaml; git hash-object .handoff/README.md; } | git hash-object --stdin)
+if [[ "$state_before" == "$state_after" ]]; then
+    pass "idempotent sync preserves board, priority, and index bytes"
+else
+    fail "idempotent sync preserves board, priority, and index bytes" "$state_before -> $state_after"
+fi
+
+"$MANNA" unblock "$ORDER_THREE" "$ORDER_TWO" >/dev/null 2>&1
+"$MANNA" sync >/dev/null 2>&1
+[[ -f ".handoff/01b02-$ORDER_THREE-third-priority.md" ]] && pass "gate updates when one blocker edge closes" || fail "gate updates when one blocker edge closes" "01b02 handoff missing"
+"$MANNA" claim "$ORDER_ONE" >/dev/null 2>&1
+"$MANNA" done "$ORDER_ONE" >/dev/null 2>&1
+"$MANNA" sync >/dev/null 2>&1
+[[ -f ".handoff/01-$ORDER_THREE-third-priority.md" ]] && pass "last closed blocker removes the launch gate" || fail "last closed blocker removes the launch gate" "bare launch handoff missing"
+
+cd "$TEST_DIR"
+rm -rf "$ORDER_DIR"
 
 # ----------------------------------------------------------------------------
 # Test G8: dreams are visible and inert until converted

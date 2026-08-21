@@ -85,7 +85,8 @@ another implements, a third tests) hands the same files between agents and
 turns every boundary into a chance to lose context.
 
 A lane begins as a Manna item. `agent-do manna create` generates its canonical
-`.handoff/<mn-id>-<slug>.md`; stage the lane by expanding that file in place
+work order; `agent-do manna sync` gives it the derived
+`.handoff/<NN>[b<MM>]-<mn-id>-<slug>.md` name and refreshes the index. Stage the lane by expanding that file in place
 with **[`docs/LANE-PROMPT-TEMPLATE.md`](docs/LANE-PROMPT-TEMPLATE.md)**. Never
 copy the work order into `.dev/`, `.handoffs/`, or a campaign-local prompt
 tree. The template carries the required sections and the reasons behind them: the
@@ -104,6 +105,9 @@ journal; all later work uses the same strict create, seal, claim, and done path.
 Manna creates the pair in both directions: the item points at the generated
 handoff and the handoff opens with the exact claim command. `manna claim`
 refuses a broken pair; `agent-do manna reconcile` also reports shadow roots.
+Priority is changed with `agent-do manna order <id> <position>`, never by
+renaming files. Dependencies remain `blocked_by` edges; a bare synchronized
+filename is safe to launch, while `bMM` holds it for blocker priority `MM`.
 Agents coordinate through
 `agent-do coord` (focus, claims, publishes), not through chat.
 

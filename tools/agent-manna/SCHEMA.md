@@ -8,14 +8,15 @@ All data is stored in `.manna/` directory:
 - `.manna/issues.jsonl` - Issue records (one JSON object per line)
 - `.manna/sessions.jsonl` - Session event log (one JSON object per line)
 - `.manna/board.yaml` - Independent board identity (`strict` or `legacy`)
+- `.manna/handoff-order.yaml` - First-class ordered priority for paired items
 - `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 - `.manna/workflow.yaml` - Strict workflow version and canonical handoff root
 - `.manna/transactions/` - Ignored write-ahead journal for interrupted pair changes
 - `.manna/transactions/legacy-board-migration.yaml` - Authenticated whole-board admission journal, present only while migration is pending
 
 Durable work orders live in tracked `.handoff/`:
-- `.handoff/README.md` - Generated ownership and usage contract
-- `.handoff/mn-xxxxxx-<slug>.md` - One generated work order per actionable item
+- `.handoff/README.md` - Generated ownership contract and board-derived index
+- `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` - Synchronized work-order presentation
 - `.handoff/.archive/` - Retired handoffs preserved by delete and item conversion
 
 ## issues.jsonl
@@ -70,6 +71,35 @@ and dreams do not carry handoffs. A strict pointer cannot be repointed or
 cleared through `update`; after editing the document, run
 `manna handoff seal <id>` to update the binding deliberately.
 
+### Ordered handoff presentation
+
+`.manna/handoff-order.yaml` is the priority authority:
+
+```yaml
+version: 1
+items:
+- mn-a1b2c3
+- mn-d4e5f6
+```
+
+`manna order <id> <position>` mutates that ordered list and synchronizes it.
+`manna sync` normalizes the list to current paired items, assigns dense
+two-digit priorities `01..N`, renames each work order, repoints `prompt`, and
+regenerates `.handoff/README.md` from one board snapshot. Priority never
+encodes dependency. Every dependency remains in `blocked_by`.
+
+A bare filename is safe to launch. `bMM` means the item is held by its
+highest-numbered still-open blocker; the README preserves the full blocker
+list. Closing blockers updates or removes the marker on the next sync.
+Claimed work orders are never renamed. Their existing number remains reserved
+until release, and lint/reconcile report any held filename drift.
+
+The native `Rename` pair transaction HMAC-binds exact before/after board rows,
+all moves, priority YAML, and README bytes. It stages every source before
+installing any destination, so swaps are no-clobber and recovery is
+idempotent. Handoff content binding excludes the path, so this operation does
+not reseal or otherwise authorize document edits.
+
 `claim` enforces the pair before state changes. The file must exist, be
 Git-visible, remain below `.handoff/` without crossing a symlink, carry exact
 structured metadata, and match the board-side content binding. A loose comment
@@ -108,8 +138,8 @@ before or complete after board, so a concurrent mutation is never overwritten.
 Replaying a completed migration is byte-stable. The annotation records how a
 row entered strict mode; it does not prevent later status or type transitions.
 
-Done issues are exempt from all of it, so archived or renamed prompts never
-nag history.
+Grandfathered done history without pairs is exempt. Done rows that still own a
+strict pair remain in ordered presentation and the generated index.
 
 ### Status Transitions
 
@@ -117,6 +147,7 @@ nag history.
 open → in_progress (via claim)
 in_progress → done (via done)
 in_progress → open (via abandon)
+blocked claim → blocked (via abandon; ownership clears, blockers remain)
 * → blocked (when blocked_by is non-empty)
 blocked → * (when blocked_by becomes empty)
 open dream → done (via done, without a claim)
@@ -133,11 +164,11 @@ and a machine-local key outside the repository. Plain shells and scripted lanes
 provide both `MANNA_SESSION_ID` and `MANNA_SESSION_TOKEN`. `update --status` is
 rejected; lifecycle state moves only through the named lifecycle verbs.
 
-Strict pair create, delete, seal, attach, and detach write an HMAC-authenticated
+Strict pair create, delete, seal, attach, detach, and presentation rename write an HMAC-authenticated
 transaction intent before touching either side. The key lives outside the
 worktree. Atomic no-clobber installation prevents concurrent intent overwrite;
-the signature binds the canonical project root, filename issue, complete rows,
-canonical `.handoff/` path, archive path, and document. The next Manna command validates the full
+the signature binds the canonical project root, journal identity, complete rows,
+canonical `.handoff/` paths, archive path, document, priority, and index. The next Manna command validates the full
 scaffold and completes an interrupted intent idempotently. Delete and
 item-to-non-item conversion archive the handoff before removing its live pointer.
 
@@ -201,7 +232,7 @@ Written atomically (temp + rename) by `reconcile --write-drift`. Shape:
 generated_at: "<ISO8601 UTC>"
 session: "<session id or null>"   # explicit or host-derived identity, else null
 findings:
-  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|workflow_sprawl|orphan_handoff|skipped
+  - kind: landed_open|dead_claim|blocker_desync|stale_dream|dangling_track|doc_reference|prompt_pairing|handoff_presentation|workflow_sprawl|orphan_handoff|skipped
     issue_id: "mn-xxxxxx"   # optional
     detail: "one line"
     evidence: "sha / file:line / pid"   # optional

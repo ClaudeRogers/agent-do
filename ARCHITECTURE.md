@@ -291,10 +291,10 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 
 ### Storage and locking (src/store.rs)
 
-- `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log), `.manna/board.yaml` (independent strict or legacy identity), and `.manna/workflow.yaml` (strict workflow version and canonical handoff root)
+- `.manna/issues.jsonl` (issue records), `.manna/sessions.jsonl` (session event log), `.manna/board.yaml` (independent strict or legacy identity), `.manna/workflow.yaml` (strict workflow version and canonical handoff root), and `.manna/handoff-order.yaml` (first-class ordered item priority)
 - `.manna/transactions/` is an ignored write-ahead journal. Each intent is HMAC-authenticated by a private key outside the worktree, installed with atomic no-clobber semantics, and bound to the canonical project root, filename, complete rows, canonical handoff, archive path, and document payload
 - `legacy-board-migration.yaml` is the one whole-board journal: it binds exact before and after rows plus every generated handoff and scaffold file, then publishes strict identity last
-- `.handoff/README.md`, `.handoff/mn-xxxxxx-<slug>.md`, and `.handoff/.archive/` are durable Git state, not scratch space
+- `.handoff/README.md`, `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md`, and `.handoff/.archive/` are durable Git state, not scratch space
 - Every mutation takes the board-wide `fs2` lock across re-read, validation, state change, temp write, fsync, and atomic rename. File locks alone are insufficient because the JSONL rewrite replaces the inode
 - Malformed lines are skipped with a stderr warning, never fatal
 - Output is YAML by default (`success:` envelope), JSON with `--json`. Exit codes: 0 success, 1 user error, 2 system error (I/O, lock)
@@ -313,8 +313,9 @@ Git-backed issue tracking with a typed board grammar. Every issue is a **track**
 
 `manna init` classifies the board once in `.manna/board.yaml`. New or empty
 boards are strict; pre-workflow nonempty boards are explicitly legacy. Strict
-boards install workflow version 2 and `.handoff/README.md`, and narrowly
-unignore `board.yaml`, `workflow.yaml`, both JSONL files, and `.handoff/`.
+boards install workflow version 2, `.manna/handoff-order.yaml`, and
+`.handoff/README.md`, and narrowly unignore both YAML authorities, both JSONL
+files, and `.handoff/`.
 Removing `workflow.yaml` cannot downgrade the board because identity is stored
 separately; init restores it. Existing version-2 digests are monotonic markers:
 restoration or a forged version downgrade validates them and never re-enters
@@ -337,6 +338,20 @@ the next Manna command. Recovery verifies the scaffold first, accepts only an
 exact complete-row replay, and cannot write outside `.handoff/`. Delete and item conversion archive the live handoff before
 clearing its pointer. Tracks and dreams never receive live handoffs.
 
+Ordered presentation is a derived build product over board truth. The ordered
+ID list in `.manna/handoff-order.yaml` is the priority authority; every
+dependency remains an explicit `blocked_by` edge. `manna sync` assigns dense
+two-digit priorities, derives one `bMM` marker from the highest-numbered
+still-open blocker, repoints rows, and regenerates `.handoff/README.md` from
+the same snapshot. A bare name is the launch signal. `manna order <id>
+<position>` changes the ordered list and performs that sync immediately.
+Claimed handoffs are immovable and keep their current numbers reserved until
+release. The `Rename` pair transaction stages all moves before installing any
+destination, so swaps and longer cycles cannot clobber files; exact before and
+after boards, priority YAML, README bytes, and all source/destination paths are
+HMAC-bound for idempotent crash recovery. Content bindings exclude paths, so a
+native rename preserves the seal without authorizing any document edit.
+
 Handoff frontmatter binds workflow version, item, track, source, base commit,
 scope, inputs, and a SHA-256 of the canonical document with the binding field
 normalized. The same digest lives in
@@ -353,7 +368,7 @@ with no claim.
 - `claim` requires status `open` and no claimant; validation and transition are one locked operation, so concurrent claimers have exactly one winner
 - Once claimed, mutations require both the exact `claimed_by` session and its bearer-token proof. The board stores only `claim_token_hash`, so the visible owner string cannot impersonate the claim
 - `done` requires owner plus `in_progress` and revalidates the authoritative handoff seal and absence of shadow work orders under the board lock; the sole exception is closing an unclaimed dream, because dreams are deliberately unclaimable
-- `abandon` requires owner plus `in_progress`; returns to `open`
+- `abandon` requires the owner plus an active claim (`in_progress` or `blocked`); it returns to `open` when clear or remains `blocked` while dependencies remain
 - `block`/`unblock` maintain `blocked_by` and derive `blocked` status; completing a blocker does **not** auto-unblock dependents. That residue is deliberate: `reconcile` reports it (`blocker_desync`) and `reconcile --fix` clears it through the same state machine
 - `update --status` is rejected. Status moves only through lifecycle verbs
 - Validation invariants: `in_progress` requires `claimed_by`; `claimed_by`, `claimed_at`, and `claim_token_hash` come and go together; handoff digests use the pinned SHA-256 shape
@@ -371,12 +386,17 @@ Board-grammar gate: findings exit 1, clean exits 0. Rules:
   `.handoff/` pointer, the canonical document matches its authoritative digest,
   no symlink escapes the project, no shadow workflow exists, and no canonical
   handoff is orphaned
+- ordered presentation rules: board priority is normalized, each filename
+  matches its derived priority and launch gate, and the generated index matches
+  the board. A live-claim hold is reported until release rather than renamed
 
 ### Reconcile (`manna reconcile [--fix] [--write-drift] [--dream-age-days N]`)
 
 Drift detection between the board and reality. Informational findings are
-advisory. `workflow_sprawl`, `orphan_handoff`, `prompt_pairing`, and `--fix`
-failures exit nonzero because they change which work order is authoritative.
+advisory. `workflow_sprawl`, `orphan_handoff`, `prompt_pairing`,
+`handoff_presentation`, and `--fix` failures exit nonzero because they change
+which work order is authoritative or whether its filename is a safe launch
+signal.
 Checks run in a fixed order, and a check that cannot run records a `skipped`
 finding with the reason:
 
@@ -387,8 +407,9 @@ finding with the reason:
 5. `dangling_track`: track edges to missing or non-track issues
 6. `doc_reference`: `mn-` ids mentioned in `.handoff/`, `.dev/`, `.zpc/`, and the per-project Claude memory directory that do not exist on this board (files ≤ 1MB, symlinks skipped, deduplicated per file+id)
 7. `prompt_pairing`, in both directions. Forward: an issue's prompt pointer resolves to a file that never mentions the issue's id. Reverse: every board id that a work-order file *claims* (a line containing `manna claim <id>`, any invocation prefix; bare id mentions are data, not claims) must belong to an issue whose prompt pointer resolves back to that same file. Strict boards scan `.handoff/**/*.md`; legacy boards retain the `.dev/session-prompts/` scan. A missing directory is a successful empty scan, and foreign-board ids are ignored
-8. `workflow_sprawl` on strict boards: any live claim-bearing Markdown appears outside `.handoff/`; internal directory aliases are scanned, while external or handoff-like symlink roots fail closed
-9. `orphan_handoff`: a structured Manna work order under `.handoff/` has no live actionable row, or does not match that row's pointer. Freeform research and continuation Markdown is not a work order; `.handoff/.archive/` is excluded intentionally
+8. `handoff_presentation`: priority state, numbered filename, launch-gate marker, or generated README index differs from the board-derived plan. The proposed repair is `agent-do manna sync`; live claimed files remain held until release
+9. `workflow_sprawl` on strict boards: any live claim-bearing Markdown appears outside `.handoff/`; internal directory aliases are scanned, while external or handoff-like symlink roots fail closed
+10. `orphan_handoff`: a structured Manna work order under `.handoff/` has no live actionable row, or does not match that row's pointer. Freeform research and continuation Markdown is not a work order; `.handoff/.archive/` is excluded intentionally
 
 The prompt pointer itself comes from the `prompt` field, or as a blessed interim convention, a description whose first line is `PROMPT: <path>`.
 

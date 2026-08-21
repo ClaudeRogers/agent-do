@@ -62,6 +62,9 @@ agent-do manna migrate
 # Create an issue
 agent-do manna create "Fix authentication bug" "Users can't login with SSO"
 
+# Derive dense priority names and the board index
+agent-do manna sync
+
 # List all issues
 agent-do manna list
 
@@ -80,7 +83,8 @@ agent-do manna context
 ### `init`
 
 Initialize `.manna/` and the tracked `.handoff/` work-order root in the current
-location. New or empty boards receive strict workflow version 2. Existing
+location. New or empty boards receive strict workflow version 2, board-owned
+`.manna/handoff-order.yaml`, and a generated `.handoff/README.md`. Existing
 nonempty legacy boards are classified explicitly and left unchanged. Strict
 mode is pinned independently in `.manna/board.yaml`; deleting the workflow
 config cannot turn validation off. Local ignore rules are narrowed so
@@ -167,6 +171,31 @@ issue:
 **Constraints:**
 - Title: 1-500 characters
 
+### `order <id> <position>` and `sync`
+
+Priority is an ordered ID list in `.manna/handoff-order.yaml`. Move an item to
+a one-based position, or converge presentation after any other board mutation:
+
+```bash
+agent-do manna order mn-abc123 1
+agent-do manna sync
+```
+
+Both paths use the native recoverable rename transaction. Sync assigns dense
+`01..N` priorities, derives the single `bMM` launch gate from the
+highest-numbered still-open blocker, repoints every moved row, and regenerates
+`.handoff/README.md`. Dependencies remain in `blocked_by`; filenames are never
+authority. Claimed handoffs do not move, and their current number stays
+reserved until release.
+
+```yaml
+success: true
+changed: true
+renamed: 3
+ordered_items: 8
+held_claimed: []
+```
+
 ### `claim <id>`
 
 Claim an issue for the current session. Sets status to `in_progress`.
@@ -214,7 +243,8 @@ issue:
 
 ### `abandon <id>`
 
-Release a claimed issue without completing it. Sets status back to `open`.
+Release a claimed issue without completing it. It returns to `open` when clear
+or remains `blocked` when unresolved blocker edges remain.
 
 ```bash
 agent-do manna abandon mn-abc123
@@ -384,10 +414,11 @@ Manna stores canonical board state in `.manna/` and durable work orders in
 ├── sessions.jsonl   # Session event log
 ├── board.yaml       # Independent strict or legacy identity
 ├── workflow.yaml    # Strict workflow version and handoff root
+├── handoff-order.yaml # First-class ordered item priority
 └── transactions/    # Ignored crash-recovery journal
 .handoff/
-├── README.md        # Generated workflow contract
-├── mn-*.md          # One bound work order per actionable item
+├── README.md        # Generated workflow contract and index
+├── NN[bMM]-mn-*.md  # Dense priority and launch-gate presentation
 └── .archive/        # Retired work orders
 ```
 

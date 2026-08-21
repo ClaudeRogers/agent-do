@@ -27,13 +27,17 @@ pub const WORKFLOW_VERSION: u32 = 2;
 pub const HANDOFF_DIR: &str = ".handoff";
 pub const WORKFLOW_FILE: &str = ".manna/workflow.yaml";
 pub const BOARD_FILE: &str = ".manna/board.yaml";
+pub const HANDOFF_ORDER_FILE: &str = ".manna/handoff-order.yaml";
 pub const HANDOFF_README: &str = ".handoff/README.md";
 pub const HANDOFF_ARCHIVE_DIR: &str = ".handoff/.archive";
+const HANDOFF_SYNC_STAGE_DIR: &str = ".handoff/.sync";
 const TRANSACTION_DIR: &str = ".manna/transactions";
 const LEGACY_MIGRATION_TRANSACTION: &str = ".manna/transactions/legacy-board-migration.yaml";
 const LEGACY_MIGRATION_VERSION: u32 = 1;
+const HANDOFF_ORDER_VERSION: u32 = 1;
+const HANDOFF_SYNC_TRANSACTION_ID: &str = "mn-handoff-sync";
 
-const README_CONTENT: &str = r#"# agent-do handoffs
+const README_PREAMBLE: &str = r#"# agent-do handoffs
 
 This directory is generated workflow state. `.manna/` owns status, tracks,
 claims, and blockers. Each actionable Manna item owns exactly one Markdown
@@ -44,14 +48,20 @@ Rules:
 - Create work through `agent-do manna create`; do not hand-build parallel
   prompt roots such as `.handoffs/`, `.dev/session-prompts/`, or
   `<campaign>/handoff-prompts/`.
-- The Manna item `prompt` field points to `.handoff/mn-xxxxxx-<slug>.md`.
+- The Manna item `prompt` field points to
+  `.handoff/<NN>[b<MM>]-mn-xxxxxx-<slug>.md` after synchronization.
 - Frontmatter identifies the item, track, source, base commit, scope, inputs,
   and SHA-256 binding for the complete document.
 - Edit a work order, then run `agent-do manna handoff seal mn-xxxxxx` before
   claiming it. A claim fails closed on any unsealed change.
 - Board state stays in Manna. The handoff contains scope, authority,
   deliverables, and verification, never a second backlog.
-- Commit `.manna/workflow.yaml`, `.manna/issues.jsonl`, and `.handoff/`.
+- Priority lives in `.manna/handoff-order.yaml`. Run `agent-do manna sync`
+  after board changes; never hand-maintain numbered filenames or this index.
+- A bare numbered filename is safe to launch. `bMM` means the item is held
+  until priority `MM` closes. The full dependency truth remains `blocked_by`.
+- Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
+  `.manna/issues.jsonl`, and `.handoff/`.
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,8 +170,29 @@ enum PairAction {
     Create,
     Attach,
     Rebind,
+    Rename,
     Detach,
     Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffRename {
+    issue_id: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffSyncTransaction {
+    before: Vec<Issue>,
+    after: Vec<Issue>,
+    renames: Vec<HandoffRename>,
+    order_before: Option<String>,
+    order_after: String,
+    readme_before: Option<String>,
+    readme_after: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +206,40 @@ struct PairTransaction {
     handoff: String,
     archive: Option<String>,
     document: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sync: Option<HandoffSyncTransaction>,
     integrity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffOrder {
+    version: u32,
+    items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffSyncResult {
+    pub renamed: usize,
+    pub held_claimed: Vec<String>,
+    pub ordered_items: usize,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffOrderEntry {
+    pub issue_id: String,
+    pub priority: usize,
+    pub expected_path: String,
+    pub actual_path: Option<String>,
+    pub held_claimed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffPresentationDrift {
+    pub issue_id: Option<String>,
+    pub rule: &'static str,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +263,10 @@ struct LegacyBoardTransaction {
     board_after: String,
     workflow_before: Option<String>,
     workflow_after: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order_after: Option<String>,
     readme_before: Option<String>,
     readme_after: String,
     integrity: String,
@@ -506,12 +574,13 @@ fn git_path_ignored(base: &Path, relative: &Path) -> Result<bool, String> {
     }
 }
 
-fn durable_paths() -> [&'static str; 5] {
+fn durable_paths() -> [&'static str; 6] {
     [
         ".manna/issues.jsonl",
         ".manna/sessions.jsonl",
         BOARD_FILE,
         WORKFLOW_FILE,
+        HANDOFF_ORDER_FILE,
         HANDOFF_README,
     ]
 }
@@ -527,7 +596,11 @@ fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>, String
 
 fn workflow_gitignore_content(existing: &str) -> String {
     let marker = "# agent-do workflow: .manna and .handoff are durable state";
-    if existing.contains(marker) && existing.lines().any(|line| line == "!.manna/board.yaml") {
+    if existing.contains(marker)
+        && existing
+            .lines()
+            .any(|line| line == "!.manna/handoff-order.yaml")
+    {
         return existing.to_string();
     }
 
@@ -537,11 +610,11 @@ fn workflow_gitignore_content(existing: &str) -> String {
     }
     if !existing.contains(marker) {
         updated.push_str(&format!(
-            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n",
+            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/handoff-order.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n",
             marker
         ));
     } else {
-        updated.push_str("!.manna/board.yaml\n.manna/transactions/\n");
+        updated.push_str("!.manna/board.yaml\n!.manna/handoff-order.yaml\n.manna/transactions/\n");
     }
     updated
 }
@@ -690,6 +763,412 @@ pub fn canonical_handoff_path(
         ));
     }
     Ok(relative)
+}
+
+fn paired_items(issues: &[Issue]) -> Vec<&Issue> {
+    issues
+        .iter()
+        .filter(|issue| {
+            issue.issue_type == IssueType::Item
+                && issue.prompt.is_some()
+                && issue.handoff_digest.is_some()
+        })
+        .collect()
+}
+
+fn has_live_claim(issue: &Issue) -> bool {
+    issue.status != IssueStatus::Done && issue.claimed_by.is_some()
+}
+
+fn canonical_order(items: Vec<String>) -> HandoffOrder {
+    HandoffOrder {
+        version: HANDOFF_ORDER_VERSION,
+        items,
+    }
+}
+
+fn serialize_order(order: &HandoffOrder) -> Result<String, String> {
+    serde_yaml::to_string(order)
+        .map_err(|error| format!("failed to serialize handoff priority: {}", error))
+}
+
+fn parse_order(text: &str) -> Result<HandoffOrder, String> {
+    let order: HandoffOrder = serde_yaml::from_str(text)
+        .map_err(|error| format!("invalid {}: {}", HANDOFF_ORDER_FILE, error))?;
+    if order.version != HANDOFF_ORDER_VERSION {
+        return Err(format!(
+            "unsupported handoff priority version {} (current {})",
+            order.version, HANDOFF_ORDER_VERSION
+        ));
+    }
+    let mut seen = HashSet::new();
+    for id in &order.items {
+        if !seen.insert(id.clone()) {
+            return Err(format!(
+                "{} contains duplicate item {}",
+                HANDOFF_ORDER_FILE, id
+            ));
+        }
+    }
+    Ok(order)
+}
+
+fn read_order_text(base: &Path) -> Result<Option<String>, String> {
+    read_optional_text(&base.join(HANDOFF_ORDER_FILE), "handoff priority")
+}
+
+fn normalize_order(
+    issues: &[Issue],
+    stored: Option<&HandoffOrder>,
+) -> Result<HandoffOrder, String> {
+    let candidates = paired_items(issues);
+    let candidate_ids = candidates
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut items = Vec::with_capacity(candidates.len());
+    let mut seen = HashSet::new();
+    if let Some(stored) = stored {
+        for id in &stored.items {
+            if candidate_ids.contains(id.as_str()) && seen.insert(id.clone()) {
+                items.push(id.clone());
+            }
+        }
+    }
+    for issue in candidates {
+        if seen.insert(issue.id.clone()) {
+            items.push(issue.id.clone());
+        }
+    }
+    Ok(canonical_order(items))
+}
+
+fn ordered_name_parts(issue_id: &str, path: &str) -> Option<(usize, Option<usize>)> {
+    let relative = Path::new(path);
+    if relative.parent()? != Path::new(HANDOFF_DIR) {
+        return None;
+    }
+    let name = relative.file_name()?.to_str()?;
+    let bytes = name.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() {
+        return None;
+    }
+    let number = name[..2].parse::<usize>().ok()?;
+    let (gate, suffix) = if bytes.get(2) == Some(&b'b') {
+        if bytes.len() < 6
+            || !bytes[3].is_ascii_digit()
+            || !bytes[4].is_ascii_digit()
+            || bytes[5] != b'-'
+        {
+            return None;
+        }
+        (Some(name[3..5].parse::<usize>().ok()?), &name[6..])
+    } else if bytes.get(2) == Some(&b'-') {
+        (None, &name[3..])
+    } else {
+        return None;
+    };
+    suffix
+        .strip_prefix(issue_id)
+        .is_some_and(|rest| rest.starts_with('-') && rest.ends_with(".md"))
+        .then_some((number, gate))
+}
+
+fn ordered_handoff_path(issue: &Issue, number: usize, blocker: Option<usize>) -> String {
+    let gate = blocker.map_or_else(String::new, |number| format!("b{:02}", number));
+    format!(
+        "{}/{:02}{}-{}-{}.md",
+        HANDOFF_DIR,
+        number,
+        gate,
+        issue.id,
+        slugify(&issue.title)
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PresentationPlan {
+    order: HandoffOrder,
+    entries: Vec<HandoffOrderEntry>,
+    after: Vec<Issue>,
+    renames: Vec<HandoffRename>,
+    readme: String,
+}
+
+fn assigned_priorities(
+    issues_by_id: &HashMap<&str, &Issue>,
+    order: &HandoffOrder,
+) -> Result<(HashMap<String, usize>, HashSet<String>), String> {
+    let count = order.items.len();
+    let desired = order
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index + 1))
+        .collect::<HashMap<_, _>>();
+    let mut assigned = HashMap::new();
+    let mut reserved = HashSet::new();
+    let mut held_without_number = HashSet::new();
+
+    // A claimed work order is immovable. Its current number wins temporarily
+    // and stays reserved until release, even if board priority changed.
+    for id in &order.items {
+        let issue = issues_by_id
+            .get(id.as_str())
+            .ok_or_else(|| format!("handoff priority references missing item {}", id))?;
+        if !has_live_claim(issue) {
+            continue;
+        }
+        let current = issue
+            .prompt
+            .as_deref()
+            .and_then(|path| ordered_name_parts(&issue.id, path))
+            .map(|(number, _)| number)
+            .filter(|number| (1..=count).contains(number));
+        if let Some(number) = current {
+            if !reserved.insert(number) {
+                return Err(format!(
+                    "claimed handoff priority {:02} is occupied more than once",
+                    number
+                ));
+            }
+            assigned.insert(id.clone(), number);
+        } else {
+            held_without_number.insert(id.clone());
+        }
+    }
+
+    // Unnumbered claimed work receives its desired slot as a reservation. It
+    // remains visibly drifted, but no peer is allowed to take its priority.
+    for id in &order.items {
+        if !held_without_number.contains(id) {
+            continue;
+        }
+        let preferred = desired[id.as_str()];
+        let number = if reserved.insert(preferred) {
+            preferred
+        } else {
+            (1..=count)
+                .find(|number| reserved.insert(*number))
+                .ok_or_else(|| "no priority remains for a claimed handoff".to_string())?
+        };
+        assigned.insert(id.clone(), number);
+    }
+
+    let mut free = (1..=count)
+        .filter(|number| !reserved.contains(number))
+        .collect::<Vec<_>>()
+        .into_iter();
+    for id in &order.items {
+        if assigned.contains_key(id) {
+            continue;
+        }
+        assigned.insert(
+            id.clone(),
+            free.next()
+                .ok_or_else(|| "handoff priority assignment is incomplete".to_string())?,
+        );
+    }
+    Ok((assigned, held_without_number))
+}
+
+fn render_handoff_index(entries: &[HandoffOrderEntry], issues: &[Issue]) -> String {
+    let by_id = issues
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+    let mut rendered = README_PREAMBLE.to_string();
+    rendered.push_str("\n## Generated index\n\n");
+    rendered.push_str("| Priority | Manna ID | Status | Full blocker list | Handoff |\n");
+    rendered.push_str("| ---: | --- | --- | --- | --- |\n");
+    for entry in entries {
+        let issue = by_id[entry.issue_id.as_str()];
+        let blockers = if issue.blocked_by.is_empty() {
+            "none".to_string()
+        } else {
+            issue
+                .blocked_by
+                .iter()
+                .map(|id| format!("`{}`", id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let handoff = if entry.held_claimed {
+            format!(
+                "`{}` (held under live claim; expected `{}`)",
+                entry.actual_path.as_deref().unwrap_or("missing"),
+                entry.expected_path
+            )
+        } else {
+            format!("`{}`", entry.expected_path)
+        };
+        rendered.push_str(&format!(
+            "| {:02} | `{}` | {} | {} | {} |\n",
+            entry.priority, issue.id, issue.status, blockers, handoff
+        ));
+    }
+    rendered
+}
+
+fn build_presentation_plan(
+    base: &Path,
+    issues: &[Issue],
+    stored: Option<&HandoffOrder>,
+) -> Result<PresentationPlan, String> {
+    let order = normalize_order(issues, stored)?;
+    if order.items.len() > 99 {
+        return Err(format!(
+            "ordered handoffs support at most 99 paired items, found {}",
+            order.items.len()
+        ));
+    }
+    let issues_by_id = issues
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+    let (assigned, held_without_number) = assigned_priorities(&issues_by_id, &order)?;
+
+    let mut blocker_numbers = HashMap::new();
+    for id in &order.items {
+        blocker_numbers.insert(id.as_str(), assigned[id]);
+    }
+
+    let mut expected = HashMap::new();
+    let mut expected_paths = HashSet::new();
+    for id in &order.items {
+        let issue = issues_by_id[id.as_str()];
+        let mut highest_open = None;
+        for blocker_id in &issue.blocked_by {
+            let blocker = issues_by_id.get(blocker_id.as_str()).ok_or_else(|| {
+                format!(
+                    "{} is blocked by {}, which has no numbered authoritative handoff",
+                    issue.id, blocker_id
+                )
+            })?;
+            if blocker.status != IssueStatus::Done {
+                let number = blocker_numbers.get(blocker_id.as_str()).ok_or_else(|| {
+                    format!(
+                        "{} is blocked by {}, which has no numbered authoritative handoff",
+                        issue.id, blocker_id
+                    )
+                })?;
+                highest_open =
+                    Some(highest_open.map_or(*number, |current: usize| current.max(*number)));
+            }
+        }
+        let path = ordered_handoff_path(issue, assigned[id], highest_open);
+        if !expected_paths.insert(path.clone()) {
+            return Err(format!("handoff priority derives duplicate path {}", path));
+        }
+        expected.insert(id.clone(), path);
+    }
+
+    let mut after = issues.to_vec();
+    let mut renames = Vec::new();
+    let mut entries = Vec::new();
+    for id in &order.items {
+        let issue = issues_by_id[id.as_str()];
+        let actual = issue.prompt.clone();
+        let expected_path = expected[id].clone();
+        let held_claimed = has_live_claim(issue) && actual.as_deref() != Some(&expected_path);
+        if !has_live_claim(issue) && actual.as_deref() != Some(&expected_path) {
+            let from = actual.clone().ok_or_else(|| {
+                format!(
+                    "paired item {} has no authoritative handoff pointer",
+                    issue.id
+                )
+            })?;
+            canonical_handoff_path(base, &WorkflowConfig::default(), issue, Some(&from))?;
+            canonical_handoff_path(
+                base,
+                &WorkflowConfig::default(),
+                issue,
+                Some(&expected_path),
+            )?;
+            renames.push(HandoffRename {
+                issue_id: issue.id.clone(),
+                from,
+                to: expected_path.clone(),
+            });
+            let row = after
+                .iter_mut()
+                .find(|row| row.id == issue.id)
+                .expect("ordered item exists in board snapshot");
+            row.prompt = Some(expected_path.clone());
+        }
+        entries.push(HandoffOrderEntry {
+            issue_id: issue.id.clone(),
+            priority: assigned[id],
+            expected_path,
+            actual_path: actual,
+            held_claimed: held_claimed || held_without_number.contains(id),
+        });
+    }
+    entries.sort_by_key(|entry| entry.priority);
+    let readme = render_handoff_index(&entries, &after);
+    Ok(PresentationPlan {
+        order,
+        entries,
+        after,
+        renames,
+        readme,
+    })
+}
+
+fn render_presentation_files(
+    base: &Path,
+    issues: &[Issue],
+    stored_text: Option<&str>,
+) -> Result<(String, String), String> {
+    let stored = stored_text.map(parse_order).transpose()?;
+    let order = normalize_order(issues, stored.as_ref())?;
+    let order_text = serialize_order(&order)?;
+    match build_presentation_plan(base, issues, Some(&order)) {
+        Ok(plan) => Ok((order_text, plan.readme)),
+        Err(error) => Ok((
+            order_text,
+            render_unsynchronized_index(&order, issues, &error),
+        )),
+    }
+}
+
+fn render_unsynchronized_index(order: &HandoffOrder, issues: &[Issue], error: &str) -> String {
+    let by_id = issues
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+    let mut rendered = README_PREAMBLE.to_string();
+    rendered.push_str("\n## Generated index\n\n");
+    rendered.push_str(&format!(
+        "> Launch presentation is blocked: {} No filename in this state is a launch signal. Repair the board and run `agent-do manna sync`.\n\n",
+        error.replace(['\n', '|'], " ")
+    ));
+    rendered.push_str("| Priority | Manna ID | Status | Full blocker list | Current handoff |\n");
+    rendered.push_str("| ---: | --- | --- | --- | --- |\n");
+    for (index, id) in order.items.iter().enumerate() {
+        let Some(issue) = by_id.get(id.as_str()) else {
+            continue;
+        };
+        let blockers = if issue.blocked_by.is_empty() {
+            "none".to_string()
+        } else {
+            issue
+                .blocked_by
+                .iter()
+                .map(|blocker| format!("`{}`", blocker))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        rendered.push_str(&format!(
+            "| {:02} | `{}` | {} | {} | `{}` |\n",
+            index + 1,
+            issue.id,
+            issue.status,
+            blockers,
+            issue.prompt.as_deref().unwrap_or("missing")
+        ));
+    }
+    rendered
 }
 
 fn split_handoff(text: &str) -> Result<(HandoffFrontmatter, &str), String> {
@@ -1338,8 +1817,16 @@ fn validate_legacy_migration_transaction(
     let config: WorkflowConfig = serde_yaml::from_str(&transaction.workflow_after)
         .map_err(|error| format!("invalid migrated workflow config: {}", error))?;
     config.validate()?;
-    if transaction.readme_after != README_CONTENT {
-        return Err("legacy migration README is not the canonical generated content".to_string());
+    if let Some(order_after) = transaction.order_after.as_deref() {
+        let order = parse_order(order_after)?;
+        if serialize_order(&order)? != order_after {
+            return Err("legacy migration handoff priority is not canonical YAML".to_string());
+        }
+        let (_, expected_readme) =
+            render_presentation_files(base, &transaction.after, Some(order_after))?;
+        if transaction.readme_after != expected_readme {
+            return Err("legacy migration README is not the canonical generated index".to_string());
+        }
     }
     let expected_gitignore =
         workflow_gitignore_content(transaction.gitignore_before.as_deref().unwrap_or_default());
@@ -1398,6 +1885,68 @@ fn validate_legacy_migration_transaction(
     Ok(config)
 }
 
+fn validate_handoff_sync_transaction(
+    base: &Path,
+    transaction: &PairTransaction,
+) -> Result<(), String> {
+    if transaction.issue_id != HANDOFF_SYNC_TRANSACTION_ID
+        || transaction.before.is_some()
+        || transaction.after.is_some()
+        || transaction.handoff != HANDOFF_DIR
+        || transaction.archive.is_some()
+        || transaction.document.is_some()
+    {
+        return Err("rename transaction has an invalid top-level shape".to_string());
+    }
+    let sync = transaction
+        .sync
+        .as_ref()
+        .ok_or_else(|| "rename transaction has no sync payload".to_string())?;
+    if sync.order_before.is_none() || sync.readme_before.is_none() {
+        return Err(
+            "rename transaction requires authenticated priority and README before states"
+                .to_string(),
+        );
+    }
+    if sync.before.len() != sync.after.len() {
+        return Err("handoff sync cannot add or delete board rows".to_string());
+    }
+    let mut ids = HashSet::new();
+    for (before, after) in sync.before.iter().zip(&sync.after) {
+        if before.id != after.id || !ids.insert(before.id.clone()) {
+            return Err("handoff sync must preserve one unique row for every issue id".to_string());
+        }
+        after
+            .validate()
+            .map_err(|error| format!("invalid synchronized row {}: {}", after.id, error))?;
+        let mut expected = before.clone();
+        expected.prompt = after.prompt.clone();
+        if &expected != after {
+            return Err(format!(
+                "handoff sync may change only the prompt pointer for {}",
+                before.id
+            ));
+        }
+    }
+
+    if let Some(before) = sync.order_before.as_deref() {
+        parse_order(before)?;
+    }
+    let order = parse_order(&sync.order_after)?;
+    if serialize_order(&order)? != sync.order_after {
+        return Err("handoff sync priority state is not canonical YAML".to_string());
+    }
+    let expected = build_presentation_plan(base, &sync.before, Some(&order))?;
+    if expected.order != order
+        || expected.after != sync.after
+        || expected.renames != sync.renames
+        || expected.readme != sync.readme_after
+    {
+        return Err("handoff sync payload is not derived from its board priority".to_string());
+    }
+    Ok(())
+}
+
 fn validate_transaction(
     base: &Path,
     config: &WorkflowConfig,
@@ -1428,6 +1977,12 @@ fn validate_transaction(
             "transaction {} failed HMAC authentication",
             path.display()
         ));
+    }
+    if transaction.action == PairAction::Rename {
+        return validate_handoff_sync_transaction(base, transaction);
+    }
+    if transaction.sync.is_some() {
+        return Err("non-rename pair transaction carries a sync payload".to_string());
     }
     for row in [&transaction.before, &transaction.after]
         .into_iter()
@@ -1488,6 +2043,7 @@ fn validate_transaction(
             }
             (after, true, false)
         }
+        PairAction::Rename => unreachable!("rename transactions return above"),
         PairAction::Detach => {
             let (Some(before), Some(after)) = (&transaction.before, &transaction.after) else {
                 return Err("detach transaction is missing a board row".to_string());
@@ -1668,6 +2224,297 @@ fn install_managed_text(
     atomic_write_replace(path, after)
 }
 
+fn sync_stage_path(issue_id: &str) -> PathBuf {
+    Path::new(HANDOFF_SYNC_STAGE_DIR).join(format!("{}.md", issue_id))
+}
+
+fn document_identity(base: &Path, relative: &Path) -> Result<Option<String>, String> {
+    let relative = safe_relative_path(base, relative, true)?;
+    let path = base.join(relative);
+    reject_symlink(&path, "handoff sync document")?;
+    match fs::read_to_string(&path) {
+        Ok(text) => handoff_manna_id(&text).map(Some).ok_or_else(|| {
+            format!(
+                "handoff sync found an unstructured file at {}",
+                path.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to read {}: {}", path.display(), error)),
+    }
+}
+
+fn locate_sync_document(base: &Path, rename: &HandoffRename) -> Result<PathBuf, String> {
+    let candidates = [
+        PathBuf::from(&rename.from),
+        sync_stage_path(&rename.issue_id),
+        PathBuf::from(&rename.to),
+    ];
+    let mut matches = Vec::new();
+    let mut seen = HashSet::new();
+    for relative in candidates {
+        if !seen.insert(relative.clone()) {
+            continue;
+        }
+        if document_identity(base, &relative)?.as_deref() == Some(rename.issue_id.as_str()) {
+            matches.push(relative);
+        }
+    }
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(format!(
+            "handoff sync cannot locate the sealed document for {}",
+            rename.issue_id
+        )),
+        _ => Err(format!(
+            "handoff sync found duplicate documents for {} at {}",
+            rename.issue_id,
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn validate_sync_file_state(
+    base: &Path,
+    transaction: &HandoffSyncTransaction,
+) -> Result<(), String> {
+    let by_id = transaction
+        .before
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+    let mut sources = HashSet::new();
+    let mut destinations = HashSet::new();
+    for rename in &transaction.renames {
+        if !sources.insert(rename.from.clone()) {
+            return Err(format!("duplicate handoff sync source {}", rename.from));
+        }
+        if !destinations.insert(rename.to.clone()) {
+            return Err(format!("duplicate handoff sync destination {}", rename.to));
+        }
+        let issue = by_id.get(rename.issue_id.as_str()).ok_or_else(|| {
+            format!(
+                "handoff sync rename targets missing item {}",
+                rename.issue_id
+            )
+        })?;
+        let from = safe_relative_path(base, Path::new(&rename.from), true)?;
+        let to = safe_relative_path(base, Path::new(&rename.to), true)?;
+        let stage = safe_relative_path(base, &sync_stage_path(&rename.issue_id), true)?;
+        for relative in [&from, &to, &stage] {
+            if !relative.starts_with(HANDOFF_DIR)
+                || relative.starts_with(HANDOFF_ARCHIVE_DIR)
+                || relative == Path::new(HANDOFF_README)
+                || relative.extension().and_then(|value| value.to_str()) != Some("md")
+            {
+                return Err(format!(
+                    "handoff sync path is outside generated work orders: {}",
+                    relative.display()
+                ));
+            }
+        }
+        let location = locate_sync_document(base, rename)?;
+        let text = fs::read_to_string(base.join(&location))
+            .map_err(|error| format!("failed to read {}: {}", location.display(), error))?;
+        validate_document(issue, &text).map_err(|error| {
+            format!(
+                "handoff sync refuses unsealed document {}: {}",
+                rename.issue_id, error
+            )
+        })?;
+        if git_path_ignored(base, &from)? {
+            return Err(format!(
+                "handoff sync source is ignored by Git: {}",
+                from.display()
+            ));
+        }
+        if git_path_ignored(base, &to)? {
+            return Err(format!(
+                "handoff sync destination is ignored by Git: {}",
+                to.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rename_sync_documents(base: &Path, transaction: &HandoffSyncTransaction) -> Result<(), String> {
+    validate_sync_file_state(base, transaction)?;
+    safe_create_dir_all(base, Path::new(HANDOFF_SYNC_STAGE_DIR))?;
+
+    // Move every source into a unique internal staging path before installing
+    // any destination. This handles A/B swaps and longer cycles without one
+    // rename replacing another work order.
+    for rename in &transaction.renames {
+        let location = locate_sync_document(base, rename)?;
+        let source = PathBuf::from(&rename.from);
+        if location != source {
+            continue;
+        }
+        let stage = sync_stage_path(&rename.issue_id);
+        if path_exists(&base.join(&stage)) {
+            return Err(format!(
+                "handoff sync staging path is occupied: {}",
+                stage.display()
+            ));
+        }
+        fs::rename(base.join(&source), base.join(&stage)).map_err(|error| {
+            format!(
+                "failed to stage {} as {}: {}",
+                source.display(),
+                stage.display(),
+                error
+            )
+        })?;
+        sync_parent(&base.join(&source))?;
+        sync_parent(&base.join(&stage))?;
+    }
+
+    for rename in &transaction.renames {
+        let location = locate_sync_document(base, rename)?;
+        let destination = PathBuf::from(&rename.to);
+        if location == destination {
+            continue;
+        }
+        let stage = sync_stage_path(&rename.issue_id);
+        if location != stage {
+            return Err(format!(
+                "handoff sync document {} is not staged for installation",
+                rename.issue_id
+            ));
+        }
+        if path_exists(&base.join(&destination)) {
+            return Err(format!(
+                "handoff sync refuses to replace occupied destination {}",
+                destination.display()
+            ));
+        }
+        fs::rename(base.join(&stage), base.join(&destination)).map_err(|error| {
+            format!(
+                "failed to install {} as {}: {}",
+                stage.display(),
+                destination.display(),
+                error
+            )
+        })?;
+        sync_parent(&base.join(&stage))?;
+        sync_parent(&base.join(&destination))?;
+    }
+
+    if base.join(HANDOFF_SYNC_STAGE_DIR).is_dir() {
+        let mut remaining = fs::read_dir(base.join(HANDOFF_SYNC_STAGE_DIR))
+            .map_err(|error| format!("failed to inspect handoff sync staging: {}", error))?;
+        if remaining.next().is_none() {
+            fs::remove_dir(base.join(HANDOFF_SYNC_STAGE_DIR))
+                .map_err(|error| format!("failed to remove handoff sync staging: {}", error))?;
+            sync_parent(&base.join(HANDOFF_SYNC_STAGE_DIR))?;
+        }
+    }
+    validate_sync_file_state(base, transaction)
+}
+
+fn apply_handoff_sync_files(
+    base: &Path,
+    transaction: &HandoffSyncTransaction,
+) -> Result<(), String> {
+    let order = base.join(HANDOFF_ORDER_FILE);
+    let readme = base.join(HANDOFF_README);
+    check_managed_text_state(
+        &order,
+        transaction.order_before.as_deref(),
+        &transaction.order_after,
+        "handoff priority",
+    )?;
+    check_managed_text_state(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )?;
+    validate_sync_file_state(base, transaction)?;
+
+    rename_sync_documents(base, transaction)?;
+    install_managed_text(
+        &order,
+        transaction.order_before.as_deref(),
+        &transaction.order_after,
+        "handoff priority",
+    )?;
+    install_managed_text(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )?;
+    Ok(())
+}
+
+fn restore_managed_text(
+    path: &Path,
+    before: Option<&str>,
+    after: &str,
+    label: &str,
+) -> Result<(), String> {
+    let before = before.ok_or_else(|| {
+        format!(
+            "cannot roll back {} because the authenticated before state is absent",
+            label
+        )
+    })?;
+    check_managed_text_state(path, Some(before), after, label)?;
+    if read_optional_text(path, label)?.as_deref() == Some(before) {
+        return Ok(());
+    }
+    atomic_write_replace(path, before)
+}
+
+fn rollback_handoff_sync_files(
+    base: &Path,
+    transaction: &HandoffSyncTransaction,
+) -> Result<(), String> {
+    let order = base.join(HANDOFF_ORDER_FILE);
+    let readme = base.join(HANDOFF_README);
+    check_managed_text_state(
+        &order,
+        transaction.order_before.as_deref(),
+        &transaction.order_after,
+        "handoff priority",
+    )?;
+    check_managed_text_state(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )?;
+    let mut reverse = transaction.clone();
+    reverse.renames = transaction
+        .renames
+        .iter()
+        .map(|rename| HandoffRename {
+            issue_id: rename.issue_id.clone(),
+            from: rename.to.clone(),
+            to: rename.from.clone(),
+        })
+        .collect();
+    rename_sync_documents(base, &reverse)?;
+    restore_managed_text(
+        &order,
+        transaction.order_before.as_deref(),
+        &transaction.order_after,
+        "handoff priority",
+    )?;
+    restore_managed_text(
+        &readme,
+        transaction.readme_before.as_deref(),
+        &transaction.readme_after,
+        "handoff README",
+    )
+}
+
 fn check_migration_document_state(
     base: &Path,
     migration_document: &MigrationDocument,
@@ -1692,6 +2539,7 @@ fn apply_legacy_migration_files(
 ) -> Result<(), String> {
     let gitignore = base.join(".gitignore");
     let workflow = base.join(WORKFLOW_FILE);
+    let order = base.join(HANDOFF_ORDER_FILE);
     let readme = base.join(HANDOFF_README);
 
     // Validate every compare-and-swap precondition before the first write so
@@ -1708,6 +2556,14 @@ fn apply_legacy_migration_files(
         &transaction.workflow_after,
         "workflow config",
     )?;
+    if let Some(order_after) = transaction.order_after.as_deref() {
+        check_managed_text_state(
+            &order,
+            transaction.order_before.as_deref(),
+            order_after,
+            "handoff priority",
+        )?;
+    }
     check_managed_text_state(
         &readme,
         transaction.readme_before.as_deref(),
@@ -1732,6 +2588,14 @@ fn apply_legacy_migration_files(
         &transaction.workflow_after,
         "workflow config",
     )?;
+    if let Some(order_after) = transaction.order_after.as_deref() {
+        install_managed_text(
+            &order,
+            transaction.order_before.as_deref(),
+            order_after,
+            "handoff priority",
+        )?;
+    }
     install_managed_text(
         &readme,
         transaction.readme_before.as_deref(),
@@ -1837,6 +2701,19 @@ fn execute_transaction(
             store.recover_replace_issue_with(before, after, || {
                 install_transaction_document(base, handoff, document)
             })?;
+        }
+        PairAction::Rename => {
+            let sync = transaction.sync.as_ref().ok_or_else(|| {
+                MannaError::MutationRejected(
+                    "rename transaction has no handoff sync payload".to_string(),
+                )
+            })?;
+            store.recover_replace_board_with(
+                &sync.before,
+                &sync.after,
+                || apply_handoff_sync_files(base, sync),
+                || Ok(()),
+            )?;
         }
         PairAction::Detach => {
             let before = transaction.before.as_ref().ok_or_else(|| {
@@ -1964,6 +2841,19 @@ fn complete_legacy_migration_path(
     }
 }
 
+fn ensure_presentation_scaffold(base: &Path, store: &MannaStore) -> Result<(), String> {
+    if base.join(HANDOFF_ORDER_FILE).is_file() {
+        return Ok(());
+    }
+    let issues = store
+        .load_issues_strict()
+        .map_err(|error| error.to_string())?;
+    let (order, readme) = render_presentation_files(base, &issues, None)?;
+    ensure_workflow_tracked(base)?;
+    atomic_write_replace(&base.join(HANDOFF_ORDER_FILE), &order)?;
+    atomic_write_replace(&base.join(HANDOFF_README), &readme)
+}
+
 pub fn recover_legacy_migration(base: &Path, store: &MannaStore) -> Result<usize, String> {
     let path = legacy_migration_path(base);
     if !path.exists() {
@@ -1971,7 +2861,14 @@ pub fn recover_legacy_migration(base: &Path, store: &MannaStore) -> Result<usize
     }
     let key = load_recovery_key(base, false)?;
     match complete_legacy_migration_path(base, store, &path, &key)? {
-        TransactionOutcome::Applied => Ok(1),
+        TransactionOutcome::Applied => {
+            // Transactions written by the immediately preceding release did
+            // not yet carry ordered presentation. Their authenticated board
+            // admission remains valid; deterministically add the new derived
+            // scaffold before ordinary strict commands resume.
+            ensure_presentation_scaffold(base, store)?;
+            Ok(1)
+        }
         TransactionOutcome::DiscardedConflict(reason) => Err(format!(
             "legacy-board migration lost a concurrent update and was discarded safely: {}",
             reason
@@ -2036,10 +2933,24 @@ fn complete_transaction_path(
             Ok(TransactionOutcome::Applied)
         }
         Err(MannaError::RecoveryConflict(reason)) => {
-            // Store recovery checks the complete row before touching the file
-            // half of a pair. A conflict therefore proves this authenticated
-            // intent is obsolete, not partially applied. Remove it so one
-            // losing optimistic writer cannot poison every later command.
+            if transaction.action == PairAction::Rename {
+                let sync = transaction.sync.as_ref().ok_or_else(|| {
+                    "conflicting rename transaction has no sync payload".to_string()
+                })?;
+                store
+                    .recover_rollback_board_files(&sync.before, &sync.after, || {
+                        rollback_handoff_sync_files(base, sync)
+                    })
+                    .map_err(|error| {
+                        format!(
+                            "handoff sync lost a concurrent board update but rollback is still pending: {}",
+                            error
+                        )
+                    })?;
+            }
+            // Single-row pair recovery checks its target before touching the
+            // file half. Whole-board rename recovery additionally rolls any
+            // staged/applied file state back under the board lock above.
             remove_transaction_if_unchanged(path, &metadata, &text)?;
             Ok(TransactionOutcome::DiscardedConflict(reason))
         }
@@ -2112,6 +3023,166 @@ pub fn recover_pair_transactions(
     Ok(recovered)
 }
 
+fn sync_handoff_presentation_with_order(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+    requested_order: Option<HandoffOrder>,
+) -> Result<HandoffSyncResult, String> {
+    validate_scaffold(base, config)?;
+    let before = store
+        .load_issues_strict()
+        .map_err(|error| error.to_string())?;
+    let order_before = read_order_text(base)?;
+    let stored = order_before.as_deref().map(parse_order).transpose()?;
+    let order = match requested_order {
+        Some(order) => normalize_order(&before, Some(&order))?,
+        None => normalize_order(&before, stored.as_ref())?,
+    };
+    let plan = build_presentation_plan(base, &before, Some(&order))?;
+
+    for issue in paired_items(&before) {
+        validate_handoff(base, config, issue).map_err(|error| {
+            format!(
+                "cannot synchronize an invalid handoff for {}: {}",
+                issue.id, error
+            )
+        })?;
+    }
+
+    let order_after = serialize_order(&plan.order)?;
+    let readme_before = read_optional_text(&base.join(HANDOFF_README), "handoff README")?;
+    let changed = before != plan.after
+        || order_before.as_deref() != Some(order_after.as_str())
+        || readme_before.as_deref() != Some(plan.readme.as_str());
+    let held_claimed = plan
+        .entries
+        .iter()
+        .filter(|entry| entry.held_claimed)
+        .map(|entry| entry.issue_id.clone())
+        .collect::<Vec<_>>();
+    let result = HandoffSyncResult {
+        renamed: plan.renames.len(),
+        held_claimed,
+        ordered_items: plan.order.items.len(),
+        changed,
+    };
+    if !changed {
+        return Ok(result);
+    }
+
+    let transaction = PairTransaction {
+        version: WORKFLOW_VERSION,
+        action: PairAction::Rename,
+        issue_id: HANDOFF_SYNC_TRANSACTION_ID.to_string(),
+        before: None,
+        after: None,
+        handoff: HANDOFF_DIR.to_string(),
+        archive: None,
+        document: None,
+        sync: Some(HandoffSyncTransaction {
+            before,
+            after: plan.after,
+            renames: plan.renames,
+            order_before,
+            order_after,
+            readme_before,
+            readme_after: plan.readme,
+        }),
+        integrity: String::new(),
+    };
+    run_transaction(base, store, config, transaction)?;
+    Ok(result)
+}
+
+pub fn sync_handoff_presentation(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+) -> Result<HandoffSyncResult, String> {
+    sync_handoff_presentation_with_order(base, store, config, None)
+}
+
+pub fn set_handoff_priority(
+    base: &Path,
+    store: &MannaStore,
+    config: &WorkflowConfig,
+    issue_id: &str,
+    position: usize,
+) -> Result<HandoffSyncResult, String> {
+    let issues = store
+        .load_issues_strict()
+        .map_err(|error| error.to_string())?;
+    let order_text = read_order_text(base)?;
+    let stored = order_text.as_deref().map(parse_order).transpose()?;
+    let mut order = normalize_order(&issues, stored.as_ref())?;
+    let Some(index) = order.items.iter().position(|id| id == issue_id) else {
+        return Err(format!(
+            "{} is not an item with an authoritative handoff",
+            issue_id
+        ));
+    };
+    if position == 0 || position > order.items.len() {
+        return Err(format!(
+            "priority must be between 1 and {}, got {}",
+            order.items.len(),
+            position
+        ));
+    }
+    let id = order.items.remove(index);
+    order.items.insert(position - 1, id);
+    sync_handoff_presentation_with_order(base, store, config, Some(order))
+}
+
+pub fn handoff_presentation_drift(
+    base: &Path,
+    issues: &[Issue],
+) -> Result<Vec<HandoffPresentationDrift>, String> {
+    let order_text = read_order_text(base)?
+        .ok_or_else(|| format!("missing durable workflow file {}", HANDOFF_ORDER_FILE))?;
+    let stored = parse_order(&order_text)?;
+    let plan = build_presentation_plan(base, issues, Some(&stored))?;
+    let mut findings = Vec::new();
+    if order_text != serialize_order(&plan.order)? {
+        findings.push(HandoffPresentationDrift {
+            issue_id: None,
+            rule: "handoff_order",
+            detail: format!(
+                "{} is not normalized to the current paired item set",
+                HANDOFF_ORDER_FILE
+            ),
+        });
+    }
+    for entry in &plan.entries {
+        if entry.actual_path.as_deref() != Some(entry.expected_path.as_str()) {
+            let hold = if entry.held_claimed {
+                "; rename is held until its live claim releases"
+            } else {
+                ""
+            };
+            findings.push(HandoffPresentationDrift {
+                issue_id: Some(entry.issue_id.clone()),
+                rule: "handoff_filename",
+                detail: format!(
+                    "handoff path is {}, expected {}{}",
+                    entry.actual_path.as_deref().unwrap_or("missing"),
+                    entry.expected_path,
+                    hold
+                ),
+            });
+        }
+    }
+    let readme = read_optional_text(&base.join(HANDOFF_README), "handoff README")?;
+    if readme.as_deref() != Some(plan.readme.as_str()) {
+        findings.push(HandoffPresentationDrift {
+            issue_id: None,
+            rule: "handoff_index",
+            detail: format!("{} does not match current board priority", HANDOFF_README),
+        });
+    }
+    Ok(findings)
+}
+
 fn prepare_bound_issue(issue: &Issue, document: String) -> Result<(Issue, String), String> {
     let binding = calculate_binding(&document)?;
     let mut bound = issue.clone();
@@ -2156,6 +3227,7 @@ pub fn create_paired_issue(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)?;
@@ -2188,6 +3260,7 @@ pub fn attach_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)?;
@@ -2224,6 +3297,7 @@ pub fn detach_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: Some(archive.to_string_lossy().into_owned()),
         document: None,
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)?;
@@ -2247,6 +3321,7 @@ pub fn delete_paired_issue(
         handoff: relative.to_string_lossy().into_owned(),
         archive: Some(archive.to_string_lossy().into_owned()),
         document: None,
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)
@@ -2285,6 +3360,7 @@ fn commit_rebind(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)?;
@@ -2358,6 +3434,7 @@ fn upgrade_legacy_handoff(
         handoff: relative.to_string_lossy().into_owned(),
         archive: None,
         document: Some(document),
+        sync: None,
         integrity: String::new(),
     };
     run_transaction(base, store, config, transaction)?;
@@ -2538,6 +3615,26 @@ fn build_legacy_migration(
         after.push(issue);
     }
 
+    let order = normalize_order(&after, None)?;
+    let order_after = serialize_order(&order)?;
+    let readme_after = match build_presentation_plan(base, &after, Some(&order)) {
+        Ok(presentation) => {
+            let destinations = presentation
+                .renames
+                .iter()
+                .map(|rename| (rename.issue_id.as_str(), rename.to.as_str()))
+                .collect::<HashMap<_, _>>();
+            for document in &mut documents {
+                if let Some(destination) = destinations.get(document.issue_id.as_str()) {
+                    document.handoff = (*destination).to_string();
+                }
+            }
+            after = presentation.after;
+            presentation.readme
+        }
+        Err(error) => render_unsynchronized_index(&order, &after, &error),
+    };
+
     let mut board = BoardConfig::strict();
     board.migrated_from_legacy_at = Some(migration_time);
     let board_after = serde_yaml::to_string(&board)
@@ -2561,8 +3658,10 @@ fn build_legacy_migration(
         board_after,
         workflow_before: read_optional_text(&base.join(WORKFLOW_FILE), "workflow config")?,
         workflow_after,
+        order_before: read_optional_text(&base.join(HANDOFF_ORDER_FILE), "handoff priority")?,
+        order_after: Some(order_after),
         readme_before: read_optional_text(&base.join(HANDOFF_README), "handoff README")?,
-        readme_after: README_CONTENT.to_string(),
+        readme_after,
         integrity: String::new(),
     })
 }
@@ -2653,7 +3752,11 @@ pub fn initialize_workflow(
     safe_create_dir_all(base, Path::new(HANDOFF_DIR))?;
     safe_create_dir_all(base, Path::new(".manna"))?;
     let gitignore_updated = ensure_workflow_tracked(base)?;
-    atomic_write_replace(&base.join(HANDOFF_README), README_CONTENT)?;
+    let order_before = read_order_text(base)?;
+    let (order, readme) =
+        render_presentation_files(base, &initial_issues, order_before.as_deref())?;
+    atomic_write_replace(&base.join(HANDOFF_ORDER_FILE), &order)?;
+    atomic_write_replace(&base.join(HANDOFF_README), &readme)?;
 
     let config = WorkflowConfig::default();
     let yaml = serde_yaml::to_string(&config)
@@ -3323,6 +4426,7 @@ mod tests {
             handoff: "victim.md".to_string(),
             archive: None,
             document: Some(document),
+            sync: None,
             integrity: String::new(),
         };
         let key = load_recovery_key(temp.path(), true).unwrap();
@@ -3351,6 +4455,7 @@ mod tests {
             handoff: ".handoff/mn-abc123-bound-project.md".to_string(),
             archive: Some(".handoff/.archive/mn-abc123-bound-project.md".to_string()),
             document: None,
+            sync: None,
             integrity: String::new(),
         };
         let key = [7_u8; 32];
@@ -3374,6 +4479,7 @@ mod tests {
             handoff: ".handoff/mn-abc123-planted.md".to_string(),
             archive: Some(".handoff/.archive/mn-abc123-forged.md".to_string()),
             document: None,
+            sync: None,
             integrity: "hmac-sha256:00".to_string(),
         };
         fs::write(&path, serde_yaml::to_string(&transaction).unwrap()).unwrap();
@@ -3456,6 +4562,7 @@ mod tests {
             handoff: handoff.to_string_lossy().into_owned(),
             archive: None,
             document: Some(stale_document),
+            sync: None,
             integrity: String::new(),
         };
         let path = write_transaction(temp.path(), &config, &transaction).unwrap();
@@ -3493,6 +4600,7 @@ mod tests {
             handoff: relative.to_string_lossy().into_owned(),
             archive: None,
             document: Some(document),
+            sync: None,
             integrity: String::new(),
         };
         write_transaction(temp.path(), &config, &transaction).unwrap();
@@ -3525,6 +4633,7 @@ mod tests {
             handoff: relative.to_string_lossy().into_owned(),
             archive: None,
             document: Some(document),
+            sync: None,
             integrity: String::new(),
         };
         write_transaction(temp.path(), &config, &transaction).unwrap();
@@ -3621,6 +4730,364 @@ mod tests {
         store.init().unwrap();
         let error = initialize_workflow(&nested, &store).unwrap_err();
         assert!(error.contains("still ignored by Git"));
+    }
+
+    #[test]
+    fn sync_derives_dense_priority_blocker_gates_and_index() {
+        let (temp, store, config) = setup();
+        let first = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00001", "First task"),
+            None,
+        )
+        .unwrap();
+        let second = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-b00002", "Second task"),
+            None,
+        )
+        .unwrap();
+        let third = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-c00003", "Third task"),
+            None,
+        )
+        .unwrap();
+        let owner =
+            SessionIdentity::from_token("ses-order", "order-0123456789abcdef0123456789abcdef")
+                .unwrap();
+        store.add_blocker(&second.id, &first.id, &owner).unwrap();
+        store.add_blocker(&third.id, &first.id, &owner).unwrap();
+        store.add_blocker(&third.id, &second.id, &owner).unwrap();
+
+        let result = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert!(result.changed);
+        assert_eq!(result.renamed, 3);
+        assert!(result.held_claimed.is_empty());
+        let rows = store.load_issues().unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == first.id)
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some(".handoff/01-mn-a00001-first-task.md")
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == second.id)
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some(".handoff/02b01-mn-b00002-second-task.md")
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == third.id)
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some(".handoff/03b02-mn-c00003-third-task.md")
+        );
+        for row in &rows {
+            validate_handoff(temp.path(), &config, row).unwrap();
+        }
+        let index = fs::read_to_string(temp.path().join(HANDOFF_README)).unwrap();
+        assert!(index.contains("| 03 | `mn-c00003` | blocked | `mn-a00001`, `mn-b00002` |"));
+        assert!(handoff_presentation_drift(temp.path(), &rows)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn priority_move_handles_rename_cycles_and_is_idempotent() {
+        let (temp, store, config) = setup();
+        for (id, title) in [
+            ("mn-a00001", "Alpha"),
+            ("mn-b00002", "Beta"),
+            ("mn-c00003", "Gamma"),
+        ] {
+            create_paired_issue(temp.path(), &store, &config, &issue(id, title), None).unwrap();
+        }
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let moved = set_handoff_priority(temp.path(), &store, &config, "mn-c00003", 1).unwrap();
+        assert_eq!(moved.renamed, 3);
+        let rows = store.load_issues().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.prompt.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                ".handoff/02-mn-a00001-alpha.md",
+                ".handoff/03-mn-b00002-beta.md",
+                ".handoff/01-mn-c00003-gamma.md",
+            ]
+        );
+        for row in &rows {
+            let text =
+                fs::read_to_string(temp.path().join(row.prompt.as_deref().unwrap())).unwrap();
+            assert_eq!(handoff_manna_id(&text).as_deref(), Some(row.id.as_str()));
+        }
+        let board = fs::read(temp.path().join(".manna/issues.jsonl")).unwrap();
+        let order = fs::read(temp.path().join(HANDOFF_ORDER_FILE)).unwrap();
+        let index = fs::read(temp.path().join(HANDOFF_README)).unwrap();
+        let replay = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert!(!replay.changed);
+        assert_eq!(replay.renamed, 0);
+        assert_eq!(
+            fs::read(temp.path().join(".manna/issues.jsonl")).unwrap(),
+            board
+        );
+        assert_eq!(
+            fs::read(temp.path().join(HANDOFF_ORDER_FILE)).unwrap(),
+            order
+        );
+        assert_eq!(fs::read(temp.path().join(HANDOFF_README)).unwrap(), index);
+    }
+
+    #[test]
+    fn live_claim_reserves_number_and_holds_gate_rename_until_release() {
+        let (temp, store, config) = setup();
+        let first = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00001", "Blocker"),
+            None,
+        )
+        .unwrap();
+        let second = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-b00002", "Claimed work"),
+            None,
+        )
+        .unwrap();
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let owner =
+            SessionIdentity::from_token("ses-claimed", "claimed-0123456789abcdef0123456789abcdef")
+                .unwrap();
+        store.claim_issue(&second.id, &owner).unwrap();
+        store.add_blocker(&second.id, &first.id, &owner).unwrap();
+
+        let held = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert_eq!(held.held_claimed, vec![second.id.clone()]);
+        assert_eq!(held.renamed, 0);
+        let claimed = store
+            .load_issues()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == second.id)
+            .unwrap();
+        assert_eq!(
+            claimed.prompt.as_deref(),
+            Some(".handoff/02-mn-b00002-claimed-work.md")
+        );
+        let drift = handoff_presentation_drift(temp.path(), &store.load_issues().unwrap()).unwrap();
+        assert!(drift.iter().any(|finding| {
+            finding.issue_id.as_deref() == Some(second.id.as_str())
+                && finding
+                    .detail
+                    .contains("held until its live claim releases")
+        }));
+
+        store.release_issue(&second.id, &owner).unwrap();
+        let released = sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        assert_eq!(released.renamed, 1);
+        assert!(released.held_claimed.is_empty());
+        let row = store
+            .load_issues()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == second.id)
+            .unwrap();
+        assert_eq!(
+            row.prompt.as_deref(),
+            Some(".handoff/02b01-mn-b00002-claimed-work.md")
+        );
+    }
+
+    #[test]
+    fn interrupted_multi_rename_recovers_board_order_and_index() {
+        let (temp, store, config) = setup();
+        for (id, title) in [
+            ("mn-a00001", "Alpha"),
+            ("mn-b00002", "Beta"),
+            ("mn-c00003", "Gamma"),
+        ] {
+            create_paired_issue(temp.path(), &store, &config, &issue(id, title), None).unwrap();
+        }
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let before = store.load_issues_strict().unwrap();
+        let mut order =
+            parse_order(&fs::read_to_string(temp.path().join(HANDOFF_ORDER_FILE)).unwrap())
+                .unwrap();
+        let id = order.items.remove(2);
+        order.items.insert(0, id);
+        let plan = build_presentation_plan(temp.path(), &before, Some(&order)).unwrap();
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Rename,
+            issue_id: HANDOFF_SYNC_TRANSACTION_ID.to_string(),
+            before: None,
+            after: None,
+            handoff: HANDOFF_DIR.to_string(),
+            archive: None,
+            document: None,
+            sync: Some(HandoffSyncTransaction {
+                before: before.clone(),
+                after: plan.after.clone(),
+                renames: plan.renames.clone(),
+                order_before: read_order_text(temp.path()).unwrap(),
+                order_after: serialize_order(&plan.order).unwrap(),
+                readme_before: read_optional_text(
+                    &temp.path().join(HANDOFF_README),
+                    "handoff README",
+                )
+                .unwrap(),
+                readme_after: plan.readme.clone(),
+            }),
+            integrity: String::new(),
+        };
+        let journal = write_transaction(temp.path(), &config, &transaction).unwrap();
+        safe_create_dir_all(temp.path(), Path::new(HANDOFF_SYNC_STAGE_DIR)).unwrap();
+        let first = &plan.renames[0];
+        fs::rename(
+            temp.path().join(&first.from),
+            temp.path().join(sync_stage_path(&first.issue_id)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            recover_pair_transactions(temp.path(), &store, &config).unwrap(),
+            1
+        );
+        assert!(!journal.exists());
+        assert_eq!(store.load_issues().unwrap(), plan.after);
+        assert_eq!(
+            fs::read_to_string(temp.path().join(HANDOFF_ORDER_FILE)).unwrap(),
+            serialize_order(&plan.order).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join(HANDOFF_README)).unwrap(),
+            plan.readme
+        );
+        assert!(!temp.path().join(HANDOFF_SYNC_STAGE_DIR).exists());
+    }
+
+    #[test]
+    fn concurrent_board_advance_rolls_back_a_partially_applied_sync() {
+        let (temp, store, config) = setup();
+        for (id, title) in [("mn-a00001", "Alpha"), ("mn-b00002", "Beta")] {
+            create_paired_issue(temp.path(), &store, &config, &issue(id, title), None).unwrap();
+        }
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+        let before = store.load_issues_strict().unwrap();
+        let order_before = read_order_text(temp.path()).unwrap();
+        let readme_before =
+            read_optional_text(&temp.path().join(HANDOFF_README), "handoff README").unwrap();
+        let mut order = parse_order(order_before.as_deref().unwrap()).unwrap();
+        order.items.swap(0, 1);
+        let plan = build_presentation_plan(temp.path(), &before, Some(&order)).unwrap();
+        let sync = HandoffSyncTransaction {
+            before: before.clone(),
+            after: plan.after.clone(),
+            renames: plan.renames.clone(),
+            order_before: order_before.clone(),
+            order_after: serialize_order(&plan.order).unwrap(),
+            readme_before: readme_before.clone(),
+            readme_after: plan.readme,
+        };
+        let transaction = PairTransaction {
+            version: WORKFLOW_VERSION,
+            action: PairAction::Rename,
+            issue_id: HANDOFF_SYNC_TRANSACTION_ID.to_string(),
+            before: None,
+            after: None,
+            handoff: HANDOFF_DIR.to_string(),
+            archive: None,
+            document: None,
+            sync: Some(sync.clone()),
+            integrity: String::new(),
+        };
+        write_transaction(temp.path(), &config, &transaction).unwrap();
+        apply_handoff_sync_files(temp.path(), &sync).unwrap();
+
+        let mut dream = issue("mn-d00004", "Concurrent intake");
+        dream.issue_type = IssueType::Dream;
+        store.append_issue(&dream).unwrap();
+        assert_eq!(
+            recover_pair_transactions(temp.path(), &store, &config).unwrap(),
+            1
+        );
+
+        let current = store.load_issues_strict().unwrap();
+        assert_eq!(&current[..before.len()], before.as_slice());
+        assert_eq!(current.last(), Some(&dream));
+        assert_eq!(read_order_text(temp.path()).unwrap(), order_before);
+        assert_eq!(
+            read_optional_text(&temp.path().join(HANDOFF_README), "handoff README").unwrap(),
+            readme_before
+        );
+        for row in &before {
+            assert!(temp.path().join(row.prompt.as_deref().unwrap()).is_file());
+        }
+        assert!(!transaction_path(temp.path(), HANDOFF_SYNC_TRANSACTION_ID).exists());
+    }
+
+    #[test]
+    fn init_adds_priority_scaffold_without_bricking_invalid_dependencies() {
+        let (temp, store, config) = setup();
+        let paired = create_paired_issue(
+            temp.path(),
+            &store,
+            &config,
+            &issue("mn-a00001", "Blocked by track"),
+            None,
+        )
+        .unwrap();
+        let mut track = issue("mn-b00002", "Umbrella");
+        track.issue_type = IssueType::Track;
+        store.append_issue(&track).unwrap();
+        let owner =
+            SessionIdentity::from_token("ses-init", "init-0123456789abcdef0123456789abcdef")
+                .unwrap();
+        store.add_blocker(&paired.id, &track.id, &owner).unwrap();
+        fs::remove_file(temp.path().join(HANDOFF_ORDER_FILE)).unwrap();
+
+        initialize_workflow(temp.path(), &store).unwrap().unwrap();
+        assert!(temp.path().join(HANDOFF_ORDER_FILE).is_file());
+        let readme = fs::read_to_string(temp.path().join(HANDOFF_README)).unwrap();
+        assert!(readme.contains("Launch presentation is blocked"));
+        assert!(load_workflow_for_board(temp.path(), &store.load_issues().unwrap()).is_ok());
+        store.remove_blocker(&paired.id, &track.id, &owner).unwrap();
+        sync_handoff_presentation(temp.path(), &store, &config).unwrap();
+    }
+
+    #[test]
+    fn preceding_release_migration_journal_upgrades_presentation_after_recovery() {
+        let (temp, store, _) = legacy_board();
+        let before = store.load_issues_strict().unwrap();
+        let mut transaction = build_legacy_migration(temp.path(), before).unwrap();
+        transaction.order_before = None;
+        transaction.order_after = None;
+        transaction.readme_after =
+            "# agent-do handoffs\n\nLegacy generated contract.\n".to_string();
+        write_legacy_migration_transaction(temp.path(), &transaction).unwrap();
+
+        assert_eq!(recover_legacy_migration(temp.path(), &store).unwrap(), 1);
+        assert!(temp.path().join(HANDOFF_ORDER_FILE).is_file());
+        assert!(fs::read_to_string(temp.path().join(HANDOFF_README))
+            .unwrap()
+            .contains("## Generated index"));
+        validate_scaffold(temp.path(), &WorkflowConfig::default()).unwrap();
     }
 
     #[test]
