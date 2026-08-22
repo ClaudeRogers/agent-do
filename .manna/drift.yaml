@@ -1,0 +1,41 @@
+generated_at: "2026-08-16T03:30:58Z"
+session: fad251da-c02f-45bf-9ea9-427635eb0596
+findings:
+- kind: landed_open
+  issue_id: mn-b8359d
+  detail: referenced by landed commit trailer but status is open
+  evidence: 4c7743aba40e
+  proposed_fix: review the commits; if the work landed, claim and done mn-b8359d
+- kind: landed_open
+  issue_id: mn-43932b
+  detail: referenced by landed commit trailer but status is open
+  evidence: 0a7e78fa21f4
+  proposed_fix: review the commits; if the work landed, claim and done mn-43932b
+- kind: stale_dream
+  issue_id: mn-53da2c
+  detail: open dream older than 14 days
+  evidence: created_at 2026-06-12
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-ae0408
+  detail: open dream older than 14 days
+  evidence: created_at 2026-06-12
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-dc73a9
+  detail: open dream older than 14 days
+  evidence: created_at 2026-07-28
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-ed129e
+  detail: open dream older than 14 days
+  evidence: created_at 2026-07-28
+  proposed_fix: promote to an item on a track, or close it
+- kind: doc_reference
+  issue_id: mn-a1b2c3
+  detail: referenced id does not exist on this board
+  evidence: .handoff/MOON-executive-brief-public-2026-07-15.md:45
+- kind: doc_reference
+  issue_id: mn-5dc58b
+  detail: referenced id does not exist on this board
+  evidence: .zpc/memory/positions.jsonl:3
