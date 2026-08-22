@@ -755,9 +755,12 @@ Manna: $WEDGE_ID"
 output=$("$MANNA" reconcile 2>&1) || true
 check_yaml "$output" "landed_open" "reconcile sees the landed evidence"
 
-# The restarted session cures its own claim: same label, lost secret. The
-# self-cure path needs no coord lookup, so this holds in any environment.
-output=$(MANNA_SESSION_ID="ses_wedge_$$" "$MANNA" reconcile --fix 2>&1) || true
+# The owner cures its own claim by presenting the VERIFIED proof (label
+# alone is spoofable and never bypasses the liveness guard). The verified
+# path needs no coord lookup, so this holds in any environment; the
+# lost-proof path rides coord liveness and is covered at the unit level.
+output=$(MANNA_SESSION_ID="ses_wedge_$$" MANNA_SESSION_TOKEN="wedge-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "$MANNA" reconcile --fix 2>&1) || true
 check_yaml "$output" "closed on landed evidence" "reconcile --fix closes on the receipt"
 output=$("$MANNA" show "$WEDGE_ID" 2>&1) || true
 check_yaml "$output" "status: done" "wedged item is done after the cure"

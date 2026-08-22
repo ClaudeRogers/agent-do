@@ -2600,15 +2600,13 @@ fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
 /// fails closed. Absent-from-coord does NOT block: an orphaned claim's owner
 /// label routinely has no coord record (that absence is the wedge itself),
 /// and demanding positive death evidence would recreate the deadlock this
-/// cure exists to break. The owning session may always cure its own claim.
+/// cure exists to break. A caller presenting the claim's verified ownership
+/// proof bypasses this guard entirely (checked before calling) — a bare
+/// label never does; labels are public and carry no lifecycle authority.
 fn landed_open_close_blocked(
     owner: &str,
-    caller_label: Option<&str>,
     coord: &Result<HashMap<String, String>, String>,
 ) -> Option<String> {
-    if caller_label == Some(owner) {
-        return None;
-    }
     match coord {
         Ok(statuses) => match coord_status_for_owner(statuses, owner) {
             Some(status) if status == "active" => Some(format!(
@@ -2618,7 +2616,7 @@ fn landed_open_close_blocked(
             _ => None,
         },
         Err(error) => Some(format!(
-            "coord liveness unavailable ({}); refusing to close over a possibly live owner — rerun where `agent-do coord` resolves, or rerun as the owning session",
+            "coord liveness unavailable ({}); refusing to close over a possibly live owner — rerun where `agent-do coord` resolves, or rerun with the owner's verified identity",
             error
         )),
     }
@@ -2628,6 +2626,7 @@ fn apply_reconcile_fixes(
     store: &MannaStore,
     issues: &[Issue],
     findings: &[Finding],
+    caller: Option<&SessionIdentity>,
 ) -> (Vec<String>, Vec<String>) {
     let mut fixed = Vec::new();
     let mut failures: Vec<String> = Vec::new();
@@ -2712,16 +2711,19 @@ fn apply_reconcile_fixes(
                 if expected.status != IssueStatus::InProgress {
                     continue;
                 }
-                let caller_label = current_session_label();
-                if caller_label.as_deref() != Some(owner.as_str()) {
+                // Only a VERIFIED ownership proof bypasses the liveness
+                // guard: the identity must check out against the claim's
+                // stored token hash. A matching public label alone is
+                // spoofable and carries no lifecycle authority.
+                let owner_verified =
+                    caller.is_some_and(|identity| expected.require_owner(identity).is_ok());
+                if !owner_verified {
                     if coord_statuses.is_none() {
                         coord_statuses = Some(coord_peer_statuses());
                     }
-                    if let Some(reason) = landed_open_close_blocked(
-                        &owner,
-                        caller_label.as_deref(),
-                        coord_statuses.as_ref().unwrap(),
-                    ) {
+                    if let Some(reason) =
+                        landed_open_close_blocked(&owner, coord_statuses.as_ref().unwrap())
+                    {
                         failures.push(format!("{}: {}", id, reason));
                         continue;
                     }
@@ -2837,7 +2839,8 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
 
     // Findings describe pre-fix drift; `fixed` lists what --fix addressed.
     let (fixed, fix_failures) = if fix {
-        apply_reconcile_fixes(&store, &issues, &findings)
+        let caller = get_session_identity().ok();
+        apply_reconcile_fixes(&store, &issues, &findings, caller.as_ref())
     } else {
         (Vec::new(), Vec::new())
     };
@@ -3808,7 +3811,7 @@ mod tests {
         store.release_issue(&issue.id, &old).unwrap();
         let new_owner = session("ses_new");
         store.claim_issue(&issue.id, &new_owner).unwrap();
-        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings, None);
         assert!(fixed.is_empty());
         assert!(failures
             .iter()
@@ -3827,14 +3830,15 @@ mod tests {
         let down: Result<HashMap<String, String>, String> = Err("agent-do unavailable".to_string());
 
         // An actively working owner blocks the cure.
-        assert!(landed_open_close_blocked("ses_active", Some("ses_other"), &live).is_some());
+        assert!(landed_open_close_blocked("ses_active", &live).is_some());
         // Idle and absent owners do not: absence is the wedge's normal state.
-        assert!(landed_open_close_blocked("ses_idle", Some("ses_other"), &live).is_none());
-        assert!(landed_open_close_blocked("ses_absent", Some("ses_other"), &live).is_none());
-        // No liveness signal at all fails closed.
-        assert!(landed_open_close_blocked("ses_absent", Some("ses_other"), &down).is_some());
-        // The owning session may always cure its own claim.
-        assert!(landed_open_close_blocked("ses_active", Some("ses_active"), &down).is_none());
+        assert!(landed_open_close_blocked("ses_idle", &live).is_none());
+        assert!(landed_open_close_blocked("ses_absent", &live).is_none());
+        // No liveness signal at all fails closed. (A verified ownership
+        // proof bypasses this guard before it is ever consulted; a bare
+        // label match never does.)
+        assert!(landed_open_close_blocked("ses_absent", &down).is_some());
+        assert!(landed_open_close_blocked("ses_active", &down).is_some());
     }
 
     #[test]
@@ -3842,10 +3846,7 @@ mod tests {
         let (_temp, store) = setup_store();
         let issue = Issue::new("mn-wedge1".to_string(), "Shipped but wedged".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
-        // Claim under the caller's own label: the self-cure path is
-        // deterministic in any environment (no coord dependency).
-        let owner_label = current_session_label().unwrap_or_else(|| "ses_gone".to_string());
-        let owner = session(&owner_label);
+        let owner = session("ses_gone");
         store.claim_issue(&issue.id, &owner).unwrap();
         let snapshot = store.load_issues().unwrap();
         let findings = vec![Finding {
@@ -3856,12 +3857,14 @@ mod tests {
             proposed_fix: Some("review the commits".to_string()),
         }];
 
-        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        // The caller presents the claim's verified ownership proof, so the
+        // self-cure path is deterministic in any environment (no coord).
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings, Some(&owner));
         assert!(failures.is_empty(), "unexpected failures: {:?}", failures);
         assert!(
             fixed.iter().any(|entry| entry.contains("mn-wedge1")
                 && entry.contains("abc123def456")
-                && entry.contains(&owner_label)),
+                && entry.contains("ses_gone")),
             "fixed must carry the evidence and the released owner: {:?}",
             fixed
         );
@@ -3885,7 +3888,7 @@ mod tests {
             proposed_fix: Some("review the commits".to_string()),
         }];
 
-        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings, None);
         assert!(fixed.is_empty(), "unclaimed landed_open must stay advisory");
         assert!(failures.is_empty());
         let current = store.load_issues().unwrap().pop().unwrap();
@@ -3897,8 +3900,7 @@ mod tests {
         let (_temp, store) = setup_store();
         let issue = Issue::new("mn-wedge2".to_string(), "Changed after scan".to_string()).unwrap();
         store.append_issue(&issue).unwrap();
-        let owner_label = current_session_label().unwrap_or_else(|| "ses_gone".to_string());
-        let owner = session(&owner_label);
+        let owner = session("ses_gone");
         store.claim_issue(&issue.id, &owner).unwrap();
         let snapshot = store.load_issues().unwrap();
         let findings = vec![Finding {
@@ -3912,7 +3914,9 @@ mod tests {
         store.release_issue(&issue.id, &owner).unwrap();
         let new_owner = session("ses_live");
         store.claim_issue(&issue.id, &new_owner).unwrap();
-        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        // The stale owner's proof verifies against the SNAPSHOT row, so the
+        // guard is bypassed — and the CAS check must still refuse the write.
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings, Some(&owner));
         assert!(fixed.is_empty());
         assert!(failures
             .iter()
