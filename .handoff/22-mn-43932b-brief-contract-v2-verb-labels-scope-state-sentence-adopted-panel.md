@@ -1,12 +1,12 @@
 ---
 workflow: 2
 manna: mn-43932b
-track: mn-b7a0cc
+track: mn-69368a
 source: null
 base_commit: d6bad082a06b9c64f472151f399e3d576108ca38
 scope: 'brief: contract v2 — verb labels, scope, state sentence (adopted panel-v2 critique)'
 inputs: []
-binding: sha256:90447ba9a9196caf67580d389c35d1a06bb448f7dccbbfe028dfea70ff7115ff
+binding: sha256:fba9e1a7c0ed69dc787c8758fbfd5005fd57d5a080f1c8588d6eb10f8eab57b3
 ---
 
 # Handoff: brief: contract v2 — verb labels, scope, state sentence (adopted panel-v2 critique)
