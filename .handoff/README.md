@@ -61,4 +61,3 @@ Rules:
 | 27 | `mn-ee7d1e` | open | none | `.handoff/27-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
 | 28 | `mn-65fae2` | open | none | `.handoff/28-mn-65fae2-manna-init-atomicity-a-half-fired-init-left-a-project-board-iden.md` |
 | 29 | `mn-898c08` | open | none | `.handoff/29-mn-898c08-manna-legacy-board-discoverability-misrouted-error-text-bootstra.md` |
-| 30 | `mn-ba8db6` | open | none | `.handoff/30-mn-ba8db6-strict-board-deadlock-ownership-proof-orphaned-by-process-restar.md` |
