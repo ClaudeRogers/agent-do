@@ -733,10 +733,6 @@ fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig
 
 fn cmd_init() -> ! {
     let store = MannaStore::new(Path::new("."));
-    if let Err(err) = store.init() {
-        handle_manna_error(err);
-    }
-
     let workflow = match initialize_workflow(Path::new("."), &store) {
         Ok(initialized) => initialized,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
@@ -1770,10 +1766,6 @@ fn cmd_dream(
             );
         }
     }
-    if let Err(err) = store.init() {
-        handle_manna_error(err);
-    }
-
     if let Err(error) = initialize_workflow(&board_dir, &store) {
         output_error(&error, EXIT_SYSTEM_ERROR);
     }

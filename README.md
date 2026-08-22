@@ -217,7 +217,11 @@ unsealed handoffs.
 
 `manna init` pins strict or legacy identity in `.manna/board.yaml`, then
 installs workflow version 2, `.manna/handoff-order.yaml`, and
-`.handoff/README.md` for strict boards. If a
+`.handoff/README.md` for strict boards. Initialization is one authenticated,
+board-locked transaction: it journals the exact prior and final bytes, installs
+every durable prerequisite, and publishes board identity last. A killed init
+therefore recovers on the next init instead of stranding an identityless board,
+and a repeated init is byte-stable. If a
 repository ignores `.manna/` or `.handoff/`, init adds
 the narrow unignore rules needed to keep workflow state in Git while leaving
 the runtime lock and transaction journal ignored. Removing `workflow.yaml`

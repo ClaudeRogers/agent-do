@@ -33,7 +33,9 @@ pub const HANDOFF_ARCHIVE_DIR: &str = ".handoff/.archive";
 const LEGACY_SOURCE_ARCHIVE_DIR: &str = ".handoff/.archive/legacy-sources";
 const HANDOFF_SYNC_STAGE_DIR: &str = ".handoff/.sync";
 const TRANSACTION_DIR: &str = ".manna/transactions";
+const BOARD_INIT_TRANSACTION: &str = ".manna/transactions/board-init.yaml";
 const LEGACY_MIGRATION_TRANSACTION: &str = ".manna/transactions/legacy-board-migration.yaml";
+const BOARD_INIT_VERSION: u32 = 1;
 const LEGACY_MIGRATION_VERSION: u32 = 1;
 const HANDOFF_ORDER_VERSION: u32 = 1;
 const HANDOFF_SYNC_TRANSACTION_ID: &str = "mn-handoff-sync";
@@ -277,6 +279,41 @@ struct MigrationSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct InitManagedText {
+    before: Option<String>,
+    after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoardInitTransaction {
+    version: u32,
+    issues: InitManagedText,
+    sessions: InitManagedText,
+    board: InitManagedText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gitignore: Option<InitManagedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<InitManagedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<InitManagedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    readme: Option<InitManagedText>,
+    integrity: String,
+}
+
+#[derive(Debug)]
+struct BoardInitPreparation {
+    transaction: BoardInitTransaction,
+    changed: bool,
+    strict: bool,
+    gitignore_updated: bool,
+    restored_config: bool,
+    old_workflow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LegacyBoardTransaction {
     version: u32,
     before: Vec<Issue>,
@@ -336,13 +373,6 @@ fn load_board_config(base: &Path) -> Result<Option<BoardConfig>, String> {
         ));
     }
     Ok(Some(config))
-}
-
-fn write_board_config(base: &Path, config: &BoardConfig) -> Result<(), String> {
-    let yaml = serde_yaml::to_string(config)
-        .map_err(|error| format!("failed to serialize board identity: {}", error))?;
-    let relative = safe_relative_path(base, Path::new(BOARD_FILE), true)?;
-    atomic_write_replace(&base.join(relative), &yaml)
 }
 
 fn path_exists(path: &Path) -> bool {
@@ -1417,6 +1447,46 @@ fn transaction_signature(
     transaction: &PairTransaction,
 ) -> Result<String, String> {
     let digest = hmac_sha256(key, &transaction_material(base, transaction)?);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    Ok(format!("hmac-sha256:{}", hex))
+}
+
+fn board_init_path(base: &Path) -> PathBuf {
+    base.join(BOARD_INIT_TRANSACTION)
+}
+
+fn board_init_material(base: &Path, transaction: &BoardInitTransaction) -> Result<Vec<u8>, String> {
+    let mut unsigned = transaction.clone();
+    unsigned.integrity.clear();
+    let project = base.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve project root {}: {}",
+            base.display(),
+            error
+        )
+    })?;
+    let payload = serde_json::to_vec(&unsigned).map_err(|error| {
+        format!(
+            "failed to serialize board init integrity material: {}",
+            error
+        )
+    })?;
+    let mut material = b"agent-do/manna/board-init/v1\0".to_vec();
+    material.extend_from_slice(project.to_string_lossy().as_bytes());
+    material.push(0);
+    material.extend_from_slice(&payload);
+    Ok(material)
+}
+
+fn board_init_signature(
+    base: &Path,
+    key: &[u8],
+    transaction: &BoardInitTransaction,
+) -> Result<String, String> {
+    let digest = hmac_sha256(key, &board_init_material(base, transaction)?);
     let hex = digest
         .iter()
         .map(|byte| format!("{:02x}", byte))
@@ -2580,7 +2650,7 @@ fn check_managed_text_state(
     let current = read_optional_text(path, label)?;
     if current.as_deref() != before && current.as_deref() != Some(after) {
         return Err(format!(
-            "{} changed after legacy migration was prepared: {}",
+            "{} changed after the workflow transaction was prepared: {}",
             label,
             path.display()
         ));
@@ -2599,6 +2669,468 @@ fn install_managed_text(
         return Ok(());
     }
     atomic_write_replace(path, after)
+}
+
+fn parse_init_issues(text: &str) -> Result<Vec<Issue>, String> {
+    let mut issues = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let issue = serde_json::from_str::<Issue>(line).map_err(|error| {
+            format!(
+                "cannot initialize malformed board line {}: {}",
+                index + 1,
+                error
+            )
+        })?;
+        issues.push(issue);
+    }
+    Ok(issues)
+}
+
+fn init_managed_changed(managed: &InitManagedText) -> bool {
+    managed.before.as_deref() != Some(managed.after.as_str())
+}
+
+fn init_transaction_changed(transaction: &BoardInitTransaction) -> bool {
+    init_managed_changed(&transaction.issues)
+        || init_managed_changed(&transaction.sessions)
+        || init_managed_changed(&transaction.board)
+        || transaction
+            .gitignore
+            .as_ref()
+            .is_some_and(init_managed_changed)
+        || transaction
+            .workflow
+            .as_ref()
+            .is_some_and(init_managed_changed)
+        || transaction.order.as_ref().is_some_and(init_managed_changed)
+        || transaction
+            .readme
+            .as_ref()
+            .is_some_and(init_managed_changed)
+}
+
+fn build_board_init(base: &Path) -> Result<BoardInitPreparation, String> {
+    let issues_before = read_optional_text(&base.join(".manna/issues.jsonl"), "issues board")?;
+    let issues_after = issues_before.clone().unwrap_or_default();
+    let issues = parse_init_issues(&issues_after)?;
+    let sessions_before =
+        read_optional_text(&base.join(".manna/sessions.jsonl"), "session journal")?;
+    let sessions_after = sessions_before.clone().unwrap_or_default();
+    let board_before = read_optional_text(&base.join(BOARD_FILE), "board identity")?;
+    let existing_board = board_before
+        .as_deref()
+        .map(serde_yaml::from_str::<BoardConfig>)
+        .transpose()
+        .map_err(|error| format!("invalid board identity: {}", error))?;
+    if existing_board
+        .as_ref()
+        .is_some_and(|board| board.version != 1)
+    {
+        return Err("unsupported Manna board identity version".to_string());
+    }
+
+    let workflow_before = read_optional_text(&base.join(WORKFLOW_FILE), "workflow config")?;
+    let existing_workflow = workflow_before
+        .as_deref()
+        .map(serde_yaml::from_str::<WorkflowConfig>)
+        .transpose()
+        .map_err(|error| format!("invalid workflow config: {}", error))?;
+    if let Some(config) = existing_workflow.as_ref() {
+        config.validate_loadable()?;
+    }
+
+    let strict_markers = workflow_markers_present(base, &issues);
+    let board = match existing_board {
+        Some(board) => board,
+        None if strict_markers || issues.is_empty() => BoardConfig::strict(),
+        None => BoardConfig::legacy(),
+    };
+    let board_after = match board_before.as_deref() {
+        Some(existing) => existing.to_string(),
+        None => serde_yaml::to_string(&board)
+            .map_err(|error| format!("failed to serialize board identity: {}", error))?,
+    };
+    let board_managed = InitManagedText {
+        before: board_before,
+        after: board_after,
+    };
+    let issues_managed = InitManagedText {
+        before: issues_before,
+        after: issues_after,
+    };
+    let sessions_managed = InitManagedText {
+        before: sessions_before,
+        after: sessions_after,
+    };
+
+    if board.workflow == BoardMode::Legacy {
+        if strict_markers || existing_workflow.is_some() {
+            return Err(
+                "legacy board identity conflicts with strict workflow markers; archive or migrate them explicitly"
+                    .to_string(),
+            );
+        }
+        let transaction = BoardInitTransaction {
+            version: BOARD_INIT_VERSION,
+            issues: issues_managed,
+            sessions: sessions_managed,
+            board: board_managed,
+            gitignore: None,
+            workflow: None,
+            order: None,
+            readme: None,
+            integrity: String::new(),
+        };
+        return Ok(BoardInitPreparation {
+            changed: init_transaction_changed(&transaction),
+            transaction,
+            strict: false,
+            gitignore_updated: false,
+            restored_config: false,
+            old_workflow: false,
+        });
+    }
+
+    if !strict_markers {
+        validate_new_handoff_root(base)?;
+    } else {
+        reject_symlink(&base.join(HANDOFF_DIR), "handoff root")?;
+    }
+
+    let restored_config = workflow_before.is_none();
+    let old_workflow = existing_workflow
+        .as_ref()
+        .is_some_and(|workflow| workflow.version < WORKFLOW_VERSION);
+    let workflow_after = match workflow_before.as_deref() {
+        Some(existing) => existing.to_string(),
+        None => serde_yaml::to_string(&WorkflowConfig::default())
+            .map_err(|error| format!("failed to serialize workflow config: {}", error))?,
+    };
+    let order_before = read_optional_text(&base.join(HANDOFF_ORDER_FILE), "handoff priority")?;
+    let (order_after, readme_after) =
+        render_presentation_files(base, &issues, order_before.as_deref())?;
+    let readme_before = read_optional_text(&base.join(HANDOFF_README), "handoff README")?;
+
+    let ignored = durable_paths()
+        .into_iter()
+        .map(|path| git_path_ignored(base, Path::new(path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let gitignore = if ignored.iter().any(|ignored| *ignored) {
+        let before = read_optional_text(&base.join(".gitignore"), ".gitignore")?;
+        let after = workflow_gitignore_content(before.as_deref().unwrap_or_default());
+        Some(InitManagedText { before, after })
+    } else {
+        None
+    };
+    let gitignore_updated = gitignore.as_ref().is_some_and(init_managed_changed);
+
+    let transaction = BoardInitTransaction {
+        version: BOARD_INIT_VERSION,
+        issues: issues_managed,
+        sessions: sessions_managed,
+        board: board_managed,
+        gitignore,
+        workflow: Some(InitManagedText {
+            before: workflow_before,
+            after: workflow_after,
+        }),
+        order: Some(InitManagedText {
+            before: order_before,
+            after: order_after,
+        }),
+        readme: Some(InitManagedText {
+            before: readme_before,
+            after: readme_after,
+        }),
+        integrity: String::new(),
+    };
+    Ok(BoardInitPreparation {
+        changed: init_transaction_changed(&transaction),
+        transaction,
+        strict: true,
+        gitignore_updated,
+        restored_config,
+        old_workflow,
+    })
+}
+
+fn validate_board_init_transaction(
+    base: &Path,
+    path: &Path,
+    transaction: &BoardInitTransaction,
+    key: &[u8],
+) -> Result<(), String> {
+    if path != board_init_path(base) {
+        return Err(format!(
+            "board init journal has non-canonical path {}",
+            path.display()
+        ));
+    }
+    if transaction.version != BOARD_INIT_VERSION {
+        return Err(format!(
+            "unsupported board init journal version {}",
+            transaction.version
+        ));
+    }
+    let expected = board_init_signature(base, key, transaction)?;
+    if !constant_time_eq(expected.as_bytes(), transaction.integrity.as_bytes()) {
+        return Err("board init journal failed integrity verification".to_string());
+    }
+    if transaction.issues.after != transaction.issues.before.clone().unwrap_or_default() {
+        return Err("board init cannot change existing issue bytes".to_string());
+    }
+    if transaction.sessions.after != transaction.sessions.before.clone().unwrap_or_default() {
+        return Err("board init cannot change existing session bytes".to_string());
+    }
+    let issues = parse_init_issues(&transaction.issues.after)?;
+    let board: BoardConfig = serde_yaml::from_str(&transaction.board.after)
+        .map_err(|error| format!("invalid initialized board identity: {}", error))?;
+    if board.version != 1 {
+        return Err(format!(
+            "unsupported initialized board identity version {}",
+            board.version
+        ));
+    }
+    if transaction.board.before.is_some()
+        && transaction.board.before.as_deref() != Some(transaction.board.after.as_str())
+    {
+        return Err("board init cannot replace an existing board identity".to_string());
+    }
+    let inferred = if workflow_markers_present(base, &issues) || issues.is_empty() {
+        BoardMode::Strict
+    } else {
+        BoardMode::Legacy
+    };
+    if transaction.board.before.is_none() && board.workflow != inferred {
+        return Err("board init identity does not match the pre-init board shape".to_string());
+    }
+
+    match board.workflow {
+        BoardMode::Legacy => {
+            if transaction.gitignore.is_some()
+                || transaction.workflow.is_some()
+                || transaction.order.is_some()
+                || transaction.readme.is_some()
+                || workflow_markers_present(base, &issues)
+            {
+                return Err("legacy board init cannot publish strict workflow state".to_string());
+            }
+        }
+        BoardMode::Strict => {
+            let workflow = transaction
+                .workflow
+                .as_ref()
+                .ok_or_else(|| "strict board init has no workflow config".to_string())?;
+            if workflow.before.is_some()
+                && workflow.before.as_deref() != Some(workflow.after.as_str())
+            {
+                return Err("board init cannot silently upgrade workflow config".to_string());
+            }
+            let config: WorkflowConfig = serde_yaml::from_str(&workflow.after)
+                .map_err(|error| format!("invalid initialized workflow config: {}", error))?;
+            config.validate_loadable()?;
+            let order = transaction
+                .order
+                .as_ref()
+                .ok_or_else(|| "strict board init has no handoff priority".to_string())?;
+            let parsed_order = parse_order(&order.after)?;
+            if serialize_order(&parsed_order)? != order.after {
+                return Err("board init handoff priority is not canonical YAML".to_string());
+            }
+            let readme = transaction
+                .readme
+                .as_ref()
+                .ok_or_else(|| "strict board init has no handoff README".to_string())?;
+            let (_, expected_readme) =
+                render_presentation_files(base, &issues, Some(&order.after))?;
+            if readme.after != expected_readme {
+                return Err("board init README is not the canonical generated index".to_string());
+            }
+            if let Some(gitignore) = transaction.gitignore.as_ref() {
+                let expected =
+                    workflow_gitignore_content(gitignore.before.as_deref().unwrap_or_default());
+                if gitignore.after != expected {
+                    return Err("board init Git visibility update is not canonical".to_string());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_init_managed(path: &Path, managed: &InitManagedText, label: &str) -> Result<(), String> {
+    check_managed_text_state(path, managed.before.as_deref(), &managed.after, label)
+}
+
+fn install_init_managed(path: &Path, managed: &InitManagedText, label: &str) -> Result<(), String> {
+    install_managed_text(path, managed.before.as_deref(), &managed.after, label)
+}
+
+fn pause_init_before_identity_for_test() {
+    if std::env::var("MANNA_TESTING").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(raw) = std::env::var("MANNA_TEST_INIT_PAUSE_BEFORE_IDENTITY_MS") else {
+        return;
+    };
+    let Ok(milliseconds) = raw.parse::<u64>() else {
+        return;
+    };
+    std::thread::sleep(std::time::Duration::from_millis(milliseconds.min(60_000)));
+}
+
+fn apply_board_init_files(base: &Path, transaction: &BoardInitTransaction) -> Result<(), String> {
+    let issues = base.join(".manna/issues.jsonl");
+    let sessions = base.join(".manna/sessions.jsonl");
+    let board = base.join(BOARD_FILE);
+    let gitignore = base.join(".gitignore");
+    let workflow = base.join(WORKFLOW_FILE);
+    let order = base.join(HANDOFF_ORDER_FILE);
+    let readme = base.join(HANDOFF_README);
+
+    check_init_managed(&issues, &transaction.issues, "issues board")?;
+    check_init_managed(&sessions, &transaction.sessions, "session journal")?;
+    check_init_managed(&board, &transaction.board, "board identity")?;
+    if let Some(managed) = transaction.gitignore.as_ref() {
+        check_init_managed(&gitignore, managed, ".gitignore")?;
+    }
+    if let Some(managed) = transaction.workflow.as_ref() {
+        check_init_managed(&workflow, managed, "workflow config")?;
+    }
+    if let Some(managed) = transaction.order.as_ref() {
+        check_init_managed(&order, managed, "handoff priority")?;
+    }
+    if let Some(managed) = transaction.readme.as_ref() {
+        check_init_managed(&readme, managed, "handoff README")?;
+    }
+
+    safe_create_dir_all(base, Path::new(".manna"))?;
+    install_init_managed(&issues, &transaction.issues, "issues board")?;
+    install_init_managed(&sessions, &transaction.sessions, "session journal")?;
+    if let Some(managed) = transaction.gitignore.as_ref() {
+        install_init_managed(&gitignore, managed, ".gitignore")?;
+    }
+    if transaction.workflow.is_some() {
+        safe_create_dir_all(base, Path::new(HANDOFF_DIR))?;
+    }
+    if let Some(managed) = transaction.workflow.as_ref() {
+        install_init_managed(&workflow, managed, "workflow config")?;
+    }
+    if let Some(managed) = transaction.order.as_ref() {
+        install_init_managed(&order, managed, "handoff priority")?;
+    }
+    if let Some(managed) = transaction.readme.as_ref() {
+        install_init_managed(&readme, managed, "handoff README")?;
+    }
+
+    if transaction.workflow.is_some() {
+        for relative in durable_paths() {
+            if git_path_ignored(base, Path::new(relative))? {
+                return Err(format!(
+                    "board init durable state is still ignored by Git: {}",
+                    relative
+                ));
+            }
+        }
+    }
+
+    // `board.yaml` is the commit point. A killed process can leave prepared
+    // bytes plus this authenticated journal, but it can never publish a board
+    // identity whose durable prerequisites are incomplete. The next init
+    // replays the exact before/after states and removes the journal.
+    pause_init_before_identity_for_test();
+    install_init_managed(&board, &transaction.board, "board identity")
+}
+
+fn execute_board_init(
+    base: &Path,
+    store: &MannaStore,
+    transaction: &BoardInitTransaction,
+) -> Result<(), MannaError> {
+    store.recover_initialize_with(|| apply_board_init_files(base, transaction))
+}
+
+fn write_board_init_transaction(
+    base: &Path,
+    transaction: &BoardInitTransaction,
+) -> Result<PathBuf, String> {
+    safe_create_dir_all(base, Path::new(TRANSACTION_DIR))?;
+    let path = board_init_path(base);
+    let key = load_recovery_key(base, true)?;
+    let mut signed = transaction.clone();
+    signed.integrity = board_init_signature(base, &key, &signed)?;
+    validate_board_init_transaction(base, &path, &signed, &key)?;
+    let yaml = serde_yaml::to_string(&signed)
+        .map_err(|error| format!("failed to serialize board init journal: {}", error))?;
+    atomic_write(&path, yaml.as_bytes(), false).map_err(|error| {
+        format!(
+            "{}; a board initialization is already pending; rerun `agent-do manna init`",
+            error
+        )
+    })?;
+    Ok(path)
+}
+
+fn complete_board_init_path(
+    base: &Path,
+    store: &MannaStore,
+    path: &Path,
+    key: &[u8],
+) -> Result<(), String> {
+    safe_relative_path(
+        base,
+        path.strip_prefix(base)
+            .map_err(|_| format!("board init journal is outside project: {}", path.display()))?,
+        false,
+    )?;
+    reject_symlink(path, "board init journal")?;
+    let mut file = File::open(path)
+        .map_err(|error| format!("failed to open {}: {}", path.display(), error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {}", path.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "board init journal is not a regular file: {}",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    let transaction: BoardInitTransaction = serde_yaml::from_str(&text)
+        .map_err(|error| format!("invalid board init journal {}: {}", path.display(), error))?;
+    validate_board_init_transaction(base, path, &transaction, key)?;
+    execute_board_init(base, store, &transaction).map_err(|error| error.to_string())?;
+    remove_transaction_if_unchanged(path, &metadata, &text)
+}
+
+fn recover_board_init(base: &Path, store: &MannaStore) -> Result<usize, String> {
+    let path = board_init_path(base);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let key = load_recovery_key(base, false)?;
+    complete_board_init_path(base, store, &path, &key)?;
+    Ok(1)
+}
+
+fn run_board_init_transaction(
+    base: &Path,
+    store: &MannaStore,
+    transaction: BoardInitTransaction,
+) -> Result<(), String> {
+    let path = write_board_init_transaction(base, &transaction)?;
+    let key = load_recovery_key(base, false)?;
+    complete_board_init_path(base, store, &path, &key).map_err(|error| {
+        format!(
+            "board initialization is pending recovery: {}. Rerun `agent-do manna init`.",
+            error
+        )
+    })
 }
 
 fn sync_stage_path(issue_id: &str) -> PathBuf {
@@ -4665,72 +5197,39 @@ pub fn initialize_workflow(
     store
         .validate_storage_root()
         .map_err(|error| error.to_string())?;
-    let recovered_migration = recover_legacy_migration(base, store)?;
-    let initial_issues = store.load_issues().map_err(|error| error.to_string())?;
-    let existing = load_workflow(base)?;
-    let strict_markers = workflow_markers_present(base, &initial_issues);
-    let board = match load_board_config(base)? {
-        Some(board) => board,
-        None if strict_markers || initial_issues.is_empty() => {
-            let board = BoardConfig::strict();
-            write_board_config(base, &board)?;
-            board
-        }
-        None => {
-            let board = BoardConfig::legacy();
-            write_board_config(base, &board)?;
-            board
-        }
+    let recovered_init = recover_board_init(base, store)?;
+    let recovered_migration = if store.is_initialized() {
+        recover_legacy_migration(base, store)?
+    } else {
+        0
     };
-    if board.workflow == BoardMode::Legacy {
-        if strict_markers || existing.is_some() {
-            return Err(
-                "legacy board identity conflicts with strict workflow markers; archive or migrate them explicitly"
-                    .to_string(),
-            );
-        }
+    let preparation = build_board_init(base)?;
+    if preparation.changed {
+        run_board_init_transaction(base, store, preparation.transaction.clone())?;
+    }
+    if !store.is_initialized() {
+        return Err("board initialization did not publish complete storage".to_string());
+    }
+    if !preparation.strict {
         return Ok(None);
     }
 
-    let restored_config = existing.is_none() && board.workflow == BoardMode::Strict;
-    if !strict_markers {
-        validate_new_handoff_root(base)?;
-    } else {
-        reject_symlink(&base.join(HANDOFF_DIR), "handoff root")?;
+    let board = load_board_config(base)?
+        .ok_or_else(|| format!("missing durable workflow file {}", BOARD_FILE))?;
+    if board.workflow != BoardMode::Strict {
+        return Err("board initialization published the wrong workflow mode".to_string());
     }
-    safe_create_dir_all(base, Path::new(HANDOFF_DIR))?;
-    safe_create_dir_all(base, Path::new(".manna"))?;
-    let gitignore_updated = ensure_workflow_tracked(base)?;
-    let order_before = read_order_text(base)?;
-    let (order, readme) =
-        render_presentation_files(base, &initial_issues, order_before.as_deref())?;
-    atomic_write_replace(&base.join(HANDOFF_ORDER_FILE), &order)?;
-    atomic_write_replace(&base.join(HANDOFF_README), &readme)?;
-
     let config = WorkflowConfig::default();
     let yaml = serde_yaml::to_string(&config)
         .map_err(|error| format!("failed to serialize workflow config: {}", error))?;
-    // A missing strict config is repairable only by restoring the current
-    // version. A real v1 config stays v1 until every item migration finishes,
-    // so interruption cannot strand a partially upgraded board behind a v2
-    // marker that suppresses the remaining work on the next init.
-    if restored_config {
-        atomic_write_replace(&workflow_path(base), &yaml)?;
-    }
     validate_scaffold(base, &config)?;
 
-    // Recovery begins only after board identity, scaffold paths, Git
-    // visibility, and journal authentication can all be checked. A planted
-    // journal is never the input that decides where validation occurs.
     let recovered_transactions =
-        recovered_migration + recover_pair_transactions(base, store, &config)?;
+        recovered_init + recovered_migration + recover_pair_transactions(base, store, &config)?;
     let issues = store.load_issues().map_err(|error| error.to_string())?;
 
-    let old_workflow = existing
-        .as_ref()
-        .is_some_and(|workflow| workflow.version < WORKFLOW_VERSION);
     let mut upgraded_items = 0;
-    if old_workflow {
+    if preparation.old_workflow {
         for issue in issues.iter().filter(|issue| {
             issue.issue_type == IssueType::Item
                 && issue.status != IssueStatus::Done
@@ -4763,9 +5262,9 @@ pub fn initialize_workflow(
     }
     Ok(Some(WorkflowInit {
         config,
-        gitignore_updated,
+        gitignore_updated: preparation.gitignore_updated,
         upgraded_items,
-        restored_config,
+        restored_config: preparation.restored_config,
         recovered_transactions,
     }))
 }
@@ -4945,6 +5444,63 @@ mod tests {
         store.init().unwrap();
         let init = initialize_workflow(temp.path(), &store).unwrap().unwrap();
         (temp, store, init.config)
+    }
+
+    #[test]
+    fn interrupted_board_init_recovers_before_identity_and_is_byte_stable() {
+        let temp = TempDir::new().unwrap();
+        Command::new("git")
+            .current_dir(temp.path())
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        let store = MannaStore::new(temp.path());
+        let preparation = build_board_init(temp.path()).unwrap();
+        assert!(preparation.changed);
+        assert!(preparation.strict);
+        let path = write_board_init_transaction(temp.path(), &preparation.transaction).unwrap();
+
+        // Reproduce a killed initializer after storage preparation but before
+        // the identity commit point. The authenticated journal is the only
+        // authority allowed to finish these exact bytes.
+        safe_create_dir_all(temp.path(), Path::new(".manna")).unwrap();
+        install_init_managed(
+            &temp.path().join(".manna/issues.jsonl"),
+            &preparation.transaction.issues,
+            "issues board",
+        )
+        .unwrap();
+        install_init_managed(
+            &temp.path().join(".manna/sessions.jsonl"),
+            &preparation.transaction.sessions,
+            "session journal",
+        )
+        .unwrap();
+        assert!(path.is_file());
+        assert!(!temp.path().join(BOARD_FILE).exists());
+
+        let recovered = initialize_workflow(temp.path(), &store).unwrap().unwrap();
+        assert_eq!(recovered.recovered_transactions, 1);
+        validate_scaffold(temp.path(), &recovered.config).unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_dir(temp.path().join(TRANSACTION_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        let before = durable_paths()
+            .into_iter()
+            .map(|relative| fs::read(temp.path().join(relative)).unwrap())
+            .collect::<Vec<_>>();
+        let repeated = initialize_workflow(temp.path(), &store).unwrap().unwrap();
+        assert_eq!(repeated.recovered_transactions, 0);
+        let after = durable_paths()
+            .into_iter()
+            .map(|relative| fs::read(temp.path().join(relative)).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
     }
 
     fn issue(id: &str, title: &str) -> Issue {
@@ -5968,6 +6524,9 @@ mod tests {
         let (temp, store, config) = setup();
         safe_create_dir_all(temp.path(), Path::new(TRANSACTION_DIR)).unwrap();
         let key = recovery_key_path(temp.path()).unwrap();
+        if key.is_file() {
+            fs::remove_file(&key).unwrap();
+        }
         assert!(!key.exists());
         assert_eq!(
             recover_pair_transactions(temp.path(), &store, &config).unwrap(),

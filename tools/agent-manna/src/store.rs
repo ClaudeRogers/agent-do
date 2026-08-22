@@ -280,6 +280,19 @@ impl MannaStore {
         Ok(lock_file)
     }
 
+    /// Run the file half of an authenticated board-initialization journal
+    /// under the same board-wide lock as every ordinary mutation. The journal
+    /// writer creates `.manna/` before calling this method, but durable board
+    /// files may not exist yet. That is why this boundary cannot require an
+    /// initialized issues file the way row transactions do.
+    pub fn recover_initialize_with<F>(&self, install: F) -> Result<()>
+    where
+        F: FnOnce() -> std::result::Result<(), String>,
+    {
+        let _board_lock = self.lock_board()?;
+        install().map_err(MannaError::MutationRejected)
+    }
+
     pub fn append_issue(&self, issue: &Issue) -> Result<()> {
         let path = self.issues_path();
         if !path.exists() {

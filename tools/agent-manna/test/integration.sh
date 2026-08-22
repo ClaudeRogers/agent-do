@@ -109,6 +109,60 @@ check_yaml "$output" "success: true" "init returns success"
 [[ -f .manna/issues.jsonl ]] && pass "issues.jsonl created" || fail "issues.jsonl created" "File not found"
 
 # ----------------------------------------------------------------------------
+# Test 1b: kill-mid-init recovery
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test 1b: kill-mid-init recovery"
+CRASH_INIT_DIR=$(mktemp -d)
+cd "$CRASH_INIT_DIR"
+git init -q
+MANNA_TESTING=1 MANNA_TEST_INIT_PAUSE_BEFORE_IDENTITY_MS=30000 \
+    "$MANNA_CORE" init >init.log 2>&1 &
+init_pid=$!
+init_prepared=0
+for _ in $(seq 1 200); do
+    if [[ -f .manna/transactions/board-init.yaml ]] \
+        && [[ -f .manna/issues.jsonl ]] \
+        && [[ -f .manna/workflow.yaml ]] \
+        && [[ ! -e .manna/board.yaml ]]; then
+        init_prepared=1
+        break
+    fi
+    if ! kill -0 "$init_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+if [[ "$init_prepared" -eq 1 ]]; then
+    pass "init reaches a journaled pre-identity state"
+else
+    fail "init reaches a journaled pre-identity state" "$(cat init.log 2>/dev/null || true)"
+fi
+kill -KILL "$init_pid" 2>/dev/null || true
+wait "$init_pid" 2>/dev/null || true
+[[ ! -e .manna/board.yaml ]] && pass "killed init never publishes partial identity" || fail "killed init never publishes partial identity" "board identity exists"
+[[ -f .manna/transactions/board-init.yaml ]] && pass "killed init retains authenticated recovery intent" || fail "killed init retains authenticated recovery intent" "journal missing"
+
+output=$("$MANNA_CORE" init 2>&1) || true
+check_yaml "$output" "success: true" "rerun recovers killed init"
+check_yaml "$output" "recovered_transactions: 1" "recovered init reports its journal"
+for durable in .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; do
+    [[ -f "$durable" ]] && pass "recovered init publishes $durable" || fail "recovered init publishes $durable" "file missing"
+done
+transaction_files=$(find .manna/transactions -type f 2>/dev/null | wc -l | tr -d ' ')
+check_exit 0 "$transaction_files" "init recovery directory is empty at rest"
+init_state_before=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; } | git hash-object --stdin)
+output=$("$MANNA_CORE" init 2>&1) || true
+check_yaml "$output" "recovered_transactions: 0" "repeated init has no recovery work"
+init_state_after=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; } | git hash-object --stdin)
+if [[ "$init_state_before" == "$init_state_after" ]]; then
+    pass "repeated init is byte-stable after crash recovery"
+else
+    fail "repeated init is byte-stable after crash recovery" "$init_state_before -> $init_state_after"
+fi
+cd "$TEST_DIR"
+
+# ----------------------------------------------------------------------------
 # Test 2: Create issues
 # ----------------------------------------------------------------------------
 echo ""
