@@ -240,7 +240,7 @@ function coherence(utils) {
     // Group elements by tag+class pattern
     const groups = new Map(); // pattern -> Element[]
 
-    const sampled = allVisible.slice(0, MAX_DRIFT_ELEMENTS);
+    const sampled = utils.sampleAcrossPage(allVisible, MAX_DRIFT_ELEMENTS);
 
     for (const el of sampled) {
       const tag = el.tagName.toLowerCase();

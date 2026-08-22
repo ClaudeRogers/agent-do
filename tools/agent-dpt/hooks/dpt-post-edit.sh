@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | python3 -c "
+FILE_PATH=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -52,15 +52,12 @@ print(json.dumps(output))
     exit 0
 fi
 
-# === Wait for HMR to update the browser ===
-# The edit just completed. The dev server needs time to recompile and push
-# the update via HMR websocket. Without this wait, DPT scores the stale
-# pre-edit page — the #1 source of false positives (e.g. "no primary CTA"
-# when the edit just added one).
-sleep 2
-
 # === MODE 1: Browse session active — score and report ===
-SCORE_OUTPUT="$(agent-do dpt score --current --quiet 2>/dev/null || true)"
+# The canonical score command first proves that this browser session has a
+# baseline for the edited project and that the open page still matches it. It
+# waits for HMR only after that proof, so unrelated pages are neither delayed
+# nor misattributed as feedback on this edit.
+SCORE_OUTPUT="$(agent-do dpt score --current --quiet --for-file "$FILE_PATH" 2>/dev/null || true)"
 
 if [[ -n "$SCORE_OUTPUT" ]]; then
     python3 -c "

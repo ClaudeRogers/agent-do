@@ -5,16 +5,258 @@ const DPT_UTILS = {
 
   // ─── Color Parsing ───────────────────────────────────────────────
 
-  parseColor(str) {
-    if (!str || str === 'transparent' || str === 'rgba(0, 0, 0, 0)') return null;
-    const rgba = str.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-    if (!rgba) return null;
+  _unparseableColors: new Map(),
+
+  _recordUnparseableColor(str) {
+    const value = String(str || '').trim();
+    if (!value) return;
+    this._unparseableColors.set(value, (this._unparseableColors.get(value) || 0) + 1);
+  },
+
+  colorParseDiagnostics() {
+    const entries = Array.from(this._unparseableColors.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     return {
-      r: parseInt(rgba[1]),
-      g: parseInt(rgba[2]),
-      b: parseInt(rgba[3]),
-      a: rgba[4] !== undefined ? parseFloat(rgba[4]) : 1
+      unparseable_count: entries.reduce((sum, entry) => sum + entry[1], 0),
+      unique_unparseable: entries.length,
+      samples: entries.slice(0, 10).map(([value, occurrences]) =>
+        occurrences > 1 ? `${value} (${occurrences} uses)` : value
+      )
     };
+  },
+
+  _clampChannel(value) {
+    return Math.round(Math.max(0, Math.min(1, value)) * 255);
+  },
+
+  _parseAlpha(value) {
+    if (value == null || value === '') return 1;
+    const token = String(value).trim();
+    const parsed = parseFloat(token);
+    if (!Number.isFinite(parsed)) return null;
+    return Math.max(0, Math.min(1, token.endsWith('%') ? parsed / 100 : parsed));
+  },
+
+  _parseRgbChannel(value) {
+    const token = String(value).trim();
+    const parsed = parseFloat(token);
+    if (!Number.isFinite(parsed)) return null;
+    return Math.max(0, Math.min(255, token.endsWith('%') ? parsed * 2.55 : parsed));
+  },
+
+  _parseUnitInterval(value, percentScale = 1) {
+    const token = String(value).trim();
+    const parsed = parseFloat(token);
+    if (!Number.isFinite(parsed)) return null;
+    return token.endsWith('%') ? (parsed / 100) * percentScale : parsed;
+  },
+
+  _parseHue(value) {
+    const token = String(value).trim().toLowerCase();
+    const parsed = parseFloat(token);
+    if (!Number.isFinite(parsed)) return null;
+    if (token.endsWith('turn')) return parsed * 360;
+    if (token.endsWith('grad')) return parsed * 0.9;
+    if (token.endsWith('rad')) return parsed * (180 / Math.PI);
+    return parsed;
+  },
+
+  _linearToSrgb(value) {
+    return value <= 0.0031308
+      ? 12.92 * value
+      : 1.055 * Math.pow(value, 1 / 2.4) - 0.055;
+  },
+
+  _srgbToLinear(value) {
+    return value <= 0.04045
+      ? value / 12.92
+      : Math.pow((value + 0.055) / 1.055, 2.4);
+  },
+
+  _fromLinearSrgb(r, g, b, a) {
+    return {
+      r: this._clampChannel(this._linearToSrgb(r)),
+      g: this._clampChannel(this._linearToSrgb(g)),
+      b: this._clampChannel(this._linearToSrgb(b)),
+      a
+    };
+  },
+
+  parseColor(str) {
+    if (!str) return null;
+    const raw = String(str).trim();
+    const lower = raw.toLowerCase();
+    if (!raw || lower === 'transparent') return null;
+
+    const hex = lower.match(/^#([0-9a-f]{3,8})$/i);
+    if (hex) {
+      let value = hex[1];
+      if (value.length === 3 || value.length === 4) {
+        value = value.split('').map(char => char + char).join('');
+      }
+      if (value.length === 6 || value.length === 8) {
+        return {
+          r: parseInt(value.slice(0, 2), 16),
+          g: parseInt(value.slice(2, 4), 16),
+          b: parseInt(value.slice(4, 6), 16),
+          a: value.length === 8 ? parseInt(value.slice(6, 8), 16) / 255 : 1
+        };
+      }
+    }
+
+    const rgb = lower.match(/^rgba?\((.*)\)$/);
+    if (rgb) {
+      const commaSyntax = rgb[1].includes(',');
+      let channels;
+      let alphaToken;
+      if (commaSyntax) {
+        const parts = rgb[1].split(',').map(part => part.trim());
+        channels = parts.slice(0, 3);
+        alphaToken = parts[3];
+      } else {
+        const slashParts = rgb[1].split('/').map(part => part.trim());
+        channels = slashParts[0].split(/\s+/);
+        alphaToken = slashParts[1];
+      }
+      if (channels.length === 3) {
+        const parsed = channels.map(channel => this._parseRgbChannel(channel));
+        const alpha = this._parseAlpha(alphaToken);
+        if (parsed.every(Number.isFinite) && alpha != null) {
+          if (alpha === 0) return null;
+          return {
+            r: Math.round(parsed[0]),
+            g: Math.round(parsed[1]),
+            b: Math.round(parsed[2]),
+            a: alpha
+          };
+        }
+      }
+      this._recordUnparseableColor(raw);
+      return null;
+    }
+
+    const hsl = lower.match(/^hsla?\((.*)\)$/);
+    if (hsl) {
+      const commaSyntax = hsl[1].includes(',');
+      let channels;
+      let alphaToken;
+      if (commaSyntax) {
+        const parts = hsl[1].split(',').map(part => part.trim());
+        channels = parts.slice(0, 3);
+        alphaToken = parts[3];
+      } else {
+        const slashParts = hsl[1].split('/').map(part => part.trim());
+        channels = slashParts[0].split(/\s+/);
+        alphaToken = slashParts[1];
+      }
+      if (channels.length === 3) {
+        const hue = this._parseHue(channels[0]);
+        const saturation = this._parseUnitInterval(channels[1]);
+        const lightness = this._parseUnitInterval(channels[2]);
+        const alpha = this._parseAlpha(alphaToken);
+        if ([hue, saturation, lightness].every(Number.isFinite) && alpha != null) {
+          const normalizedHue = ((hue % 360) + 360) % 360;
+          const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+          const x = chroma * (1 - Math.abs((normalizedHue / 60) % 2 - 1));
+          const offset = lightness - chroma / 2;
+          let red = 0;
+          let green = 0;
+          let blue = 0;
+          if (normalizedHue < 60) [red, green, blue] = [chroma, x, 0];
+          else if (normalizedHue < 120) [red, green, blue] = [x, chroma, 0];
+          else if (normalizedHue < 180) [red, green, blue] = [0, chroma, x];
+          else if (normalizedHue < 240) [red, green, blue] = [0, x, chroma];
+          else if (normalizedHue < 300) [red, green, blue] = [x, 0, chroma];
+          else [red, green, blue] = [chroma, 0, x];
+          return {
+            r: this._clampChannel(red + offset),
+            g: this._clampChannel(green + offset),
+            b: this._clampChannel(blue + offset),
+            a: alpha
+          };
+        }
+      }
+      this._recordUnparseableColor(raw);
+      return null;
+    }
+
+    const oklch = lower.match(/^oklch\((.*)\)$/);
+    if (oklch) {
+      const slashParts = oklch[1].split('/').map(part => part.trim());
+      const channels = slashParts[0].split(/\s+/);
+      const alpha = this._parseAlpha(slashParts[1]);
+      if (channels.length === 3 && alpha != null) {
+        const lightness = this._parseUnitInterval(channels[0]);
+        // CSS Color 4 maps 100% chroma to 0.4 for OKLCH.
+        const chroma = this._parseUnitInterval(channels[1], 0.4);
+        const hue = this._parseHue(channels[2]);
+        if ([lightness, chroma, hue].every(Number.isFinite)) {
+          const radians = hue * Math.PI / 180;
+          const a = chroma * Math.cos(radians);
+          const b = chroma * Math.sin(radians);
+          const lPrime = lightness + 0.3963377774 * a + 0.2158037573 * b;
+          const mPrime = lightness - 0.1055613458 * a - 0.0638541728 * b;
+          const sPrime = lightness - 0.0894841775 * a - 1.2914855480 * b;
+          const l = lPrime ** 3;
+          const m = mPrime ** 3;
+          const s = sPrime ** 3;
+          return this._fromLinearSrgb(
+            4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+            alpha
+          );
+        }
+      }
+      this._recordUnparseableColor(raw);
+      return null;
+    }
+
+    const color = lower.match(/^color\(\s*([^\s]+)\s+(.+)\)$/);
+    if (color) {
+      const space = color[1];
+      const slashParts = color[2].split('/').map(part => part.trim());
+      const channelTokens = slashParts[0].split(/\s+/);
+      const alpha = this._parseAlpha(slashParts[1]);
+      if (channelTokens.length === 3 && alpha != null) {
+        const channels = channelTokens.map(channel => this._parseUnitInterval(channel));
+        if (channels.every(Number.isFinite)) {
+          if (space === 'srgb') {
+            return {
+              r: this._clampChannel(channels[0]),
+              g: this._clampChannel(channels[1]),
+              b: this._clampChannel(channels[2]),
+              a: alpha
+            };
+          }
+          if (space === 'srgb-linear') {
+            return this._fromLinearSrgb(channels[0], channels[1], channels[2], alpha);
+          }
+          if (space === 'display-p3') {
+            const [pr, pg, pb] = channels.map(channel => this._srgbToLinear(channel));
+            const x = 0.4865709486 * pr + 0.2656676932 * pg + 0.1982172852 * pb;
+            const y = 0.2289745641 * pr + 0.6917385218 * pg + 0.0792869141 * pb;
+            const z = 0.0000000000 * pr + 0.0451133820 * pg + 1.0439443689 * pb;
+            return this._fromLinearSrgb(
+              3.2409699419 * x - 1.5373831776 * y - 0.4986107603 * z,
+              -0.9692436363 * x + 1.8759675015 * y + 0.0415550574 * z,
+              0.0556300797 * x - 0.2039769589 * y + 1.0569715142 * z,
+              alpha
+            );
+          }
+        }
+      }
+      this._recordUnparseableColor(raw);
+      return null;
+    }
+
+    // Computed styles should resolve named and HSL colors to rgb(). Any
+    // remaining explicit color function is unsupported and must be visible in
+    // the result instead of silently turning into a perfect score.
+    if (/^(#|hsl|hwb|lab|lch|oklab|oklch|color\()/.test(lower)) {
+      this._recordUnparseableColor(raw);
+    }
+    return null;
   },
 
   rgbToHex(r, g, b) {
@@ -91,6 +333,13 @@ const DPT_UTILS = {
     return s < 10;
   },
 
+  // HSL saturation alone overstates chroma near black and white. Multiplying
+  // by the lightness envelope recovers the actual HSL chroma on a 0-100 scale.
+  effectiveSaturation(hsl) {
+    const lightness = Math.max(0, Math.min(100, hsl.l)) / 100;
+    return hsl.s * (1 - Math.abs(2 * lightness - 1));
+  },
+
   isStatusColor(h, s) {
     if (s < 20) return false;
     // Red zone: 340-20
@@ -102,12 +351,27 @@ const DPT_UTILS = {
     return false;
   },
 
+  fontWeightRange(value) {
+    const normalized = String(value || 'normal').trim().toLowerCase();
+    if (normalized === 'normal') return [400, 400];
+    if (normalized === 'bold') return [700, 700];
+    const values = (normalized.match(/\d+(?:\.\d+)?/g) || []).map(Number);
+    if (values.length === 0) return [400, 400];
+    return values.length === 1 ? [values[0], values[0]] : [values[0], values[1]];
+  },
+
   // ─── DOM Traversal ───────────────────────────────────────────────
 
   getEffectiveBackground(el) {
     let current = el;
     while (current && current !== document.documentElement) {
-      const bg = window.getComputedStyle(current).backgroundColor;
+      const computed = window.getComputedStyle(current);
+      const backgroundImage = computed.backgroundImage;
+      if (backgroundImage && backgroundImage !== 'none') {
+        this._recordUnparseableColor(`background-image: ${backgroundImage}`);
+        return null;
+      }
+      const bg = computed.backgroundColor;
       const parsed = this.parseColor(bg);
       if (parsed && parsed.a > 0.1) {
         if (parsed.a < 1 && current.parentElement) {
@@ -141,6 +405,30 @@ const DPT_UTILS = {
     const rect = el.getBoundingClientRect();
     return rect.top < window.innerHeight && rect.bottom > 0 &&
            rect.left < window.innerWidth && rect.right > 0;
+  },
+
+  documentHeight() {
+    const body = document.body || {};
+    const root = document.documentElement || {};
+    return Math.max(
+      window.innerHeight || 0,
+      body.scrollHeight || 0,
+      body.offsetHeight || 0,
+      root.scrollHeight || 0,
+      root.offsetHeight || 0,
+      root.clientHeight || 0
+    );
+  },
+
+  isOnPage(el) {
+    const rect = el.getBoundingClientRect();
+    const top = rect.top + (window.scrollY || window.pageYOffset || 0);
+    const left = rect.left + (window.scrollX || window.pageXOffset || 0);
+    const root = document.documentElement || {};
+    const width = Math.max(window.innerWidth || 0, root.scrollWidth || 0, root.clientWidth || 0);
+    return rect.width > 0 && rect.height > 0 &&
+      top < this.documentHeight() && top + rect.height > 0 &&
+      left < width && left + rect.width > 0;
   },
 
   isTextElement(el) {
@@ -184,6 +472,24 @@ const DPT_UTILS = {
   // Collect all visible elements of specified types
   queryVisible(selector) {
     return Array.from(document.querySelectorAll(selector)).filter(el => this.isVisible(el));
+  },
+
+  // Keep bounded checks representative of the whole document. A plain
+  // `slice(0, limit)` silently collapses back to the first viewport on large
+  // pages because DOM order is usually top-to-bottom.
+  sampleAcrossPage(elements, limit) {
+    if (!Number.isFinite(limit) || limit <= 0 || elements.length <= limit) return [...elements];
+    const scrollY = window.scrollY || window.pageYOffset || 0;
+    const ordered = [...elements].sort((a, b) =>
+      (a.getBoundingClientRect().top + scrollY) - (b.getBoundingClientRect().top + scrollY)
+    );
+    const sample = [];
+    const denominator = Math.max(1, limit - 1);
+    for (let index = 0; index < limit; index++) {
+      const sourceIndex = Math.round((index / denominator) * (ordered.length - 1));
+      sample.push(ordered[sourceIndex]);
+    }
+    return sample;
   },
 
   // ─── Geometry ────────────────────────────────────────────────────

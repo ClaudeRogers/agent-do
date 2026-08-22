@@ -278,7 +278,7 @@
 - **agent-gcp**: Google Cloud Platform management (projects, APIs, secrets, service accounts, OAuth)
 - **agent-render**: Render.com service management via REST API
 - **agent-vercel**: Vercel project/deployment management via REST API
-- **agent-dpt**: Design Perception Tensor (72 rules, 0-100 visual quality score)
+- **agent-dpt**: Design Perception Tensor (65 rules, 0-100 visual quality score)
 - **agent-pdf2md**: PDF-to-Markdown converter with tabular/prose auto-detection
 - **agent-tail**: Dev command wrapper with log capture for AI agents
 - **agent-vision**: Visual perception CLI (YOLO, OCR, face detection, Vision LLM)

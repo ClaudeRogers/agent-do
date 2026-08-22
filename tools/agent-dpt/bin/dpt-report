@@ -613,10 +613,14 @@ def narrate_synthesis(syn, lines):
     overall_g = syn.get('overall_grade', '?')
     dims = syn.get('dimensions', {})
     scoring = syn.get('scoring', {})
+    incomplete = syn.get('incomplete', False) or overall is None
 
     lines.append(bold('  QUALITY SCORE'))
     lines.append('')
-    lines.append(f'  Overall: {bold(grade_color(overall_g))} ({overall}/100)')
+    if incomplete:
+        lines.append(f'  Overall: {bold(grade_color("INCOMPLETE"))} (score withheld)')
+    else:
+        lines.append(f'  Overall: {bold(grade_color(overall_g))} ({overall}/100)')
     lines.append('')
 
     dim_order = [
@@ -630,11 +634,17 @@ def narrate_synthesis(syn, lines):
         d = dims.get(key, {})
         s = d.get('score', 0)
         g = d.get('grade', '?')
-        bar_len = s // 5
-        bar = '\u2588' * bar_len + '\u2591' * (20 - bar_len)
+        if s is None:
+            bar = '\u2591' * 20
+            score_label = 'INCOMPLETE'
+            g = 'INCOMPLETE'
+        else:
+            bar_len = s // 5
+            bar = '\u2588' * bar_len + '\u2591' * (20 - bar_len)
+            score_label = str(s)
         floors = d.get('hard_floors_hit', [])
         floor_tag = f'  {red("!" + ",".join(floors))}' if floors else ''
-        lines.append(f'      {label} {bar} {grade_color(g):>4} {dim(str(s))}{floor_tag}')
+        lines.append(f'      {label} {bar} {grade_color(g):>4} {dim(score_label)}{floor_tag}')
 
     # Scoring derivation
     if scoring:
@@ -769,7 +779,7 @@ def narrate_recommendations(data, lines):
     # Touch targets
     tt = sr.get('sr02_touch_targets', {})
     if tt.get('undersized', 0) > tt.get('total_interactive', 1) * 0.5:
-        recs.append('Expand interactive elements to 44px minimum height. The sidebar links at 32px are the primary offenders.')
+        recs.append('Inspect the reported undersized interactive elements and expand the targets that are not exempt inline links.')
 
     # Nav items
     for n in aa.get('aa09_navigation_item_count', {}).get('items_per_nav', []):
@@ -846,7 +856,7 @@ def main():
 
     lines.append(f'  {dim("─" * 58)}')
     lines.append(f'  {dim("DPT v" + meta.get("version", "0.1.0") + " — Design Perception Tensor")}')
-    lines.append(f'  {dim("Non-human design perception: 70+ rules, 5 layers, " + str(meta.get("total_timing_ms", "?")) + "ms")}')
+    lines.append(f'  {dim("Non-human design perception: 65 rules, 5 layers, " + str(meta.get("total_timing_ms", "?")) + "ms")}')
     lines.append('')
 
     print('\n'.join(lines))

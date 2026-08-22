@@ -374,7 +374,7 @@ arguments, shell history, or docs.
 | `gh` | GitHub PR work-state: inbox, review, unresolved threads, checks, audit with deploy probes |
 | `db` | Database client for PostgreSQL, MySQL, SQLite: connect, snapshot schema, query |
 | `excel` | Workbook automation: read and write cells, formulas, sheets |
-| `dpt` | Design Perception Tensor: 72-rule visual quality scoring of the live page, 0-100 |
+| `dpt` | Design Perception Tensor: 65-rule visual quality scoring of the full live page, 0-100 |
 
 The rest of the catalog covers cloud platforms (`render`, `vercel`, `supabase`,
 `cloudflare`, `gcp`, `docker`, `k8s`), identity providers (`clerk`, `okta`),

@@ -5955,12 +5955,12 @@ tools:
     - generate prioritized fix lists with CSS selectors
     - baseline/diff for before/after comparison
     commands:
-      scan: Full scan → JSON with all 72 checks
+      scan: Full-page scan → JSON with all 65 checks
       score: Quick score + grade + dimension summary
       report: Narrative design critique report
       violations: Violations sorted by impact for AI fix loops
-      baseline: Save current scan as baseline
-      diff: Compare against baseline, show deltas
+      baseline: Save a browser-session + project baseline
+      diff: Compare against that scoped baseline, show deltas
       build: Rebuild engine from source
     examples:
     - intent: check the design quality of this page

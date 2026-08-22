@@ -11,12 +11,12 @@ function chromaticField(utils) {
   const allVisible = utils.queryVisible('*');
   const textElements = allVisible.filter(el => utils.isTextElement(el));
   const interactiveElements = allVisible.filter(el => utils.isInteractive(el));
-  const viewportElements = allVisible.filter(el => utils.isInViewport(el));
+  const pageElements = allVisible.filter(el => utils.isOnPage(el));
 
   // ─── CF-01: WCAG Text Contrast ────────────────────────────────────
 
   function cf01_textContrast() {
-    const sampled = textElements.slice(0, MAX_TEXT_SAMPLE);
+    const sampled = utils.sampleAcrossPage(textElements, MAX_TEXT_SAMPLE);
     const violations = [];
     let checkedCount = 0;
     let hardFailCount = 0;
@@ -119,7 +119,8 @@ function chromaticField(utils) {
       pass_rate: passRate,
       adjusted_pass_rate: adjustedPassRate,
       hard_failures: hardFailCount,
-      soft_failures: softFailCount
+      soft_failures: softFailCount,
+      pass: hardFailCount === 0
     };
 
     if (totalFails > MAX_VIOLATIONS) {
@@ -269,7 +270,7 @@ function chromaticField(utils) {
         const parsed = utils.parseColor(style[prop]);
         if (!parsed || parsed.a < 0.1) continue;
         const hsl = utils.rgbToHsl(parsed.r, parsed.g, parsed.b);
-        if (hsl.s >= 20) { // must be chromatic
+        if (utils.effectiveSaturation(hsl) >= 20) { // must be perceptually chromatic
           const bucket = Math.round(hsl.h / 10) * 10; // 10-degree buckets
           hueUsage[bucket] = (hueUsage[bucket] || 0) + 1;
         }
@@ -312,7 +313,7 @@ function chromaticField(utils) {
         const parsed = utils.parseColor(style[prop]);
         if (!parsed || parsed.a < 0.1) continue;
         const hsl = utils.rgbToHsl(parsed.r, parsed.g, parsed.b);
-        if (hsl.s < 20) continue;
+        if (utils.effectiveSaturation(hsl) < 20) continue;
 
         const hueDist = Math.min(
           Math.abs(hsl.h - primaryHue),
@@ -334,6 +335,7 @@ function chromaticField(utils) {
       interactive_uses: maxInteractive,
       non_interactive_leaks: leakCount,
       leaked_selectors: leakedSelectors,
+      effective_saturation_threshold: 20,
       pass: leakCount === 0
     };
   }
@@ -436,7 +438,7 @@ function chromaticField(utils) {
       return s > 40 && h >= 210 && h <= 260;
     }
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) continue;
@@ -483,7 +485,7 @@ function chromaticField(utils) {
     let fullSatElements = 0;
     const fullSatHues = new Set(); // 30-degree buckets
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       let found = false;
 
@@ -548,10 +550,10 @@ function chromaticField(utils) {
     const MAX_ELEMENTS = 200;
     const MAX_PAIRS = 10;
 
-    // Collect viewport elements with chromatic colors (S > 40%)
+    // Collect page elements with chromatic colors (S > 40%)
     const chromaticEls = [];
 
-    for (const el of viewportElements) {
+    for (const el of utils.sampleAcrossPage(pageElements, MAX_ELEMENTS)) {
       if (chromaticEls.length >= MAX_ELEMENTS) break;
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -613,9 +615,9 @@ function chromaticField(utils) {
     const HUE_BUCKET_SIZE = 30;
     const bucketAreas = {}; // bucket -> total pixel area
 
-    const viewportArea = window.innerWidth * window.innerHeight;
+    const scanArea = window.innerWidth * utils.documentHeight();
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       const bgParsed = utils.parseColor(style.backgroundColor);
       if (!bgParsed || bgParsed.a < 0.1) continue;
@@ -635,7 +637,7 @@ function chromaticField(utils) {
     let overuseCount = 0;
 
     for (const [bucket, area] of Object.entries(bucketAreas)) {
-      const areaPct = Math.round((area / viewportArea) * 1000) / 10;
+      const areaPct = Math.round((area / scanArea) * 1000) / 10;
       hueAreas.push({ hue_bucket: parseInt(bucket), area_pct: areaPct });
       if (areaPct > AREA_THRESHOLD) {
         overuseCount++;
