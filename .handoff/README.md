@@ -59,6 +59,7 @@ Rules:
 | 25 | `mn-3086f2` | open | none | `.handoff/25-mn-3086f2-docs-estate-wide-refresh-to-as-is-state-readme-integration-archi.md` |
 | 26 | `mn-8b4a1c` | open | none | `.handoff/26-mn-8b4a1c-tests-suite-can-hang-forever-on-the-bootstrap-gui-dialog-pin-age.md` |
 | 27 | `mn-ee7d1e` | open | none | `.handoff/27-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
-| 28 | `mn-2521d5` | open | none | `.handoff/28-mn-2521d5-dpt-fix-false-positive-generators-and-honesty-defects.md` |
+| 28 | `mn-2521d5` | in_progress | none | `.handoff/28-mn-2521d5-dpt-fix-false-positive-generators-and-honesty-defects.md` |
 | 29 | `mn-d2d67b` | open | none | `.handoff/29-mn-d2d67b-manna-done-handoffs-retire-to-handoff-archive-root-is-the-live-p.md` |
 | 30 | `mn-040aae` | blocked | `mn-d2d67b` | `.handoff/30b29-mn-040aae-manna-estate-wide-handoff-debris-cleanup-pre-structure-work-orde.md` |
+| 31 | `mn-386f70` | open | none | `.handoff/31-mn-386f70-harness-agent-substack-draft-publish-essays-through-substack-s-e.md` |
