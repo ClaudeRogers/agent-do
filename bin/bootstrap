@@ -20,7 +20,10 @@ json=false
 recommend=false
 force=false
 yes=false
+never=false
+allow=false
 cwd="$PWD"
+OPTOUT_MARKER=".agent-do-no-bootstrap"
 
 show_help() {
     cat <<'EOF'
@@ -40,6 +43,9 @@ Options:
   --cwd PATH    Detect the target project from PATH instead of the current dir
   --yes         Non-interactive mode for callers that already have user approval
   --force       Re-run init commands even if the target already exists
+  --never       Mark this root opted out: write .agent-do-no-bootstrap so
+                recommend reports nothing pending and hooks stop asking
+  --allow       Remove the opt-out marker written by --never
   --help, -h    Show this help
 
 Examples:
@@ -69,6 +75,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force)
             force=true
+            shift
+            ;;
+        --never)
+            never=true
+            shift
+            ;;
+        --allow)
+            allow=true
             shift
             ;;
         --help|-h)
@@ -140,6 +154,31 @@ fi
 
 project_root="$(find_project_root "$cwd")"
 project_name="$(basename "$project_root")"
+
+optout_path="$project_root/$OPTOUT_MARKER"
+if [[ "$never" == true ]]; then
+    {
+        echo "# agent-do bootstrap opt-out"
+        echo "# This root never wants agent-do bootstrap: recommend reports nothing"
+        echo "# pending and session hooks stop asking. Remove this file (or run"
+        echo "# 'agent-do bootstrap --allow') to opt back in."
+        echo "opted_out_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$optout_path"
+    echo "Opted out: $project_name ($project_root) will not be asked to bootstrap."
+    echo "Marker: $optout_path"
+    exit 0
+fi
+if [[ "$allow" == true ]]; then
+    if [[ -f "$optout_path" ]]; then
+        rm "$optout_path"
+        echo "Opt-out removed: $project_name ($project_root) may be offered bootstrap again."
+    else
+        echo "No opt-out marker at $optout_path; nothing to remove."
+    fi
+    exit 0
+fi
+opted_out=false
+[[ -f "$optout_path" ]] && opted_out=true
 
 project_detected=false
 if [[ -e "$project_root/.git" ]] \
@@ -259,15 +298,22 @@ if [[ "$wants_manna" == true ]]; then
     fi
 fi
 
+if [[ "$opted_out" == true && "$force" != true ]]; then
+    # The root said never: nothing is pending here, by declaration.
+    pending_actions=()
+    pending_labels=()
+    pending_commands=()
+fi
+
 needs_bootstrap=false
 [[ ${#pending_actions[@]} -gt 0 ]] && needs_bootstrap=true
 
 ask_prompt=""
 if [[ "$needs_bootstrap" == true ]]; then
     if [[ "$manna_legacy_board" == true ]]; then
-        ask_prompt="legacy board: run agent-do manna migrate now?"
+        ask_prompt="Legacy board in $project_name ($project_root): run agent-do manna migrate now?"
     else
-        ask_prompt="Bootstrap agent-do for this project now? It will initialize: $(join_by ', ' "${pending_labels[@]}")."
+        ask_prompt="Bootstrap agent-do for $project_name ($project_root)? It will initialize: $(join_by ', ' "${pending_labels[@]}")."
     fi
 fi
 
@@ -277,10 +323,10 @@ if [[ "$recommend" == true ]]; then
             "$(printf '%s\n' "${detected_tools[@]:-}")" \
             "$(printf '%s\n' "${pending_actions[@]:-}")" \
             "$(printf '%s\n' "${pending_commands[@]:-}")" \
-            "$ask_prompt" "$manna_legacy_board" <<'PYTHON'
+            "$ask_prompt" "$manna_legacy_board" "$opted_out" <<'PYTHON'
 import json, sys
 
-project_root, project_name, needs_bootstrap, detected_blob, pending_blob, commands_blob, ask_prompt, legacy_board = sys.argv[1:9]
+project_root, project_name, needs_bootstrap, detected_blob, pending_blob, commands_blob, ask_prompt, legacy_board, opted_out = sys.argv[1:10]
 
 def split_lines(blob):
     return [line for line in blob.splitlines() if line]
@@ -294,6 +340,7 @@ print(json.dumps({
     "commands": split_lines(commands_blob),
     "ask_prompt": ask_prompt,
     "legacy_board": legacy_board == "true",
+    "opted_out": opted_out == "true",
 }, ensure_ascii=False))
 PYTHON
     else
@@ -311,10 +358,18 @@ PYTHON
                 echo "    - $local_cmd"
             done
             echo "  Ask: $ask_prompt"
+        elif [[ "$opted_out" == true ]]; then
+            echo "  Pending: none (opted out via $OPTOUT_MARKER; 'agent-do bootstrap --allow' re-enables)"
         else
             echo "  Pending: none"
         fi
     fi
+    exit 0
+fi
+
+if [[ "$opted_out" == true && "$force" != true ]]; then
+    echo "This root is opted out of bootstrap ($OPTOUT_MARKER present)."
+    echo "Run 'agent-do bootstrap --allow' first, or pass --force."
     exit 0
 fi
 

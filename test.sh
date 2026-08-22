@@ -194,6 +194,8 @@ check_cmd "browser import tests" python3 "$SCRIPT_DIR/tests/test_browser_import.
 check_cmd "browse daemon isolation tests" python3 "$SCRIPT_DIR/tests/test_browse_daemon_isolation.py"
 check_cmd "browse session default tests" python3 "$SCRIPT_DIR/tests/test_browse_session_defaults.py"
 check_cmd "tool regression tests" python3 "$SCRIPT_DIR/tests/test_tool_regressions.py"
+check_cmd "dpt offline tests" python3 "$SCRIPT_DIR/tests/test_dpt.py"
+check_cmd "dpt browser integration tests" bash "$SCRIPT_DIR/tools/agent-dpt/test/integration.sh"
 check_cmd "manna unit tests" cargo test --quiet --manifest-path "$SCRIPT_DIR/tools/agent-manna/Cargo.toml"
 check_cmd "manna integration tests" bash "$SCRIPT_DIR/tools/agent-manna/test/integration.sh"
 
@@ -322,6 +324,11 @@ check_output "sentry help lists snapshot command" "snapshot" "$AGENT_DO" sentry 
 check_error_output "sentry unknown command exits with error" "Unknown command" "$AGENT_DO" sentry bogus-command-xyz
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap ask prompt names the project root" "$BOOTSTRAP_PROJECT" "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap --never opts the root out" "will not be asked" "$AGENT_DO" bootstrap --never --cwd "$BOOTSTRAP_PROJECT"
+check_output "opted-out root reports nothing pending" '"needs_bootstrap": false' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "opted-out root is flagged in JSON" '"opted_out": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap --allow restores the offer" "may be offered" "$AGENT_DO" bootstrap --allow --cwd "$BOOTSTRAP_PROJECT"
 check_output "bootstrap initializes context, zpc, and workflow" "Initialized: context, zpc, manna" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
 check_cmd "bootstrap created project-local .zpc" test -d "$BOOTSTRAP_PROJECT/.zpc"
 check_cmd "bootstrap created project-local .manna workflow" test -f "$BOOTSTRAP_PROJECT/.manna/workflow.yaml"

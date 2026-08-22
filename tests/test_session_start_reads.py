@@ -329,9 +329,12 @@ def test_legacy_board_migration_is_discoverable() -> None:
             and recommendation.get("commands") == ["agent-do manna migrate"],
             repr(recommendation),
         )
+        ask = recommendation.get("ask_prompt", "")
         check(
-            "bootstrap names the one-command remedy",
-            "legacy board: run agent-do manna migrate" in recommendation.get("ask_prompt", ""),
+            "bootstrap names the one-command remedy and the project it applies to",
+            "run agent-do manna migrate" in ask
+            and "Legacy board" in ask
+            and recommendation.get("project_root", "") in ask,
             repr(recommendation),
         )
 

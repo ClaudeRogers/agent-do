@@ -80,6 +80,16 @@ run_native_bootstrap_prompt() {
     local ask_prompt="$1"
     local project_root="$2"
     local response
+    # With many sessions open, an unlabeled dialog is unanswerable: the title
+    # names the repo, and the body always ends with its full path.
+    local dialog_label
+    dialog_label="$(basename "$project_root")"
+    case "$ask_prompt" in
+        *"$project_root"*) ;;
+        *) ask_prompt="$ask_prompt
+
+Project: $project_root" ;;
+    esac
 
     case "${AGENT_DO_BOOTSTRAP_AUTO_RESPONSE:-}" in
         bootstrap)
@@ -94,7 +104,7 @@ run_native_bootstrap_prompt() {
             fi
 
             response=$(osascript <<EOF 2>/dev/null || true
-display dialog "$(printf '%s' "$ask_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')" with title "agent-do Bootstrap" buttons {"Not now", "Bootstrap"} default button "Bootstrap"
+display dialog "$(printf '%s' "$ask_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')" with title "agent-do Bootstrap — $(printf '%s' "$dialog_label" | sed 's/\\/\\\\/g; s/"/\\"/g')" buttons {"Not now", "Bootstrap"} default button "Bootstrap"
 button returned of result
 EOF
 )
