@@ -50,12 +50,11 @@ if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
-# --- Pin coord + manna identity to this Claude session ---
+# --- Pin coord + stable host identity to this Claude session ---
 # Every Bash call then derives the same coord agent identity, and the
 # SessionEnd hook can retire exactly that identity via the same session_id.
-# Manna gets the same public anchor plus a private token. The pair survives
-# separate shell invocations without turning the visible session_id into
-# lifecycle authority.
+# Manna derives its private proof from the stable host id under a machine-local
+# key, so separate shell invocations and process restarts recover one owner.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
@@ -156,7 +155,7 @@ DLG
 }
 
 append_bootstrap_prompt() {
-    local bootstrap_json needs_bootstrap ask_prompt project_root commands prompt_mode
+    local bootstrap_json needs_bootstrap ask_prompt project_root commands prompt_mode legacy_board legacy_notice
 
     [ -n "$AGENT_DO_DIR" ] || return 0
     [ -n "$CWD" ] || return 0
@@ -171,6 +170,11 @@ append_bootstrap_prompt() {
     ask_prompt=$(echo "$bootstrap_json" | jq -r '.ask_prompt // ""' 2>/dev/null || true)
     project_root=$(echo "$bootstrap_json" | jq -r '.project_root // ""' 2>/dev/null || true)
     commands=$(echo "$bootstrap_json" | jq -r '.commands[]?' 2>/dev/null || true)
+    legacy_board=$(echo "$bootstrap_json" | jq -r 'if .legacy_board then "true" else "false" end' 2>/dev/null || echo "false")
+    legacy_notice=""
+    if [ "$legacy_board" = "true" ]; then
+        legacy_notice="legacy board: run agent-do manna migrate"
+    fi
 
     prompt_mode="${AGENT_DO_BOOTSTRAP_PROMPT_MODE:-}"
     if [ -z "$prompt_mode" ]; then
@@ -197,6 +201,8 @@ append_bootstrap_prompt() {
 ## Bootstrap Opportunity
 
 This project has pending agent-do bootstrap work.
+
+$legacy_notice
 
 At the start of your first reply in this session, ask exactly one short yes/no question:
 \"$ask_prompt\"

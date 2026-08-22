@@ -545,7 +545,9 @@ echo "=== Board Grammar Tests ==="
 GRAMMAR_DIR=$(mktemp -d)
 GRAMMAR_PHYS=$(cd "$GRAMMAR_DIR" && pwd -P)
 cd "$GRAMMAR_DIR"
+git init -q
 "$MANNA" init >/dev/null 2>&1
+git add -- .manna .handoff/README.md
 
 # ----------------------------------------------------------------------------
 # Test G1: types and track edges
@@ -875,6 +877,14 @@ ignore_exit=0
 git check-ignore --quiet -- .manna/issues.jsonl || ignore_exit=$?
 check_exit 1 "$ignore_exit" "issues.jsonl is durable Git-visible state"
 
+lint_exit=0
+output=$("$MANNA" lint 2>&1) || lint_exit=$?
+check_exit 1 "$lint_exit" "lint distinguishes Git-visible from Git-tracked board state"
+check_yaml "$output" "workflow_tracking" "lint classifies untracked durable state"
+check_yaml "$output" "git-tracked: no" "lint reports the durable tracking predicate"
+check_yaml "$output" ".manna/issues.jsonl" "lint names the untracked canonical board"
+git add -- .manna .handoff/README.md
+
 output=$("$MANNA" create "Paired work" 2>&1) || true
 check_yaml "$output" "success: true" "create generates a paired item"
 PAIR_ID=$(extract_id "$output")
@@ -1053,12 +1063,14 @@ rm -rf "$NEUTRAL_TARGET"
 LEGACY_DIR=$(mktemp -d)
 LEGACY_PHYS=$(cd "$LEGACY_DIR" && pwd -P)
 cd "$LEGACY_DIR"
+git init -q
 mkdir -p .manna
 touch .manna/sessions.jsonl
 printf '%s\n' '{"id":"mn-a1b2c3","title":"Existing legacy row","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}' > .manna/issues.jsonl
 output=$("$MANNA" init 2>&1) || true
 check_yaml "$output" "workflow: legacy" "init classifies a real pre-workflow board explicitly"
 check_yaml "$(cat .manna/board.yaml)" "workflow: legacy" "legacy mode is pinned instead of inferred"
+git add -- .manna
 mkdir -p .dev/session-prompts
 LEGACY_PROMPT="$LEGACY_PHYS/.dev/session-prompts/lane-a.md"
 output=$("$MANNA" create "Legacy paired work" --prompt "$LEGACY_PROMPT" 2>&1) || true
@@ -1093,6 +1105,17 @@ printf '%s\n' \
     '{"id":"mn-a10005","title":"Historical item","status":"done","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"claimed_by":"legacy-history","claimed_at":"2026-01-02T00:00:00Z","track":"mn-a10001","prompt":".dev/session-prompts/deleted.md"}' \
     '{"id":"mn-a10006","title":"Parked dream","status":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","blocked_by":[],"type":"dream","track":"mn-a10001"}' \
     > .manna/issues.jsonl
+
+write_exit=0
+output=$("$MANNA" create "Must migrate first" 2>&1) || write_exit=$?
+check_exit 2 "$write_exit" "identityless nonempty board refuses ordinary writes"
+check_yaml "$output" "nonempty legacy board" "identityless error classifies the board"
+check_yaml "$output" "agent-do manna migrate" "identityless error names the convergence command"
+if [[ "$output" != *"agent-do manna init"* ]]; then
+    pass "identityless legacy guidance does not misroute to init"
+else
+    fail "identityless legacy guidance does not misroute to init" "$output"
+fi
 
 output=$("$MANNA" init 2>&1) || true
 check_yaml "$output" "workflow: legacy" "legacy .handoff content does not imply strict board identity"
@@ -1153,6 +1176,7 @@ done_exit=0
 "$MANNA" done mn-a10002 >/dev/null 2>&1 || done_exit=$?
 check_exit 0 "$done_exit" "done works after migration"
 "$MANNA" sync >/dev/null 2>&1
+git add -- .manna .handoff/README.md
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "migrated fixture has no lint findings"
@@ -1237,6 +1261,7 @@ check_yaml "$output" "changed: true" "sync reports mixed presentation convergenc
     || fail "blocked marker is re-derived from board edges" "expected blocked handoff missing"
 strict_sync_count=$(find .handoff -maxdepth 1 -type f -name "03-$MIXED_STRICT_ID-*.md" | wc -l | tr -d ' ')
 check_exit 1 "$strict_sync_count" "strict native handoff joins the generated dense plan"
+git add -- .manna .handoff/README.md
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "synchronized mixed fixture has no lint findings"
@@ -1356,6 +1381,7 @@ check_exit 0 "$transaction_files" "source-ingestion recovery directory is empty 
 sync_exit=0
 output=$("$MANNA" sync 2>&1) || sync_exit=$?
 check_exit 0 "$sync_exit" "sync converges imported source presentation"
+git add -- .manna .handoff/README.md
 lint_exit=0
 output=$("$MANNA" lint 2>&1) || lint_exit=$?
 check_exit 0 "$lint_exit" "imported source fixture has no lint findings"
@@ -1372,6 +1398,7 @@ ORDER_DIR=$(mktemp -d)
 cd "$ORDER_DIR"
 git init -q
 "$MANNA" init >/dev/null 2>&1
+git add -- .manna .handoff/README.md
 output=$("$MANNA" create "First priority" 2>&1) || true
 ORDER_ONE=$(extract_id "$output")
 output=$("$MANNA" create "Second priority" 2>&1) || true

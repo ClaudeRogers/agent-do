@@ -221,6 +221,20 @@ if { [[ -f "$project_root/.manna/board.yaml" ]] \
     manna_strict_marker=true
 fi
 
+# A nonempty board with no strict identity or workflow config predates the v2
+# admission gate. It must migrate, not loop through init. A live board-init
+# journal is the one exception: init owns and recovers that transaction.
+manna_legacy_board=false
+if [[ -d "$project_root/.manna" ]] \
+    && [[ -f "$project_root/.manna/issues.jsonl" ]] \
+    && grep -Eq '[^[:space:]]' "$project_root/.manna/issues.jsonl" \
+    && [[ ! -e "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" ]] \
+    && ! { [[ -f "$project_root/.manna/board.yaml" ]] \
+        && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml"; } \
+    && [[ ! -f "$project_root/.manna/transactions/board-init.yaml" ]]; then
+    manna_legacy_board=true
+fi
+
 manna_workflow_healthy=false
 if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.yaml" \
     && -f "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" \
@@ -230,14 +244,19 @@ if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.y
     manna_workflow_healthy=true
 fi
 
-if [[ "$wants_manna" == true ]] \
-    && { [[ "$force" == true ]] \
+if [[ "$wants_manna" == true ]]; then
+    if [[ "$manna_legacy_board" == true ]]; then
+        pending_actions+=("manna_migrate")
+        pending_labels+=("legacy manna board migration")
+        pending_commands+=("agent-do manna migrate")
+    elif [[ "$force" == true ]] \
         || [[ ! -d "$project_root/.manna" ]] \
         || [[ ! -f "$project_root/.manna/board.yaml" ]] \
-        || { [[ "$manna_strict_marker" == true ]] && [[ "$manna_workflow_healthy" != true ]]; }; }; then
-    pending_actions+=("manna_init")
-    pending_labels+=("manna + handoff workflow")
-    pending_commands+=("agent-do manna init")
+        || { [[ "$manna_strict_marker" == true ]] && [[ "$manna_workflow_healthy" != true ]]; }; then
+        pending_actions+=("manna_init")
+        pending_labels+=("manna + handoff workflow")
+        pending_commands+=("agent-do manna init")
+    fi
 fi
 
 needs_bootstrap=false
@@ -245,7 +264,11 @@ needs_bootstrap=false
 
 ask_prompt=""
 if [[ "$needs_bootstrap" == true ]]; then
-    ask_prompt="Bootstrap agent-do for this project now? It will initialize: $(join_by ', ' "${pending_labels[@]}")."
+    if [[ "$manna_legacy_board" == true ]]; then
+        ask_prompt="legacy board: run agent-do manna migrate now?"
+    else
+        ask_prompt="Bootstrap agent-do for this project now? It will initialize: $(join_by ', ' "${pending_labels[@]}")."
+    fi
 fi
 
 if [[ "$recommend" == true ]]; then
@@ -254,10 +277,10 @@ if [[ "$recommend" == true ]]; then
             "$(printf '%s\n' "${detected_tools[@]:-}")" \
             "$(printf '%s\n' "${pending_actions[@]:-}")" \
             "$(printf '%s\n' "${pending_commands[@]:-}")" \
-            "$ask_prompt" <<'PYTHON'
+            "$ask_prompt" "$manna_legacy_board" <<'PYTHON'
 import json, sys
 
-project_root, project_name, needs_bootstrap, detected_blob, pending_blob, commands_blob, ask_prompt = sys.argv[1:8]
+project_root, project_name, needs_bootstrap, detected_blob, pending_blob, commands_blob, ask_prompt, legacy_board = sys.argv[1:9]
 
 def split_lines(blob):
     return [line for line in blob.splitlines() if line]
@@ -270,6 +293,7 @@ print(json.dumps({
     "pending_actions": split_lines(pending_blob),
     "commands": split_lines(commands_blob),
     "ask_prompt": ask_prompt,
+    "legacy_board": legacy_board == "true",
 }, ensure_ascii=False))
 PYTHON
     else
@@ -313,6 +337,13 @@ for action in "${pending_actions[@]}"; do
             (
                 cd "$project_root"
                 "$AGENT_DO" manna init >/dev/null
+            )
+            executed+=("manna")
+            ;;
+        manna_migrate)
+            (
+                cd "$project_root"
+                "$AGENT_DO" manna migrate >/dev/null
             )
             executed+=("manna")
             ;;

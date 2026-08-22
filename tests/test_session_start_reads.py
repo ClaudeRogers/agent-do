@@ -86,6 +86,7 @@ BOOTSTRAP = {
     "ask_prompt": "Bootstrap agent-do for this project?",
     "project_root": "/stub/project",
     "commands": ["agent-do zpc init", "agent-do manna init"],
+    "legacy_board": False,
 }
 
 TOUCH = {
@@ -280,6 +281,102 @@ def test_session_identity_exports_are_complete_and_private() -> None:
             and "MANNA_SESSION_TOKEN" not in complete_exports
             and "CLAUDE_SESSION_ID" not in complete_exports,
             complete_exports,
+        )
+
+
+def test_legacy_board_migration_is_discoverable() -> None:
+    print("legacy board migration discovery:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        board = project / ".manna"
+        board.mkdir(parents=True)
+        (project / "CLAUDE.md").write_text("Use `agent-do manna` here.\n", encoding="utf-8")
+        (board / "issues.jsonl").write_text(
+            '{"id":"mn-a10001","title":"Legacy row","status":"open",'
+            '"created_at":"2026-01-01T00:00:00Z",'
+            '"updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}\n',
+            encoding="utf-8",
+        )
+        (board / "sessions.jsonl").write_text("", encoding="utf-8")
+        env = dict(os.environ)
+        env["AGENT_DO_HOME"] = str(root / "agent-do-home")
+        proc = subprocess.run(
+            [
+                "bash",
+                str(REPO / "bin" / "bootstrap"),
+                "--recommend",
+                "--json",
+                "--cwd",
+                str(project),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        check("legacy bootstrap recommendation exits 0", proc.returncode == 0, proc.stderr)
+        try:
+            recommendation = json.loads(proc.stdout)
+        except Exception as exc:  # noqa: BLE001
+            check("legacy bootstrap recommendation is JSON", False, f"{exc}: {proc.stdout!r}")
+            return
+        check("legacy bootstrap recommendation is JSON", True)
+        check(
+            "bootstrap classifies legacy migration before a write",
+            recommendation.get("legacy_board") is True
+            and recommendation.get("pending_actions") == ["manna_migrate"]
+            and recommendation.get("commands") == ["agent-do manna migrate"],
+            repr(recommendation),
+        )
+        check(
+            "bootstrap names the one-command remedy",
+            "legacy board: run agent-do manna migrate" in recommendation.get("ask_prompt", ""),
+            repr(recommendation),
+        )
+
+        transactions = board / "transactions"
+        transactions.mkdir()
+        (transactions / "board-init.yaml").write_text("pending: true\n", encoding="utf-8")
+        recovery_proc = subprocess.run(
+            [
+                "bash",
+                str(REPO / "bin" / "bootstrap"),
+                "--recommend",
+                "--json",
+                "--cwd",
+                str(project),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        recovery = json.loads(recovery_proc.stdout)
+        check(
+            "pending atomic init stays on its authenticated recovery path",
+            recovery_proc.returncode == 0
+            and recovery.get("legacy_board") is False
+            and recovery.get("pending_actions") == ["manna_init"]
+            and recovery.get("commands") == ["agent-do manna init"],
+            repr(recovery),
+        )
+        (transactions / "board-init.yaml").unlink()
+
+        bindir, fixtures, log = build_stub(
+            root, direct_coord=True, interrupts=INTERRUPTS_NONE
+        )
+        (fixtures / "bootstrap.json").write_text(
+            json.dumps(recommendation), encoding="utf-8"
+        )
+        hook = run_hook(root, bindir, fixtures, log, "valid")
+        check("legacy SessionStart exits 0", hook.returncode == 0, hook.stderr)
+        context = context_of(hook)
+        check(
+            "SessionStart surfaces legacy migration before board writes",
+            "legacy board: run agent-do manna migrate" in context
+            and "agent-do manna migrate" in context,
+            context,
         )
 
 
@@ -505,6 +602,7 @@ def main() -> int:
     test_wellformed_reads_render_identically()
     test_interrupts_take_precedence()
     test_unreadable_answers_degrade_quietly()
+    test_legacy_board_migration_is_discoverable()
     test_session_identity_exports_are_complete_and_private()
     test_cursor_session_identity_is_restart_durable()
 

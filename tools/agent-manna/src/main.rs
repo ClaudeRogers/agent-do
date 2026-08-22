@@ -29,7 +29,8 @@ use manna_core::workflow::{
     initialize_workflow, load_workflow_for_board, migrate_legacy_board, rebind_handoff_metadata,
     recover_legacy_migration, recover_pair_transactions, runtime_session_identity,
     runtime_session_label, seal_handoff, set_handoff_priority, sync_handoff_presentation,
-    validate_handoff, validate_scaffold, HandoffSyncResult, WorkflowConfig, HANDOFF_DIR,
+    untracked_durable_paths, validate_handoff, validate_scaffold, HandoffSyncResult,
+    WorkflowConfig, HANDOFF_DIR,
 };
 
 /// Exit codes
@@ -1819,6 +1820,21 @@ fn cmd_lint(json: bool) -> ! {
     let (issues, workflow) = load_board_workflow(&store);
     let mut findings = lint_board(&issues);
     findings.extend(lint_prompt_files(&issues));
+    match untracked_durable_paths(Path::new(".")) {
+        Ok(paths) => findings.extend(paths.into_iter().map(|path| LintFinding {
+            issue_id: "board".to_string(),
+            rule: "workflow_tracking".to_string(),
+            detail: format!(
+                "durable workflow file {} is not tracked by Git (git-tracked: no)",
+                path.display()
+            ),
+        })),
+        Err(error) => findings.push(LintFinding {
+            issue_id: "board".to_string(),
+            rule: "workflow_tracking".to_string(),
+            detail: format!("cannot verify durable board tracking: {}", error),
+        }),
+    }
     if let Some(config) = workflow.as_ref() {
         findings.extend(lint_strict_workflow(&issues, config));
         match handoff_presentation_drift(Path::new("."), &issues) {

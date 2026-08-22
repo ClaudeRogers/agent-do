@@ -322,6 +322,12 @@ restoration or a forged version downgrade validates them and never re-enters
 the binding-creating migration path. The runtime lock and transaction journal
 stay ignored.
 
+An identityless board is routed by its rows: empty means `manna init`, while
+nonempty means `manna migrate`. `bootstrap --recommend` uses the same boundary
+and SessionStart surfaces `legacy board: run agent-do manna migrate` before a
+normal write reaches the fail-closed gate. A pending authenticated board-init
+journal stays on the init recovery path.
+
 `manna migrate` is the explicit bridge for a nonempty legacy board, including
 a board left behind a premature strict identity. Under one board lock, its
 authenticated transaction generates sealed handoffs for all active items,
@@ -386,6 +392,8 @@ Board-grammar gate: findings exit 1, clean exits 0. Rules:
 - `dangling_track`: track edges must point at existing track rows
 - `dream_status`: dreams only carry `open` or `done`
 - `prompt_file`: a prompt pointer on a non-done issue must resolve to a file
+- `workflow_tracking`: every existing canonical board file must be present in
+  the Git index; a visible but untracked file reports `git-tracked: no`
 - strict workflow rules: the scaffold exists, each active item has a canonical
   `.handoff/` pointer, the canonical document matches its authoritative digest,
   no symlink escapes the project, no shadow workflow exists, and no canonical
@@ -458,7 +466,7 @@ Resolves agent-do (PATH → `~/.local/bin` symlink → breadcrumb → script-rel
 - **Injected context sections**, each independently gated:
   - the tooling reminder (prefer agent-do over raw CLI; discovery commands)
   - project-scoped tooling (`suggest --project`, 3s bound): top likely tools with readiness fixes
-  - a bootstrap prompt when `bootstrap --recommend` (3s bound) reports pending setup; on macOS this defaults to a native dialog that can run `bootstrap --yes` directly and notify with a log, otherwise it becomes a context ask
+  - a bootstrap prompt when `bootstrap --recommend` (3s bound) reports pending setup; legacy boards carry the explicit `legacy board: run agent-do manna migrate` notice. On macOS this defaults to a native dialog that can run `bootstrap --yes` directly and notify with a log, otherwise it becomes a context ask
   - coord context (2s bounds): active interrupts if any exist, else a focus reminder when active peers exist and this agent has no focus
   - the **Manna Board**: gated on `$CWD/.manna` existing; injects `manna context --max-tokens 1500` (2s bound) plus claim/done working instructions
   - the **drift greeting**: if `.manna/drift.yaml` exists and contains findings, its first 30 lines are injected with instructions to reconcile before claiming new work

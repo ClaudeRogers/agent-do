@@ -149,7 +149,7 @@ The hooks decide what to inject by looking at the repo, not configuration:
 | `<git-dir>/agent-do/coord/` exists | SessionEnd runs `coord stop`; SessionStart injects coord interrupts or a focus reminder when active peers exist |
 | `$CWD/.zpc/` exists | SessionStart mentions the experience journal and its status commands |
 | Frontend markers (package.json frameworks, `.tsx`/`.vue`/`.svelte` files, Flutter) | SessionStart injects the design-toolkit workflow |
-| `bootstrap --recommend` reports pending setup | SessionStart raises the bootstrap prompt (native macOS dialog by default, context ask otherwise; `AGENT_DO_BOOTSTRAP_PROMPT_MODE=native|context|disabled` overrides) |
+| `bootstrap --recommend` reports pending setup | SessionStart raises the bootstrap prompt (native macOS dialog by default, context ask otherwise; `AGENT_DO_BOOTSTRAP_PROMPT_MODE=native|context|disabled` overrides). A nonempty board without strict identity/config surfaces `legacy board: run agent-do manna migrate` |
 
 A repo with none of these gets the tooling reminder and project-scoped suggestions only.
 
@@ -228,8 +228,9 @@ Claims made under an identity that coord later reports dead, stale, or stopped
 surface as `dead_claim` findings, and `reconcile --fix` releases only when the
 complete inspected row still matches.
 
-**Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for every
-detected project. New boards receive `.manna/workflow.yaml` and a tracked
+**Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for new
+boards and strict-scaffold repair, and `manna migrate` for a detected nonempty
+legacy board. New boards receive `.manna/workflow.yaml` and a tracked
 `.handoff/` root. `manna create` generates one initial work order for each
 actionable item and stores the same repository-relative path in the issue's
 `prompt` field. `.manna/handoff-order.yaml` owns priority. `manna sync`
@@ -241,7 +242,9 @@ board-only.
 The handoff contains exactly one claim target for its item. `manna claim`
 checks the file, pointer, claim command, canonical root, and Git visibility
 before it writes any state; a broken pair exits 2. `manna lint` checks the same
-contract as a board gate. `manna reconcile` checks both directions under
+contract as a board gate. It also reports `workflow_tracking` with
+`git-tracked: no` for each canonical board file that exists outside the Git
+index. `manna reconcile` checks both directions under
 `.handoff/` and reports `workflow_sprawl` when active local work appears under
 `.handoffs/`, `.dev/session-prompts/`, or nested `handoff-prompts/` roots. Bare
 id mentions are data, not claims; only `manna claim <id>` command lines bind.
@@ -256,6 +259,9 @@ claims without ownership proofs, and publishes strict identity last in one
 recoverable transaction. Their absolute pointers, `PROMPT:` description fallback,
 and `.dev/session-prompts/` reverse scan keep working. This compatibility path
 prevents an agent-do upgrade from rearranging a live campaign silently.
+An identityless nonempty board directs every caller to this migration command;
+an empty identityless board and an authenticated pending init journal direct
+the caller to `manna init`.
 
 **The loop.** Claim before working, `done` only after verification (done requires the claim), file stray ideas with `agent-do manna dream "<spark>"` (routes to the nearest board walking up from cwd, else the global inbox under `~/.agent-do/inbox`), and let SessionEnd's reconcile write `.manna/drift.yaml` so the next session starts by reconciling the board against reality.
 

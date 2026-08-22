@@ -583,8 +583,13 @@ pub fn load_workflow_for_board(
     issues: &[Issue],
 ) -> Result<Option<WorkflowConfig>, String> {
     let board = load_board_config(base)?.ok_or_else(|| {
-        "Manna board identity is missing; run `agent-do manna init` before using the board"
-            .to_string()
+        if issues.is_empty() {
+            "Manna board identity is missing; run `agent-do manna init` before using the board"
+                .to_string()
+        } else {
+            "Manna board identity is missing on a nonempty legacy board; run `agent-do manna migrate` before using the board"
+                .to_string()
+        }
     })?;
     match board.workflow {
         BoardMode::Strict => match load_workflow(base)? {
@@ -640,6 +645,46 @@ fn durable_paths() -> [&'static str; 6] {
         HANDOFF_ORDER_FILE,
         HANDOFF_README,
     ]
+}
+
+fn git_path_tracked(base: &Path, relative: &Path) -> Result<bool, String> {
+    let inside = Command::new("git")
+        .current_dir(base)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|error| format!("git rev-parse unavailable: {}", error))?;
+    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        return Ok(false);
+    }
+    let output = Command::new("git")
+        .current_dir(base)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(relative)
+        .output()
+        .map_err(|error| format!("git ls-files unavailable: {}", error))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(format!("git ls-files failed with status {:?}", code)),
+    }
+}
+
+/// Durable board files can be Git-visible without being in the index. Lint
+/// reports that distinction so an ignored-state repair cannot be mistaken for
+/// actual history protection.
+pub fn untracked_durable_paths(base: &Path) -> Result<Vec<PathBuf>, String> {
+    durable_paths()
+        .into_iter()
+        .chain([".manna/drift.yaml"])
+        .filter(|relative| base.join(relative).is_file())
+        .filter_map(
+            |relative| match git_path_tracked(base, Path::new(relative)) {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(PathBuf::from(relative))),
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
 }
 
 fn read_optional_text(path: &Path, label: &str) -> Result<Option<String>, String> {
@@ -5417,6 +5462,40 @@ mod tests {
             1
         );
         assert_eq!(workflow_gitignore_content(&updated), updated);
+    }
+
+    #[test]
+    fn identityless_board_guidance_distinguishes_empty_from_legacy() {
+        let temp = TempDir::new().unwrap();
+        let empty_error = load_workflow_for_board(temp.path(), &[]).unwrap_err();
+        assert!(empty_error.contains("agent-do manna init"));
+        assert!(!empty_error.contains("agent-do manna migrate"));
+
+        let legacy = vec![Issue::new("mn-a10001".to_string(), "Legacy row".to_string()).unwrap()];
+        let legacy_error = load_workflow_for_board(temp.path(), &legacy).unwrap_err();
+        assert!(legacy_error.contains("nonempty legacy board"));
+        assert!(legacy_error.contains("agent-do manna migrate"));
+        assert!(!legacy_error.contains("agent-do manna init"));
+    }
+
+    #[test]
+    fn durable_board_files_are_findings_until_added_to_git() {
+        let (temp, _, _) = setup();
+        let untracked = untracked_durable_paths(temp.path()).unwrap();
+        assert_eq!(
+            untracked,
+            durable_paths().map(PathBuf::from).to_vec(),
+            "Git-visible files are not durable until the index owns them"
+        );
+
+        let added = Command::new("git")
+            .current_dir(temp.path())
+            .args(["add", "--"])
+            .args(durable_paths())
+            .status()
+            .unwrap();
+        assert!(added.success());
+        assert!(untracked_durable_paths(temp.path()).unwrap().is_empty());
     }
 
     #[test]

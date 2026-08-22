@@ -146,7 +146,10 @@ agent-do bootstrap
 which stateful tools should be initialized for the current machine or
 repository. Every detected project gets the paired work-state scaffold:
 `.manna/` for the board and tracked `.handoff/` files for executable work
-orders. `bootstrap` initializes the pieces that are actually needed.
+orders. `bootstrap` initializes the pieces that are actually needed. When it
+finds a nonempty pre-workflow board, the recommendation says `legacy board:
+run agent-do manna migrate`, and ordinary bootstrap runs that convergence path
+instead of sending the board through `init`.
 
 ## Finding The Right Tool
 
@@ -235,6 +238,9 @@ operation is crash-recoverable and idempotent; normal strict writes keep every
 Stage 0 fail-closed check.
 Restoration and ordinary metadata updates never recalculate a handoff seal;
 only `handoff seal` can authorize edited contents.
+An identityless write on a nonempty board names `migrate` directly. Empty
+boards still name `init`, and an authenticated init journal remains owned by
+init recovery.
 
 Priority is a first-class ordered list in `.manna/handoff-order.yaml`, not an
 inference from dependencies or filenames. `manna order <id> <position>` moves
@@ -267,6 +273,10 @@ agent-do manna reconcile         # drift between the board and reality
 agent-do manna reconcile --fix   # safe fixes: abandon dead claims,
                                  # unblock resolved blockers
 ```
+
+Lint also verifies durability, not just ignore rules. Each canonical board
+file that is visible but absent from the Git index produces a
+`workflow_tracking` finding with `git-tracked: no`.
 
 `reconcile` is receipts over testimony: it reads git history for `Manna:`
 trailers, probes whether claiming sessions are still alive, and checks blockers
