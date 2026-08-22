@@ -467,13 +467,19 @@ struct DriftReport {
 /// were pinned explicitly or an agent host supplies an opaque runtime identity
 /// whose proof can be derived under the machine-local Manna key.
 fn get_session_identity() -> Result<SessionIdentity, String> {
-    let id = std::env::var("MANNA_SESSION_ID").ok();
-    let token = std::env::var("MANNA_SESSION_TOKEN").ok();
+    // Empty counts as unset: hooks neutralize a stale half-pinned pair by
+    // blanking it, so derivation below can take over after a restart.
+    let id = std::env::var("MANNA_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let token = std::env::var("MANNA_SESSION_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     match (id, token) {
         (Some(id), Some(token)) => return SessionIdentity::from_token(&id, &token),
         (Some(_), None) => {
             return Err(
-                "MANNA_SESSION_ID is pinned but MANNA_SESSION_TOKEN is missing; ownership requires both values"
+                "MANNA_SESSION_ID is pinned but MANNA_SESSION_TOKEN is missing; ownership requires both values. Restart-durable alternative: unset MANNA_SESSION_ID and export CLAUDE_SESSION_ID — its proof re-derives under the machine-local key after any process restart"
                     .to_string(),
             )
         }
@@ -2586,6 +2592,38 @@ fn write_drift_file(findings: &[Finding]) -> Result<String, String> {
 
 /// Apply --fix for dead_claim and blocker_desync findings through the
 /// existing state machine. Returns (fixed issue ids, failure messages).
+/// Decide whether the landed_open cure may close over `owner`'s claim.
+///
+/// The landed commit trailers are the authorizing evidence for the closure;
+/// this guard exists only to avoid closing over a session that is verifiably
+/// mid-work. Coord transport failure means no liveness signal at all, so it
+/// fails closed. Absent-from-coord does NOT block: an orphaned claim's owner
+/// label routinely has no coord record (that absence is the wedge itself),
+/// and demanding positive death evidence would recreate the deadlock this
+/// cure exists to break. The owning session may always cure its own claim.
+fn landed_open_close_blocked(
+    owner: &str,
+    caller_label: Option<&str>,
+    coord: &Result<HashMap<String, String>, String>,
+) -> Option<String> {
+    if caller_label == Some(owner) {
+        return None;
+    }
+    match coord {
+        Ok(statuses) => match coord_status_for_owner(statuses, owner) {
+            Some(status) if status == "active" => Some(format!(
+                "claiming session {} is active; not closing over live work",
+                owner
+            )),
+            _ => None,
+        },
+        Err(error) => Some(format!(
+            "coord liveness unavailable ({}); refusing to close over a possibly live owner — rerun where `agent-do coord` resolves, or rerun as the owning session",
+            error
+        )),
+    }
+}
+
 fn apply_reconcile_fixes(
     store: &MannaStore,
     issues: &[Issue],
@@ -2594,6 +2632,7 @@ fn apply_reconcile_fixes(
     let mut fixed = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
+    let mut coord_statuses: Option<Result<HashMap<String, String>, String>> = None;
 
     for finding in findings {
         let id = match &finding.issue_id {
@@ -2653,6 +2692,57 @@ fn apply_reconcile_fixes(
                     Ok(())
                 }) {
                     Ok(_) => fixed.push(id),
+                    Err(error) => failures.push(format!("{}: {}", id, error)),
+                }
+            }
+            FindingKind::LandedOpen => {
+                let Some(expected) = issues.iter().find(|issue| issue.id == id).cloned() else {
+                    failures.push(format!("{}: stale reconcile evidence: row disappeared", id));
+                    continue;
+                };
+                // Only the orphaned-claim wedge closes mechanically: an
+                // in_progress row whose owner can no longer present its proof
+                // (mn-ba8db6). Unclaimed landed_open stays advisory — merge
+                // judgment remains with the human/orchestrator. The landed
+                // commit trailers are the authorizing evidence, never the
+                // requester.
+                let Some(owner) = expected.claimed_by.clone() else {
+                    continue;
+                };
+                if expected.status != IssueStatus::InProgress {
+                    continue;
+                }
+                let caller_label = current_session_label();
+                if caller_label.as_deref() != Some(owner.as_str()) {
+                    if coord_statuses.is_none() {
+                        coord_statuses = Some(coord_peer_statuses());
+                    }
+                    if let Some(reason) = landed_open_close_blocked(
+                        &owner,
+                        caller_label.as_deref(),
+                        coord_statuses.as_ref().unwrap(),
+                    ) {
+                        failures.push(format!("{}: {}", id, reason));
+                        continue;
+                    }
+                }
+                let evidence = finding.evidence.clone().unwrap_or_default();
+                match store.repair_issue(&id, move |issue, _| {
+                    if issue != &expected {
+                        return Err(
+                            "stale reconcile evidence: row changed after inspection; nothing was closed"
+                                .to_string(),
+                        );
+                    }
+                    issue.release_dead_claim()?;
+                    issue.status = IssueStatus::Done;
+                    issue.updated_at = Utc::now();
+                    Ok(())
+                }) {
+                    Ok(_) => fixed.push(format!(
+                        "{}: closed on landed evidence [{}]; orphaned claim {} released",
+                        id, evidence, owner
+                    )),
                     Err(error) => failures.push(format!("{}: {}", id, error)),
                 }
             }
@@ -3725,6 +3815,110 @@ mod tests {
             .any(|failure| failure.contains("stale reconcile evidence")));
         let current = store.load_issues().unwrap().pop().unwrap();
         assert_eq!(current.claimed_by.as_deref(), Some("ses_new"));
+        current.require_owner(&new_owner).unwrap();
+    }
+
+    #[test]
+    fn landed_open_guard_branches() {
+        let live: Result<HashMap<String, String>, String> = Ok(HashMap::from([
+            ("ses_active".to_string(), "active".to_string()),
+            ("ses_idle".to_string(), "idle".to_string()),
+        ]));
+        let down: Result<HashMap<String, String>, String> = Err("agent-do unavailable".to_string());
+
+        // An actively working owner blocks the cure.
+        assert!(landed_open_close_blocked("ses_active", Some("ses_other"), &live).is_some());
+        // Idle and absent owners do not: absence is the wedge's normal state.
+        assert!(landed_open_close_blocked("ses_idle", Some("ses_other"), &live).is_none());
+        assert!(landed_open_close_blocked("ses_absent", Some("ses_other"), &live).is_none());
+        // No liveness signal at all fails closed.
+        assert!(landed_open_close_blocked("ses_absent", Some("ses_other"), &down).is_some());
+        // The owning session may always cure its own claim.
+        assert!(landed_open_close_blocked("ses_active", Some("ses_active"), &down).is_none());
+    }
+
+    #[test]
+    fn landed_open_fix_closes_orphaned_in_progress_claim() {
+        let (_temp, store) = setup_store();
+        let issue = Issue::new("mn-wedge1".to_string(), "Shipped but wedged".to_string()).unwrap();
+        store.append_issue(&issue).unwrap();
+        // Claim under the caller's own label: the self-cure path is
+        // deterministic in any environment (no coord dependency).
+        let owner_label = current_session_label().unwrap_or_else(|| "ses_gone".to_string());
+        let owner = session(&owner_label);
+        store.claim_issue(&issue.id, &owner).unwrap();
+        let snapshot = store.load_issues().unwrap();
+        let findings = vec![Finding {
+            kind: FindingKind::LandedOpen,
+            issue_id: Some(issue.id.clone()),
+            detail: "referenced by landed commit trailer but status is in_progress".to_string(),
+            evidence: Some("abc123def456".to_string()),
+            proposed_fix: Some("review the commits".to_string()),
+        }];
+
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        assert!(failures.is_empty(), "unexpected failures: {:?}", failures);
+        assert!(
+            fixed.iter().any(|entry| entry.contains("mn-wedge1")
+                && entry.contains("abc123def456")
+                && entry.contains(&owner_label)),
+            "fixed must carry the evidence and the released owner: {:?}",
+            fixed
+        );
+        let current = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(current.status, IssueStatus::Done);
+        assert!(current.claimed_by.is_none());
+        assert!(current.claim_token_hash.is_none());
+    }
+
+    #[test]
+    fn landed_open_fix_leaves_unclaimed_items_advisory() {
+        let (_temp, store) = setup_store();
+        let issue = Issue::new("mn-advis1".to_string(), "Open with trailer".to_string()).unwrap();
+        store.append_issue(&issue).unwrap();
+        let snapshot = store.load_issues().unwrap();
+        let findings = vec![Finding {
+            kind: FindingKind::LandedOpen,
+            issue_id: Some(issue.id.clone()),
+            detail: "referenced by landed commit trailer but status is open".to_string(),
+            evidence: Some("abc123def456".to_string()),
+            proposed_fix: Some("review the commits".to_string()),
+        }];
+
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        assert!(fixed.is_empty(), "unclaimed landed_open must stay advisory");
+        assert!(failures.is_empty());
+        let current = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(current.status, IssueStatus::Open);
+    }
+
+    #[test]
+    fn landed_open_fix_is_cas_guarded_against_row_changes() {
+        let (_temp, store) = setup_store();
+        let issue = Issue::new("mn-wedge2".to_string(), "Changed after scan".to_string()).unwrap();
+        store.append_issue(&issue).unwrap();
+        let owner_label = current_session_label().unwrap_or_else(|| "ses_gone".to_string());
+        let owner = session(&owner_label);
+        store.claim_issue(&issue.id, &owner).unwrap();
+        let snapshot = store.load_issues().unwrap();
+        let findings = vec![Finding {
+            kind: FindingKind::LandedOpen,
+            issue_id: Some(issue.id.clone()),
+            detail: "referenced by landed commit trailer but status is in_progress".to_string(),
+            evidence: Some("abc123def456".to_string()),
+            proposed_fix: Some("review the commits".to_string()),
+        }];
+
+        store.release_issue(&issue.id, &owner).unwrap();
+        let new_owner = session("ses_live");
+        store.claim_issue(&issue.id, &new_owner).unwrap();
+        let (fixed, failures) = apply_reconcile_fixes(&store, &snapshot, &findings);
+        assert!(fixed.is_empty());
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("stale reconcile evidence")));
+        let current = store.load_issues().unwrap().pop().unwrap();
+        assert_eq!(current.status, IssueStatus::InProgress);
         current.require_owner(&new_owner).unwrap();
     }
 }

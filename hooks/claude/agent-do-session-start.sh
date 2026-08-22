@@ -60,18 +60,20 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
 fi
-if [ -n "$SESSION_ID" ] && [ -n "$CLAUDE_ENV_FILE" ] && { [ -z "${MANNA_SESSION_ID:-}" ] || [ -z "${MANNA_SESSION_TOKEN:-}" ]; }; then
-    if command -v openssl >/dev/null 2>&1; then
-        MANNA_TOKEN=$(openssl rand -hex 32 2>/dev/null)
-    elif command -v uuidgen >/dev/null 2>&1; then
-        MANNA_TOKEN="$(uuidgen 2>/dev/null)$(uuidgen 2>/dev/null)"
-        MANNA_TOKEN=$(printf '%s' "$MANNA_TOKEN" | tr -d '-' | tr 'A-F' 'a-f')
-    else
-        MANNA_TOKEN=""
+# Manna ownership rides a machine-key derived identity: manna-core derives
+# the proof from CLAUDE_SESSION_ID under ~/.agent-do/manna/session-identity.key,
+# so a restarted process re-derives the same proof and keeps lifecycle
+# authority over its claims (mn-ba8db6). A random MANNA_SESSION_TOKEN died
+# with the process and wedged mid-work claims. Explicit MANNA_SESSION_ID +
+# MANNA_SESSION_TOKEN pins (scripted lanes) still take priority when present.
+if [ -n "$SESSION_ID" ] && [ -n "$CLAUDE_ENV_FILE" ] && [ -z "${MANNA_SESSION_TOKEN:-}" ]; then
+    if [ -n "${MANNA_SESSION_ID:-}" ]; then
+        # Neutralize a stale half-pinned pair; manna treats empty as unset
+        # and falls through to the derived identity.
+        echo 'export MANNA_SESSION_ID=""' >> "$CLAUDE_ENV_FILE"
     fi
-    if [ -n "$MANNA_TOKEN" ]; then
-        echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
-        echo "export MANNA_SESSION_TOKEN=\"$MANNA_TOKEN\"" >> "$CLAUDE_ENV_FILE"
+    if [ -z "${CLAUDE_SESSION_ID:-}" ]; then
+        echo "export CLAUDE_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
     fi
 fi
 

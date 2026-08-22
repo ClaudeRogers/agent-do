@@ -723,6 +723,76 @@ cd "$TEST_DIR"
 rm -rf "$GRAMMAR_DIR"
 
 # ----------------------------------------------------------------------------
+# Test G5b: reconcile --fix cures a landed, orphaned-proof claim (mn-ba8db6)
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G5b: landed_open --fix closes orphaned in_progress claims"
+WEDGE_DIR=$(mktemp -d)
+cd "$WEDGE_DIR"
+git init -q
+git -c user.email=manna@test -c user.name=manna-test commit -q --allow-empty -m "root"
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "Wedged work" 2>&1) || true
+WEDGE_ID=$(extract_id "$output")
+MANNA_SESSION_ID="ses_wedge_$$" MANNA_SESSION_TOKEN="wedge-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "$MANNA" claim "$WEDGE_ID" >/dev/null 2>&1
+
+# The owner's process "restarts": same visible label, different secret.
+done_exit=0
+MANNA_SESSION_ID="ses_wedge_$$" MANNA_SESSION_TOKEN="wedge-token-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+    "$MANNA" done "$WEDGE_ID" >/dev/null 2>&1 || done_exit=$?
+if [[ $done_exit -ne 0 ]]; then
+    pass "done refuses a mismatched ownership proof"
+else
+    fail "done refuses a mismatched ownership proof" "done succeeded with the wrong secret"
+fi
+
+# The work verifiably landed: a commit carries the Manna trailer.
+git -c user.email=manna@test -c user.name=manna-test commit -q --allow-empty -m "fix: shipped
+
+Manna: $WEDGE_ID"
+
+output=$("$MANNA" reconcile 2>&1) || true
+check_yaml "$output" "landed_open" "reconcile sees the landed evidence"
+
+# The restarted session cures its own claim: same label, lost secret. The
+# self-cure path needs no coord lookup, so this holds in any environment.
+output=$(MANNA_SESSION_ID="ses_wedge_$$" "$MANNA" reconcile --fix 2>&1) || true
+check_yaml "$output" "closed on landed evidence" "reconcile --fix closes on the receipt"
+output=$("$MANNA" show "$WEDGE_ID" 2>&1) || true
+check_yaml "$output" "status: done" "wedged item is done after the cure"
+"$MANNA" sync >/dev/null 2>&1
+
+# Unclaimed landed_open stays advisory — merge judgment stays human.
+output=$("$MANNA" create "Advisory work" 2>&1) || true
+ADVIS_ID=$(extract_id "$output")
+git -c user.email=manna@test -c user.name=manna-test commit -q --allow-empty -m "notes
+
+Manna: $ADVIS_ID"
+output=$("$MANNA" reconcile --fix 2>&1) || true
+output=$("$MANNA" show "$ADVIS_ID" 2>&1) || true
+check_yaml "$output" "status: open" "unclaimed landed_open stays advisory"
+
+# ----------------------------------------------------------------------------
+# Test G5c: machine-key derived identity survives a process restart
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test G5c: derived identity survives restart"
+DERIVE_HOME=$(mktemp -d)
+RESTART_UUID="0f0f0f0f-1111-2222-3333-444444444444"
+output=$("$MANNA" create "Derived identity work" 2>&1) || true
+DERIVE_ID=$(extract_id "$output")
+env -u MANNA_SESSION_ID -u MANNA_SESSION_TOKEN AGENT_DO_HOME="$DERIVE_HOME" \
+    CLAUDE_SESSION_ID="$RESTART_UUID" "$MANNA" claim "$DERIVE_ID" >/dev/null 2>&1
+# "Restart": a fresh process presents only the same host session id. The
+# blanked pair proves empty-means-unset (how hooks neutralize stale pins).
+done_exit=0
+MANNA_SESSION_ID= MANNA_SESSION_TOKEN= AGENT_DO_HOME="$DERIVE_HOME" \
+    CLAUDE_SESSION_ID="$RESTART_UUID" "$MANNA" done "$DERIVE_ID" >/dev/null 2>&1 || done_exit=$?
+check_exit 0 "$done_exit" "derived proof re-derives after restart; done succeeds"
+"$MANNA" sync >/dev/null 2>&1
+
+# ----------------------------------------------------------------------------
 # Test G7: strict workflow pairing, claim gate, sprawl detection, legacy compatibility
 # ----------------------------------------------------------------------------
 echo ""

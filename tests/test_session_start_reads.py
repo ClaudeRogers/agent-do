@@ -186,7 +186,12 @@ def run_hook(
             "AGENT_DO_ZPC_AUTOINIT": "0",
         }
     )
-    for variable in ("AGENT_DO_COORD_SESSION", "MANNA_SESSION_ID", "MANNA_SESSION_TOKEN"):
+    for variable in (
+        "AGENT_DO_COORD_SESSION",
+        "MANNA_SESSION_ID",
+        "MANNA_SESSION_TOKEN",
+        "CLAUDE_SESSION_ID",
+    ):
         env.pop(variable, None)
     env.update(identity_env or {})
     if env_file is None:
@@ -220,24 +225,18 @@ def test_session_identity_exports_are_complete_and_private() -> None:
             'export AGENT_DO_COORD_SESSION="stub-session"' in exports,
             exports,
         )
+        claude_lines = [
+            line for line in exports.splitlines() if line.startswith("export CLAUDE_SESSION_ID=")
+        ]
         check(
-            "Manna public identity is pinned",
-            'export MANNA_SESSION_ID="stub-session"' in exports,
+            "Manna rides the derived identity, pinned exactly once",
+            len(claude_lines) == 1 and 'export CLAUDE_SESSION_ID="stub-session"' in exports,
             exports,
         )
-        token_lines = [
-            line for line in exports.splitlines() if line.startswith("export MANNA_SESSION_TOKEN=")
-        ]
-        check("Manna private token is pinned exactly once", len(token_lines) == 1, exports)
-        token = token_lines[0].split('"', 2)[1] if token_lines else ""
         check(
-            "Manna private token has 256-bit hex shape",
-            len(token) == 64 and all(character in "0123456789abcdef" for character in token),
-            token,
-        )
-        check(
-            "Manna private token is not emitted in hook output",
-            bool(token) and token not in proc.stdout and token not in proc.stderr,
+            "no mortal token is minted (proofs derive under the machine key)",
+            "MANNA_SESSION_TOKEN" not in exports and "MANNA_SESSION_ID" not in exports,
+            exports,
         )
 
         partial_file = root / "partial.env"
@@ -253,9 +252,9 @@ def test_session_identity_exports_are_complete_and_private() -> None:
         )
         partial_exports = partial_file.read_text(encoding="utf-8")
         check(
-            "incomplete inherited identity is replaced as one pair",
-            'export MANNA_SESSION_ID="stub-session"' in partial_exports
-            and "export MANNA_SESSION_TOKEN=" in partial_exports
+            "incomplete inherited identity is neutralized for derivation",
+            'export MANNA_SESSION_ID=""' in partial_exports
+            and 'export CLAUDE_SESSION_ID="stub-session"' in partial_exports
             and "stale-partial-owner" not in partial_exports,
             partial_exports,
         )
@@ -276,9 +275,10 @@ def test_session_identity_exports_are_complete_and_private() -> None:
         )
         complete_exports = complete_file.read_text(encoding="utf-8")
         check(
-            "complete inherited identity pair is preserved",
+            "complete inherited identity pair is preserved untouched",
             "MANNA_SESSION_ID" not in complete_exports
-            and "MANNA_SESSION_TOKEN" not in complete_exports,
+            and "MANNA_SESSION_TOKEN" not in complete_exports
+            and "CLAUDE_SESSION_ID" not in complete_exports,
             complete_exports,
         )
 
