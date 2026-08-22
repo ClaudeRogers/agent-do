@@ -60,4 +60,3 @@ Rules:
 | 26 | `mn-8b4a1c` | open | none | `.handoff/26-mn-8b4a1c-tests-suite-can-hang-forever-on-the-bootstrap-gui-dialog-pin-age.md` |
 | 27 | `mn-ee7d1e` | open | none | `.handoff/27-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
 | 28 | `mn-898c08` | open | none | `.handoff/28-mn-898c08-manna-legacy-board-discoverability-misrouted-error-text-bootstra.md` |
-| 29 | `mn-6b8255` | open | none | `.handoff/29-mn-6b8255-manna-migrate-the-cursor-hook-to-derived-identity-parity-with-mn.md` |
