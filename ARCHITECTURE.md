@@ -454,7 +454,7 @@ All four Claude hooks are advisory: they inject context or run cleanup, and neve
 Resolves agent-do (PATH → `~/.local/bin` symlink → breadcrumb → script-relative repo fallback for bare checkouts), then:
 
 - **PATH**: appends an export line to `CLAUDE_ENV_FILE` so every Bash call finds `agent-do`
-- **Identity pins**: exports `AGENT_DO_COORD_SESSION`, `MANNA_SESSION_ID`, and a random 256-bit `MANNA_SESSION_TOKEN` into `CLAUDE_ENV_FILE`. The public ids anchor to the Claude session; the private token proves claim ownership across shell invocations without entering the board
+- **Identity pins**: exports `AGENT_DO_COORD_SESSION` and `CLAUDE_SESSION_ID` into `CLAUDE_ENV_FILE`. Manna derives the private ownership proof from the stable host session id under a mode-0600 machine-local key, so process restarts recover the same authority without storing a bearer token in the board. Cursor's adapter persists its conversation id through the same derivation input. Complete explicit `MANNA_SESSION_ID` plus `MANNA_SESSION_TOKEN` pins still win for scripted lanes
 - **Injected context sections**, each independently gated:
   - the tooling reminder (prefer agent-do over raw CLI; discovery commands)
   - project-scoped tooling (`suggest --project`, 3s bound): top likely tools with readiness fixes

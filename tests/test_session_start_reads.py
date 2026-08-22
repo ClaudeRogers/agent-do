@@ -283,65 +283,108 @@ def test_session_identity_exports_are_complete_and_private() -> None:
         )
 
 
-def test_cursor_session_identity_exports_are_complete() -> None:
+def test_cursor_session_identity_is_restart_durable() -> None:
     print("Cursor session identity exports:")
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         project = root / "project"
         project.mkdir()
-        env = dict(os.environ)
-        env.update(
-            {
-                "AGENT_DO_REPO": str(REPO),
-                "AGENT_DO_HOME": str(root / "agent-do-home"),
-                "HOME": str(root / "home"),
-                "AGENT_DO_BOOTSTRAP_PROMPT_MODE": "disabled",
-                "AGENT_DO_ZPC_INJECT": "0",
-                "AGENT_DO_ZPC_AUTOINIT": "0",
-            }
-        )
-        for variable in (
-            "AGENT_DO_COORD_SESSION",
-            "MANNA_SESSION_ID",
-            "MANNA_SESSION_TOKEN",
-        ):
-            env.pop(variable, None)
-        proc = subprocess.run(
-            ["python3", str(CURSOR_HOOK)],
-            input=json.dumps(
+
+        def run_cursor(identity_env: dict[str, str] | None = None) -> dict[str, str]:
+            env = dict(os.environ)
+            env.update(
                 {
-                    "cwd": str(project),
-                    "conversation_id": "cursor-conversation-123",
+                    "AGENT_DO_REPO": str(REPO),
+                    "AGENT_DO_HOME": str(root / "agent-do-home"),
+                    "HOME": str(root / "home"),
+                    "AGENT_DO_BOOTSTRAP_PROMPT_MODE": "disabled",
+                    "AGENT_DO_ZPC_INJECT": "0",
+                    "AGENT_DO_ZPC_AUTOINIT": "0",
                 }
-            ),
-            capture_output=True,
-            text=True,
-            check=False,
-            env=env,
-        )
-        check("Cursor identity hook exits 0", proc.returncode == 0, proc.stderr)
-        try:
-            payload = json.loads(proc.stdout)
-            exports = payload["env"]
-        except Exception as exc:  # noqa: BLE001
-            check("Cursor identity hook emits environment", False, f"{exc}: {proc.stdout!r}")
-            return
-        check("Cursor identity hook emits environment", True)
+            )
+            for variable in (
+                "AGENT_DO_COORD_SESSION",
+                "MANNA_SESSION_ID",
+                "MANNA_SESSION_TOKEN",
+                "CLAUDE_SESSION_ID",
+            ):
+                env.pop(variable, None)
+            env.update(identity_env or {})
+            proc = subprocess.run(
+                ["python3", str(CURSOR_HOOK)],
+                input=json.dumps(
+                    {
+                        "cwd": str(project),
+                        "conversation_id": "cursor-conversation-123",
+                    }
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            check("Cursor identity hook exits 0", proc.returncode == 0, proc.stderr)
+            try:
+                payload = json.loads(proc.stdout)
+                exports = payload["env"]
+            except Exception as exc:  # noqa: BLE001
+                check("Cursor identity hook emits environment", False, f"{exc}: {proc.stdout!r}")
+                return {}
+            check("Cursor identity hook emits environment", True)
+            return exports
+
+        exports = run_cursor()
         check(
             "Cursor coord identity is pinned",
             exports.get("AGENT_DO_COORD_SESSION") == "cursor-conversation-123",
             repr(exports),
         )
         check(
-            "Cursor Manna public identity is pinned",
-            exports.get("MANNA_SESSION_ID") == "cursor-conversation-123",
+            "Cursor Manna identity uses the conversation id for derivation",
+            exports.get("CLAUDE_SESSION_ID") == "cursor-conversation-123",
             repr(exports),
         )
-        token = exports.get("MANNA_SESSION_TOKEN", "")
         check(
-            "Cursor Manna private token has 256-bit hex shape",
-            len(token) == 64 and all(character in "0123456789abcdef" for character in token),
-            token,
+            "Cursor does not mint a mortal Manna identity pair",
+            "MANNA_SESSION_ID" not in exports and "MANNA_SESSION_TOKEN" not in exports,
+            repr(exports),
+        )
+        check(
+            "Cursor restart returns the same derivation input",
+            run_cursor() == exports,
+            repr(exports),
+        )
+
+        stale_id = run_cursor({"MANNA_SESSION_ID": "stale-owner"})
+        check(
+            "Cursor neutralizes an id-only stale pin",
+            stale_id.get("MANNA_SESSION_ID") == ""
+            and stale_id.get("CLAUDE_SESSION_ID") == "cursor-conversation-123"
+            and "MANNA_SESSION_TOKEN" not in stale_id,
+            repr(stale_id),
+        )
+
+        stale_token = run_cursor({"MANNA_SESSION_TOKEN": "b" * 64})
+        check(
+            "Cursor neutralizes a token-only stale pin",
+            stale_token.get("MANNA_SESSION_TOKEN") == ""
+            and stale_token.get("CLAUDE_SESSION_ID") == "cursor-conversation-123"
+            and "MANNA_SESSION_ID" not in stale_token,
+            repr(stale_token),
+        )
+
+        complete = run_cursor(
+            {
+                "MANNA_SESSION_ID": "pinned-lane",
+                "MANNA_SESSION_TOKEN": "c" * 64,
+            }
+        )
+        check(
+            "Cursor preserves a complete explicit identity pair",
+            complete.get("MANNA_SESSION_ID") == "pinned-lane"
+            and complete.get("MANNA_SESSION_TOKEN") == "c" * 64
+            and "CLAUDE_SESSION_ID" not in complete,
+            repr(complete),
         )
 
 
@@ -463,7 +506,7 @@ def main() -> int:
     test_interrupts_take_precedence()
     test_unreadable_answers_degrade_quietly()
     test_session_identity_exports_are_complete_and_private()
-    test_cursor_session_identity_exports_are_complete()
+    test_cursor_session_identity_is_restart_durable()
 
     print()
     if FAILURES:

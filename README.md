@@ -280,19 +280,19 @@ workflow-integrity findings exit 1; informational drift stays advisory.
 
 With the Claude Code hooks installed, board-driven work needs no ceremony:
 
-- **SessionStart** pins the session identity (`AGENT_DO_COORD_SESSION`,
-  `MANNA_SESSION_ID`, `MANNA_SESSION_TOKEN`) so coordination presence and board
-  claims survive pid recycling without making the public owner label a
-  credential, then injects the current board into context. If the previous
-  session left unresolved drift, the greeting includes it.
+- **SessionStart** pins `AGENT_DO_COORD_SESSION` and persists the Claude or
+  Cursor host session id. Manna derives its private ownership proof from that
+  stable id under a machine-local key, so claims survive process restarts
+  without making the public owner label a credential. The hook then injects
+  the current board into context. If the previous session left unresolved
+  drift, the greeting includes it.
 - **SessionEnd** retires coordination presence and runs a bounded
   `manna reconcile --write-drift` advisory, leaving findings in
   `.manna/drift.yaml` for the next session's greeting.
 
 Everything is presence-gated: repositories without a `.manna/` board see none
-of it. Codex, whose SessionStart channel cannot persist environment exports,
-derives the same stable ownership proof from its opaque thread id and a
-machine-local key outside the repository.
+of it. Codex supplies its opaque thread id directly; Manna derives the same
+stable ownership proof under the machine-local key outside the repository.
 
 The wider hook model stays non-blocking by design: hooks suggest relevant tools
 at session start, route fuzzy user prompts to likely `agent-do` commands,

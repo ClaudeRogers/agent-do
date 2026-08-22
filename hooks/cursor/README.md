@@ -37,10 +37,12 @@ three agent-do entries appear under **User config**.
 | `cursor_compat.py` | shared | JSON translation + repo resolution |
 | `hooks.json.example` | registration | copy/merge into `~/.cursor/hooks.json` |
 
-The SessionStart adapter returns `AGENT_DO_COORD_SESSION`, `MANNA_SESSION_ID`,
-and a random 256-bit `MANNA_SESSION_TOKEN` in Cursor's persistent `env` field.
-Separate shell calls therefore share one authenticated Manna owner without
-putting the private token in repository state.
+The SessionStart adapter returns `AGENT_DO_COORD_SESSION` and persists Cursor's
+conversation id as `CLAUDE_SESSION_ID`. Manna derives the ownership proof from
+that stable id under the machine-local key, so separate shell calls and a
+restarted Cursor process recover the same authenticated owner. A complete
+explicit `MANNA_SESSION_ID` plus `MANNA_SESSION_TOKEN` pair still takes
+precedence for scripted lanes.
 
 ## Upgrade model
 
