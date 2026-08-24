@@ -4657,6 +4657,10 @@ tools:
     concurrency: mixed
   manna:
     description: Git-backed issue tracking with generated, bidirectionally linked handoff work orders
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     capabilities:
     - track issues and dependencies
     - manage session state

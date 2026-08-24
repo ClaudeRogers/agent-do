@@ -24,6 +24,7 @@ SERVE_DIR = REPO / "tools" / "agent-manna" / "serve"
 sys.path.insert(0, str(SERVE_DIR))
 
 import board as board_lib  # noqa: E402
+import digest as digest_lib  # noqa: E402
 import serve as serve_lib  # noqa: E402
 
 ISSUES = [
@@ -268,6 +269,81 @@ class LiveDerivationTests(unittest.TestCase):
         self.assertIsNotNone(board_lib.live_drift(self.root, self.stub))
 
 
+class DigestTests(unittest.TestCase):
+    """One-line digests: validated, cached by content hash, generated in byte-bounded batches, title as fallback."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["AGENT_DO_HOME"] = self.tmp.name
+        self.rows = [
+            {"id": "mn-aaaaaa", "title": "First ready thing", "description": "Make the first thing.", "kind": "item"},
+            {"id": "mn-bbbbbb", "title": "Second ready thing", "description": None, "kind": "item"},
+            {"id": "mn-track1", "title": "TRACK: Program", "kind": "track"},
+        ]
+
+    def tearDown(self) -> None:
+        os.environ.pop("AGENT_DO_HOME", None)
+        self.tmp.cleanup()
+
+    def test_validator_holds_the_line(self) -> None:
+        row = self.rows[0]
+        self.assertEqual(digest_lib.validate("Build the first thing.", row), "Build the first thing")
+        self.assertIsNone(digest_lib.validate("x" * (digest_lib.DIGEST_MAX_CHARS + 1), row))
+        self.assertIsNone(digest_lib.validate("first ready thing", row), "the title is not a digest")
+        self.assertIsNone(digest_lib.validate("Do mn-aaaaaa now", row), "no ids")
+        self.assertIsNone(digest_lib.validate("two\nlines", row))
+        self.assertIsNone(digest_lib.validate(None, row))
+
+    def test_generate_writes_cache_and_apply_reads_it(self) -> None:
+        calls = []
+        def caller(prompt):
+            calls.append(prompt)
+            return {"mn-aaaaaa": "Make the first thing real", "mn-bbbbbb": "y" * 200}, "stub-model"
+        out = digest_lib.generate("proj", self.rows[:2], caller=caller)
+        self.assertEqual(out["written"], 1)
+        self.assertEqual(out["failed"], 1, "the long one fails after its shorten retry")
+        self.assertEqual(len(calls), 2, "one batch call plus one strict retry")
+        self.assertIn("Previous answers", calls[1])
+        report = digest_lib.apply("proj", self.rows)
+        self.assertEqual(self.rows[0]["digest"], "Make the first thing real")
+        self.assertIsNone(self.rows[1]["digest"])
+        self.assertIsNone(self.rows[2]["digest"], "tracks never get digests")
+        self.assertEqual(report["ready"], 1)
+        self.assertEqual(report["missing"], 0, "a failed row is not retried until its content changes")
+        # content change invalidates
+        self.rows[0]["description"] = "Changed."
+        report = digest_lib.apply("proj", self.rows)
+        self.assertIsNone(self.rows[0]["digest"])
+        self.assertEqual([r["id"] for r in report["missing_rows"]], ["mn-aaaaaa"])
+
+    def test_chunking_is_byte_bounded(self) -> None:
+        many = [{"id": f"mn-{i:06d}", "title": "t" * 40, "description": "d" * 400, "kind": "item"} for i in range(30)]
+        one = len(digest_lib._item_block(many[0]).encode("utf-8")) + 2
+        chunks = digest_lib.chunk_by_bytes(many, one * 7)
+        self.assertTrue(all(len(c) <= 7 for c in chunks))
+        self.assertEqual(sum(len(c) for c in chunks), 30)
+        # and never more items per call than the measured cap, whatever the bytes allow
+        big = digest_lib.chunk_by_bytes(many * 3, 10**9)
+        self.assertTrue(all(len(c) <= digest_lib.DIGESTS_PER_CALL for c in big))
+        self.assertEqual(sum(len(c) for c in big), 90)
+
+    def test_failed_call_leaves_titles_and_invents_nothing(self) -> None:
+        def caller(prompt):
+            raise RuntimeError("no credential")
+        out = digest_lib.generate("proj", self.rows[:2], caller=caller)
+        self.assertEqual(out["written"], 0)
+        cache = digest_lib.load_cache("proj")
+        self.assertTrue(all(v["digest"] is None and v["failed"] and v["transient"] for v in cache.values()))
+        # transient: inside the cooldown the rows are not asked again; after it they are
+        report = digest_lib.apply("proj", self.rows[:2])
+        self.assertEqual(report["missing"], 0)
+        for v in cache.values():
+            v["failed_at"] = "2000-01-01T00:00:00Z"
+        digest_lib.save_cache("proj", cache)
+        report = digest_lib.apply("proj", self.rows[:2])
+        self.assertEqual(report["missing"], 2)
+
+
 class RegistryAndHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -367,7 +443,8 @@ class RegistryAndHttpTests(unittest.TestCase):
             status, body, ctype = get("/proj")
             self.assertEqual(status, 200)
             self.assertIn("text/html", ctype)
-            self.assertIn(b'id="now-list"', body)
+            self.assertIn(b'id="board-list"', body)
+            self.assertIn(b'data-sheet="coord"', body)
 
             status, body, _ = get("/proj/api/state")
             state = json.loads(body)

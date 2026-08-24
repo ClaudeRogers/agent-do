@@ -433,31 +433,42 @@ context: |
 
 ### `serve [--open] [--json] [--port N]`
 
-The human window. One read-only daemon on `127.0.0.1:7777` renders every
-registered board at `/` and this project at `/<name>`:
+The human window: a read-only cockpit on `127.0.0.1:7777`. `/` is the estate
+(every registered board with needs-you / working / here); `/<name>` is one
+board:
 
-- **now**: claimed work with the claimant's liveness and coord pulse (needs-you / working, current tool, latest prompt), attention-first
-- **coordination**: who is here, what they hold, advisory claims with contention (two live owners on overlapping paths), drops
-- **next**: open, unblocked, in `handoff-order.yaml` priority
-- **needs decision**: titles led by `[DECISION]`, `[HUMAN]`, or `[OWNER]` (add a name for this machine: `serve --decision-marker "[NAME]"`)
-- **waiting**: the `blocked_by` graph in topological waves
-- **drift**: live findings from `manna reconcile --json` (read-only) when the board moves, with the written file's age beside them
-- **by track**, **dreams**, and a grep/filter table over everything
-- item drawers: description, blockers and dependents, every commit carrying the item's `Manna:` trailer, and one-click copy of the handoff path, the id, and the `show` command
+- **three tabs** — `inbox` (every ask, one shape per row: who/what · the ask ·
+  the verb you perform: grant, fix, rule, split, close, read, launch),
+  `board` (now / next / waiting, chips `live · +done · dreams · track`, a
+  `list | timeline` switch), `coordination` (needs you, peers with what they
+  hold, claims with contention, drops)
+- **inspector** on the right: the item's manna title and description, blockers
+  and dependents, claimant with pulse, trailer commits, one-click copy of the
+  handoff path, id, and `show` command; or a peer's session, pulse, holdings
+- **status strip** at the bottom: drift (live `reconcile --json`, read-only)
+  and the daemon's health; `debug ▸` opens the sheet with every finding
+- **⌘K / jump**: sheets, items, peers, other boards
+- **digests**: each row shows a one-line digest of the item (fast model,
+  hash-keyed cache under `$AGENT_DO_HOME/manna/serve/digests/`, regenerated
+  only when title or description change, title as fallback); the manna title
+  stays in the inspector. Set `AGENT_DO_SERVE_AI=off` to keep titles only.
+
+Finish: ledger density on a 12px floor, one-line rows, zebra, a severity
+stripe leading each row, outlined state pills, prompt headers (`$ manna next`),
+raised-row selection. Ratified through four wireframe rounds (2026-08-24).
 
 ```bash
 agent-do manna serve            # register this board, start the daemon if needed, print the URL
 agent-do manna serve --open     # same, and open it
 agent-do manna serve --scan ~/Projects        # register every board below a directory
+agent-do manna serve --decision-marker "[NAME]"   # a leading title tag that means "a human must rule"
 agent-do manna serve --status | --stop
 ```
 
-The index at `/` carries each board's needs-you / working / here counts from coord, so one page answers who needs me across every registered project. Board and git state re-derive on file change; presence re-reads every ten seconds and pushes only when it changed.
-
 Agents never read from it: `context`, `list`, and `show` remain the contract.
 Private claim proofs (`claim_token_hash`) never leave the board directory.
-Implementation: `serve/serve.py` (daemon, registry under `$AGENT_DO_HOME/manna/serve/`)
-and `serve/board.py` (pure derivation), beside the Rust core.
+Implementation: `serve/serve.py` (daemon, registry, two-clock cache),
+`serve/board.py` (pure derivation), `serve/digest.py` (digests), beside the Rust core.
 
 ## Architecture
 

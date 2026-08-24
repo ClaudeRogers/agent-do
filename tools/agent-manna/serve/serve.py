@@ -37,6 +37,7 @@ from typing import Any
 SERVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SERVE_DIR))
 import board as board_lib  # noqa: E402
+import digest as digest_lib  # noqa: E402
 
 STATIC_DIR = SERVE_DIR / "static"
 AGENT_DO = Path(os.environ.get("MANNA_SERVE_AGENT_DO") or (SERVE_DIR.parents[2] / "agent-do"))
@@ -71,7 +72,7 @@ SCAN_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", "
 def source_hash() -> str:
     """Identity of the Python the daemon runs; static files are read per request."""
     digest = hashlib.sha256()
-    for name in ("serve.py", "board.py"):
+    for name in ("serve.py", "board.py", "digest.py"):
         digest.update((SERVE_DIR / name).read_bytes())
     return digest.hexdigest()[:16]
 
@@ -227,6 +228,20 @@ def pid_alive(pid: int) -> bool:
 # ---------------------------------------------------------------- HTTP
 
 
+# Digests need a model; the house flag family decides (AGENT_DO_SERVE_AI, then
+# AGENT_DO_AI), and a missing credential simply leaves rows on their titles.
+def _digests_enabled() -> bool:
+    try:
+        sys.path.insert(0, str(SERVE_DIR.parents[2] / "lib"))
+        from ai_router import ai_requested  # type: ignore
+        return ai_requested(digest_lib.FLAG_NAME)
+    except Exception:
+        return False
+
+
+DIGESTS_ENABLED = _digests_enabled()
+
+
 class BoardCache:
     """Two clocks. Board and git state is keyed by a file signature and
     recomputed only when those files move (that is where reconcile and the
@@ -252,6 +267,14 @@ class BoardCache:
 
     def base_signature(self, root: Path) -> str:
         return board_lib.base_signature(root, self.gitdir(root))
+
+    def digest_signature(self, slug: str) -> str:
+        path = digest_lib.cache_path(slug)
+        try:
+            st = path.stat()
+            return f"digests:{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            return "digests:none"
 
     # -- board + git clock
 
@@ -306,12 +329,15 @@ class BoardCache:
 
     # -- the page
 
-    def signature(self, root: Path) -> str:
-        """What a board stream watches: board+git files plus the presence digest."""
-        return self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
+    def signature(self, root: Path, slug: str | None = None) -> str:
+        """What a board stream watches: board+git files, the presence digest, and the digest cache."""
+        sig = self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
+        if slug:
+            sig += "|" + self.digest_signature(slug)
+        return sig
 
     def state(self, slug: str, root: Path) -> tuple[str, dict[str, Any]]:
-        sig = self.signature(root)
+        sig = self.signature(root, slug)
         with self.lock:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
@@ -324,6 +350,12 @@ class BoardCache:
         )
         state["slug"] = slug
         state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
+        # Digests: cached lines attach now; missing ones generate in the
+        # background, and the cache file's change re-signs the page.
+        report = digest_lib.apply(slug, state["all"])
+        state["digests"] = {"ready": report["ready"], "missing": report["missing"], "model": report["model"], "generating": False}
+        if report["missing_rows"] and DIGESTS_ENABLED:
+            state["digests"]["generating"] = digest_lib.schedule(slug, report["missing_rows"])
         with self.lock:
             self.states[slug] = (sig, state)
         return sig, state
@@ -484,12 +516,12 @@ class Handler(SimpleHTTPRequestHandler):
             _, state = CACHE.state(slug, root)
             return self.send_json(state)
         if rest == ["api", "events"]:
-            return self.stream(lambda: CACHE.signature(root), lambda: CACHE.state(slug, root)[1])
+            return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
         return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
 
     def route_api(self, parts: list[str], query: str) -> None:
         if parts == ["health"]:
-            return self.send_json({"server": SERVER_NAME, "pid": os.getpid(), "port": self.server.server_address[1], "boards": len(load_registry()), "started_at": getattr(self.server, "started_at", None), "source": SOURCE_HASH})
+            return self.send_json({"server": SERVER_NAME, "pid": os.getpid(), "port": self.server.server_address[1], "boards": len(load_registry()), "started_at": getattr(self.server, "started_at", None), "source": SOURCE_HASH, "digests": DIGESTS_ENABLED})
         if parts == ["boards"]:
             return self.send_json(boards_index())
         if parts == ["events"]:

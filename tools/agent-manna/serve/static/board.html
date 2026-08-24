@@ -10,78 +10,65 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main-content">Skip to board</a>
+  <a class="skip-link" href="#sheet">Skip to board</a>
   <header class="topbar">
-    <div class="prompt"><span class="prompt-mark">$</span><strong id="prompt-name">manna</strong><span class="muted">serve --watch</span></div>
-    <label class="search-label"><span class="muted">grep </span><input id="grep" type="search" placeholder="id, title, track, claimant" autocomplete="off" /></label>
-    <div class="topbar-state" aria-live="polite">
-      <a href="/">[all boards]</a>
-      <span class="separator">|</span>
-      <span id="connection-mark" class="connection-mark">○</span>
-      <span id="connection-label">connecting</span>
-      <span class="separator">|</span>
+    <nav class="crumb" aria-label="Estate"><a href="/">estate</a><span class="sep">›</span><strong id="crumb-name">board</strong></nav>
+    <div class="tabs" role="tablist" aria-label="Sheets">
+      <button class="tab" role="tab" data-sheet="inbox" type="button">inbox <span class="badge" data-badge="inbox"></span></button>
+      <button class="tab active" role="tab" data-sheet="board" type="button">board</button>
+      <button class="tab" role="tab" data-sheet="coord" type="button">coordination <span class="badge" data-badge="coord"></span></button>
+    </div>
+    <label class="grep"><span class="sr">grep</span><input id="grep" type="search" placeholder="grep" autocomplete="off" /></label>
+    <div class="topbar-right">
+      <button class="text-button" id="jump-button" type="button" title="⌘K">jump ▾</button>
+      <span class="sep">|</span>
+      <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
+      <span class="sep">|</span>
       <span id="last-sync">waiting for state</span>
-      <button class="text-button" id="refresh-button" type="button">[refresh]</button>
     </div>
   </header>
-  <main id="main-content">
-    <section class="status-block" aria-labelledby="page-title">
-      <p class="command" id="command-line">$ manna context</p>
-      <h1 id="page-title">loading</h1>
-      <div class="status-lines">
-        <p><span class="label">repo</span><strong id="repo-state">loading</strong></p>
-        <p><span class="label">board</span><strong id="board-state">loading</strong></p>
-        <p><span class="label">drift</span><strong id="drift-state">loading</strong></p>
-        <p><span class="label">peers</span><strong id="peers-state">loading</strong></p>
-      </div>
-      <div class="counts" id="counts"></div>
-    </section>
-    <nav class="jump-nav" aria-label="Page sections">
-      <a href="#now">now</a><a href="#coord">coordination</a><a href="#next">next</a><a href="#decisions">needs decision</a><a href="#waiting">waiting</a><a href="#drift">drift</a><a href="#tracks">tracks</a><a href="#dreams">dreams</a><a href="#all">all</a>
-    </nav>
 
-    <section class="document-section" id="now"><div class="section-line"><h2>## now</h2><span>claimed · liveness from coord</span></div><div class="task-list" id="now-list"></div></section>
-    <section class="document-section" id="coord">
-      <div class="section-line"><h2>## coordination</h2><span id="coord-caption">who is here · what they hold · where they collide</span></div>
-      <h3 class="subheading">### needs you</h3>
-      <div class="task-list" id="needs-you-list"></div>
-      <h3 class="subheading">### peers</h3>
-      <div class="task-list" id="peer-list"></div>
-      <h3 class="subheading">### claims</h3>
-      <div class="task-list" id="claim-list"></div>
-      <h3 class="subheading">### drops</h3>
-      <div class="task-list" id="drop-list"></div>
-      <p class="note">From coord: presence, pulse, advisory claims, and file drops. Contention is two live owners whose claimed paths overlap. Read-only; act through <code>agent-do coord</code>.</p>
-    </section>
-    <section class="document-section" id="next"><div class="section-line"><h2>## next</h2><span>unblocked · handoff-order priority</span></div><div class="task-list" id="next-list"></div></section>
-    <section class="document-section" id="decisions"><div class="section-line"><h2>## needs decision</h2><span>held for a ruling</span></div><div class="task-list" id="decision-list"></div></section>
-    <section class="document-section" id="waiting"><div class="section-line"><h2>## waiting</h2><span>blocked · waves from the blocker graph</span></div><div id="waves"></div></section>
-    <section class="document-section" id="drift"><div class="section-line"><h2>## drift</h2><span id="drift-age"></span></div><div class="log" id="drift-list"></div><p class="note">Live: the daemon runs <code>manna reconcile --json</code> (read-only) when the board moves. The file age is the last <code>reconcile --write-drift</code>.</p></section>
-    <section class="document-section" id="tracks"><div class="section-line"><h2>## by track</h2><span>programs</span></div><div id="track-list"></div></section>
-    <section class="document-section" id="dreams"><div class="section-line"><h2>## dreams</h2><span>parked · not claimable</span></div><div class="task-list" id="dream-list"></div></section>
-    <section class="document-section" id="all">
-      <div class="section-line"><h2>## all</h2><span id="inventory-count"></span></div>
-      <div class="filter-row" role="group" aria-label="Filter by state">
-        <button class="filter active" type="button" data-state="all">[all]</button>
-        <button class="filter" type="button" data-state="active">[active]</button>
-        <button class="filter" type="button" data-state="ready">[ready]</button>
-        <button class="filter" type="button" data-state="waiting">[waiting]</button>
-        <button class="filter" type="button" data-state="decision">[decision]</button>
-        <button class="filter" type="button" data-state="dream">[dream]</button>
-        <button class="filter" type="button" data-state="done">[done]</button>
+  <main class="cockpit">
+    <section id="sheet" class="sheet" aria-live="polite">
+      <div class="sheet-body" id="sheet-inbox" hidden>
+        <div class="sheet-head"><span class="prompt">manna inbox</span><span class="cap" id="inbox-cap"></span></div>
+        <div class="list" id="inbox-list"></div>
       </div>
-      <div class="table-wrap"><table>
-        <colgroup><col class="c-check"><col class="c-id"><col><col class="c-track"><col class="c-state"><col class="c-updated"></colgroup>
-        <thead><tr><th scope="col"><span class="sr">state</span></th><th scope="col">manna</th><th scope="col">work</th><th scope="col">track</th><th scope="col">state</th><th scope="col">updated</th></tr></thead>
-        <tbody id="inventory-body"></tbody>
-      </table></div>
+      <div class="sheet-body" id="sheet-board">
+        <div class="chips" role="group" aria-label="Filters">
+          <button class="chip active" data-chip="live" type="button">live</button>
+          <button class="chip" data-chip="done" type="button">+done</button>
+          <button class="chip" data-chip="dreams" type="button">dreams</button>
+          <span class="chip-select"><label for="track-filter" class="sr">track</label><select id="track-filter"><option value="">track ▾</option></select></span>
+          <span class="modes"><button class="mode active" data-mode="list" type="button">list</button><span class="sep">|</span><button class="mode" data-mode="timeline" type="button">timeline</button></span>
+        </div>
+        <div id="board-list"></div>
+      </div>
+      <div class="sheet-body" id="sheet-coord" hidden>
+        <div id="coord-list"></div>
+      </div>
+      <div class="sheet-body" id="sheet-debug" hidden>
+        <div id="debug-list"></div>
+      </div>
     </section>
-    <footer class="footer">
-      <p><span class="label">source </span><strong id="source-path">.manna/issues.jsonl</strong></p>
-      <p><span class="label">root </span><strong id="root-path"></strong></p>
-      <p><span class="label">mode </span><strong>read-only human view; agents use <code>agent-do manna context</code></strong></p>
-    </footer>
+    <aside id="inspector" class="inspector" aria-label="Inspector"><p class="empty">select a row</p></aside>
   </main>
+
+  <footer class="strip">
+    <span class="strip-slug" id="strip-slug">[board]</span>
+    <span id="strip-drift"></span>
+    <span id="strip-file"></span>
+    <span id="strip-health"></span>
+    <span id="strip-digests"></span>
+    <button class="text-button strip-debug" id="debug-button" type="button">debug ▸</button>
+  </footer>
+
+  <div class="palette" id="palette" hidden>
+    <div class="palette-box" role="dialog" aria-label="Jump">
+      <input id="palette-input" type="text" placeholder="sheet, item, peer, board…" autocomplete="off" />
+      <div id="palette-results"></div>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <noscript>This local page needs JavaScript to read the board.</noscript>
 </body>
