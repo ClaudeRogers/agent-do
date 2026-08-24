@@ -28,6 +28,11 @@ const ago = (v) => {
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`;
 };
 
+// "TRACK: Agentic Work OS (program umbrella)" -> "Agentic Work OS": the row
+// is already inside a board; the label's job is to name the program, not
+// explain what a track is.
+const shortTrack = (t) => String(t || "").replace(/^\s*track\s*:\s*/i, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+
 function matches(row) {
   if (!app.grep) return true;
   const hay = [row.id, row.title, row.track_title, row.track, row.claimant?.label, row.description].filter(Boolean).join(" ").toLowerCase();
@@ -55,14 +60,16 @@ function taskRow(row, opts = {}) {
   if (row.prompt) actions.push(`<a href="${api("handoff")}?path=${encodeURIComponent(row.prompt)}" target="_blank" rel="noreferrer">[open handoff]</a>`);
   actions.push(`<button type="button" data-copy="${esc(row.id)}">[copy id]</button>`);
   actions.push(`<button type="button" data-copy="agent-do manna show ${esc(row.id)}">[copy show cmd]</button>`);
-  const trackTag = opts.showTrack !== false && row.track_title ? `<span class="track-tag">${esc(row.track_title)}</span>` : "";
+  const track = opts.showTrack !== false && row.track_title ? shortTrack(row.track_title) : "";
   return `
     <details class="task" id="row-${esc(row.id)}">
       <summary>
         <span class="task-check ${cls(st)}">${mark(st)}</span>
         <span class="task-id">${esc(row.id)}</span>
-        <span class="task-title">${esc(row.title)}${trackTag}</span>
-        <span class="task-state ${cls(st)}">${esc(label(st))}${row.order != null ? ` <span class="faint">#${row.order + 1}</span>` : ""}</span>
+        <span class="task-title">${esc(row.title)}</span>
+        <span class="task-track" title="${esc(row.track_title || "")}">${esc(track)}</span>
+        <span class="task-state ${cls(st)}">${esc(label(st))}</span>
+        <span class="task-prio">${row.order != null ? `#${row.order + 1}` : ""}</span>
       </summary>
       <div class="task-body">
         ${row.description ? `<p class="desc">${esc(row.description)}</p>` : ""}
@@ -86,7 +93,7 @@ function renderHeader(s) {
   document.title = `manna / ${s.name}`;
   $("#prompt-name").textContent = s.name;
   $("#page-title").textContent = s.name.toUpperCase();
-  $("#command-line").textContent = `$ cd ${s.root} && agent-do manna context`;
+  $("#command-line").textContent = "$ agent-do manna serve";
   const g = s.git || {};
   $("#repo-state").textContent = g.is_repo ? `${g.branch || "(detached)"} / HEAD ${g.head} / ${g.dirty_paths} dirty path${g.dirty_paths === 1 ? "" : "s"}` : "not a git repository";
   $("#board-state").textContent = `${s.total} rows · workflow ${s.board.workflow || "unknown"} · ${s.board.order_count} in handoff order · issues written ${ago(s.board.issues_modified_at)}`;
@@ -107,10 +114,10 @@ function renderWaves(s) {
   const stray = (s.unlayered || []).filter(matches);
   let html = waves.map((w) => `
     <section class="wave">
-      <div class="wave-heading"><strong>Wave ${w.wave}</strong><span>${w.wave === 1 ? "waits only on work that is ready, active, or awaiting a decision" : `waits on wave ${w.wave - 1}`} · ${w.items.length} item${w.items.length === 1 ? "" : "s"}</span></div>
+      <div class="wave-heading"><strong>Wave ${w.wave}</strong><span>${w.items.length} item${w.items.length === 1 ? "" : "s"} · ${w.wave === 1 ? "waits on unblocked work" : `waits on wave ${w.wave - 1}`}</span></div>
       <div class="task-list">${w.items.map((r) => taskRow(r)).join("")}</div>
     </section>`).join("");
-  if (stray.length) html += `<section class="wave"><div class="wave-heading"><strong>Unlayered</strong><span>a cycle or a missing blocker; reconcile should name it</span></div><div class="task-list">${stray.map((r) => taskRow(r)).join("")}</div></section>`;
+  if (stray.length) html += `<section class="wave"><div class="wave-heading"><strong>Unlayered</strong><span>${stray.length} item${stray.length === 1 ? "" : "s"} · cycle or missing blocker</span></div><div class="task-list">${stray.map((r) => taskRow(r)).join("")}</div></section>`;
   $("#waves").innerHTML = html || '<p class="empty">Nothing is blocked.</p>';
 }
 
@@ -128,7 +135,7 @@ function renderTracks(s) {
     const items = t.items.filter(matches);
     const open = items.filter((r) => r.effective !== "done").length;
     return `<details class="track" ${app.grep ? "open" : ""}>
-      <summary><span class="task-check state-track">[#]</span><strong>${esc(t.title)}</strong><span>${t.id ? esc(t.id) + " · " : ""}${open} open / ${items.length} shown</span></summary>
+      <summary><span class="task-check state-track">[#]</span><strong>${esc(shortTrack(t.title))}</strong><span>${open} open · ${items.length} shown${t.id ? " · " + esc(t.id) : ""}</span></summary>
       <div class="task-list">${items.length ? items.map((r) => taskRow(r, { showTrack: false })).join("") : '<p class="empty">nothing matches</p>'}</div>
     </details>`;
   }).join("") || '<p class="empty">No tracks on this board.</p>';
@@ -141,11 +148,12 @@ function renderInventory(s) {
   $("#inventory-body").innerHTML = rows.length ? rows.map((r) => `
     <tr>
       <td class="${cls(r.effective)}">${mark(r.effective)}</td>
-      <td><a href="#row-${esc(r.id)}">${esc(r.id)}</a></td>
-      <td>${esc(r.title)}${r.track_title ? ` <span class="faint">· ${esc(r.track_title)}</span>` : ""}</td>
+      <td class="nowrap"><a href="#row-${esc(r.id)}">${esc(r.id)}</a></td>
+      <td>${esc(r.title)}</td>
+      <td class="faint nowrap">${esc(shortTrack(r.track_title || ""))}</td>
       <td class="${cls(r.effective)}">${esc(label(r.effective))}</td>
       <td class="nowrap">${esc(fmtDate(r.updated_at))}</td>
-    </tr>`).join("") : '<tr><td colspan="5" class="empty">Nothing matches.</td></tr>';
+    </tr>`).join("") : '<tr><td colspan="6" class="empty">Nothing matches.</td></tr>';
 }
 
 function bindCopy() {

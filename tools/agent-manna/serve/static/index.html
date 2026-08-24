@@ -26,8 +26,8 @@
       <p class="muted" id="summary-line">loading</p>
     </section>
     <section class="document-section">
-      <div class="table-wrap"><table>
-        <thead><tr><th scope="col">board</th><th scope="col">active</th><th scope="col">ready</th><th scope="col">blocked</th><th scope="col">decision</th><th scope="col">dream</th><th scope="col">done</th><th scope="col">drift</th><th scope="col">updated</th><th scope="col">path</th></tr></thead>
+      <div class="table-wrap"><table class="boards">
+        <thead><tr><th scope="col">board</th><th scope="col" class="num">active</th><th scope="col" class="num">ready</th><th scope="col" class="num">blocked</th><th scope="col" class="num">decision</th><th scope="col" class="num">dream</th><th scope="col" class="num">done</th><th scope="col" class="num">drift</th><th scope="col">updated</th><th scope="col">path</th></tr></thead>
         <tbody id="boards-body"></tbody>
       </table></div>
       <p class="note">A board appears here after <code>agent-do manna serve</code> runs inside its project once, or after <code>agent-do manna serve --scan &lt;dir&gt;</code>.</p>

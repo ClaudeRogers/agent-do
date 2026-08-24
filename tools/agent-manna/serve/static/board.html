@@ -40,13 +40,13 @@
       <a href="#now">now</a><a href="#next">next</a><a href="#decisions">needs decision</a><a href="#waiting">waiting</a><a href="#drift">drift</a><a href="#tracks">tracks</a><a href="#dreams">dreams</a><a href="#all">all</a>
     </nav>
 
-    <section class="document-section" id="now"><div class="section-line"><h2>## now</h2><span>claimed and in progress, with the claimant's liveness from coord</span></div><div class="task-list" id="now-list"></div></section>
-    <section class="document-section" id="next"><div class="section-line"><h2>## next</h2><span>open, nothing blocking, in handoff-order priority</span></div><div class="task-list" id="next-list"></div></section>
-    <section class="document-section" id="decisions"><div class="section-line"><h2>## needs decision</h2><span>a human rules before these move</span></div><div class="task-list" id="decision-list"></div></section>
-    <section class="document-section" id="waiting"><div class="section-line"><h2>## waiting</h2><span>blocked, layered by the blocker graph: a wave may start when the wave before it is done</span></div><div id="waves"></div></section>
+    <section class="document-section" id="now"><div class="section-line"><h2>## now</h2><span>claimed · liveness from coord</span></div><div class="task-list" id="now-list"></div></section>
+    <section class="document-section" id="next"><div class="section-line"><h2>## next</h2><span>unblocked · handoff-order priority</span></div><div class="task-list" id="next-list"></div></section>
+    <section class="document-section" id="decisions"><div class="section-line"><h2>## needs decision</h2><span>held for a ruling</span></div><div class="task-list" id="decision-list"></div></section>
+    <section class="document-section" id="waiting"><div class="section-line"><h2>## waiting</h2><span>blocked · waves from the blocker graph</span></div><div id="waves"></div></section>
     <section class="document-section" id="drift"><div class="section-line"><h2>## drift</h2><span id="drift-age"></span></div><div class="log" id="drift-list"></div><p class="note">From the last <code>manna reconcile</code>. This page never runs reconcile; it reads what the last run left.</p></section>
-    <section class="document-section" id="tracks"><div class="section-line"><h2>## by track</h2><span>programs and what belongs to each</span></div><div id="track-list"></div></section>
-    <section class="document-section" id="dreams"><div class="section-line"><h2>## dreams</h2><span>parked sparks: visible, not claimable, until converted</span></div><div class="task-list" id="dream-list"></div></section>
+    <section class="document-section" id="tracks"><div class="section-line"><h2>## by track</h2><span>programs</span></div><div id="track-list"></div></section>
+    <section class="document-section" id="dreams"><div class="section-line"><h2>## dreams</h2><span>parked · not claimable</span></div><div class="task-list" id="dream-list"></div></section>
     <section class="document-section" id="all">
       <div class="section-line"><h2>## all</h2><span id="inventory-count"></span></div>
       <div class="filter-row" role="group" aria-label="Filter by state">
@@ -59,7 +59,8 @@
         <button class="filter" type="button" data-state="done">[done]</button>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th scope="col">check</th><th scope="col">manna</th><th scope="col">work</th><th scope="col">state</th><th scope="col">updated</th></tr></thead>
+        <colgroup><col class="c-check"><col class="c-id"><col><col class="c-track"><col class="c-state"><col class="c-updated"></colgroup>
+        <thead><tr><th scope="col"><span class="sr">state</span></th><th scope="col">manna</th><th scope="col">work</th><th scope="col">track</th><th scope="col">state</th><th scope="col">updated</th></tr></thead>
         <tbody id="inventory-body"></tbody>
       </table></div>
     </section>
