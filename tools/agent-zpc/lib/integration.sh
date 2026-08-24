@@ -256,8 +256,8 @@ max_tokens, budget_origin = delivery.resolve(sys.argv[7], override)
 # re-reads a rule they think they already know.
 live = delivery.live_claims(global_path)
 
-# Dated order, not file order: promotions and mining append at different times
-# than the days they describe, and "newest first" has to mean the claim's day.
+# Dated order, not file order: promotions append at different times than the
+# days they describe, and "newest first" has to mean the claim's day.
 live.sort(key=lambda record: record["row"].get("date", ""), reverse=True)
 
 # Preferences first, then the rest of the technique claims. The cut takes from

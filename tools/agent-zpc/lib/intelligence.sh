@@ -6,21 +6,15 @@ cmd_harvest() {
     ensure_zpc
     mkdir -p "$ZPC_STATE_DIR"
 
-    local auto=false dry_run=false since="" corrections=false
+    local auto=false dry_run=false since=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --auto) auto=true; shift ;;
             --dry-run) dry_run=true; shift ;;
             --since) since="$2"; shift 2 ;;
-            --corrections) corrections=true; shift ;;
             --help|-h)
                 echo "Usage: agent-zpc harvest [--auto] [--dry-run] [--since last]"
-                echo "       agent-zpc harvest --corrections [--since YYYY-MM-DD] [--dry-run]"
-                echo
-                echo "  --corrections   Mine past sessions for corrections the user typed and"
-                echo "                  write them to the machine-wide store as dated preference"
-                echo "                  lessons, each carrying the sentence verbatim."
                 return 0
                 ;;
             *) shift ;;
@@ -28,13 +22,6 @@ cmd_harvest() {
     done
 
     log_access "harvest"
-
-    # Consolidation reads this project's lessons; correction mining reads past
-    # transcripts and writes the global layer. Same verb, different corpus.
-    if [[ "$corrections" == true ]]; then
-        _harvest_corrections "$since" "$dry_run"
-        return $?
-    fi
 
     local lessons_file="$ZPC_MEMORY_DIR/lessons.jsonl"
     local decisions_file="$ZPC_MEMORY_DIR/decisions.jsonl"
@@ -313,73 +300,6 @@ PYTHON
     fi
 }
 
-# Where the transcripts live. Two sources because neither covers the other: the
-# agent-sessions index is every harness back to the beginning and is rebuilt on
-# a schedule, so it is always a little behind; the live Claude Code transcripts
-# are exactly the part it has not caught up to yet. Both are read-only — mining
-# never writes to another tool's store.
-ZPC_SESSIONS_DB="${AGENT_SESSIONS_DB:-$HOME/.cache/agent-sessions/sessions.db}"
-ZPC_TRANSCRIPT_ROOT="${AGENT_ZPC_TRANSCRIPT_ROOT:-$HOME/.claude/projects}"
-
-# Mine past corrections into the machine-wide layer.
-#
-# A correction is evidence, not a guess: the user already said what he wanted
-# and the transcript kept the sentence. Every mined lesson carries that sentence
-# verbatim, the day it was typed, one line naming what the assistant had just
-# done, and the session it happened in — and lands as a dated, retractable claim
-# like every other, never as a rule.
-_harvest_corrections() {
-    local since="$1" dry_run="$2"
-
-    ensure_global
-    local store="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
-
-    local args=("$ZPC_SESSIONS_DB" "$ZPC_TRANSCRIPT_ROOT" "$store" "$since")
-    [[ "$dry_run" == true ]] && args+=("--dry-run")
-
-    local result
-    result=$(python3 "$ZPC_LIB_DIR/corrections.py" "${args[@]}") || {
-        die "Correction mining failed; nothing was written."
-    }
-
-    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        json_result "$result"
-        return 0
-    fi
-
-    python3 << 'PYTHON' - "$result"
-import json, sys
-
-data = json.loads(sys.argv[1])
-prefix = "DRY RUN — " if data["dry_run"] else ""
-print(f"{prefix}ZPC CORRECTION MINING")
-index = data["index"]
-mark = index["watermark"] or "never"
-state = f"indexed through {mark}" if index["present"] else "absent"
-print(f"  Index:      {state}")
-print(f"  Live scan:  {data['live']['files_scanned']} transcript(s) past the watermark")
-print(f"  Candidates: {data['candidates']} (newest {data['selected']} considered)")
-
-# A cap that hides what it dropped is a silent truncation. Say the number.
-if data["beyond_cap"]:
-    print(f"  Beyond cap: {data['beyond_cap']} older correction(s) not mined this run")
-if data["dry_run"]:
-    print(f"  Would write: {sum(1 for r in data['found'] if r['status'] == 'new')}")
-else:
-    print(f"  Written:    {data['written']} ({data['already_mined']} already mined)")
-
-if data["found"]:
-    print()
-    for row in data["found"]:
-        flag = "+" if row["status"] == "new" else "="
-        print(f"  {flag} [{row['date']}] {row['id']} ({row['marker']}) {row['session'][:8]}")
-        print(f"      said: {row['quote'][:160]}")
-        print(f"      after: {row['preceded_by'][:120]}")
-else:
-    print("\n  No corrections matched. The lexicon is in lib/corrections.py.")
-PYTHON
-}
-
 cmd_query() {
     ensure_zpc
 
@@ -430,18 +350,20 @@ def matches(obj, tag, since, text):
             return False
     return True
 
-def local_claims(path, prefix, kind):
+def local_claims(path, prefix, kind, scope="project"):
     """Claims with their epistemic state attached, ids derived where absent.
 
     Deriving here is what lets `query --text les-1a2b3c` find a row whose id has
     not been written to disk yet: the id an agent read in an inject blob is the
-    id this search answers to, backfilled or not.
+    id this search answers to, backfilled or not. The machine-wide store reads
+    through the same path: a retracted global row answers a query flagged as
+    retracted, never as a live claim.
     """
     rows = []
     for record in epistemics.analyze(path, prefix)["claims"]:
         obj = dict(record["row"])
         obj["_type"] = kind
-        obj["_scope"] = "project"
+        obj["_scope"] = scope
         obj["_retracted"] = record["retraction"] is not None
         if record["retraction"] is not None:
             obj["_retraction"] = record["retraction"]
@@ -463,19 +385,9 @@ if qtype in ("all", "decisions") and os.path.exists(decisions_file):
             results.append(obj)
 
 if include_global and qtype in ("all", "lessons") and os.path.exists(global_lessons_file):
-    with open(global_lessons_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                obj["_type"] = "lesson"
-                obj["_scope"] = "global"
-                if matches(obj, tag, since, text):
-                    results.append(obj)
-            except:
-                pass
+    for obj in local_claims(global_lessons_file, "les-", "lesson", scope="global"):
+        if matches(obj, tag, since, text):
+            results.append(obj)
 
 # Sort by date descending, limit
 results.sort(key=lambda x: x.get("date", ""), reverse=True)

@@ -23,7 +23,7 @@ _zpc_claim_count() {
 }
 
 # Which file holds this claim. A les- id can name a project lesson or a
-# machine-wide one — promoted and mined rows carry the same prefix — so the id
+# machine-wide one — promoted rows keep their project-store prefix — so the id
 # alone does not say, and the answer is whichever store actually resolves it.
 # Project first: that is the store the command is standing in. An id found in
 # neither reports against the project store, where the "no such claim" message
@@ -45,6 +45,28 @@ _zpc_store_file() {
         dec-*) printf '%s' "$ZPC_MEMORY_DIR/decisions.jsonl" ;;
         *) return 1 ;;
     esac
+}
+
+# The other store holding this same claim, if any. A lesson learned here and
+# promoted keeps one id in two files, and a retraction that tombstones only the
+# copy in front of it leaves the machine-wide copy rendering in every other
+# project — which is exactly the copy a retraction most needs to reach.
+_zpc_twin_store() {
+    local id="$1" chosen="$2" project global
+    case "$id" in
+        les-*) ;;
+        *) return 1 ;;
+    esac
+    project="$ZPC_MEMORY_DIR/lessons.jsonl"
+    global="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
+    if [[ "$chosen" == "$project" ]]; then
+        [[ -f "$global" ]] && _epistemics resolve "$global" "les-" "$id" >/dev/null 2>&1 \
+            && printf '%s' "$global" && return 0
+    elif [[ "$chosen" == "$global" ]]; then
+        [[ -f "$project" ]] && _epistemics resolve "$project" "les-" "$id" >/dev/null 2>&1 \
+            && printf '%s' "$project" && return 0
+    fi
+    return 1
 }
 
 _zpc_store_prefix() {
@@ -219,6 +241,16 @@ PYTHON
         || die "Could not build the correction row; nothing was written."
     append_jsonl "$file" "$correction" || return 1
 
+    # Same correction, same evidence, into the twin store: one id, one verdict,
+    # every copy. Filed second so a failure here leaves the first tombstone
+    # standing and the message below names what did not land.
+    local twin=""
+    if twin="$(_zpc_twin_store "$target" "$file")"; then
+        _zpc_backfill "$twin" "$prefix" >/dev/null
+        append_jsonl "$twin" "$correction" \
+            || die "Filed against $file but not against its copy in $twin; file it there by hand."
+    fi
+
     log_access "retract"
 
     local blast='{"lessons":[],"decisions":[],"patterns":[]}'
@@ -234,7 +266,7 @@ PYTHON
     updated="$(_zpc_resolve "$target")" || updated="$row"
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
-        python3 << 'PYTHON' - "$correction" "$updated" "$blast" "$candidate"
+        python3 << 'PYTHON' - "$correction" "$updated" "$blast" "$candidate" "$file" "$twin"
 import json, sys
 
 payload = {
@@ -242,17 +274,19 @@ payload = {
     "target": json.loads(sys.argv[2]),
     "blast_radius": json.loads(sys.argv[3]),
     "kind": "challenge" if sys.argv[4] == "true" else "retraction",
+    "stores": [s for s in (sys.argv[5], sys.argv[6]) if s],
 }
 print(json.dumps({"success": True, "result": payload}, ensure_ascii=False))
 PYTHON
     else
-        python3 << 'PYTHON' - "$correction" "$updated" "$blast" "$candidate"
+        python3 << 'PYTHON' - "$correction" "$updated" "$blast" "$candidate" "$file" "$twin"
 import json, sys
 
 correction = json.loads(sys.argv[1])
 record = json.loads(sys.argv[2])
 blast = json.loads(sys.argv[3])
 candidate = sys.argv[4] == "true"
+twin = sys.argv[6]
 
 claim = record.get("claim", "")
 if candidate:
@@ -270,6 +304,8 @@ else:
     print()
     print("Nothing was deleted. The claim stays on disk with the receipt beside it;")
     print("inject stops rendering it and shows the correction for the next 30 days.")
+    if twin:
+        print(f"  also filed against the copy in {twin}")
 
     lessons = blast.get("lessons", [])
     decisions = blast.get("decisions", [])

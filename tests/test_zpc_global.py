@@ -131,6 +131,32 @@ def main() -> None:
         query_text = checked(consumer, env, "query", "--global", "--tag", "harness-seed").stdout
         require(query_text.count("[global]") == 2, f"text query must label global entries: {query_text}")
 
+        # One id, two files: the lesson learned in `source` and its promoted
+        # copy. A retraction filed where the lesson was learned has to reach
+        # the machine-wide copy too, or every other project keeps reading it.
+        worktree_id = next(
+            item["id"] for item in query["results"]
+            if item["takeaway"] == "Seed ignored env files from the parent worktree."
+        )
+        withdrawn = json_result(checked(
+            source, env, "retract", worktree_id,
+            "--evidence", "the parent checkout seeds nothing; worktrees read env from the vault now",
+            "--json",
+        ))
+        require(len(withdrawn["stores"]) == 2, f"retraction must name both stores it reached: {withdrawn}")
+        for where, label in ((source, "source"), (consumer, "consumer")):
+            blob = checked(where, env, "inject").stdout
+            require(
+                "Seed ignored env files from the parent worktree." not in blob,
+                f"retracted lesson kept rendering in {label}: {blob}",
+            )
+        after = json_result(checked(consumer, env, "query", "--global", "--tag", "harness-seed", "--json"))
+        flagged = {item["id"]: item.get("_retracted", False) for item in after["results"]}
+        require(
+            flagged.get(worktree_id) is True and sum(flagged.values()) == 1,
+            f"global query must flag the retracted copy, and only it: {flagged}",
+        )
+
         tail_env = env.copy()
         tail_home = tmp / "tail-home"
         tail_env["AGENT_DO_HOME"] = str(tail_home)

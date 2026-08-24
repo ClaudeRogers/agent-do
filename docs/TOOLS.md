@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 20 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 21 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2539,7 +2539,7 @@ Concurrency: `write`
 - `dream`: File an idea spark on the nearest board or the global inbox
 - `lint`: Check board grammar and strict handoff linkage; findings exit 1
 - `reconcile`: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
-- `serve`: Read-only human board view on a fixed local port (7777); every registered board indexed at /, this project at /<name>; always prints the URL
+- `serve`: Read-only human board view on a fixed local port (7777); every registered board indexed at /, this project at /\<name>; always prints the URL
 
 **Examples**
 
@@ -2564,6 +2564,10 @@ agent-do manna reconcile --write-drift
 agent-do manna order mn-abc123 1
 # synchronize handoff filenames after a board change
 agent-do manna sync
+# show me the board
+agent-do manna serve --open
+# list every board on this machine
+agent-do manna serve --scan ~/Projects
 ```
 
 **Safety (from contracts)**
@@ -2571,6 +2575,7 @@ agent-do manna sync
 - Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
 - Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `sync`, `unblock`, `update`
 - destructive (irreversible data loss; confirm before auto-running): `delete`, `migrate`
+- long_running (daemon/stream/session; may never return): `serve`
 - polymorphic (beat decided by payload or flag at call time): `reconcile`
 - composite (one call performs several beats internally): `migrate`, `order`, `sync`
 
@@ -4803,7 +4808,7 @@ Concurrency: `mixed`
 - `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
 - `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
 - `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
-- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and queues them for review (correction-candidates.jsonl, never injected), each carrying the sentence verbatim; a candidate becomes a lesson only through learn + promote
+- `harvest`: Post-build consolidation scan
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
@@ -4831,8 +4836,6 @@ agent-do zpc review --since HEAD~20 --dry-run
 agent-do zpc review --auto --phase 'Sprint 3'
 # consolidate after swarm build
 agent-do zpc harvest
-# learn from the corrections I have already typed
-agent-do zpc harvest --corrections --dry-run
 # what has this user already told me about how to work
 agent-do zpc inject --preferences
 # check memory status
