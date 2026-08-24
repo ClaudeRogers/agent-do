@@ -41,7 +41,7 @@ import board as board_lib  # noqa: E402
 STATIC_DIR = SERVE_DIR / "static"
 AGENT_DO = SERVE_DIR.parents[2] / "agent-do"
 
-# 7777 is a name, not a bound: Erik's pick (2026-08-24) for a port anyone on
+# 7777 is a name, not a bound: chosen 2026-08-24 for a port anyone on
 # the estate can remember. Override with --port or MANNA_SERVE_PORT.
 DEFAULT_PORT = 7777
 DEFAULT_HOST = "127.0.0.1"

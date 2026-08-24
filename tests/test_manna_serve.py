@@ -183,7 +183,7 @@ class RegistryAndHttpTests(unittest.TestCase):
         )
         before = board_lib.summary(self.root, serve_lib.decision_markers())["decisions"]
         with self.assertRaises(ValueError):
-            serve_lib.add_decision_marker("ERIK")
+            serve_lib.add_decision_marker("ADA")
         serve_lib.add_decision_marker("[ADA]")
         serve_lib.add_decision_marker("[ada]")
         self.assertEqual(serve_lib.load_registry_file()["decision_markers"], ["[ADA]"])
