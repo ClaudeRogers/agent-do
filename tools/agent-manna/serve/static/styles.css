@@ -162,7 +162,7 @@ tr:hover td { background: var(--raised); }
 }
 
 table.boards { table-layout: auto; }
-table.boards td.num, table.boards th.num { text-align: right; padding-left: var(--s3); padding-right: var(--s3); }
+table.boards td.num, table.boards th.num { text-align: right; padding-left: var(--s2); padding-right: var(--s2); }
 table.boards td.num + td:not(.num), table.boards th.num + th:not(.num) { padding-left: var(--s4); }
 table.boards th.nowrap, table.boards td.nowrap { white-space: nowrap; }
 
