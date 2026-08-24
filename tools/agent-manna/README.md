@@ -442,7 +442,7 @@ registered board at `/` and this project at `/<name>`:
 - **waiting**: the `blocked_by` graph in topological waves
 - **drift**: the last `reconcile --write-drift` findings (the page never runs reconcile)
 - **by track**, **dreams**, and a grep/filter table over everything
-- item drawers: description, blockers and dependents, the sealed handoff, every commit carrying the item's `Manna:` trailer
+- item drawers: description, blockers and dependents, every commit carrying the item's `Manna:` trailer, and one-click copy of the handoff path, the id, and the `show` command
 
 ```bash
 agent-do manna serve            # register this board, start the daemon if needed, print the URL

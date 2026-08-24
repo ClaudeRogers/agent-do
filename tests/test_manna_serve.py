@@ -115,6 +115,10 @@ class DerivationTests(unittest.TestCase):
         self.assertEqual(waves[2], ["mn-eeeeee"])
         self.assertEqual(sorted(r["id"] for r in self.state["unlayered"]), ["mn-cycle1", "mn-cycle2"])
 
+    def test_handoff_existence_is_reported_per_row(self) -> None:
+        self.assertTrue(self.by_id["mn-aaaaaa"]["handoff_exists"])
+        self.assertIsNone(self.by_id["mn-bbbbbb"]["handoff_exists"])
+
     def test_dependents_are_reverse_edges(self) -> None:
         self.assertEqual(self.by_id["mn-aaaaaa"]["dependents"], ["mn-dddddd"])
 
@@ -237,11 +241,10 @@ class RegistryAndHttpTests(unittest.TestCase):
             self.assertEqual(state["slug"], "proj")
             self.assertNotIn("claim_token_hash", body.decode())
 
+            # No document viewer: the page hands out the handoff path, never the file.
             status, _, _ = get("/proj/handoff?path=.handoff/01-mn-aaaaaa-first.md")
-            self.assertEqual(status, 200)
-            for bad in ("/proj/handoff?path=secret.md", "/proj/handoff?path=../proj/secret.md", "/proj/handoff?path=.manna/issues.jsonl", "/proj/handoff?path="):
-                status, _, _ = get(bad)
-                self.assertEqual(status, 404, bad)
+            self.assertEqual(status, 404)
+            self.assertNotIn("work order body", body.decode())
 
             status, _, _ = get("/nope")
             self.assertEqual(status, 404)

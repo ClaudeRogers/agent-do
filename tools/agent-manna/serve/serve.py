@@ -15,7 +15,6 @@ own registry under $AGENT_DO_HOME/manna/serve/.
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
 import signal
@@ -377,8 +376,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(state)
         if rest == ["api", "events"]:
             return self.stream(lambda: CACHE.signature(root), lambda: CACHE.state(slug, root)[1])
-        if rest == ["handoff"]:
-            return self.send_handoff(root, parsed.query)
         return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
 
     def route_api(self, parts: list[str], query: str) -> None:
@@ -411,25 +408,6 @@ class Handler(SimpleHTTPRequestHandler):
                 time.sleep(POLL_INTERVAL_SECONDS)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
-
-    def send_handoff(self, root: Path, query: str) -> None:
-        requested = urllib.parse.parse_qs(query).get("path", [""])[0]
-        root = root.resolve()  # macOS: /var is /private/var; compare like with like
-        state_dir = root / ".manna"
-        handoff_dir_name = board_lib.read_yaml(state_dir / "workflow.yaml").get("handoff_dir") or ".handoff"
-        allowed_root = (root / handoff_dir_name).resolve()
-        candidate = (root / requested).resolve()
-        inside = candidate == allowed_root or allowed_root in candidate.parents
-        if not requested or not inside or not candidate.is_file() or candidate.suffix.lower() not in {".md", ".txt", ".source"}:
-            return self.send_bytes(b"handoff is missing or outside the board's handoff root", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND)
-        content = candidate.read_text(encoding="utf-8", errors="replace")
-        title = html.escape(str(candidate.relative_to(root)))
-        body = (
-            "<!doctype html><meta charset='utf-8'><meta name='color-scheme' content='dark'>"
-            f"<title>{title}</title><link rel='stylesheet' href='/static/styles.css'>"
-            f"<main class='handoff'><header class='handoff-head'>{title}</header><pre>{html.escape(content)}</pre></main>"
-        ).encode("utf-8")
-        self.send_bytes(body, "text/html; charset=utf-8")
 
 
 def run_server(host: str, port: int) -> None:

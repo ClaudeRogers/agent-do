@@ -56,10 +56,13 @@ function taskRow(row, opts = {}) {
   const commits = row.commits?.length
     ? `<p><span class="label">commits</span><strong>${row.commits.map((c) => `<span class="commit"><span class="sha">${esc(c.sha)}</span> ${esc(c.subject)} <span class="faint">${esc(ago(c.at))}</span></span>`).join("<br>")}</strong></p>`
     : "";
-  const actions = [];
-  if (row.prompt) actions.push(`<a href="${api("handoff")}?path=${encodeURIComponent(row.prompt)}" target="_blank" rel="noreferrer">[open handoff]</a>`);
-  actions.push(`<button type="button" data-copy="${esc(row.id)}">[copy id]</button>`);
-  actions.push(`<button type="button" data-copy="agent-do manna show ${esc(row.id)}">[copy show cmd]</button>`);
+  const actions = ['<span class="label">copy:</span>'];
+  if (row.prompt) actions.push(`<button type="button" data-copy="${esc(row.prompt)}" data-label="handoff">[handoff]</button>`);
+  actions.push(`<button type="button" data-copy="${esc(row.id)}" data-label="id">[id]</button>`);
+  actions.push(`<button type="button" data-copy="agent-do manna show ${esc(row.id)}" data-label="show cmd">[show cmd]</button>`);
+  // A strict board guarantees the pair; only a legacy board can dangle.
+  const dangling = row.prompt && row.handoff_exists === false && app.state?.board?.workflow !== "strict";
+  if (dangling) actions.push('<span class="faint">no handoff on disk</span>');
   const track = opts.showTrack !== false && row.track_title ? shortTrack(row.track_title) : "";
   return `
     <details class="task" id="row-${esc(row.id)}">
@@ -157,8 +160,18 @@ function renderInventory(s) {
 }
 
 function bindCopy() {
-  $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(b.dataset.copy); toast(`copied: ${b.dataset.copy}`); } catch { toast(b.dataset.copy); }
+  $$("[data-copy]").forEach((b) => b.addEventListener("click", async (event) => {
+    event.preventDefault();
+    const text = b.dataset.copy;
+    try {
+      await navigator.clipboard.writeText(text);
+      b.textContent = "[copied]";
+      b.classList.add("copied");
+      toast(`copied ${text}`);
+      window.setTimeout(() => { b.textContent = `[${b.dataset.label}]`; b.classList.remove("copied"); }, 1600);
+    } catch {
+      toast(`copy failed; select it: ${text}`);
+    }
   }));
 }
 

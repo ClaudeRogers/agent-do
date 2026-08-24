@@ -92,7 +92,8 @@ h2 { font-size: var(--t-h2); margin: 0; }
 .task-meta { display: grid; grid-template-columns: 96px 1fr; column-gap: var(--s4); row-gap: var(--s1); }
 .task-meta p { display: contents; }
 .task-meta strong { font-weight: 500; color: var(--text); }
-.task-actions { margin-top: var(--s2); display: flex; gap: var(--s4); }
+.task-actions { margin-top: var(--s2); display: flex; gap: var(--s3); align-items: baseline; }
+.task-actions button.copied { color: var(--green); }
 .commit { color: var(--muted); }
 .commit .sha { color: var(--amber); }
 
@@ -141,9 +142,6 @@ tr:hover td { background: var(--raised); }
 .toast { position: fixed; bottom: 18px; right: 18px; background: var(--raised); border: 1px solid var(--line-strong); padding: 8px 12px; opacity: 0; transition: opacity 0.2s; }
 .toast.visible { opacity: 1; }
 
-.handoff { max-width: var(--measure); margin: 0 auto; }
-.handoff-head { position: sticky; top: 0; padding: 12px 22px; background: var(--surface); border-bottom: 1px solid var(--line); color: var(--amber); }
-.handoff pre { margin: 0; padding: 24px 22px; white-space: pre-wrap; word-break: break-word; }
 
 @media (max-width: 900px) {
   .task > summary { grid-template-columns: var(--col-check) var(--col-id) minmax(0, 1fr) var(--col-state); }

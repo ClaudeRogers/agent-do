@@ -303,6 +303,7 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
             "title_plain": strip_markers(str(issue.get("title", ""))),
             "track_title": tracks.get(track_id, {}).get("title") if track_id else None,
             "order": order_index.get(issue["id"]),
+            "handoff_exists": (root / str(issue["prompt"])).is_file() if issue.get("prompt") else None,
             "blockers": blockers,
             "dependents": [],
             "decision": is_decision(issue, markers) and status != "done",
