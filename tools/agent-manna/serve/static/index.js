@@ -28,14 +28,13 @@ function render(state) {
   const cell = (n, cls) => `<td class="num ${n ? cls : "faint"}">${n || "·"}</td>`;
   $("#boards-body").innerHTML = rows.length ? rows.map((b) => {
     const sc = b.status_counts || {};
-    const name = b.exists ? `<a href="${esc(b.url)}">${esc(b.slug)}</a>` : `<span class="faint">${esc(b.slug)}</span>`;
+    const name = b.exists ? `<a href="${esc(b.url)}" title="${esc(b.root)}">${esc(b.slug)}</a>` : `<span class="faint" title="${esc(b.root)}">${esc(b.slug)}</span>`;
     return `<tr>
-      <td>${name}${b.exists ? "" : ' <span class="faint">(missing)</span>'}</td>
+      <td class="nowrap">${name}${b.exists ? "" : ' <span class="faint">(missing)</span>'}</td>
       ${cell(b.coord?.needs_you, "attn-needs-user")}${cell(b.coord?.working, "attn-working")}${cell(b.coord?.here, "")}${cell(sc.in_progress, "state-active")}${cell(sc.open, "state-ready")}${cell(sc.blocked, "state-waiting")}${cell(b.decisions, "state-decision")}${cell(b.dreams, "state-dream")}${cell(sc.done, "state-done")}${cell(b.drift_count, "state-decision")}
       <td class="nowrap">${esc(fmtDate(b.latest_update))}</td>
-      <td class="faint">${esc(b.root)}</td>
     </tr>`;
-  }).join("") : '<tr><td colspan="13" class="empty">No boards registered yet.</td></tr>';
+  }).join("") : '<tr><td colspan="12" class="empty">No boards registered yet.</td></tr>';
 }
 
 function receive(state) { lastReceived = new Date(); setConn(true, "live"); render(state); }
