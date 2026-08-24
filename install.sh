@@ -105,6 +105,9 @@ CLAUDE_SETTINGS_SPECS=(
     "UserPromptSubmit||agent-do-correction-keys.py|5"
     "UserPromptSubmit||agent-do-now-stamp.py|5"
     "PreToolUse|Bash|agent-do-pretooluse-check.py|5"
+    "UserPromptSubmit||agent-do-zpc-trigger.py|5"
+    "PreToolUse|Bash|agent-do-zpc-trigger.py|5"
+    "PostToolUse|Edit|Write|agent-do-zpc-trigger.py|5"
     "SessionEnd||agent-do-coord-stop.sh|10"
     "Stop||agent-do-zpc-write-nudge.sh|5"
     "PostToolUse|ExitPlanMode|agent-do-zpc-position-nudge.sh|5"
@@ -592,6 +595,7 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-quantity-check.py|hooks/claude/agent-do-quantity-check.py|py|required"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
+    "agent-do-zpc-trigger.py|hooks/claude/agent-do-zpc-trigger.py|py|required"
     IFS='|' read -r name rel kind requirement <<< "$spec"
     src="$REPO_DIR/$rel"
     dst="$CLAUDE_HOOKS_DIR/$name"

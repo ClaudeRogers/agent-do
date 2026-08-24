@@ -95,10 +95,29 @@ def main() -> None:
                 tags,
             )
 
-        first = json_result(checked(source, env, "promote", "harness-seed", "--to", "global", "--json"))
-        second = json_result(checked(source, env, "promote", "harness-seed", "--to", "global", "--json"))
-        require(first["promoted"] == 2, f"expected two promoted lessons: {first}")
-        require(second["promoted"] == 0 and second["skipped"] == 2, f"promotion must deduplicate: {second}")
+        # Machine-wide promotion is gated and one row at a time: each carries
+        # its rule, its why, its trigger, and a receipt that it is really
+        # cross-project. `always` rows are the ones session start renders.
+        gate = ["--when", "always", "--scope", "machine"]
+        first = json_result(checked(
+            source, env, "promote", "1", "--to", "global", "--json",
+            "--rule", "Seed ignored env files from the parent worktree",
+            "--why", "a fresh worktree omits them and the build fails on a missing secret", *gate,
+        ))
+        require(first["promoted"] == 1, f"expected one promoted lesson: {first}")
+        second_row = json_result(checked(
+            source, env, "promote", "2", "--to", "global", "--json",
+            "--rule", "Heal the browser daemon, keep the session",
+            "--why", "the saved state is on disk; only the daemon wedged", *gate,
+        ))
+        require(second_row["promoted"] == 1, f"expected the second lesson to land: {second_row}")
+        second = json_result(checked(
+            source, env, "promote", "1", "--to", "global", "--json",
+            "--rule", "Seed ignored env files from the parent worktree",
+            "--why", "a fresh worktree omits them and the build fails on a missing secret", *gate,
+        ))
+        require(second["promoted"] == 0 and second["updated"] == 1,
+                f"re-promotion must update the existing row, never duplicate it: {second}")
 
         consumer = init_project(tmp, "consumer", env)
         checked(

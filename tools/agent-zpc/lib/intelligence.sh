@@ -883,16 +883,19 @@ PYTHON
 cmd_promote() {
     ensure_zpc
 
-    local source="" target=""
+    local source="" target="" rule="" why="" scope="" seen_in=""
+    local whens=()
     local positionals=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --to) target="$2"; shift 2 ;;
-            --help|-h)
-                echo "Usage: agent-zpc promote <line-numbers|tag> --to team|global"
-                return 0
-                ;;
+            --rule) rule="$2"; shift 2 ;;
+            --why) why="$2"; shift 2 ;;
+            --when) whens+=("$2"); shift 2 ;;
+            --seen-in) seen_in="$2"; shift 2 ;;
+            --scope) scope="$2"; shift 2 ;;
+            --help|-h) _promote_help; return 0 ;;
             *) positionals+=("$1"); shift ;;
         esac
     done
@@ -900,7 +903,7 @@ cmd_promote() {
     source="${positionals[0]:-}"
 
     if [[ -z "$source" || -z "$target" ]]; then
-        die "Usage: agent-zpc promote <line-numbers|tag> --to team|global"
+        die "Usage: agent-zpc promote <line-number|tag> --to team|global [--rule ... --why ... --when kind:match ... (--seen-in a,b | --scope machine|user)]"
     fi
 
     if [[ "$target" != "team" && "$target" != "global" ]]; then
@@ -918,14 +921,24 @@ cmd_promote() {
         dest_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
     fi
 
-    local result
-    result=$(python3 << 'PYTHON' - "$lessons_file" "$dest_file" "$source" "$ZPC_LIB_DIR"
+    local whens_json
+    whens_json=$(printf '%s\n' "${whens[@]+"${whens[@]}"}" | python3 -c 'import json,sys; print(json.dumps([l for l in sys.stdin.read().split("\n") if l]))')
+
+    local result rc=0
+    result=$(python3 << 'PYTHON' - "$lessons_file" "$dest_file" "$source" "$ZPC_LIB_DIR" "$target" \
+        "$rule" "$why" "$whens_json" "$seen_in" "$scope" "$(dirname "$ZPC_DIR")"
 import json, sys, os
 
 lessons_file, dest_file, source = sys.argv[1], sys.argv[2], sys.argv[3]
-
 sys.path.insert(0, sys.argv[4])
-import epistemics
+import epistemics, triggers
+
+target = sys.argv[5]
+rule, why = sys.argv[6], sys.argv[7]
+when_specs = json.loads(sys.argv[8])
+seen_in = [p.strip() for p in sys.argv[9].split(",") if p.strip()]
+scope = sys.argv[10].strip()
+promoted_from = os.path.basename(sys.argv[11].rstrip("/")) or sys.argv[11]
 
 # Read source lessons. A retracted claim is not promoted to a wider audience,
 # and a correction row is not a lesson anyone can act on.
@@ -944,47 +957,119 @@ for i, (_, obj) in enumerate(entries, 1):
         continue
     lessons.append((i, obj))
 
-# Read existing dest for dedup
-existing = set()
-if os.path.exists(dest_file):
-    with open(dest_file) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    obj = json.loads(line)
-                    key = (obj.get("date",""), obj.get("context",""), obj.get("problem",""))
-                    existing.add(key)
-                except:
-                    pass
-
 # Select lessons to promote
 selected = []
 if source.replace(",", "").isdigit():
-    # Line numbers
     line_nums = set(int(n.strip()) for n in source.split(",") if n.strip())
     for i, obj in lessons:
         if i in line_nums:
             selected.append(obj)
 else:
-    # Tag name
     for i, obj in lessons:
         if source in obj.get("tags", []):
             selected.append(obj)
 
-# Write, deduplicating
-promoted = 0
-with open(dest_file, "a") as f:
-    for obj in selected:
-        key = (obj.get("date",""), obj.get("context",""), obj.get("problem",""))
-        if key not in existing:
-            f.write(json.dumps(obj) + "\n")
-            existing.add(key)
-            promoted += 1
 
-print(json.dumps({"promoted": promoted, "skipped": len(selected) - promoted, "total_selected": len(selected)}))
+def key_of(obj):
+    return (obj.get("date", ""), obj.get("context", ""), obj.get("problem", ""))
+
+
+def refuse(lines):
+    print(json.dumps({"refused": True, "reasons": lines, "selected": len(selected)}))
+    sys.exit(2)
+
+
+if target == "global":
+    # The gate. One row at a time: a machine-wide lesson is promoted on
+    # purpose, with its own rule and why, never as a batch.
+    if not selected:
+        refuse([f"nothing selected by '{source}' (a line number or a tag of a live lesson)"])
+    if len(selected) != 1:
+        refuse([f"'{source}' selects {len(selected)} lessons; promote to global one at a time, "
+                "each with its own --rule, --why and --when"])
+    try:
+        whens = [triggers.parse_when(spec) for spec in when_specs]
+    except triggers.TriggerError as exc:
+        refuse([str(exc)])
+    missing = triggers.gate(selected[0], rule=rule, why=why, whens=whens,
+                            seen_in=seen_in, scope=scope)
+    if missing:
+        refuse(missing)
+    selected = [triggers.stamp(selected[0], rule=rule, why=why, whens=whens,
+                               seen_in=seen_in, scope=scope, promoted_from=promoted_from)]
+
+# Existing destination rows, by the identity promote has always used.
+existing = {}
+dest_entries = epistemics.load(dest_file) if os.path.exists(dest_file) else []
+for raw, obj in dest_entries:
+    if obj is None or epistemics.is_correction(obj):
+        continue
+    existing[key_of(obj)] = obj
+
+promoted = updated = skipped = 0
+if target == "global":
+    # A row already there is re-promoted with its gate fields: this is how a
+    # lesson promoted before triggers existed gets its rule, why and when
+    # without a retract-and-reissue. The stored id is kept.
+    obj = selected[0]
+    k = key_of(obj)
+    if k in existing:
+        rewritten = []
+        for raw, parsed in dest_entries:
+            if parsed is not None and not epistemics.is_correction(parsed) and key_of(parsed) == k:
+                merged = dict(parsed)
+                for field in ("rule", "why", "when", "seen_in", "scope", "promoted_from", "promoted_at"):
+                    merged.pop(field, None)
+                    if field in obj:
+                        merged[field] = obj[field]
+                rewritten.append((json.dumps(merged, ensure_ascii=False), merged))
+                updated += 1
+            else:
+                rewritten.append((raw, parsed))
+        epistemics.write_atomic(dest_file, rewritten)
+    else:
+        with open(dest_file, "a") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        promoted += 1
+else:
+    with open(dest_file, "a") as f:
+        for obj in selected:
+            k = key_of(obj)
+            if k not in existing:
+                f.write(json.dumps(obj) + "\n")
+                existing[k] = obj
+                promoted += 1
+            else:
+                skipped += 1
+
+print(json.dumps({"promoted": promoted, "updated": updated, "skipped": skipped,
+                  "total_selected": len(selected), "target": target}))
 PYTHON
-    )
+    ) || rc=$?
+
+    if [[ "$rc" == "$ZPC_RETRACT_REFUSED" ]]; then
+        if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+            json_error "$result" "$ZPC_RETRACT_REFUSED" || true
+        else
+            python3 << 'PYTHON' - "$result" "$source" >&2
+import json, sys
+data = json.loads(sys.argv[1])
+print(f"Refused: '{sys.argv[2]}' may not go machine-wide as filed. Nothing was written.")
+print()
+for reason in data["reasons"]:
+    print(f"  - {reason}")
+print()
+print("A global lesson rides into every session on this machine. It carries what to do,")
+print("why, and the situation that summons it, or it stays a project lesson.")
+print("  agent-zpc promote <line> --to global --rule \"...\" --why \"...\" \\")
+print("      --when prompt:\"<regex>\" [--when command:\"<regex>\"] [--when path:\"<glob>\"] \\")
+print("      --seen-in proj-a,proj-b | --scope machine|user")
+PYTHON
+        fi
+        exit "$ZPC_RETRACT_REFUSED"
+    elif [[ "$rc" != 0 ]]; then
+        die "Promotion failed; nothing was written."
+    fi
 
     if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
         json_result "$result"
@@ -993,9 +1078,51 @@ PYTHON
 import json, sys
 data = json.loads(sys.argv[1])
 target = sys.argv[2]
-print(f"Promoted {data['promoted']} lessons to {target}")
+if data.get("updated"):
+    print(f"Updated {data['updated']} {target} lesson with its rule, why and trigger")
+else:
+    print(f"Promoted {data['promoted']} lessons to {target}")
 if data["skipped"]:
     print(f"  ({data['skipped']} duplicates skipped)")
+if target == "global" and (data.get("promoted") or data.get("updated")):
+    print("  It fires when its trigger matches; session start carries only `always` rows and a count.")
 PYTHON
     fi
 }
+
+_promote_help() {
+    cat << 'EOF'
+Usage: agent-zpc promote <line-number|tag> --to team
+       agent-zpc promote <line-number> --to global --rule "<instruction>" --why "<reason>" \
+           --when <kind:match> [--when ...] (--seen-in <proj,proj> | --scope machine|user)
+
+A machine-wide lesson rides into every session on this machine, so it has to
+earn the seat. Promotion to global refuses (exit 2, nothing written) unless
+the row carries:
+
+  --rule      what to do, as an instruction a session can follow
+  --why       the reason, so a session can tell when the rule does not apply
+  --when      the situation that summons it, one or more of:
+                prompt:<regex>     words in what the user typed
+                command:<regex>    a shell command about to run
+                path:<glob>        a file just edited
+                always             every session's opening context (rare)
+  --seen-in   two or more project names it bit in, or
+  --scope     machine|user when it is about this machine or this user
+
+Rows a machine wrote (mined, auto-captured) are never eligible. Re-promoting a
+row already in the global store updates its rule/why/when in place under the
+same id. Team promotion is unchanged: promote <lines|tag> --to team.
+
+Delivery follows from --when: `always` rows render at session start; the rest
+wait, and the hook that fires at that moment injects them
+(agent-zpc inject --trigger prompt|command|path <value>).
+
+Examples:
+  agent-zpc promote 14 --to global \
+      --rule "Prove a test's premise inside the test before asserting the behavior" \
+      --why "a test that fakes its own premise can assert nothing and still pass" \
+      --when path:"test_*.py" --when path:"*.test.*" --scope user
+EOF
+}
+

@@ -4812,8 +4812,8 @@ Concurrency: `mixed`
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
-- `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
+- `promote`: Promote lessons: --to team copies rows; --to global is gated and refuses (exit 2, nothing written) unless the one row carries --rule, --why, --when kind:match (prompt|command|path|always) and --seen-in a,b | --scope machine|user; machine-written rows never qualify; re-promoting updates the global copy in place
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --trigger prompt|command|path \<value> emits only the machine-wide lessons whose `when` fires for that moment (the hook path; empty when nothing matches; session start carries `always` rows and a count of the rest); --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
 - `init`: Initialize .zpc/ in a project; --store-only creates the store alone (no .gitignore append, no agent instruction file) and keeps it out of git through .git/info/exclude, which is what an unattended caller may run in a repo it does not own
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check
@@ -4838,6 +4838,10 @@ agent-do zpc review --auto --phase 'Sprint 3'
 agent-do zpc harvest
 # what has this user already told me about how to work
 agent-do zpc inject --preferences
+# make a project lesson machine-wide with its rule, why and trigger
+agent-do zpc promote 14 --to global --rule 'Prove the premise inside the test' --why 'a faked premise proves nothing' --when 'path:test_*.py' --scope user
+# which machine-wide lessons fire for this moment
+agent-do zpc inject --trigger prompt 'write a test for the parser'
 # check memory status
 agent-do zpc status
 # search for docker lessons
