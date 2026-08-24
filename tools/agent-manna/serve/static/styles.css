@@ -165,3 +165,27 @@ table.boards { table-layout: auto; }
 table.boards td.num, table.boards th.num { text-align: right; padding-left: var(--s3); padding-right: var(--s3); }
 table.boards td.num + td:not(.num), table.boards th.num + th:not(.num) { padding-left: var(--s4); }
 table.boards td:last-child { color: var(--faint); font-size: var(--t-small); }
+
+.subheading { font-size: var(--t-body); font-weight: 500; color: var(--muted); margin: var(--s4) 0 var(--s1); }
+.peer > summary, .claim, .drop {
+  display: grid; column-gap: var(--s3); align-items: start; padding: var(--s2) var(--s1);
+  border-bottom: 1px solid var(--line);
+}
+.peer > summary { grid-template-columns: var(--col-check) 168px minmax(0, 1fr) var(--col-track) var(--col-state) var(--col-prio); list-style: none; cursor: pointer; }
+.peer > summary::-webkit-details-marker { display: none; }
+.peer > summary:hover { background: var(--raised); }
+.peer-id { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peer-what { min-width: 0; }
+.peer-what .task-pulse { margin-top: var(--s1); }
+.peer-holding { color: var(--faint); font-size: var(--t-small); line-height: 21px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peer-holding a { color: var(--muted); }
+.peer-age { color: var(--faint); font-size: var(--t-small); line-height: 21px; text-align: right; white-space: nowrap; }
+.peer-body { padding: var(--s1) var(--s1) var(--s4) calc(var(--col-check) + 168px + 2 * var(--s3)); color: var(--muted); }
+.claim { grid-template-columns: var(--col-check) minmax(0, 1fr) 168px var(--col-state) var(--col-prio); }
+.claim-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claim-reason { color: var(--faint); font-size: var(--t-small); display: block; white-space: normal; }
+.claim.stale { color: var(--faint); }
+.claim.contended .claim-path { color: var(--red); }
+.drop { grid-template-columns: var(--col-check) 168px minmax(0, 1fr) var(--col-prio); }
+.drop-note { color: var(--muted); font-size: var(--t-small); display: block; overflow: hidden; text-overflow: ellipsis; }
+.task-list > .peer:last-child > summary, .task-list > .claim:last-child, .task-list > .drop:last-child { border-bottom: 0; }

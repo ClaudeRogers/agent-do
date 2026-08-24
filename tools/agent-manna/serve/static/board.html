@@ -37,10 +37,22 @@
       <div class="counts" id="counts"></div>
     </section>
     <nav class="jump-nav" aria-label="Page sections">
-      <a href="#now">now</a><a href="#next">next</a><a href="#decisions">needs decision</a><a href="#waiting">waiting</a><a href="#drift">drift</a><a href="#tracks">tracks</a><a href="#dreams">dreams</a><a href="#all">all</a>
+      <a href="#now">now</a><a href="#coord">coordination</a><a href="#next">next</a><a href="#decisions">needs decision</a><a href="#waiting">waiting</a><a href="#drift">drift</a><a href="#tracks">tracks</a><a href="#dreams">dreams</a><a href="#all">all</a>
     </nav>
 
     <section class="document-section" id="now"><div class="section-line"><h2>## now</h2><span>claimed · liveness from coord</span></div><div class="task-list" id="now-list"></div></section>
+    <section class="document-section" id="coord">
+      <div class="section-line"><h2>## coordination</h2><span id="coord-caption">who is here · what they hold · where they collide</span></div>
+      <h3 class="subheading">### needs you</h3>
+      <div class="task-list" id="needs-you-list"></div>
+      <h3 class="subheading">### peers</h3>
+      <div class="task-list" id="peer-list"></div>
+      <h3 class="subheading">### claims</h3>
+      <div class="task-list" id="claim-list"></div>
+      <h3 class="subheading">### drops</h3>
+      <div class="task-list" id="drop-list"></div>
+      <p class="note">From coord: presence, pulse, advisory claims, and file drops. Contention is two live owners whose claimed paths overlap. Read-only; act through <code>agent-do coord</code>.</p>
+    </section>
     <section class="document-section" id="next"><div class="section-line"><h2>## next</h2><span>unblocked · handoff-order priority</span></div><div class="task-list" id="next-list"></div></section>
     <section class="document-section" id="decisions"><div class="section-line"><h2>## needs decision</h2><span>held for a ruling</span></div><div class="task-list" id="decision-list"></div></section>
     <section class="document-section" id="waiting"><div class="section-line"><h2>## waiting</h2><span>blocked · waves from the blocker graph</span></div><div id="waves"></div></section>

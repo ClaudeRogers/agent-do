@@ -168,6 +168,69 @@ function renderTracks(s) {
   }).join("") || '<p class="empty">No tracks on this board.</p>';
 }
 
+const peerMark = (a) => ({ "needs-user": "[!]", failed: "[x]", working: "[~]", present: "[ ]", idle: "[.]", finished: "[=]", ended: "[=]", gone: "[-]" }[a] || "[ ]");
+
+function peerMatches(p) {
+  if (!app.grep) return true;
+  return [p.agent_id, p.alias, p.goal, p.pulse?.latest_prompt, ...(p.holding || []).map((h) => h.id + " " + h.title)].filter(Boolean).join(" ").toLowerCase().includes(app.grep.toLowerCase());
+}
+
+function peerRow(p) {
+  const pulse = p.pulse;
+  const what = p.goal || pulse?.latest_prompt || "";
+  const line = pulse ? `<span class="task-pulse">${pulse.activity ? esc(pulse.activity) : ""}${pulse.todo?.total ? ` · ${esc(pulse.todo.done)}/${esc(pulse.todo.total)}` : ""}${pulse.latest_prompt && p.goal ? ` · “${esc(clip(pulse.latest_prompt, 96))}”` : ""}</span>` : "";
+  const holding = (p.holding || []).map((h) => `<a href="#row-${esc(h.id)}" title="${esc(h.title)}">${esc(h.id)}</a>`).join(" ");
+  return `
+    <details class="peer" id="peer-${esc(String(p.agent_id).replace(/[^a-z0-9-]/gi, ""))}">
+      <summary>
+        <span class="task-check ${esc(attnCls(p.attention))}">${peerMark(p.attention)}</span>
+        <span class="peer-id" title="${esc(p.agent_id)}">${esc(p.alias || p.agent_id)}</span>
+        <span class="peer-what">${esc(clip(what, 120)) || '<span class="faint">no focus declared</span>'}${line}</span>
+        <span class="peer-holding">${holding || ""}</span>
+        <span class="task-state ${esc(attnCls(p.attention))}">${esc(attn(p.attention))}</span>
+        <span class="peer-age">${esc(p.age || "")}</span>
+      </summary>
+      <div class="peer-body">
+        <div class="task-meta">
+          <p><span class="label">session</span><strong>${esc(p.agent_id)}${p.runtime ? ` · ${esc(p.runtime)}` : ""}${p.role ? ` · ${esc(p.role)}` : ""}${p.mode ? ` · ${esc(p.mode)}` : ""}</strong></p>
+          <p><span class="label">liveness</span><strong><span class="live-${esc(p.status)}">${esc(p.status)}</span> ${esc(p.age || "")}</strong></p>
+          ${p.goal ? `<p><span class="label">focus</span><strong>${esc(p.goal)}</strong></p>` : ""}
+          ${p.paths?.length ? `<p><span class="label">paths</span><strong>${p.paths.map((x) => esc(x)).join("<br>")}</strong></p>` : ""}
+          ${pulse ? `<p><span class="label">pulse</span><strong><span class="${esc(attnCls(p.attention))}">${esc(attn(p.attention))}</span>${pulse.activity ? ` · ${esc(pulse.activity)}` : ""}${pulse.updated_at ? ` <span class="faint">${esc(ago(pulse.updated_at))}</span>` : ""}${pulse.latest_prompt ? `<br><span class="faint">“${esc(clip(pulse.latest_prompt, 240))}”</span>` : ""}</strong></p>` : ""}
+          ${(p.holding || []).length ? `<p><span class="label">holding</span><strong>${p.holding.map((h) => `<a href="#row-${esc(h.id)}">${esc(h.id)}</a> ${esc(h.title)}`).join("<br>")}</strong></p>` : ""}
+        </div>
+      </div>
+    </details>`;
+}
+
+function renderCoord(s) {
+  const peers = (s.peers || []).filter(peerMatches);
+  const needs = peers.filter((p) => p.attention === "needs-user" || p.attention === "failed");
+  const here = peers.filter((p) => p.attention !== "gone");
+  const gone = peers.length - here.length;
+  const c = s.coord || { claims: [], contention: [], drops: [] };
+  $("#coord-caption").textContent = `${here.length} here${gone ? ` · ${gone} gone` : ""} · ${c.claims.filter((x) => !x.stale).length} live claims${c.contention.length ? ` · ${c.contention.length} contended` : ""}${c.drops.length ? ` · ${c.drops.length} drops` : ""}`;
+  $("#needs-you-list").innerHTML = needs.length ? needs.map(peerRow).join("") : '<p class="empty">Nobody is waiting on you.</p>';
+  const rest = here.filter((p) => !needs.includes(p));
+  $("#peer-list").innerHTML = rest.length ? rest.map(peerRow).join("") : `<p class="empty">${peers.length ? "Everyone here is listed above." : "No sessions on the coord board."}</p>`;
+  const claims = c.claims.filter((x) => !app.grep || `${x.path} ${x.owner} ${x.reason || ""}`.toLowerCase().includes(app.grep.toLowerCase()));
+  $("#claim-list").innerHTML = claims.length ? claims.map((x) => `
+    <div class="claim${x.stale ? " stale" : ""}${x.contended ? " contended" : ""}">
+      <span class="task-check ${x.contended ? "state-waiting" : x.stale ? "state-missing" : "state-ready"}">${x.contended ? "[!]" : x.stale ? "[-]" : "[ ]"}</span>
+      <span class="claim-path" title="${esc(x.path)}">${esc(x.path)}${x.reason ? `<span class="claim-reason">${esc(x.reason)}</span>` : ""}</span>
+      <span class="peer-id" title="${esc(x.owner)}">${esc(x.owner_alias || x.owner)}${x.stale ? `<span class="claim-reason">owner ${esc(x.owner_status || "gone")}</span>` : ""}</span>
+      <span class="task-state ${x.contended ? "state-waiting" : x.stale ? "state-missing" : "state-ready"}">${x.contended ? "contended" : x.stale ? "stale" : esc(x.strength || "claimed")}</span>
+      <span class="peer-age">${esc(ago(x.updated_at))}</span>
+    </div>`).join("") : '<p class="empty">No advisory claims.</p>';
+  $("#drop-list").innerHTML = c.drops.length ? c.drops.map((d) => `
+    <div class="drop">
+      <span class="task-check state-track">[&gt;]</span>
+      <span class="peer-id" title="${esc(d.owner)}">${esc(d.owner)} → ${esc(d.for || "any")}</span>
+      <span class="claim-path">${esc(Array.isArray(d.path) ? d.path.join(", ") : d.path || "")}${d.note ? `<span class="drop-note">${esc(d.note)}</span>` : ""}</span>
+      <span class="peer-age">${esc(ago(d.created_at))}</span>
+    </div>`).join("") : '<p class="empty">No drops waiting.</p>';
+}
+
 function renderInventory(s) {
   const rows = (s.all || []).filter((r) => r.kind !== "track").filter((r) => app.filter === "all" || r.effective === app.filter).filter(matches);
   const total = (s.all || []).filter((r) => r.kind !== "track").length;
@@ -201,9 +264,10 @@ function bindCopy() {
 
 function renderAll() {
   const s = app.state; if (!s) return;
-  const openIds = new Set($$("details.task[open]").map((d) => d.id));
+  const openIds = new Set($$("details.task[open], details.peer[open]").map((d) => d.id));
   renderHeader(s);
   renderList("#now-list", s.now || [], "Nothing claimed right now.");
+  renderCoord(s);
   renderList("#next-list", s.next || [], "Nothing is ready: every open item is blocked or awaiting a decision.");
   renderList("#decision-list", s.decisions || [], "No decisions pending.");
   renderWaves(s);

@@ -56,6 +56,15 @@ STUB_PEERS = {
         {"agent_id": "session-dead00000000", "status": "dead", "age": "3h ago", "age_seconds": 10800, "runtime": "claude", "focus": {}},
     ],
 }
+STUB_CLAIMS = {"success": True, "claims": [
+    {"path": "tools/x", "owner": "session-deadbeefdead", "owner_status": "active", "reason": "building", "strength": "soft", "updated_at": "2026-08-24T00:00:00Z"},
+    {"path": "tools/x/sub.py", "owner": "session-0000aaaa1111", "owner_status": "active", "reason": "also here", "strength": "soft", "updated_at": "2026-08-24T00:00:00Z"},
+    {"path": "docs", "owner": "session-dead00000000", "owner_status": "dead", "reason": "old", "strength": "soft", "updated_at": "2026-08-01T00:00:00Z"},
+    {"path": "README.md", "owner": "codex-feedfacefeedface", "owner_status": "idle", "reason": "docs", "strength": "soft", "updated_at": "2026-08-24T00:00:00Z"},
+]}
+STUB_DROPS = {"success": True, "drops": [
+    {"for": "session-deadbeefdead", "path": "notes.md", "note": "read this", "owner_label": "session-0000aaaa1111", "created_at": "2026-08-24T00:00:00Z"},
+]}
 STUB_RECONCILE = {"success": True, "findings": [
     {"kind": "landed_open", "issue_id": "mn-aaaaaa", "detail": "live finding", "evidence": "abc123", "proposed_fix": "claim and done"},
     {"kind": "stale_dream", "issue_id": "mn-dream1", "detail": "old dream", "evidence": "created 2026-08-02", "proposed_fix": "convert or close"},
@@ -68,9 +77,12 @@ def make_stub_agent_do(directory: Path) -> Path:
     script = directory / "agent-do"
     script.write_text(
         "#!/usr/bin/env python3\nimport json, sys\n"
-        f"PEERS = {STUB_PEERS!r}\nRECON = {STUB_RECONCILE!r}\n"
+        f"PEERS = {STUB_PEERS!r}\nRECON = {STUB_RECONCILE!r}\nCLAIMS = {STUB_CLAIMS!r}\nDROPS = {STUB_DROPS!r}\n"
         "a = sys.argv[1:]\n"
         "if a[:3] == ['coord', 'peers', '--json']: print(json.dumps(PEERS)); sys.exit(0)\n"
+        "if a[:3] == ['coord', 'claims', '--json']: print(json.dumps(CLAIMS)); sys.exit(0)\n"
+        "if a[:3] == ['coord', 'drops', '--json']: print(json.dumps(DROPS)); sys.exit(0)\n"
+        "if a[:2] == ['coord', 'need']: print(json.dumps({'success': True, 'needs': []})); sys.exit(0)\n"
         "if a[:3] == ['manna', 'reconcile', '--json']: print(json.dumps(RECON)); sys.exit(1)\n"
         "sys.exit(2)\n",
         encoding="utf-8",
@@ -235,6 +247,21 @@ class LiveDerivationTests(unittest.TestCase):
         self.assertEqual(d["file"]["count"], 1)
         self.assertEqual(d["file"]["generated_at"], "2026-08-20T00:00:00Z")
         self.assertFalse((self.root / ".manna" / "drift.yaml").read_text().count("live finding"), "the page never writes drift")
+
+    def test_coord_snapshot_contention_stale_and_holdings(self) -> None:
+        c = self.state["coord"]
+        self.assertEqual(len(c["contention"]), 1)
+        self.assertEqual(c["contention"][0]["paths"], ["tools/x", "tools/x/sub.py"])
+        by_path = {x["path"]: x for x in c["claims"]}
+        self.assertTrue(by_path["tools/x"]["contended"] and by_path["tools/x/sub.py"]["contended"])
+        self.assertFalse(by_path["README.md"]["contended"])
+        self.assertTrue(by_path["docs"]["stale"])
+        self.assertEqual([x["path"] for x in c["claims"]][:2], ["tools/x", "tools/x/sub.py"], "contended first, stale last")
+        self.assertEqual(c["claims"][-1]["path"], "docs")
+        self.assertEqual(len(c["drops"]), 1)
+        peers = {p["agent_id"]: p for p in self.state["peers"]}
+        self.assertEqual([h["id"] for h in peers["session-deadbeefdead"]["holding"]], ["mn-cccccc"])
+        self.assertEqual(peers["codex-feedfacefeedface"]["holding"], [])
 
     def test_nonzero_exit_reconcile_still_counts(self) -> None:
         # the stub exits 1 with findings, as reconcile does

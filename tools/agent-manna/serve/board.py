@@ -296,6 +296,79 @@ def attention_key(peer: dict[str, Any]) -> tuple:
     return (pos, peer.get("age_seconds") if isinstance(peer.get("age_seconds"), (int, float)) else 10**9)
 
 
+def coord_json(root: Path, agent_do: Path | None, *verb: str, key: str) -> list[dict[str, Any]]:
+    if agent_do is None or not agent_do.is_file():
+        return []
+    out = run([str(agent_do), "coord", *verb, "--json"], root, timeout=10)
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    rows = data.get(key) if isinstance(data, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+LIVE_OWNER = frozenset({"active", "idle"})
+
+
+def _overlaps(a: str, b: str) -> bool:
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/") or a == "." or b == "."
+
+
+def coord_snapshot(root: Path, agent_do: Path | None, peers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Claims, drops, needs, and the contention the page can see for itself:
+    two live owners whose claimed paths overlap. coord's own interrupts are
+    per-session; the daemon has no session, so it derives the shared view."""
+    claims = []
+    for c in coord_json(root, agent_do, "claims", key="claims"):
+        claims.append(
+            {
+                "path": c.get("path"),
+                "owner": c.get("owner"),
+                "owner_alias": c.get("owner_alias"),
+                "owner_status": c.get("owner_status"),
+                "reason": c.get("reason"),
+                "strength": c.get("strength"),
+                "updated_at": c.get("updated_at") or c.get("created_at"),
+                "stale": c.get("owner_status") not in LIVE_OWNER,
+            }
+        )
+    live = [c for c in claims if not c["stale"] and c.get("path")]
+    contention: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for i, a in enumerate(live):
+        for b in live[i + 1 :]:
+            if a["owner"] == b["owner"] or not _overlaps(str(a["path"]), str(b["path"])):
+                continue
+            key = tuple(sorted((f"{a['owner']}:{a['path']}", f"{b['owner']}:{b['path']}")))
+            if key in seen:
+                continue
+            seen.add(key)
+            contention.append({"paths": sorted({str(a["path"]), str(b["path"])}), "owners": sorted({str(a["owner"]), str(b["owner"])})})
+    for c in claims:
+        c["contended"] = any(c["owner"] in x["owners"] and c["path"] in x["paths"] for x in contention)
+    claims.sort(key=lambda c: (c["stale"], not c["contended"], str(c["path"])))
+
+    drops = []
+    for d in coord_json(root, agent_do, "drops", key="drops"):
+        drops.append(
+            {
+                "for": d.get("for"),
+                "path": d.get("path") or d.get("paths"),
+                "note": d.get("note"),
+                "owner": d.get("owner_label") or d.get("owner"),
+                "key": d.get("key"),
+                "created_at": d.get("created_at"),
+            }
+        )
+    drops.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    needs = [{"key": n.get("key"), "why": n.get("why"), "owner": n.get("owner") or n.get("owner_label")} for n in coord_json(root, agent_do, "need", "list", "--all", key="needs")]
+    return {"claims": claims, "contention": contention, "drops": drops, "needs": needs}
+
+
 def _identity_hex(value: str | None) -> str:
     """The hex tail shared by manna's claimant label and coord's agent id.
 
@@ -359,6 +432,7 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
     git = git_summary(root)
     trailers = git_trailers(root) if git["is_repo"] else {}
     peers = coord_peers(root, agent_do) if git["is_repo"] else []
+    coord = coord_snapshot(root, agent_do, peers) if peers else {"claims": [], "contention": [], "drops": [], "needs": []}
 
     by_id = {i["id"]: i for i in issues}
     order_index = {issue_id: n for n, issue_id in enumerate(order)}
@@ -431,6 +505,12 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
         for dep in row.get("blocked_by") or []:
             if dep in row_by_id:
                 row_by_id[dep]["dependents"].append(row["id"])
+    for peer in peers:
+        peer["holding"] = [
+            {"id": r["id"], "title": r["title"]}
+            for r in rows
+            if r.get("claimed_by") and r.get("status") == "in_progress" and match_peer(r["claimed_by"], [peer]) is peer
+        ]
 
     def order_key(row: dict[str, Any]) -> tuple:
         pos = row["order"]
@@ -502,6 +582,7 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
         "git": git,
         "peers": sorted(peers, key=attention_key),
         "attention": {rank: sum(1 for p in peers if p.get("attention") == rank) for rank in ATTENTION_ORDER},
+        "coord": coord,
         "counts": counts,
         "status_counts": status_counts,
         "total": len(issues),
