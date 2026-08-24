@@ -35,6 +35,8 @@ ISSUES = [
     {"id": "mn-eeeeee", "title": "Waits on dddddd", "status": "blocked", "blocked_by": ["mn-dddddd"], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-ffffff", "title": "[ERIK] Ratify the thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-999999", "title": "Open but graph says blocked", "status": "open", "blocked_by": ["mn-bbbbbb"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
+    {"id": "mn-mentio", "title": "Retire the [ERIK] title convention", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
+    {"id": "mn-second", "title": "[P1-K] [erik] Rule on the second thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-dream1", "title": "A spark", "status": "open", "type": "dream", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-05T00:00:00Z"},
     {"id": "mn-done00", "title": "Shipped thing", "status": "done", "blocked_by": [], "track": "mn-track1", "legacy_migration": {"version": 1}, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-06T00:00:00Z"},
     {"id": "mn-cycle1", "title": "Cycle A", "status": "blocked", "blocked_by": ["mn-cycle2"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
@@ -89,7 +91,7 @@ class DerivationTests(unittest.TestCase):
         self.assertNotIn("legacy_migration", payload)
 
     def test_next_follows_handoff_order_then_unordered(self) -> None:
-        self.assertEqual([r["id"] for r in self.state["next"]], ["mn-bbbbbb", "mn-aaaaaa"])
+        self.assertEqual([r["id"] for r in self.state["next"]], ["mn-bbbbbb", "mn-aaaaaa", "mn-mentio"])
 
     def test_now_carries_claimant_with_unseen_liveness_without_coord(self) -> None:
         now = self.state["now"]
@@ -98,7 +100,8 @@ class DerivationTests(unittest.TestCase):
         self.assertEqual(now[0]["claimant"]["liveness"], "unseen")
 
     def test_decisions_come_from_title_markers(self) -> None:
-        self.assertEqual([r["id"] for r in self.state["decisions"]], ["mn-ffffff"])
+        self.assertEqual(sorted(r["id"] for r in self.state["decisions"]), ["mn-ffffff", "mn-second"])
+        self.assertEqual(self.by_id["mn-mentio"]["effective"], "ready")
         self.assertEqual(self.by_id["mn-ffffff"]["effective"], "decision")
         self.assertEqual(self.by_id["mn-ffffff"]["title_plain"], "Ratify the thing")
 
@@ -127,12 +130,12 @@ class DerivationTests(unittest.TestCase):
         self.assertEqual(self.state["tracks"][-1]["title"], "(no track)")
         self.assertEqual(self.state["drift"]["count"], 1)
         self.assertEqual(self.state["drift"]["kinds"], {"landed_open": 1})
-        self.assertEqual(self.state["counts"]["ready"], 2)
+        self.assertEqual(self.state["counts"]["ready"], 3)
         self.assertEqual(self.state["git"]["branch"], "main")
 
     def test_summary_matches_derivation(self) -> None:
         summary = board_lib.summary(self.root)
-        self.assertEqual(summary["decisions"], 1)
+        self.assertEqual(summary["decisions"], 2)
         self.assertEqual(summary["dreams"], 1)
         self.assertEqual(summary["status_counts"]["done"], 1)
         self.assertEqual(summary["drift_count"], 1)
@@ -207,7 +210,7 @@ class RegistryAndHttpTests(unittest.TestCase):
             status, body, _ = get("/api/boards")
             index = json.loads(body)
             self.assertEqual([b["slug"] for b in index["boards"]], ["proj"])
-            self.assertEqual(index["boards"][0]["decisions"], 1)
+            self.assertEqual(index["boards"][0]["decisions"], 2)
 
             status, body, ctype = get("/proj")
             self.assertEqual(status, 200)

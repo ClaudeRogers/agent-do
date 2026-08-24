@@ -244,10 +244,16 @@ def match_peer(claimed_by: str | None, peers: list[dict[str, Any]]) -> dict[str,
 # ---------------------------------------------------------------- derivation
 
 
+_LEADING_TAGS = re.compile(r"^\s*((?:\[[^\]]*\]\s*)+)")
+
+
 def is_decision(issue: dict[str, Any]) -> bool:
-    title = str(issue.get("title", "")).lstrip()
-    upper = title.upper()
-    return any(marker in upper for marker in DECISION_MARKERS)
+    """A marker counts only when it leads the title; a mention mid-sentence is prose."""
+    match = _LEADING_TAGS.match(str(issue.get("title", "")))
+    if not match:
+        return False
+    tags = {tag.upper() for tag in re.findall(r"\[[^\]]*\]", match.group(1))}
+    return any(marker in tags for marker in DECISION_MARKERS)
 
 
 def strip_markers(title: str) -> str:
