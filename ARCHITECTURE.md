@@ -362,6 +362,56 @@ native rename preserves the seal without authorizing any document edit.
 Completed pairs leave the launch plan on the next sync: their sealed handoffs
 return to unnumbered paths, while the board and Git history retain provenance.
 
+### Portable federation
+
+Cross-repository relations sit beside the issue state machine in the optional,
+tracked `.manna/federation.yaml`. They are not fields on `Issue`. Each board
+opts in to a public identity (`mb-` plus 32 lowercase hex characters), and an
+outbound edge names a local source, a closed relation kind, and a portable
+`manna://<board_id>/<issue_id>` target. Normal clones and worktrees retain the
+ID as replicas. `manna federation fork --reason <text>` is the only identity
+split: it journals exact bytes, archives the inherited manifest, generates a
+new ID, and clears active relations.
+
+The authority boundary is asymmetric by design:
+
+1. The source repository's manifest is the only durable authority for its
+   outbound declaration.
+2. The machine-local serve registry is a resolver cache. It can explain a
+   declaration, but cannot create, remove, or become the only copy of one.
+3. Every claim, block, done, handoff, ownership, landed-evidence, lint, and
+   reconcile decision remains local to the board that owns the issue.
+4. Missing counterpart boards degrade to `unavailable` and never invalidate
+   the source board.
+
+`relate` and `unrelate` share the board-wide lock with issue writes, re-read the
+strict board and manifest, and require the exact owner proof when a source is
+actively claimed or blocked. Open and done sources accept authenticated
+lineage declarations without rewriting issue JSONL or handoff bytes. Manifest
+init, relation changes, and fork use a project-bound HMAC journal with exact
+before and after bytes. A fork additionally binds the archive path and bytes.
+
+`manna relations` is a local declaration read. `--resolve` joins only the
+private serve registry and returns:
+
+- `resolved`: every registered replica agrees on the exact target row bytes;
+- `unavailable`: no registered board carries the target board ID;
+- `missing`: an unambiguous registered board lacks the issue ID;
+- `ambiguous`: cached identity disagrees with live identity, a candidate is
+  unreadable, or replicas disagree on target presence or exact row bytes.
+
+`--check` exits nonzero for `missing` and `ambiguous`, but not `unavailable`.
+Counterpart edges separately render `confirmed`, `one_way`, `unavailable`, or
+`ambiguous` reciprocity. Two reciprocal declarations remain two autonomous
+writes. No cross-board mutation is atomic or implied.
+
+Lint and reconcile inspect only tracked local authority: manifest shape,
+deterministic order, local source existence, same-board and duplicate refusal,
+Git tracking, archive validity, and transaction convergence. Remote state does
+not enter `landed_open`, `dead_claim`, `blocker_desync`, prompt pairing, or
+handoff presentation. Serve adds derived relations to issue drawers without
+changing NOW, NEXT, WAITING, NEEDS DECISION, or DRIFT placement.
+
 Handoff frontmatter binds workflow version, item, track, source, base commit,
 scope, inputs, and a SHA-256 of the canonical document with the binding field
 normalized. The same digest lives in

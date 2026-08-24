@@ -11,8 +11,11 @@ All data is stored in `.manna/` directory:
 - `.manna/handoff-order.yaml` - First-class ordered priority for paired items
 - `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 - `.manna/workflow.yaml` - Strict workflow version and canonical handoff root
+- `.manna/federation.yaml` - Optional tracked board identity and outbound cross-board relations
+- `.manna/federation-archive/*.yaml` - Tracked manifests retired by an intentional project fork
 - `.manna/transactions/` - Ignored write-ahead journal for interrupted pair changes
 - `.manna/transactions/legacy-board-migration.yaml` - Authenticated whole-board admission journal, present only while migration is pending
+- `.manna/transactions/federation.yaml` - Authenticated federation mutation journal, present only while a write is pending
 
 Durable work orders live in tracked `.handoff/`:
 - `.handoff/README.md` - Generated ownership contract and board-derived index
@@ -20,6 +23,56 @@ Durable work orders live in tracked `.handoff/`:
   work-order presentation
 - `.handoff/.archive/` - Retired handoffs preserved by delete and item conversion
 - `.handoff/.archive/legacy-sources/*.source` - Exact non-Markdown evidence for imported in-project legacy work orders retired during migration
+
+## federation.yaml
+
+Federation is opt-in. A board without this file retains its existing behavior.
+`manna federation init` creates the file idempotently under the board-wide lock:
+
+```yaml
+version: 1
+board_id: mb-5c54d1b4cce04f8b9f4418a9180ad87e
+relations:
+- from: mn-27a833
+  kind: informed_by
+  to: manna://mb-973809091a7444329b38fa9a1ee7979f/mn-55530d
+  hint: agent-do
+```
+
+`board_id` is `mb-` plus exactly 32 lowercase hexadecimal characters generated
+from 128 random bits. It is public identity, not a credential. Normal clones
+and Git worktrees retain the ID as replicas of one logical board. An
+intentional project fork must use `manna federation fork --reason <text>`,
+which archives the exact inherited manifest, generates a new ID, and starts
+with no active relations.
+
+Each relation contains a local `from` issue, one closed vocabulary kind
+(`counterpart`, `informed_by`, `depends_on`, or `supersedes`), a portable
+`manna://<board_id>/<issue_id>` target, and an optional human-only `hint`.
+Relations serialize in deterministic `(from, kind, to)` order. Exact
+duplicates, missing local sources, malformed coordinates, and same-board
+targets are invalid. Target status, title, claimant, local path, and resolution
+cache are never stored here.
+
+The manifest declares lineage only. It cannot claim, block, unblock, complete,
+reopen, delete, reseal, or reconcile any issue. Local `blocked_by`, handoff
+pairing, ownership proofs, and `Manna:` trailer evidence remain exclusively
+local. `relate` and `unrelate` require the exact owner proof when the source is
+actively claimed or blocked; open and done sources accept an authenticated
+declaration without rewriting either issue or handoff bytes.
+
+`manna relations` reads the tracked declaration. `--resolve` optionally reads
+the machine-local serve registry and reports `resolved`, `unavailable`,
+`missing`, or `ambiguous`; it never searches the network or writes a board.
+Unavailable boards are a valid degraded read. `--check` exits 1 only for a
+present board missing the target or for divergent replicas. Counterpart edges
+also report `confirmed`, `one_way`, `unavailable`, or `ambiguous` reciprocity.
+
+Manifest writes and forks share the board lock and an HMAC-authenticated,
+project-bound journal carrying exact before and after bytes. Recovery accepts
+only those exact states. Lint and reconcile validate local shape, sources,
+tracking, archive, and pending-transaction convergence without consulting the
+registry.
 
 ## issues.jsonl
 

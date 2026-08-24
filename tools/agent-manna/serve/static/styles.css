@@ -106,6 +106,13 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .inspector .meta { display: grid; grid-template-columns: 76px 1fr; gap: var(--s1) var(--s2); font-size: var(--t-small); color: var(--muted); }
 .inspector .meta b { font-weight: 500; color: var(--text); }
 .inspector .actions { margin-top: auto; display: flex; gap: var(--s3); align-items: baseline; font-size: var(--t-small); }
+.relation-list { border-top: 1px solid var(--line); padding-top: var(--s2); }
+.relation-heading { color: var(--faint); font-size: var(--t-meta); letter-spacing: .08em; margin: 0 0 var(--s2); }
+.relation-line { margin: 0 0 var(--s2); }
+.relation-line .label { display: block; color: var(--faint); font-size: var(--t-meta); }
+.relation-line strong { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.relation-target, .relation-uri { display: block; }
+.relation-target { color: var(--text); }
 .inspector .actions button.copied { color: var(--green); }
 .commit .sha { color: var(--amber); }
 

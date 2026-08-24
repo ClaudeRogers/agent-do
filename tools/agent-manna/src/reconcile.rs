@@ -20,6 +20,7 @@ pub enum FindingKind {
     BlockerDesync,
     StaleDream,
     DanglingTrack,
+    FederationIntegrity,
     DocReference,
     PromptPairing,
     HandoffPresentation,

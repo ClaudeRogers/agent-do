@@ -203,6 +203,44 @@ class DerivationTests(unittest.TestCase):
         os.utime(path, (1, 1))
         self.assertNotEqual(before, board_lib.signature(self.root, gitdir))
 
+    def test_federation_declarations_are_attached_without_changing_local_waves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_board(Path(tmp) / "federated")
+            (root / ".manna" / "federation.yaml").write_text(
+                "version: 1\n"
+                "board_id: mb-11111111111111111111111111111111\n"
+                "relations:\n"
+                "- from: mn-aaaaaa\n"
+                "  kind: informed_by\n"
+                "  to: manna://mb-22222222222222222222222222222222/mn-bbbbbb\n"
+                "  hint: target-board\n",
+                encoding="utf-8",
+            )
+            state = board_lib.derive(root, agent_do=None)
+            by_id = {row["id"]: row for row in state["all"]}
+            self.assertEqual(state["board"]["board_id"], "mb-11111111111111111111111111111111")
+            self.assertEqual(by_id["mn-aaaaaa"]["relations"][0]["kind"], "informed_by")
+            self.assertEqual(by_id["mn-aaaaaa"]["effective"], "ready")
+            self.assertEqual([row["id"] for row in state["next"]][:2], ["mn-bbbbbb", "mn-aaaaaa"])
+
+    def test_resolved_relation_payload_enriches_the_same_issue_rows(self) -> None:
+        state = {"all": [{"id": "mn-aaaaaa", "relations": []}], "federation": {"relations": []}}
+        payload = {
+            "success": True,
+            "relations": [
+                {
+                    "from": "mn-aaaaaa",
+                    "kind": "counterpart",
+                    "to": "manna://mb-22222222222222222222222222222222/mn-bbbbbb",
+                    "resolution": {"state": "resolved", "replicas": 1, "issue": {"title": "Target", "status": "done"}},
+                    "reciprocity": "confirmed",
+                }
+            ],
+        }
+        serve_lib.attach_resolved_relations(state, payload)
+        self.assertEqual(state["all"][0]["relations"][0]["resolution"]["state"], "resolved")
+        self.assertEqual(state["federation"]["relations"][0]["reciprocity"], "confirmed")
+
     def test_peer_matching_across_identity_forms(self) -> None:
         peers = [{"agent_id": "session-3c15edbd4860", "status": "active"}, {"agent_id": "codex-01a02afe94d27b52", "status": "idle"}]
         self.assertEqual(board_lib.match_peer("claude-3c15edbd486045ef", peers)["status"], "active")
@@ -364,11 +402,25 @@ class RegistryAndHttpTests(unittest.TestCase):
         self.assertEqual((slug2, fresh2), ("elsewhere--proj", True))
         self.assertEqual(serve_lib.register_board(self.root), ("proj", False))
 
+    def test_registry_caches_public_federation_identity(self) -> None:
+        (self.root / ".manna" / "federation.yaml").write_text(
+            "version: 1\n"
+            "board_id: mb-11111111111111111111111111111111\n"
+            "relations: []\n",
+            encoding="utf-8",
+        )
+        slug, _ = serve_lib.register_board(self.root)
+        self.assertEqual(
+            serve_lib.load_registry()[slug]["board_id"],
+            "mb-11111111111111111111111111111111",
+        )
+
     def test_machine_added_marker_is_honored_and_never_in_code(self) -> None:
         self.assertNotIn("[ADA]", board_lib.DECISION_MARKERS)
-        (self.root / ".manna" / "issues.jsonl").open("a", encoding="utf-8").write(
-            json.dumps({"id": "mn-named1", "title": "[Ada] Rule on the named thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"}) + "\n"
-        )
+        with (self.root / ".manna" / "issues.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps({"id": "mn-named1", "title": "[Ada] Rule on the named thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"}) + "\n"
+            )
         before = board_lib.summary(self.root, serve_lib.decision_markers())["decisions"]
         with self.assertRaises(ValueError):
             serve_lib.add_decision_marker("ADA")
@@ -478,9 +530,10 @@ class RegistryAndHttpTests(unittest.TestCase):
                 req = urllib.request.Request(base + "/api/health", headers={"Host": host})
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     self.assertEqual(resp.status, 200, host)
-            status, _, ctype = get("/static/app.js")
+            status, app, ctype = get("/static/app.js")
             self.assertEqual(status, 200)
             self.assertIn("javascript", ctype)
+            self.assertIn(b"RELATIONS", app)
         finally:
             server.stopping = True
             server.shutdown()

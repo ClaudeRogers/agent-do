@@ -54,6 +54,26 @@ function inboxRows(s) {
   return out.filter((x) => !app.grep || x.text.toLowerCase().includes(app.grep.toLowerCase()));
 }
 
+function relationStateClass(state) {
+  return ({ resolved: "c-done", unavailable: "c-muted", missing: "c-waiting", ambiguous: "c-decision" }[state] || "c-muted");
+}
+function relationMarkup(rows) {
+  if (!rows?.length) return "";
+  return `<div class="relation-list"><p class="relation-heading">RELATIONS</p>${rows.map((relation) => {
+    const resolution = relation.resolution;
+    const state = resolution?.state || "declared";
+    const target = resolution?.issue;
+    const reciprocity = relation.reciprocity ? ` · reciprocity ${esc(String(relation.reciprocity).replaceAll("_", " "))}` : "";
+    const detail = target
+      ? `<span class="relation-target">${esc(target.title)} · ${esc(target.status)}</span>`
+      : resolution?.detail ? `<span class="relation-target">${esc(resolution.detail)}</span>` : "";
+    return `<p class="relation-line">
+      <span class="label">${esc(String(relation.kind).replaceAll("_", " "))}</span>
+      <strong><code>${esc(relation.hint || relation.to)}</code> <span class="${esc(relationStateClass(state))}">${esc(state)}</span>${reciprocity}${detail}<span class="faint relation-uri">${esc(relation.to)}</span></strong>
+    </p>`;
+  }).join("")}</div>`;
+}
+
 // ------------------------------------------------------------ rendering: rows
 function itemRow(r) {
   const sel = app.selected?.kind === "item" && app.selected.id === r.id;
@@ -148,7 +168,7 @@ function renderDebug(s) {
   html += `<div class="kv">
     ${kv("drift", d.source === "reconcile" ? `${d.count} live · ${Object.entries(d.kinds || {}).map(([k, n]) => `${esc(k)} ${n}`).join(", ") || "clean"}` : `${d.count ?? 0} from file`)}
     ${kv("drift file", d.file?.present ? `${d.file.count} findings · written ${esc(ago(d.file.generated_at))} ago` : "no drift.yaml written yet")}
-    ${kv("board", `${s.total} rows · workflow ${esc(s.board?.workflow || "unknown")} · ${s.board?.order_count} in handoff order · issues written ${esc(ago(s.board?.issues_modified_at))} ago`)}
+    ${kv("board", `${s.total} rows · workflow ${esc(s.board?.workflow || "unknown")}${s.board?.board_id ? ` · ${esc(s.board.board_id)}` : ""} · ${s.board?.order_count} in handoff order · issues written ${esc(ago(s.board?.issues_modified_at))} ago`)}
     ${kv("repo", s.git?.is_repo ? `${esc(s.git.branch || "(detached)")} / HEAD ${esc(s.git.head)} / ${s.git.dirty_paths} dirty` : "not a git repository")}
     ${kv("coord", `presence ${esc(s.coord_refreshed_ago)}s old · ${(s.peers || []).length} rows`)}
     ${kv("digests", `${s.digests?.ready ?? 0} ready · ${s.digests?.missing ?? 0} missing${s.digests?.generating ? " · generating" : ""}${s.digests?.model ? ` · ${esc(s.digests.model)}` : ""}`)}
@@ -190,6 +210,7 @@ function renderInspector(s) {
   if (!r) { el.innerHTML = '<p class="empty">that item is no longer on the board</p>'; return; }
   const st = r.effective;
   const cl = r.claimant;
+  const relations = relationMarkup(r.relations || []);
   el.innerHTML = `<div class="head"><span>${esc(r.id)}</span><span class="pill ${cls(st)}">${esc(label(st))}</span>${r.order != null ? `<span>#${r.order + 1}</span>` : ""}${r.kind !== "item" ? `<span>${esc(r.kind)}</span>` : ""}</div>
     <h2>${esc(r.title)}</h2>
     ${r.digest ? `<div class="digest-line">${esc(r.digest)}</div>` : ""}
@@ -204,6 +225,7 @@ function renderInspector(s) {
       ${r.commits?.length ? `<span>commits</span><b>${r.commits.map((c) => `<span class="commit"><span class="sha">${esc(c.sha)}</span> ${esc(clip(c.subject, 56))} <span class="faint">${esc(ago(c.at))}</span></span>`).join("<br>")}</b>` : `<span>commits</span><b class="faint">none yet</b>`}
       ${r.prompt ? `<span>handoff</span><b class="faint">${esc(r.prompt)}</b>` : ""}
     </div>
+    ${relations}
     <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
   bindCopy();
 }
@@ -225,7 +247,7 @@ function renderChrome(s) {
   const needs = (s.attention?.["needs-user"] || 0) + (s.attention?.failed || 0);
   $("[data-badge=coord]").textContent = needs ? String(needs) : "";
   const d = s.drift || {};
-  $("#strip-slug").textContent = `[${s.name}]`;
+  $("#strip-slug").textContent = s.board?.board_id ? `[${s.name}] ${s.board.board_id}` : `[${s.name}]`;
   $("#strip-drift").innerHTML = d.count ? `<span class="warn">▲ ${d.count} drift</span>` : `drift clean`;
   $("#strip-file").textContent = d.file?.present ? `file ${ago(d.file.generated_at)}` : "no drift file";
   $("#strip-health").textContent = `presence ${s.coord_refreshed_ago ?? "?"}s · ${s.git?.dirty_paths ?? 0} dirty · ${(s.peers || []).filter((p) => p.attention !== "gone").length} here`;

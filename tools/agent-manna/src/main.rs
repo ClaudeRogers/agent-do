@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use manna_core::age::{age_of, dated};
 use manna_core::error::MannaError;
+use manna_core::federation::{self, MannaUri, Relation, RelationKind};
 use manna_core::id::generate_unique_id;
 use manna_core::issue::{
     dream_claim_refusal, is_default_type, Issue, IssueStatus, IssueType, SessionIdentity,
@@ -120,6 +121,62 @@ enum Commands {
     Handoff {
         #[command(subcommand)]
         command: HandoffCommands,
+    },
+
+    /// Initialize, inspect, or explicitly fork portable federation identity
+    Federation {
+        #[command(subcommand)]
+        command: FederationCommands,
+    },
+
+    /// Add one typed outbound cross-board relation
+    Relate {
+        /// Local source issue ID
+        local_id: String,
+
+        /// Relation kind: counterpart, informed_by, depends_on, or supersedes
+        #[arg(long)]
+        kind: String,
+
+        /// Portable target coordinate: manna://<board-id>/<issue-id>
+        #[arg(long)]
+        to: String,
+
+        /// Optional human-readable target hint; never identity
+        #[arg(long)]
+        hint: Option<String>,
+    },
+
+    /// Remove one exact outbound cross-board relation
+    Unrelate {
+        /// Local source issue ID
+        local_id: String,
+
+        /// Relation kind
+        #[arg(long)]
+        kind: String,
+
+        /// Portable target coordinate
+        #[arg(long)]
+        to: String,
+    },
+
+    /// List durable relations and optionally resolve registered counterparts
+    Relations {
+        /// Optional local source issue filter
+        local_id: Option<String>,
+
+        /// Resolve through the machine-local serve registry
+        #[arg(long)]
+        resolve: bool,
+
+        /// Fail for missing targets or divergent replicas; unavailable is valid
+        #[arg(long)]
+        check: bool,
+
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
     },
 
     /// Add a blocker dependency
@@ -267,6 +324,26 @@ enum HandoffCommands {
     Seal {
         /// Issue ID (e.g., mn-abc123)
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FederationCommands {
+    /// Idempotently create this board's tracked federation identity
+    Init,
+
+    /// Show local federation identity and declaration counts
+    Status {
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Intentionally fork identity, archive the inherited manifest, and clear relations
+    Fork {
+        /// Human reason recorded in the tracked federation archive
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -725,6 +802,12 @@ fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig
             Err(error) => handle_manna_error(error),
         };
     }
+    if let Err(error) = federation::recover_transaction(Path::new("."), store) {
+        output_error(
+            &format!("Cannot recover Manna federation transaction: {}", error),
+            EXIT_SYSTEM_ERROR,
+        );
+    }
     (issues, workflow)
 }
 
@@ -805,6 +888,128 @@ fn cmd_status() -> ! {
         workflow_version: workflow.as_ref().map(|config| config.version),
         handoff_dir: workflow.map(|config| config.handoff_dir),
     });
+}
+
+fn parse_relation_kind(value: &str) -> RelationKind {
+    value
+        .parse::<RelationKind>()
+        .unwrap_or_else(|error| output_error(&error, EXIT_USER_ERROR))
+}
+
+fn parse_manna_uri(value: &str) -> MannaUri {
+    value
+        .parse::<MannaUri>()
+        .unwrap_or_else(|error| output_error(&error, EXIT_USER_ERROR))
+}
+
+fn cmd_federation_init() -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _ = load_board_workflow(&store);
+    let session = require_session_identity();
+    match federation::initialize(Path::new("."), &store, &session) {
+        Ok(result) => output_success(result),
+        Err(error) => handle_manna_error(error),
+    }
+}
+
+fn cmd_federation_status(json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let (issues, _) = load_board_workflow(&store);
+    match federation::status(Path::new("."), &issues) {
+        Ok(result) if json => output_success_json(result),
+        Ok(result) => output_success(result),
+        Err(error) => output_error(&error, EXIT_USER_ERROR),
+    }
+}
+
+fn cmd_federation_fork(reason: String) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _ = load_board_workflow(&store);
+    let session = require_session_identity();
+    match federation::fork(Path::new("."), &store, &session, &reason) {
+        Ok(result) => output_success(result),
+        Err(error) => handle_manna_error(error),
+    }
+}
+
+fn cmd_relate(local_id: String, kind: String, to: String, hint: Option<String>) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _ = load_board_workflow(&store);
+    let session = require_session_identity();
+    let relation = Relation {
+        from: local_id,
+        kind: parse_relation_kind(&kind),
+        to: parse_manna_uri(&to),
+        hint: hint
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    };
+    match federation::relate(Path::new("."), &store, &session, relation) {
+        Ok(result) => output_success(result),
+        Err(error) => handle_manna_error(error),
+    }
+}
+
+fn cmd_unrelate(local_id: String, kind: String, to: String) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let _ = load_board_workflow(&store);
+    let session = require_session_identity();
+    let kind = parse_relation_kind(&kind);
+    let to = parse_manna_uri(&to);
+    match federation::unrelate(Path::new("."), &store, &session, &local_id, kind, &to) {
+        Ok(result) => output_success(result),
+        Err(error) => handle_manna_error(error),
+    }
+}
+
+fn cmd_relations(local_id: Option<String>, resolve: bool, check: bool, json: bool) -> ! {
+    let store = MannaStore::new(Path::new("."));
+    if !store.is_initialized() {
+        output_error(
+            "Storage not initialized. Run 'manna-core init' first.",
+            EXIT_USER_ERROR,
+        );
+    }
+    let (issues, _) = load_board_workflow(&store);
+    let resolve = resolve || check;
+    let result = federation::relations(Path::new("."), &issues, local_id.as_deref(), resolve)
+        .unwrap_or_else(|error| output_error(&error, EXIT_USER_ERROR));
+    let exit_code = if check && result.check_failed() {
+        EXIT_USER_ERROR
+    } else {
+        EXIT_SUCCESS
+    };
+    output_with_exit(result, json, exit_code);
 }
 
 fn cmd_create(
@@ -1820,6 +2025,15 @@ fn cmd_lint(json: bool) -> ! {
     let (issues, workflow) = load_board_workflow(&store);
     let mut findings = lint_board(&issues);
     findings.extend(lint_prompt_files(&issues));
+    findings.extend(
+        federation::lint(Path::new("."), &issues)
+            .into_iter()
+            .map(|finding| LintFinding {
+                issue_id: finding.issue_id,
+                rule: finding.rule.to_string(),
+                detail: finding.detail,
+            }),
+    );
     match untracked_durable_paths(Path::new(".")) {
         Ok(paths) => findings.extend(paths.into_iter().map(|path| LintFinding {
             issue_id: "board".to_string(),
@@ -2796,10 +3010,23 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
     // 5. dangling_track
     findings.extend(check_dangling_track(&issues));
 
-    // 6. doc_reference
+    // 6. federation integrity (strictly local; never resolves remote state)
+    findings.extend(
+        federation::lint(Path::new("."), &issues)
+            .into_iter()
+            .map(|finding| Finding {
+                kind: FindingKind::FederationIntegrity,
+                issue_id: (finding.issue_id != "board").then_some(finding.issue_id),
+                detail: finding.detail,
+                evidence: Some(finding.rule.to_string()),
+                proposed_fix: None,
+            }),
+    );
+
+    // 7. doc_reference
     findings.extend(check_doc_references(&issues));
 
-    // 7. prompt_pairing (forward: pointer content, reverse: workflow root)
+    // 8. prompt_pairing (forward: pointer content, reverse: workflow root)
     findings.extend(check_prompt_pairing_forward(&issues));
     if let Some(config) = workflow.as_ref() {
         findings.extend(check_prompt_pairing_reverse(
@@ -2875,6 +3102,7 @@ fn cmd_reconcile(fix: bool, write_drift: bool, dream_age_days: i64, json: bool) 
                 | FindingKind::OrphanHandoff
                 | FindingKind::PromptPairing
                 | FindingKind::HandoffPresentation
+                | FindingKind::FederationIntegrity
         )
     });
     let exit_code = if !fix_failures.is_empty() || integrity_failure {
@@ -2921,6 +3149,24 @@ fn main() {
         Commands::Handoff { command } => match command {
             HandoffCommands::Seal { id } => cmd_handoff_seal(id),
         },
+        Commands::Federation { command } => match command {
+            FederationCommands::Init => cmd_federation_init(),
+            FederationCommands::Status { json } => cmd_federation_status(json),
+            FederationCommands::Fork { reason } => cmd_federation_fork(reason),
+        },
+        Commands::Relate {
+            local_id,
+            kind,
+            to,
+            hint,
+        } => cmd_relate(local_id, kind, to, hint),
+        Commands::Unrelate { local_id, kind, to } => cmd_unrelate(local_id, kind, to),
+        Commands::Relations {
+            local_id,
+            resolve,
+            check,
+            json,
+        } => cmd_relations(local_id, resolve, check, json),
         Commands::Block { id, blocker_id } => cmd_block(id, blocker_id),
         Commands::Unblock { id, blocker_id } => cmd_unblock(id, blocker_id),
         Commands::List {

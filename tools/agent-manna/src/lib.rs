@@ -2,6 +2,7 @@
 pub mod age;
 pub mod context;
 pub mod error;
+pub mod federation;
 pub mod id;
 pub mod issue;
 pub mod reconcile;

@@ -464,7 +464,7 @@ fn safe_relative_path(
     Ok(relative)
 }
 
-fn safe_create_dir_all(base: &Path, relative: &Path) -> Result<(), String> {
+pub(crate) fn safe_create_dir_all(base: &Path, relative: &Path) -> Result<(), String> {
     let relative = normalize_relative(relative)?;
     let mut cursor = base.to_path_buf();
     for component in relative.components() {
@@ -492,7 +492,7 @@ fn safe_create_dir_all(base: &Path, relative: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -501,7 +501,7 @@ fn sync_parent(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to sync {}: {}", parent.display(), error))
 }
 
-fn atomic_write(path: &Path, contents: &[u8], replace: bool) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8], replace: bool) -> Result<(), String> {
     reject_symlink(path, "workflow file")?;
     let parent = path
         .parent()
@@ -1427,7 +1427,7 @@ fn calculate_binding(text: &str) -> Result<String, String> {
     Ok(format!("sha256:{:x}", digest))
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -1439,7 +1439,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut normalized = [0_u8; BLOCK];
     if key.len() > BLOCK {
@@ -1603,7 +1603,7 @@ fn resolve_missing_leaf(path: PathBuf) -> Result<PathBuf, String> {
     Ok(canonical.join(remainder).join(name))
 }
 
-fn recovery_key_path(base: &Path) -> Result<PathBuf, String> {
+pub(crate) fn recovery_key_path(base: &Path) -> Result<PathBuf, String> {
     let git = Command::new("git")
         .current_dir(base)
         .args(["rev-parse", "--absolute-git-dir"])
@@ -1639,7 +1639,7 @@ fn recovery_key_path(base: &Path) -> Result<PathBuf, String> {
     )
 }
 
-fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn reject_symlink_components(path: &Path, label: &str) -> Result<(), String> {
     let mut cursor = PathBuf::new();
     for component in path.components() {
         cursor.push(component.as_os_str());
@@ -1691,7 +1691,7 @@ fn read_private_key(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     Ok(key)
 }
 
-fn load_private_key(path: &Path, create: bool, label: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn load_private_key(path: &Path, create: bool, label: &str) -> Result<Vec<u8>, String> {
     if path.is_file() {
         return read_private_key(path, label);
     }

@@ -4663,6 +4663,7 @@ tools:
       - OPENAI_API_KEY
     capabilities:
     - track issues and dependencies
+    - declare portable typed relations between autonomous repository boards
     - manage session state
     - store context across sessions
     - query issue history
@@ -4677,6 +4678,10 @@ tools:
       sync: Derive numbered handoff filenames, blocker launch gates, and the README index from board state
       abandon: Release a claimed issue back to open
       handoff: Seal and bind an intentional canonical handoff edit
+      federation: Initialize, inspect, or explicitly fork a portable Manna federation identity
+      relate: Add one typed outbound cross-board relation
+      unrelate: Remove one typed outbound cross-board relation
+      relations: List local relations and optionally resolve them through registered boards
       block: Add a blocker dependency
       unblock: Remove a blocker dependency
       list: List issues (--status, --type, --track filters)
@@ -4713,14 +4718,23 @@ tools:
       command: agent-manna serve --open
     - intent: list every board on this machine
       command: agent-manna serve --scan ~/Projects
+    - intent: initialize portable board identity
+      command: agent-manna federation init
+    - intent: link this item to a sibling board
+      command: agent-manna relate mn-a1b2c3 --kind counterpart --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
+    - intent: inspect cross-board relations
+      command: agent-manna relations --resolve --check
     contracts:
       connect:
       - init
+      - federation
       snapshot:
       - list
       - show
       - context
       - status
+      - federation
+      - relations
       interact:
       - migrate
       - create
@@ -4732,6 +4746,9 @@ tools:
       - sync
       - abandon
       - handoff
+      - federation
+      - relate
+      - unrelate
       - block
       - unblock
       - dream
@@ -4739,7 +4756,12 @@ tools:
       verify:
       - lint
       - reconcile
+      - relations
       attributes:
+        federation:
+        - polymorphic
+        - composite
+        - destructive
         migrate:
         - destructive
         - composite
@@ -4747,6 +4769,10 @@ tools:
         - composite
         delete:
         - destructive
+        unrelate:
+        - destructive
+        relations:
+        - polymorphic
         sync:
         - composite
         reconcile:

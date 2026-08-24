@@ -166,7 +166,11 @@ def register_board(root: Path) -> tuple[str, bool]:
     boards = load_registry()
     slug = slug_for(root, boards)
     fresh = slug not in boards
-    boards[slug] = {"path": str(root), "registered_at": boards.get(slug, {}).get("registered_at") or utc_now_iso()}
+    entry = {"path": str(root), "registered_at": boards.get(slug, {}).get("registered_at") or utc_now_iso()}
+    board_id = board_lib.read_federation(root / ".manna").get("board_id")
+    if board_id:
+        entry["board_id"] = board_id
+    boards[slug] = entry
     save_registry(boards)
     return slug, fresh
 
@@ -331,7 +335,7 @@ class BoardCache:
 
     def signature(self, root: Path, slug: str | None = None) -> str:
         """What a board stream watches: board+git files, the presence digest, and the digest cache."""
-        sig = self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
+        sig = self.base_signature(root) + "|coord:" + self.bundle(root)["digest"] + "|federation:" + federation_signature()
         if slug:
             sig += "|" + self.digest_signature(slug)
         return sig
@@ -348,6 +352,7 @@ class BoardCache:
             root, AGENT_DO, decision_markers(), live=True,
             peers=bundle["peers"], coord=bundle["coord"], drift_live=bits["drift_live"], trailers=bits["trailers"],
         )
+        attach_resolved_relations(state, resolved_relations(root))
         state["slug"] = slug
         state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
         # Digests: cached lines attach now; missing ones generate in the
@@ -384,6 +389,67 @@ def index_row(slug: str, entry: dict[str, Any], markers: tuple[str, ...]) -> dic
 
 def registered_roots(boards: dict[str, dict[str, Any]]) -> list[Path]:
     return [Path(e.get("path", "")) for e in boards.values() if (Path(e.get("path", "")) / ".manna").is_dir()]
+
+
+def federation_signature() -> str:
+    """Every registered identity and target row that can change a derived
+    relation read. A target transition must wake the source board stream even
+    though it changes zero bytes in the source checkout."""
+    parts = []
+    try:
+        stat = registry_path().stat()
+        parts.append(f"registry:{stat.st_mtime_ns}:{stat.st_size}")
+    except OSError:
+        parts.append("registry:missing")
+    for slug, entry in sorted(load_registry().items()):
+        root = Path(entry.get("path", ""))
+        for relative in (".manna/federation.yaml", ".manna/issues.jsonl"):
+            path = root / relative
+            try:
+                stat = path.stat()
+                parts.append(f"{slug}:{relative}:{stat.st_mtime_ns}:{stat.st_size}")
+            except OSError:
+                parts.append(f"{slug}:{relative}:missing")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def resolved_relations(root: Path) -> dict[str, Any] | None:
+    """Ask the Rust read path for the same resolver semantics the CLI exposes.
+    The daemon never reimplements replica selection or writes either board."""
+    if not board_lib.read_federation(root / ".manna").get("enabled"):
+        return None
+    out = board_lib.run(
+        [str(AGENT_DO), "manna", "relations", "--resolve", "--json"],
+        root,
+        timeout=30,
+    )
+    if not out:
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not data.get("success") or not isinstance(data.get("relations"), list):
+        return None
+    return data
+
+
+def attach_resolved_relations(state: dict[str, Any], payload: dict[str, Any] | None) -> None:
+    if not payload:
+        return
+    reports = [row for row in payload.get("relations", []) if isinstance(row, dict)]
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for report in reports:
+        source = report.get("from")
+        if isinstance(source, str):
+            by_source.setdefault(source, []).append(report)
+    for row in state.get("all", []):
+        if isinstance(row, dict):
+            row["relations"] = by_source.get(row.get("id"), [])
+    federation = state.get("federation")
+    if isinstance(federation, dict):
+        federation["relations"] = reports
+        federation["resolved"] = True
 
 
 def boards_index() -> dict[str, Any]:

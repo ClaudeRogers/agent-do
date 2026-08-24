@@ -1575,6 +1575,205 @@ cd "$TEST_DIR"
 rm -rf "$GATE_DIR"
 
 # ============================================================================
+# Portable Federation Tests
+# ============================================================================
+
+echo ""
+echo "=== Portable Federation Tests ==="
+
+FED_SOURCE=$(mktemp -d)
+FED_TARGET=$(mktemp -d)
+FED_REPLICA=$(mktemp -d)
+FED_CLONE=$(mktemp -d)
+SERVE_DIR="$SCRIPT_DIR/../serve"
+
+register_federation_roots() {
+    local serve_python="python3"
+    if ! "$serve_python" -c 'import yaml' >/dev/null 2>&1 \
+        && [[ -x /usr/bin/python3 ]] \
+        && /usr/bin/python3 -c 'import yaml' >/dev/null 2>&1; then
+        serve_python="/usr/bin/python3"
+    fi
+    PYTHONPATH="$SERVE_DIR" "$serve_python" - "$@" <<'PY'
+import sys
+from pathlib import Path
+
+from serve import register_board
+
+for value in sys.argv[1:]:
+    register_board(Path(value))
+PY
+}
+
+clear_federation_registry() {
+    rm -f "$AGENT_DO_HOME/manna/serve/boards.json"
+}
+
+cd "$FED_SOURCE"
+git init -q
+git config user.name "Manna Federation Fixture"
+git config user.email "manna-federation@example.invalid"
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "Federated source" 2>&1) || true
+FED_SOURCE_ID=$(extract_id "$output")
+"$MANNA" sync >/dev/null 2>&1
+output=$("$MANNA" federation status 2>&1) || true
+check_yaml "$output" "enabled: false" "existing board stays federation-disabled until opt-in"
+output=$("$MANNA" federation init 2>&1) || true
+check_yaml "$output" "success: true" "federation init succeeds"
+check_yaml "$output" "changed: true" "first federation init writes identity"
+FED_SOURCE_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+[[ "$FED_SOURCE_BOARD" =~ ^mb-[a-f0-9]{32}$ ]] \
+    && pass "federation init emits a 128-bit board identity" \
+    || fail "federation init emits a 128-bit board identity" "$FED_SOURCE_BOARD"
+output=$("$MANNA" federation init 2>&1) || true
+check_yaml "$output" "changed: false" "federation init is idempotent"
+git add -- .manna .handoff
+git commit -qm "test: source federation fixture"
+
+cd "$FED_TARGET"
+git init -q
+git config user.name "Manna Federation Fixture"
+git config user.email "manna-federation@example.invalid"
+"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" create "Federated target" 2>&1) || true
+FED_TARGET_ID=$(extract_id "$output")
+output=$("$MANNA" federation init 2>&1) || true
+FED_TARGET_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+git add -- .manna .handoff
+git commit -qm "test: target federation fixture"
+
+cd "$FED_SOURCE"
+FED_SOURCE_HANDOFF=$(find .handoff -type f -name "*$FED_SOURCE_ID*" -print -quit)
+FED_ISSUES_BEFORE=$(git hash-object .manna/issues.jsonl)
+FED_HANDOFF_BEFORE=$(git hash-object "$FED_SOURCE_HANDOFF")
+FED_TARGET_URI="manna://$FED_TARGET_BOARD/$FED_TARGET_ID"
+output=$("$MANNA" relate "$FED_SOURCE_ID" --kind informed_by --to "$FED_TARGET_URI" --hint target-repo 2>&1) || true
+check_yaml "$output" "success: true" "relate writes one typed outbound declaration"
+check_yaml "$output" "$FED_TARGET_URI" "relate preserves the board-qualified target URI"
+[[ "$FED_ISSUES_BEFORE" == "$(git hash-object .manna/issues.jsonl)" ]] \
+    && pass "relate preserves source issue bytes" \
+    || fail "relate preserves source issue bytes" "issues.jsonl changed"
+[[ "$FED_HANDOFF_BEFORE" == "$(git hash-object "$FED_SOURCE_HANDOFF")" ]] \
+    && pass "relate preserves source handoff bytes" \
+    || fail "relate preserves source handoff bytes" "handoff changed"
+output=$("$MANNA" relations --json 2>&1) || true
+check_yaml "$output" '"resolved":false' "relations without --resolve reads durable local state only"
+if [[ "$output" != *'"resolution"'* ]]; then
+    pass "local relation read carries no derived resolution cache"
+else
+    fail "local relation read carries no derived resolution cache" "$output"
+fi
+git add -- .manna/federation.yaml
+git commit -qm "test: declare federation relation"
+
+clear_federation_registry
+unavailable_exit=0
+output=$("$MANNA" relations --resolve --check --json 2>&1) || unavailable_exit=$?
+check_exit 0 "$unavailable_exit" "unavailable target is a successful degraded check"
+check_yaml "$output" '"state":"unavailable"' "unregistered target resolves unavailable"
+
+register_federation_roots "$FED_SOURCE" "$FED_TARGET"
+output=$("$MANNA" relations --resolve --check --json 2>&1) || true
+check_yaml "$output" '"state":"resolved"' "two registered repositories resolve the relation"
+check_yaml "$output" '"status":"open"' "resolver reports the target's open status"
+
+cd "$FED_TARGET"
+"$MANNA" claim "$FED_TARGET_ID" >/dev/null 2>&1
+"$MANNA" done "$FED_TARGET_ID" >/dev/null 2>&1
+git add -- .manna .handoff
+git commit -qm "test: complete remote target" -m "Manna: $FED_SOURCE_ID"
+
+cd "$FED_SOURCE"
+output=$("$MANNA" relations --resolve --check --json 2>&1) || true
+check_yaml "$output" '"status":"done"' "resolver reflects remote completion"
+[[ "$FED_ISSUES_BEFORE" == "$(git hash-object .manna/issues.jsonl)" ]] \
+    && pass "remote completion preserves source lifecycle bytes" \
+    || fail "remote completion preserves source lifecycle bytes" "source issues.jsonl changed"
+[[ "$FED_HANDOFF_BEFORE" == "$(git hash-object "$FED_SOURCE_HANDOFF")" ]] \
+    && pass "remote completion preserves source handoff bytes" \
+    || fail "remote completion preserves source handoff bytes" "source handoff changed"
+reconcile_exit=0
+output=$("$MANNA" reconcile --json 2>&1) || reconcile_exit=$?
+check_exit 0 "$reconcile_exit" "remote Manna trailer cannot create local landed-open evidence"
+if [[ "$output" != *"landed_open"* ]]; then
+    pass "reconcile ignores target-repository commit trailers"
+else
+    fail "reconcile ignores target-repository commit trailers" "$output"
+fi
+
+cp "$FED_TARGET/.manna/issues.jsonl" "$TEST_DIR/federation-target-issues.jsonl"
+: > "$FED_TARGET/.manna/issues.jsonl"
+missing_exit=0
+output=$("$MANNA" relations --resolve --check --json 2>&1) || missing_exit=$?
+check_exit 1 "$missing_exit" "present board with a missing target fails --check"
+check_yaml "$output" '"state":"missing"' "present board without target resolves missing"
+lint_exit=0
+output=$("$MANNA" lint --json 2>&1) || lint_exit=$?
+check_exit 0 "$lint_exit" "remote missing state does not invalidate local lint"
+cp "$TEST_DIR/federation-target-issues.jsonl" "$FED_TARGET/.manna/issues.jsonl"
+
+cp -R "$FED_TARGET/." "$FED_REPLICA/"
+python3 - "$FED_REPLICA/.manna/issues.jsonl" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines()
+path.write_text("\n".join(line + " " for line in lines) + "\n")
+PY
+clear_federation_registry
+register_federation_roots "$FED_SOURCE" "$FED_TARGET" "$FED_REPLICA"
+ambiguous_exit=0
+output=$("$MANNA" relations --resolve --check --json 2>&1) || ambiguous_exit=$?
+check_exit 1 "$ambiguous_exit" "divergent target replicas fail --check"
+check_yaml "$output" '"state":"ambiguous"' "divergent target replicas resolve ambiguous"
+clear_federation_registry
+register_federation_roots "$FED_REPLICA" "$FED_TARGET" "$FED_SOURCE"
+reverse_exit=0
+output=$("$MANNA" relations --resolve --check --json 2>&1) || reverse_exit=$?
+check_exit 1 "$reverse_exit" "ambiguous resolution is registration-order independent"
+check_yaml "$output" '"state":"ambiguous"' "no divergent replica wins by registration order"
+
+clear_federation_registry
+git clone -q "$FED_SOURCE" "$FED_CLONE/source-only"
+cd "$FED_CLONE/source-only"
+clone_lint_exit=0
+"$MANNA" lint --json >/dev/null 2>&1 || clone_lint_exit=$?
+check_exit 0 "$clone_lint_exit" "source-only clone passes local lint"
+clone_reconcile_exit=0
+"$MANNA" reconcile --json >/dev/null 2>&1 || clone_reconcile_exit=$?
+check_exit 0 "$clone_reconcile_exit" "source-only clone passes local reconcile"
+clone_relations_exit=0
+output=$("$MANNA" relations --resolve --check --json 2>&1) || clone_relations_exit=$?
+check_exit 0 "$clone_relations_exit" "source-only clone retains a valid degraded relation"
+check_yaml "$output" '"state":"unavailable"' "source-only clone prints unavailable"
+
+cd "$FED_SOURCE"
+output=$("$MANNA" federation fork --reason "intentional fixture fork" 2>&1) || true
+check_yaml "$output" "success: true" "federation fork succeeds explicitly"
+check_yaml "$output" "relations: []" "federation fork clears inherited relations"
+FED_FORK_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+if [[ "$FED_FORK_BOARD" =~ ^mb-[a-f0-9]{32}$ && "$FED_FORK_BOARD" != "$FED_SOURCE_BOARD" ]]; then
+    pass "federation fork generates a distinct board identity"
+else
+    fail "federation fork generates a distinct board identity" "$FED_SOURCE_BOARD -> $FED_FORK_BOARD"
+fi
+FED_ARCHIVE=$(find .manna/federation-archive -type f -name "*.yaml" -print -quit)
+[[ -n "$FED_ARCHIVE" && -f "$FED_ARCHIVE" ]] \
+    && pass "federation fork archives the inherited manifest" \
+    || fail "federation fork archives the inherited manifest" "archive missing"
+check_yaml "$(cat "$FED_ARCHIVE")" "$FED_SOURCE_BOARD" "federation archive retains the inherited identity"
+check_yaml "$(cat "$FED_ARCHIVE")" "$FED_TARGET_URI" "federation archive retains inherited relations"
+git add -- .manna/federation.yaml .manna/federation-archive
+fork_lint_exit=0
+"$MANNA" lint --json >/dev/null 2>&1 || fork_lint_exit=$?
+check_exit 0 "$fork_lint_exit" "tracked fork manifest and archive pass lint"
+
+cd "$TEST_DIR"
+rm -rf "$FED_SOURCE" "$FED_TARGET" "$FED_REPLICA" "$FED_CLONE"
+
+# ============================================================================
 # Summary
 # ============================================================================
 

@@ -280,6 +280,22 @@ impl MannaStore {
         Ok(lock_file)
     }
 
+    /// Run an arbitrary board-scoped operation while holding the same lock as
+    /// issue lifecycle mutations.
+    ///
+    /// Durable adjuncts such as the federation manifest must share this lock
+    /// with `issues.jsonl`: their validation reads issue ownership and their
+    /// write must not race a claim, completion, or deletion between those two
+    /// steps. The closure is responsible for re-reading every file it uses
+    /// after the lock is acquired.
+    pub fn with_board_lock<T, F>(&self, operation: F) -> Result<T>
+    where
+        F: FnOnce() -> Result<T>,
+    {
+        let _board_lock = self.lock_board()?;
+        operation()
+    }
+
     /// Run the file half of an authenticated board-initialization journal
     /// under the same board-wide lock as every ordinary mutation. The journal
     /// writer creates `.manna/` before calling this method, but durable board

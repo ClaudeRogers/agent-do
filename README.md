@@ -257,6 +257,32 @@ sealed history, so a bare numbered filename always means launchable work.
 Renames, prompt repoints, priority state, and the index share one authenticated,
 recoverable transaction; filenames are presentation and never authority.
 
+Cross-repository lineage is an optional federation layer, not remote lifecycle
+authority. A participating repository tracks `.manna/federation.yaml`, whose
+public `board_id` plus local issue ID forms a portable target such as
+`manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6`. The declaration travels
+with Git. The machine-local `manna serve` registry only resolves it when a
+counterpart board is present; an absent board remains a valid `unavailable`
+citation.
+
+```bash
+agent-do manna federation init
+agent-do manna relate mn-a1b2c3 --kind informed_by \
+  --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6 \
+  --hint agent-do
+agent-do manna relations mn-a1b2c3 --resolve --check
+agent-do manna unrelate mn-a1b2c3 --kind informed_by \
+  --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
+agent-do manna federation fork --reason "intentional project fork"
+```
+
+Kinds are `counterpart`, `informed_by`, `depends_on`, and `supersedes`. None
+changes claim, block, done, handoff, or reconcile state in either repository.
+Resolution is one of `resolved`, `unavailable`, `missing`, or `ambiguous`;
+`--check` fails only for a present missing target or divergent replicas. A fork
+archives the inherited identity and relations, assigns a new board ID, and
+starts empty. Existing boards do nothing until `federation init` is run.
+
 Raw ideas enter through `dream`, which files the spark on the nearest board up
 the directory tree, or the global inbox when no board exists:
 

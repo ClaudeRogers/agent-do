@@ -42,6 +42,9 @@ _RS = "\x1e"
 COORD_SIGNATURE_FILES = ("agents.json", "sessions.json", "claims.json", "focus.json")
 
 _MN_ID = re.compile(r"\bmn-[0-9a-f]{6,}\b")
+_BOARD_ID = re.compile(r"^mb-[0-9a-f]{32}$")
+_MANNA_URI = re.compile(r"^manna://mb-[0-9a-f]{32}/mn-[0-9a-f]{6,}$")
+RELATION_KINDS = frozenset({"counterpart", "informed_by", "depends_on", "supersedes"})
 
 
 def utc_now() -> datetime:
@@ -119,6 +122,41 @@ def read_yaml(path: Path) -> dict[str, Any]:
 def read_order(board_dir: Path) -> list[str]:
     items = read_yaml(board_dir / "handoff-order.yaml").get("items")
     return [i for i in items if isinstance(i, str)] if isinstance(items, list) else []
+
+
+def read_federation(board_dir: Path) -> dict[str, Any]:
+    """Read the portable declaration only. Resolution remains a separate,
+    derived operation through the machine-local registry."""
+    path = board_dir / "federation.yaml"
+    if path.is_symlink():
+        return {"enabled": True, "board_id": None, "relations": [], "error": "symlinked federation manifest refused"}
+    if not path.is_file():
+        return {"enabled": False, "board_id": None, "relations": []}
+    data = read_yaml(path)
+    board_id = data.get("board_id")
+    rows = data.get("relations")
+    if data.get("version") != 1 or not isinstance(board_id, str) or not _BOARD_ID.fullmatch(board_id):
+        return {"enabled": True, "board_id": None, "relations": [], "error": "invalid federation manifest"}
+    relations = []
+    if not isinstance(rows, list):
+        return {"enabled": True, "board_id": board_id, "relations": [], "error": "invalid federation relations"}
+    for row in rows:
+        if not isinstance(row, dict):
+            return {"enabled": True, "board_id": board_id, "relations": [], "error": "invalid federation relation"}
+        source, kind, target = row.get("from"), row.get("kind"), row.get("to")
+        if (
+            not isinstance(source, str)
+            or not _MN_ID.fullmatch(source)
+            or kind not in RELATION_KINDS
+            or not isinstance(target, str)
+            or not _MANNA_URI.fullmatch(target)
+        ):
+            return {"enabled": True, "board_id": board_id, "relations": [], "error": "invalid federation relation"}
+        relation = {"from": source, "kind": kind, "to": target}
+        if isinstance(row.get("hint"), str) and row["hint"].strip():
+            relation["hint"] = row["hint"]
+        relations.append(relation)
+    return {"enabled": True, "board_id": board_id, "relations": relations}
 
 
 def live_drift(root: Path, agent_do: Path | None) -> dict[str, Any] | None:
@@ -443,6 +481,7 @@ def derive(
         drift = {**drift_file, "source": "file", "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
     workflow = read_yaml(board_dir / "workflow.yaml")
     board_meta = read_yaml(board_dir / "board.yaml")
+    federation = read_federation(board_dir)
     git = git_summary(root)
     if trailers is None:
         trailers = git_trailers(root) if git["is_repo"] else {}
@@ -454,6 +493,9 @@ def derive(
     by_id = {i["id"]: i for i in issues}
     order_index = {issue_id: n for n, issue_id in enumerate(order)}
     tracks = {i["id"]: i for i in issues if i.get("type") == "track"}
+    relations_by_source: dict[str, list[dict[str, Any]]] = {}
+    for relation in federation.get("relations") or []:
+        relations_by_source.setdefault(relation["from"], []).append(relation)
 
     def kind(issue: dict[str, Any]) -> str:
         return issue.get("type") or "item"
@@ -499,6 +541,7 @@ def derive(
                 else None
             ),
             "commits": trailers.get(issue["id"], []),
+            "relations": [dict(relation) for relation in relations_by_source.get(issue["id"], [])],
         }
         # effective: what the graph says, not only what the status field says
         if kind(issue) == "track":
@@ -591,6 +634,7 @@ def derive(
         "board": {
             "path": ".manna/issues.jsonl",
             "workflow": board_meta.get("workflow"),
+            "board_id": federation.get("board_id"),
             "decision_markers": list(markers),
         "handoff_dir": handoff_dir,
             "issues_modified_at": mtime_iso(board_dir / "issues.jsonl"),
@@ -611,6 +655,7 @@ def derive(
         "dreams": dream_rows,
         "tracks": track_groups,
         "drift": drift,
+        "federation": federation,
         "all": sorted(rows, key=order_key),
     }
 
@@ -626,6 +671,7 @@ def signature_paths(root: Path, gitdir: Path | None, include_coord: bool = True)
         board_dir / "drift.yaml",
         board_dir / "board.yaml",
         board_dir / "workflow.yaml",
+        board_dir / "federation.yaml",
     ]
     if gitdir:
         paths.extend([gitdir / "HEAD", gitdir / "index", gitdir / "logs" / "HEAD"])

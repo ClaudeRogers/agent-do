@@ -74,7 +74,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 21 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 25 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2513,6 +2513,7 @@ Concurrency: `write`
 **Capabilities**
 
 - track issues and dependencies
+- declare portable typed relations between autonomous repository boards
 - manage session state
 - store context across sessions
 - query issue history
@@ -2529,6 +2530,10 @@ Concurrency: `write`
 - `sync`: Derive numbered handoff filenames, blocker launch gates, and the README index from board state
 - `abandon`: Release a claimed issue back to open
 - `handoff`: Seal and bind an intentional canonical handoff edit
+- `federation`: Initialize, inspect, or explicitly fork a portable Manna federation identity
+- `relate`: Add one typed outbound cross-board relation
+- `unrelate`: Remove one typed outbound cross-board relation
+- `relations`: List local relations and optionally resolve them through registered boards
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
@@ -2568,16 +2573,26 @@ agent-do manna sync
 agent-do manna serve --open
 # list every board on this machine
 agent-do manna serve --scan ~/Projects
+# initialize portable board identity
+agent-do manna federation init
+# link this item to a sibling board
+agent-do manna relate mn-a1b2c3 --kind counterpart --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
+# inspect cross-board relations
+agent-do manna relations --resolve --check
 ```
+
+**Credentials**
+
+- Optional: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `sync`, `unblock`, `update`
-- destructive (irreversible data loss; confirm before auto-running): `delete`, `migrate`
+- Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `relations`, `show`, `status`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `federation`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `relate`, `sync`, `unblock`, `unrelate`, `update`
+- destructive (irreversible data loss; confirm before auto-running): `delete`, `federation`, `migrate`, `unrelate`
 - long_running (daemon/stream/session; may never return): `serve`
-- polymorphic (beat decided by payload or flag at call time): `reconcile`
-- composite (one call performs several beats internally): `migrate`, `order`, `sync`
+- polymorphic (beat decided by payload or flag at call time): `federation`, `reconcile`, `relations`
+- composite (one call performs several beats internally): `federation`, `migrate`, `order`, `sync`
 
 ### meet
 
