@@ -83,6 +83,12 @@ h2 { font-size: var(--t-h2); margin: 0; }
 .task-check { color: var(--faint); }
 .task-id { color: var(--muted); }
 .task-title { color: var(--text); min-width: 0; }
+.task-pulse { display: block; color: var(--faint); font-size: var(--t-small); margin-top: var(--s1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attn-needs-user { color: var(--amber); }
+.attn-failed { color: var(--red); }
+.attn-working { color: var(--blue); }
+.attn-present, .attn-idle { color: var(--muted); }
+.attn-finished, .attn-ended, .attn-gone, .attn-unseen { color: var(--faint); }
 .task-track { color: var(--faint); font-size: var(--t-small); line-height: 21px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .task-state { white-space: nowrap; }
 .task-prio { color: var(--faint); font-size: var(--t-small); line-height: 21px; text-align: right; white-space: nowrap; }

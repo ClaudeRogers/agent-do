@@ -7,6 +7,10 @@ const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt
 const api = (p) => `/${encodeURIComponent(app.slug)}/${p}`;
 
 const LABEL = { active: "in progress", ready: "ready", waiting: "blocked", decision: "needs decision", dream: "dream", done: "done", track: "track", missing: "missing" };
+const ATTN = { "needs-user": "needs you", failed: "failed", working: "working", present: "present", idle: "idle", finished: "finished", ended: "ended", gone: "gone", unseen: "unseen" };
+const attn = (a) => ATTN[a] || String(a || "");
+const attnCls = (a) => `attn-${String(a || "unseen").replace(/[^a-z-]/g, "")}`;
+const clip = (t, n) => { const v = String(t || "").replace(/\s+/g, " ").trim(); return v.length > n ? v.slice(0, n - 1) + "…" : v; };
 const label = (s) => LABEL[s] || String(s || "").replaceAll("_", " ");
 const mark = (s) => ({ done: "[x]", active: "[~]", decision: "[!]", waiting: "[-]", dream: "[*]", track: "[#]" }[s] || "[ ]");
 const cls = (s) => `state-${s || "missing"}`;
@@ -47,10 +51,10 @@ function toast(msg) {
 function taskRow(row, opts = {}) {
   const st = row.effective;
   const claimant = row.claimant
-    ? `<p><span class="label">claimed by</span><strong>${esc(row.claimant.label)} <span class="live-${esc(row.claimant.liveness)}">${esc(row.claimant.liveness)}</span>${row.claimant.age ? ` <span class="faint">${esc(row.claimant.age)}</span>` : ""}${row.claimant.goal ? `<br><span class="faint">${esc(row.claimant.goal)}</span>` : ""}</strong></p>`
+    ? `<p><span class="label">claimed by</span><strong>${esc(row.claimant.label)} <span class="live-${esc(row.claimant.liveness)}">${esc(row.claimant.liveness)}</span>${row.claimant.age ? ` <span class="faint">${esc(row.claimant.age)}</span>` : ""}${row.claimant.goal ? `<br><span class="faint">${esc(row.claimant.goal)}</span>` : ""}</strong></p>${row.claimant.pulse ? `<p><span class="label">pulse</span><strong><span class="${esc(attnCls(row.claimant.attention))}">${esc(attn(row.claimant.attention))}</span>${row.claimant.pulse.activity ? ` · ${esc(row.claimant.pulse.activity)}` : ""}${row.claimant.pulse.updated_at ? ` <span class="faint">${esc(ago(row.claimant.pulse.updated_at))}</span>` : ""}${row.claimant.pulse.latest_prompt ? `<br><span class="faint">“${esc(clip(row.claimant.pulse.latest_prompt, 200))}”</span>` : ""}</strong></p>` : ""}`
     : "";
   const blockers = row.blockers?.length
-    ? `<p><span class="label">waits on</span><strong>${row.blockers.map((b) => `<a href="#row-${esc(b.id)}">${esc(b.id)}</a> <span class="${cls(b.status === "blocked" ? "waiting" : b.status)}">${esc(label(b.status))}</span> ${esc(b.title)}`).join("<br>")}</strong></p>`
+    ? `<p><span class="label">waits on</span><strong>${row.blockers.map((b) => `<a href="#row-${esc(b.id)}">${esc(b.id)}</a> <span class="${esc(cls(b.status === "blocked" ? "waiting" : b.status))}">${esc(label(b.status))}</span> ${esc(b.title)}`).join("<br>")}</strong></p>`
     : "";
   const dependents = row.dependents?.length ? `<p><span class="label">unblocks</span><strong>${row.dependents.map((d) => `<a href="#row-${esc(d)}">${esc(d)}</a>`).join(", ")}</strong></p>` : "";
   const commits = row.commits?.length
@@ -64,14 +68,21 @@ function taskRow(row, opts = {}) {
   const dangling = row.prompt && row.handoff_exists === false && app.state?.board?.workflow !== "strict";
   if (dangling) actions.push('<span class="faint">no handoff on disk</span>');
   const track = opts.showTrack !== false && row.track_title ? shortTrack(row.track_title) : "";
+  const pulse = row.claimant?.pulse;
+  const attention = row.claimant?.attention;
+  const pulseLine = st === "active" && row.claimant
+    ? `<span class="task-pulse"><span class="${esc(attnCls(attention))}">${esc(attn(attention))}</span>${pulse?.activity ? ` · ${esc(pulse.activity)}` : ""}${pulse?.todo?.total ? ` · ${esc(pulse.todo.done)}/${esc(pulse.todo.total)}` : ""}${pulse?.latest_prompt ? ` · “${esc(clip(pulse.latest_prompt, 96))}”` : ""}</span>`
+    : "";
+  const stateText = st === "active" && (attention === "needs-user" || attention === "failed") ? attn(attention) : label(st);
+  const stateCls = st === "active" && (attention === "needs-user" || attention === "failed") ? attnCls(attention) : cls(st);
   return `
     <details class="task" id="row-${esc(row.id)}">
       <summary>
         <span class="task-check ${cls(st)}">${mark(st)}</span>
         <span class="task-id">${esc(row.id)}</span>
-        <span class="task-title">${esc(row.title)}</span>
+        <span class="task-title">${esc(row.title)}${pulseLine}</span>
         <span class="task-track" title="${esc(row.track_title || "")}">${esc(track)}</span>
-        <span class="task-state ${cls(st)}">${esc(label(st))}</span>
+        <span class="task-state ${esc(stateCls)}">${esc(stateText)}</span>
         <span class="task-prio">${row.order != null ? `#${row.order + 1}` : ""}</span>
       </summary>
       <div class="task-body">
@@ -102,11 +113,22 @@ function renderHeader(s) {
   $("#board-state").textContent = `${s.total} rows · workflow ${s.board.workflow || "unknown"} · ${s.board.order_count} in handoff order · issues written ${ago(s.board.issues_modified_at)}`;
   const d = s.drift;
   const drift = $("#drift-state");
-  drift.textContent = !d.present ? "no drift.yaml (reconcile has not run here)" : d.count ? `${d.count} finding${d.count === 1 ? "" : "s"} as of ${ago(d.generated_at)}: ${Object.entries(d.kinds).map(([k, n]) => `${k} ${n}`).join(", ")}` : `clean as of ${ago(d.generated_at)}`;
+  const kinds = Object.entries(d.kinds || {}).map(([k, n]) => `${k} ${n}`).join(", ");
+  const fileNote = d.source === "reconcile" ? (d.file?.present ? ` · file ${d.file.count} as of ${ago(d.file.generated_at)}` : " · no drift.yaml written yet") : "";
+  drift.textContent = d.source === "reconcile"
+    ? (d.count ? `${d.count} live: ${kinds}${fileNote}` : `clean live${fileNote}`)
+    : (!d.present ? "no drift.yaml (reconcile has not run here)" : d.count ? `${d.count} as of ${ago(d.generated_at)}: ${kinds}` : `clean as of ${ago(d.generated_at)}`);
   drift.className = d.count ? "state-decision" : "state-done";
-  const live = (s.peers || []).filter((p) => p.status === "active");
-  const idle = (s.peers || []).filter((p) => p.status === "idle");
-  $("#peers-state").textContent = s.peers?.length ? `${live.length} active, ${idle.length} idle, ${s.peers.length - live.length - idle.length} gone` : "none on the coord board";
+  const a = s.attention || {};
+  const parts = [];
+  if (a["needs-user"]) parts.push(`<span class="attn-needs-user">${a["needs-user"]} need you</span>`);
+  if (a.failed) parts.push(`<span class="attn-failed">${a.failed} failed</span>`);
+  if (a.working) parts.push(`${a.working} working`);
+  if (a.present) parts.push(`${a.present} present`);
+  if (a.idle) parts.push(`${a.idle} idle`);
+  if (a.finished || a.ended) parts.push(`${(a.finished || 0) + (a.ended || 0)} finished`);
+  if (a.gone) parts.push(`<span class="faint">${a.gone} gone</span>`);
+  $("#peers-state").innerHTML = parts.length ? parts.join(", ") : "none on the coord board";
   const c = s.counts || {};
   $("#counts").innerHTML = [["active", "now"], ["ready", "next"], ["decision", "decisions"], ["waiting", "waiting"], ["dream", "dreams"], ["done", "all"]]
     .map(([k, anchor]) => `<a href="#${anchor}"><span class="n ${cls(k)}">${c[k] || 0}</span> <span class="muted">${label(k)}</span></a>`).join("");
@@ -126,7 +148,9 @@ function renderWaves(s) {
 
 function renderDrift(s) {
   const d = s.drift;
-  $("#drift-age").textContent = d.present ? `${d.count} finding${d.count === 1 ? "" : "s"} · ${ago(d.generated_at)}` : "no drift file";
+  $("#drift-age").textContent = d.source === "reconcile"
+    ? `${d.count} finding${d.count === 1 ? "" : "s"} · live${d.file?.present ? ` · file ${ago(d.file.generated_at)}` : ""}`
+    : (d.present ? `${d.count} finding${d.count === 1 ? "" : "s"} · file ${ago(d.generated_at)}` : "no drift file");
   const rows = (d.findings || []).filter((f) => !app.grep || JSON.stringify(f).toLowerCase().includes(app.grep.toLowerCase()));
   $("#drift-list").innerHTML = rows.length
     ? rows.map((f) => `<p><span class="log-kind">${esc(f.kind)}</span><span>${f.issue_id ? `<a href="#row-${esc(f.issue_id)}">${esc(f.issue_id)}</a>` : ""}</span><span>${esc(f.detail || "")}${f.evidence ? ` <span class="faint">(${esc(f.evidence)})</span>` : ""}</span>${f.proposed_fix ? `<span class="log-fix">fix: ${esc(f.proposed_fix)}</span>` : ""}</p>`).join("")

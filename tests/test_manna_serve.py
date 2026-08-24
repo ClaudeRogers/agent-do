@@ -30,7 +30,8 @@ ISSUES = [
     {"id": "mn-track1", "title": "TRACK: Program", "status": "open", "type": "track", "blocked_by": [], "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z"},
     {"id": "mn-aaaaaa", "title": "First ready thing", "status": "open", "blocked_by": [], "track": "mn-track1", "prompt": ".handoff/01-mn-aaaaaa-first.md", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-10T00:00:00Z"},
     {"id": "mn-bbbbbb", "title": "Second ready thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-11T00:00:00Z"},
-    {"id": "mn-cccccc", "title": "Claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-deadbeefdeadbeef", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "0" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-12T00:00:00Z"},
+    {"id": "mn-cccccc", "title": "Claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-deadbeefdead0000", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "0" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-12T00:00:00Z"},
+    {"id": "mn-cccc22", "title": "Second claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-0000aaaa1111ffff", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "1" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-13T00:00:00Z"},
     {"id": "mn-dddddd", "title": "Waits on aaaaaa", "status": "blocked", "blocked_by": ["mn-aaaaaa"], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-eeeeee", "title": "Waits on dddddd", "status": "blocked", "blocked_by": ["mn-dddddd"], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-ffffff", "title": "[DECISION] Ratify the thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
@@ -42,6 +43,40 @@ ISSUES = [
     {"id": "mn-cycle1", "title": "Cycle A", "status": "blocked", "blocked_by": ["mn-cycle2"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-cycle2", "title": "Cycle B", "status": "blocked", "blocked_by": ["mn-cycle1"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
 ]
+
+
+STUB_PEERS = {
+    "success": True,
+    "peers": [
+        {"agent_id": "session-deadbeefdead", "status": "active", "age": "3s ago", "age_seconds": 3, "runtime": "claude", "focus": {"goal": "building the thing"},
+         "pulse": {"status": "needs-user", "activity": "Bash", "latest_prompt": "please fix it", "updated_at": "2026-08-24T00:00:00Z", "turns": 4, "todo": {"done": 1, "total": 3, "current": "fix unicode"}}},
+        {"agent_id": "session-0000aaaa1111", "status": "active", "age": "9s ago", "age_seconds": 9, "runtime": "claude", "focus": {"goal": "reading"},
+         "pulse": {"status": "working", "activity": "Read", "latest_prompt": "look around", "updated_at": "2026-08-24T00:00:00Z", "turns": 1}},
+        {"agent_id": "codex-feedfacefeedface", "status": "idle", "age": "40m ago", "age_seconds": 2400, "runtime": "codex", "focus": {}},
+        {"agent_id": "session-dead00000000", "status": "dead", "age": "3h ago", "age_seconds": 10800, "runtime": "claude", "focus": {}},
+    ],
+}
+STUB_RECONCILE = {"success": True, "findings": [
+    {"kind": "landed_open", "issue_id": "mn-aaaaaa", "detail": "live finding", "evidence": "abc123", "proposed_fix": "claim and done"},
+    {"kind": "stale_dream", "issue_id": "mn-dream1", "detail": "old dream", "evidence": "created 2026-08-02", "proposed_fix": "convert or close"},
+]}
+
+
+def make_stub_agent_do(directory: Path) -> Path:
+    """A stand-in `agent-do` that answers the two verbs serve consumes."""
+    import shlex
+    script = directory / "agent-do"
+    script.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\n"
+        f"PEERS = {STUB_PEERS!r}\nRECON = {STUB_RECONCILE!r}\n"
+        "a = sys.argv[1:]\n"
+        "if a[:3] == ['coord', 'peers', '--json']: print(json.dumps(PEERS)); sys.exit(0)\n"
+        "if a[:3] == ['manna', 'reconcile', '--json']: print(json.dumps(RECON)); sys.exit(1)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
 
 
 def git(root: Path, *args: str) -> str:
@@ -95,9 +130,12 @@ class DerivationTests(unittest.TestCase):
 
     def test_now_carries_claimant_with_unseen_liveness_without_coord(self) -> None:
         now = self.state["now"]
-        self.assertEqual([r["id"] for r in now], ["mn-cccccc"])
-        self.assertEqual(now[0]["claimant"]["label"], "claude-deadbeefdeadbeef")
-        self.assertEqual(now[0]["claimant"]["liveness"], "unseen")
+        self.assertEqual(sorted(r["id"] for r in now), ["mn-cccc22", "mn-cccccc"])
+        first = next(r for r in now if r["id"] == "mn-cccccc")
+        self.assertEqual(first["claimant"]["label"], "claude-deadbeefdead0000")
+        self.assertEqual(first["claimant"]["liveness"], "unseen")
+        self.assertIsNone(first["claimant"]["pulse"])
+        self.assertEqual(self.state["drift"]["source"], "file")
 
     def test_decisions_come_from_title_markers(self) -> None:
         self.assertEqual(sorted(r["id"] for r in self.state["decisions"]), ["mn-ffffff", "mn-second"])
@@ -158,6 +196,49 @@ class DerivationTests(unittest.TestCase):
         self.assertEqual(board_lib.match_peer("codex-01a02afe94d27b52", peers)["status"], "idle")
         self.assertIsNone(board_lib.match_peer("claude-ffffffffffffffff", peers))
         self.assertIsNone(board_lib.match_peer(None, peers))
+
+
+class LiveDerivationTests(unittest.TestCase):
+    """With coord and reconcile answering (stubbed), pulse rides the rows and drift is live."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = make_board(Path(cls.tmp.name) / "proj")
+        cls.stub = make_stub_agent_do(Path(cls.tmp.name))
+        cls.state = board_lib.derive(cls.root, agent_do=cls.stub, live=True)
+        cls.by_id = {r["id"]: r for r in cls.state["all"]}
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def test_now_sorts_needs_user_first_and_carries_pulse(self) -> None:
+        now = self.state["now"]
+        self.assertEqual([r["id"] for r in now], ["mn-cccccc", "mn-cccc22"])
+        c = now[0]["claimant"]
+        self.assertEqual(c["attention"], "needs-user")
+        self.assertEqual(c["pulse"]["activity"], "Bash")
+        self.assertEqual(c["pulse"]["todo"], {"done": 1, "total": 3, "current": "fix unicode"})
+        self.assertEqual(now[1]["claimant"]["attention"], "working")
+
+    def test_peers_attention_first_and_counted(self) -> None:
+        self.assertEqual([p["attention"] for p in self.state["peers"]], ["needs-user", "working", "idle", "gone"])
+        self.assertEqual(self.state["attention"]["needs-user"], 1)
+        self.assertEqual(self.state["attention"]["gone"], 1)
+
+    def test_drift_is_live_with_file_age_beside_it(self) -> None:
+        d = self.state["drift"]
+        self.assertEqual(d["source"], "reconcile")
+        self.assertEqual(d["count"], 2)
+        self.assertEqual(d["kinds"], {"landed_open": 1, "stale_dream": 1})
+        self.assertEqual(d["file"]["count"], 1)
+        self.assertEqual(d["file"]["generated_at"], "2026-08-20T00:00:00Z")
+        self.assertFalse((self.root / ".manna" / "drift.yaml").read_text().count("live finding"), "the page never writes drift")
+
+    def test_nonzero_exit_reconcile_still_counts(self) -> None:
+        # the stub exits 1 with findings, as reconcile does
+        self.assertIsNotNone(board_lib.live_drift(self.root, self.stub))
 
 
 class RegistryAndHttpTests(unittest.TestCase):

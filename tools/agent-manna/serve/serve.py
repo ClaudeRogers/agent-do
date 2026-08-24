@@ -38,7 +38,7 @@ sys.path.insert(0, str(SERVE_DIR))
 import board as board_lib  # noqa: E402
 
 STATIC_DIR = SERVE_DIR / "static"
-AGENT_DO = SERVE_DIR.parents[2] / "agent-do"
+AGENT_DO = Path(os.environ.get("MANNA_SERVE_AGENT_DO") or (SERVE_DIR.parents[2] / "agent-do"))
 
 # 7777 is a name, not a bound: chosen 2026-08-24 for a port anyone on
 # the estate can remember. Override with --port or MANNA_SERVE_PORT.
@@ -240,7 +240,7 @@ class BoardCache:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
                 return cached
-        state = board_lib.derive(root, AGENT_DO, decision_markers())
+        state = board_lib.derive(root, AGENT_DO, decision_markers(), live=True)
         state["slug"] = slug
         with self.lock:
             self.states[slug] = (sig, state)

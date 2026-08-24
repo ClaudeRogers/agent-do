@@ -68,14 +68,19 @@ def find_board_root(start: Path) -> Path | None:
     return None
 
 
-def run(cmd: list[str], cwd: Path, timeout: float) -> str:
+def run(cmd: list[str], cwd: Path, timeout: float, any_exit: bool = False) -> str:
+    """stdout of a command, or "" when it failed. `any_exit` keeps stdout on a
+    nonzero exit, for verbs like reconcile that exit 1 *because* they found
+    something and still print the structured answer."""
     try:
         completed = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True, check=False, timeout=timeout
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return completed.stdout if completed.returncode == 0 else ""
+    if completed.returncode == 0 or any_exit:
+        return completed.stdout
+    return ""
 
 
 # ---------------------------------------------------------------- raw reads
@@ -114,6 +119,30 @@ def read_yaml(path: Path) -> dict[str, Any]:
 def read_order(board_dir: Path) -> list[str]:
     items = read_yaml(board_dir / "handoff-order.yaml").get("items")
     return [i for i in items if isinstance(i, str)] if isinstance(items, list) else []
+
+
+def live_drift(root: Path, agent_do: Path | None) -> dict[str, Any] | None:
+    """Findings as of now. `manna reconcile --json` reads the board and git
+    without writing; the file it would write needs --write-drift, which the
+    page never passes. None when the CLI is unavailable or fails."""
+    if agent_do is None or not agent_do.is_file():
+        return None
+    out = run([str(agent_do), "manna", "reconcile", "--json"], root, timeout=60, any_exit=True)
+    if not out:
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return None
+    findings = [f for f in findings if isinstance(f, dict)]
+    kinds: dict[str, int] = {}
+    for finding in findings:
+        kind = str(finding.get("kind", "unknown"))
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return {"findings": findings, "count": len(findings), "kinds": kinds, "generated_at": iso(utc_now())}
 
 
 def read_drift(board_dir: Path) -> dict[str, Any]:
@@ -207,15 +236,64 @@ def coord_peers(root: Path, agent_do: Path | None) -> list[dict[str, Any]]:
                 "alias": peer.get("alias"),
                 "status": peer.get("status"),
                 "age": peer.get("age"),
+                "age_seconds": peer.get("age_seconds"),
                 "runtime": peer.get("runtime"),
                 "role": peer.get("role"),
                 "mode": peer.get("mode"),
                 "phase": peer.get("phase"),
                 "goal": focus.get("goal"),
                 "paths": focus.get("paths") or peer.get("territory") or [],
+                "pulse": slim_pulse(peer.get("pulse")),
             }
         )
+    for peer in slim:
+        peer["attention"] = attention_rank(peer)
     return slim
+
+
+# Attention-first, the order coord peers itself uses: whoever waits on a
+# human outranks whoever failed, outranks whoever is working, outranks the
+# merely present; the finished and the gone sink.
+ATTENTION_ORDER = ("needs-user", "failed", "working", "present", "idle", "finished", "ended", "gone")
+
+
+def slim_pulse(pulse: Any) -> dict[str, Any] | None:
+    """The telemetry fields the page shows. Pulse is a hint about what a
+    session is doing now, never evidence of what the board records."""
+    if not isinstance(pulse, dict):
+        return None
+    out = {
+        "status": pulse.get("status"),
+        "activity": pulse.get("activity"),
+        "latest_prompt": pulse.get("latest_prompt"),
+        "updated_at": pulse.get("updated_at"),
+        "turns": pulse.get("turns"),
+    }
+    todo = pulse.get("todo")
+    if isinstance(todo, dict):
+        out["todo"] = {"done": todo.get("done"), "total": todo.get("total"), "current": todo.get("current")}
+    return out
+
+
+def attention_rank(peer: dict[str, Any]) -> str:
+    liveness = peer.get("status")
+    pulse = peer.get("pulse") or {}
+    pstatus = pulse.get("status")
+    if liveness in ("dead", "stopped", "stale"):
+        return "gone"
+    if pstatus in ("needs-user", "failed", "working", "finished", "ended"):
+        return pstatus
+    if liveness == "active":
+        return "present"
+    if liveness == "idle":
+        return "idle"
+    return "present"
+
+
+def attention_key(peer: dict[str, Any]) -> tuple:
+    rank = peer.get("attention") or attention_rank(peer)
+    pos = ATTENTION_ORDER.index(rank) if rank in ATTENTION_ORDER else len(ATTENTION_ORDER)
+    return (pos, peer.get("age_seconds") if isinstance(peer.get("age_seconds"), (int, float)) else 10**9)
 
 
 def _identity_hex(value: str | None) -> str:
@@ -261,12 +339,21 @@ def strip_markers(title: str) -> str:
     return re.sub(r"^(\s*\[[^\]]*\]\s*)+", "", title).strip() or title
 
 
-def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = DECISION_MARKERS) -> dict[str, Any]:
-    """Build the whole page model for one board root."""
+def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = DECISION_MARKERS, live: bool = False) -> dict[str, Any]:
+    """Build the whole page model for one board root.
+
+    `live` runs reconcile for current drift (the daemon does; tests and quick
+    summaries do not). Either way the file's findings and age are reported,
+    so the page can say how stale the last written reconcile is."""
     board_dir = root / ".manna"
     issues = read_issues(board_dir)
     order = read_order(board_dir)
-    drift = read_drift(board_dir)
+    drift_file = read_drift(board_dir)
+    drift_live = live_drift(root, agent_do) if live else None
+    if drift_live:
+        drift = {**drift_live, "source": "reconcile", "present": True, "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
+    else:
+        drift = {**drift_file, "source": "file", "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
     workflow = read_yaml(board_dir / "workflow.yaml")
     board_meta = read_yaml(board_dir / "board.yaml")
     git = git_summary(root)
@@ -314,6 +401,8 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
                     "age": peer.get("age") if peer else None,
                     "runtime": peer.get("runtime") if peer else None,
                     "goal": peer.get("goal") if peer else None,
+                    "pulse": peer.get("pulse") if peer else None,
+                    "attention": peer.get("attention") if peer else "unseen",
                 }
                 if issue.get("claimed_by")
                 else None
@@ -347,7 +436,13 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
         pos = row["order"]
         return (pos is None, pos if pos is not None else 0, row.get("updated_at") or "", row["id"])
 
-    now_rows = sorted((r for r in rows if r["effective"] == "active"), key=order_key)
+    def now_key(row: dict[str, Any]) -> tuple:
+        claimant = row.get("claimant") or {}
+        rank = claimant.get("attention") or "unseen"
+        pos = ATTENTION_ORDER.index(rank) if rank in ATTENTION_ORDER else len(ATTENTION_ORDER)
+        return (pos, *order_key(row))
+
+    now_rows = sorted((r for r in rows if r["effective"] == "active"), key=now_key)
     next_rows = sorted((r for r in rows if r["effective"] == "ready"), key=order_key)
     decision_rows = sorted((r for r in rows if r["decision"] and r["effective"] != "done"), key=order_key)
     waiting_rows = [r for r in rows if r["effective"] == "waiting"]
@@ -405,7 +500,8 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
             "order_count": len(order),
         },
         "git": git,
-        "peers": peers,
+        "peers": sorted(peers, key=attention_key),
+        "attention": {rank: sum(1 for p in peers if p.get("attention") == rank) for rank in ATTENTION_ORDER},
         "counts": counts,
         "status_counts": status_counts,
         "total": len(issues),
