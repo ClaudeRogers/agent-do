@@ -311,6 +311,7 @@ def coord_json(root: Path, agent_do: Path | None, *verb: str, key: str) -> list[
 
 
 LIVE_OWNER = frozenset({"active", "idle"})
+EMPTY_COORD: dict[str, Any] = {"claims": [], "contention": [], "drops": [], "needs": []}
 
 
 def _overlaps(a: str, b: str) -> bool:
@@ -412,17 +413,30 @@ def strip_markers(title: str) -> str:
     return re.sub(r"^(\s*\[[^\]]*\]\s*)+", "", title).strip() or title
 
 
-def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = DECISION_MARKERS, live: bool = False) -> dict[str, Any]:
+def derive(
+    root: Path,
+    agent_do: Path | None = None,
+    markers: tuple[str, ...] = DECISION_MARKERS,
+    live: bool = False,
+    *,
+    peers: list[dict[str, Any]] | None = None,
+    coord: dict[str, Any] | None = None,
+    drift_live: dict[str, Any] | None = None,
+    trailers: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Build the whole page model for one board root.
 
     `live` runs reconcile for current drift (the daemon does; tests and quick
     summaries do not). Either way the file's findings and age are reported,
-    so the page can say how stale the last written reconcile is."""
+    so the page can say how stale the last written reconcile is. The daemon
+    passes precomputed pieces so the expensive ones (reconcile, git log,
+    coord) are cached on their own clocks."""
     board_dir = root / ".manna"
     issues = read_issues(board_dir)
     order = read_order(board_dir)
     drift_file = read_drift(board_dir)
-    drift_live = live_drift(root, agent_do) if live else None
+    if drift_live is None and live:
+        drift_live = live_drift(root, agent_do)
     if drift_live:
         drift = {**drift_live, "source": "reconcile", "present": True, "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
     else:
@@ -430,9 +444,12 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
     workflow = read_yaml(board_dir / "workflow.yaml")
     board_meta = read_yaml(board_dir / "board.yaml")
     git = git_summary(root)
-    trailers = git_trailers(root) if git["is_repo"] else {}
-    peers = coord_peers(root, agent_do) if git["is_repo"] else []
-    coord = coord_snapshot(root, agent_do, peers) if peers else {"claims": [], "contention": [], "drops": [], "needs": []}
+    if trailers is None:
+        trailers = git_trailers(root) if git["is_repo"] else {}
+    if peers is None:
+        peers = coord_peers(root, agent_do) if git["is_repo"] else []
+    if coord is None:
+        coord = coord_snapshot(root, agent_do, peers) if peers else EMPTY_COORD
 
     by_id = {i["id"]: i for i in issues}
     order_index = {issue_id: n for n, issue_id in enumerate(order)}
@@ -601,7 +618,7 @@ def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = 
 # ---------------------------------------------------------------- signature
 
 
-def signature_paths(root: Path, gitdir: Path | None) -> list[Path]:
+def signature_paths(root: Path, gitdir: Path | None, include_coord: bool = True) -> list[Path]:
     board_dir = root / ".manna"
     paths = [
         board_dir / "issues.jsonl",
@@ -612,16 +629,53 @@ def signature_paths(root: Path, gitdir: Path | None) -> list[Path]:
     ]
     if gitdir:
         paths.extend([gitdir / "HEAD", gitdir / "index", gitdir / "logs" / "HEAD"])
-        # Presence, claims, and focus move the page; pulse.json and
-        # events.jsonl churn on every tool call and would re-render for nothing.
-        coord_root = gitdir / "agent-do" / "coord"
-        paths.extend(coord_root / name for name in COORD_SIGNATURE_FILES)
+        if include_coord:
+            coord_root = gitdir / "agent-do" / "coord"
+            paths.extend(coord_root / name for name in COORD_SIGNATURE_FILES)
     return paths
 
 
-def signature(root: Path, gitdir: Path | None) -> str:
+def base_signature(root: Path, gitdir: Path | None) -> str:
+    """Board + git only. Presence files are excluded on purpose: every tool
+    call by any agent in the repo touches them, so a signature that included
+    them would never settle. Presence is read on its own cadence."""
+    return signature(root, gitdir, include_coord=False)
+
+
+def coord_signature(root: Path, gitdir: Path | None) -> str:
+    """Only the coord presence files: what the estate glance depends on."""
+    if not gitdir:
+        return "no-git"
     parts = []
-    for path in signature_paths(root, gitdir):
+    for name in COORD_SIGNATURE_FILES:
+        path = gitdir / "agent-do" / "coord" / name
+        try:
+            st = path.stat()
+            parts.append(f"{name}:{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append(f"{name}:missing")
+    return "|".join(parts)
+
+
+def glance(root: Path, agent_do: Path | None) -> dict[str, Any]:
+    """Attention counts for one board's coord presence: the index-row view."""
+    return glance_from_peers(coord_peers(root, agent_do))
+
+
+def glance_from_peers(peers: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {rank: sum(1 for p in peers if p.get("attention") == rank) for rank in ATTENTION_ORDER}
+    return {
+        "attention": counts,
+        "needs_you": counts["needs-user"] + counts["failed"],
+        "working": counts["working"],
+        "here": sum(v for k, v in counts.items() if k != "gone"),
+        "gone": counts["gone"],
+    }
+
+
+def signature(root: Path, gitdir: Path | None, include_coord: bool = True) -> str:
+    parts = []
+    for path in signature_paths(root, gitdir, include_coord):
         try:
             st = path.stat()
             parts.append(f"{path}:{st.st_mtime_ns}:{st.st_size}")

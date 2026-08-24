@@ -312,6 +312,31 @@ class RegistryAndHttpTests(unittest.TestCase):
         found = {p.relative_to(base).as_posix() for p in serve_lib.scan_boards(base)}
         self.assertEqual(found, {"a", "a/sub"})
 
+    def test_index_glance_reads_coord_per_board(self) -> None:
+        serve_lib.register_board(self.root)
+        stub = make_stub_agent_do(Path(self.tmp.name))
+        original, serve_lib.AGENT_DO = serve_lib.AGENT_DO, stub
+        try:
+            serve_lib.CACHE.bundles.clear()
+            index = serve_lib.boards_index()
+            row = index["boards"][0]
+            self.assertEqual(row["coord"]["needs_you"], 1)
+            self.assertEqual(row["coord"]["working"], 1)
+            self.assertEqual(row["coord"]["here"], 3)
+            self.assertEqual(row["coord"]["gone"], 1)
+            self.assertEqual(index["totals"]["needs_you"], 1)
+            # presence runs on a cadence: inside the window the same bundle answers
+            root = self.root.resolve()
+            first = serve_lib.CACHE.bundle(root)
+            self.assertIs(serve_lib.CACHE.bundle(root), first)
+            self.assertIn("coord:" + first["digest"], serve_lib.CACHE.signature(root))
+            later = serve_lib.CACHE.bundle(root, now=first["fetched_at"] + serve_lib.COORD_REFRESH_SECONDS + 1)
+            self.assertIsNot(later, first)
+            self.assertEqual(later["digest"], first["digest"], "same presence, same digest: no push")
+        finally:
+            serve_lib.AGENT_DO = original
+            serve_lib.CACHE.bundles.clear()
+
     def test_http_surface(self) -> None:
         serve_lib.register_board(self.root)
         server = ThreadingHTTPServer(("127.0.0.1", 0), serve_lib.Handler)

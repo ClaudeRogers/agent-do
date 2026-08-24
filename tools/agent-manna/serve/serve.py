@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +53,13 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
 # once a second is far under that once render time is added, and costs a
 # handful of stat calls per client per second.
 POLL_INTERVAL_SECONDS = 1.0
+
+# Presence is re-read every ten seconds: Nielsen's limit for keeping a
+# person's attention on a dialogue (Usability Engineering, 1993: 10s), so
+# a "needs you" reaches the page inside the window in which it still holds
+# the human's attention. Presence files themselves churn on every tool call
+# in the repo, so they cannot drive a signature; a cadence must.
+COORD_REFRESH_SECONDS = 10.0
 
 # A scan walks three directory levels below the root it is given: deep enough
 # for <root>/<project>/<sub-project>/.manna, the deepest layout this was built
@@ -220,19 +228,87 @@ def pid_alive(pid: int) -> bool:
 
 
 class BoardCache:
+    """Two clocks. Board and git state is keyed by a file signature and
+    recomputed only when those files move (that is where reconcile and the
+    git log live). Coord presence is refreshed on a cadence and carries a
+    content digest, so streams push only when presence actually changed."""
+
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.states: dict[str, tuple[str, dict[str, Any]]] = {}
         self.gitdirs: dict[str, Path | None] = {}
+        self.bits: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.bundles: dict[str, dict[str, Any]] = {}
+        self.states: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def gitdir(self, root: Path) -> Path | None:
         key = str(root)
-        if key not in self.gitdirs:
-            self.gitdirs[key] = board_lib.git_dir(root)
-        return self.gitdirs[key]
+        with self.lock:
+            if key in self.gitdirs:
+                return self.gitdirs[key]
+        value = board_lib.git_dir(root)
+        with self.lock:
+            self.gitdirs[key] = value
+        return value
+
+    def base_signature(self, root: Path) -> str:
+        return board_lib.base_signature(root, self.gitdir(root))
+
+    # -- board + git clock
+
+    def board_bits(self, root: Path) -> tuple[str, dict[str, Any]]:
+        """Reconcile findings and trailer commits, valid until the board or git moves."""
+        key = str(root)
+        sig = self.base_signature(root)
+        with self.lock:
+            cached = self.bits.get(key)
+            if cached and cached[0] == sig:
+                return cached
+        is_repo = self.gitdir(root) is not None
+        value = {
+            "drift_live": board_lib.live_drift(root, AGENT_DO) if is_repo else None,
+            "trailers": board_lib.git_trailers(root) if is_repo else {},
+        }
+        with self.lock:
+            self.bits[key] = (sig, value)
+        return sig, value
+
+    # -- presence clock
+
+    def bundle(self, root: Path, now: float | None = None) -> dict[str, Any]:
+        """Peers + claims/drops/needs, at most COORD_REFRESH_SECONDS old."""
+        key = str(root)
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            cached = self.bundles.get(key)
+            if cached and now - cached["fetched_at"] < COORD_REFRESH_SECONDS:
+                return cached
+        if self.gitdir(root) is None:
+            peers, coord = [], board_lib.EMPTY_COORD
+        else:
+            peers = board_lib.coord_peers(root, AGENT_DO)
+            coord = board_lib.coord_snapshot(root, AGENT_DO, peers) if peers else board_lib.EMPTY_COORD
+        digest = hashlib.sha256(json.dumps({"p": peers, "c": coord}, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        value = {"fetched_at": now, "peers": peers, "coord": coord, "digest": digest, "glance": board_lib.glance_from_peers(peers)}
+        with self.lock:
+            self.bundles[key] = value
+        return value
+
+    def refresh_bundles(self, roots: list[Path]) -> None:
+        """Bring every stale bundle current in parallel, one worker per core."""
+        now = time.monotonic()
+        with self.lock:
+            stale = [r for r in roots if not (self.bundles.get(str(r)) and now - self.bundles[str(r)]["fetched_at"] < COORD_REFRESH_SECONDS)]
+        if not stale:
+            return
+        workers = max(1, min(len(stale), os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda r: self.bundle(r, now), stale))
+
+    # -- the page
 
     def signature(self, root: Path) -> str:
-        return board_lib.signature(root, self.gitdir(root))
+        """What a board stream watches: board+git files plus the presence digest."""
+        return self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
 
     def state(self, slug: str, root: Path) -> tuple[str, dict[str, Any]]:
         sig = self.signature(root)
@@ -240,32 +316,63 @@ class BoardCache:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
                 return cached
-        state = board_lib.derive(root, AGENT_DO, decision_markers(), live=True)
+        _, bits = self.board_bits(root)
+        bundle = self.bundle(root)
+        state = board_lib.derive(
+            root, AGENT_DO, decision_markers(), live=True,
+            peers=bundle["peers"], coord=bundle["coord"], drift_live=bits["drift_live"], trailers=bits["trailers"],
+        )
         state["slug"] = slug
+        state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
         with self.lock:
             self.states[slug] = (sig, state)
         return sig, state
+
+    def glance(self, root: Path) -> dict[str, Any]:
+        return self.bundle(root)["glance"]
 
 
 CACHE = BoardCache()
 
 
+EMPTY_GLANCE = {"attention": {}, "needs_you": 0, "working": 0, "here": 0, "gone": 0}
+
+
+def index_row(slug: str, entry: dict[str, Any], markers: tuple[str, ...]) -> dict[str, Any]:
+    root = Path(entry.get("path", ""))
+    if root.is_dir() and (root / ".manna").is_dir():
+        row = board_lib.summary(root, markers)
+        row["coord"] = CACHE.glance(root)
+    else:
+        row = {"name": root.name, "root": str(root), "exists": False, "total": 0, "status_counts": {}, "dreams": 0, "decisions": 0, "drift_count": 0, "drift_generated_at": None, "latest_update": None, "issues_modified_at": None, "coord": EMPTY_GLANCE}
+    row["slug"] = slug
+    row["url"] = f"/{urllib.parse.quote(slug)}"
+    return row
+
+
+def registered_roots(boards: dict[str, dict[str, Any]]) -> list[Path]:
+    return [Path(e.get("path", "")) for e in boards.values() if (Path(e.get("path", "")) / ".manna").is_dir()]
+
+
 def boards_index() -> dict[str, Any]:
     boards = load_registry()
-    rows = []
-    for slug, entry in sorted(boards.items()):
-        root = Path(entry.get("path", ""))
-        if root.is_dir() and (root / ".manna").is_dir():
-            row = board_lib.summary(root, decision_markers())
-        else:
-            row = {"name": root.name, "root": str(root), "exists": False, "total": 0, "status_counts": {}, "dreams": 0, "decisions": 0, "drift_count": 0, "drift_generated_at": None, "latest_update": None, "issues_modified_at": None}
-        row["slug"] = slug
-        row["url"] = f"/{urllib.parse.quote(slug)}"
-        rows.append(row)
-    rows.sort(key=lambda r: (not r["exists"], r.get("latest_update") or ""), reverse=False)
+    markers = decision_markers()
+    items = sorted(boards.items())
+    CACHE.refresh_bundles(registered_roots(boards))
+    # One coord read per board on a cold cache; fan out one worker per core
+    # (os.cpu_count() is the authority) so 30+ boards answer in one read's time.
+    workers = max(1, min(len(items) or 1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        rows = list(pool.map(lambda kv: index_row(kv[0], kv[1], markers), items))
+    # needs-you first, then freshest, missing boards last
     rows.sort(key=lambda r: r.get("latest_update") or "", reverse=True)
-    rows.sort(key=lambda r: not r["exists"])
-    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path()), "decision_markers": list(decision_markers())}
+    rows.sort(key=lambda r: (not r["exists"], -(r.get("coord") or {}).get("needs_you", 0), -(r.get("coord") or {}).get("working", 0)))
+    totals = {
+        "needs_you": sum((r.get("coord") or {}).get("needs_you", 0) for r in rows),
+        "working": sum((r.get("coord") or {}).get("working", 0) for r in rows),
+        "here": sum((r.get("coord") or {}).get("here", 0) for r in rows),
+    }
+    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path()), "decision_markers": list(markers), "totals": totals}
 
 
 def index_signature() -> str:
@@ -275,9 +382,11 @@ def index_signature() -> str:
         parts.append(f"registry:{st.st_mtime_ns}:{st.st_size}")
     except OSError:
         parts.append("registry:missing")
-    for slug, entry in sorted(load_registry().items()):
+    boards = load_registry()
+    CACHE.refresh_bundles(registered_roots(boards))
+    for slug, entry in sorted(boards.items()):
         root = Path(entry.get("path", ""))
-        parts.append(slug + "=" + CACHE.signature(root))
+        parts.append(slug + "=" + (CACHE.signature(root) if (root / ".manna").is_dir() else "missing"))
     return "|".join(parts)
 
 

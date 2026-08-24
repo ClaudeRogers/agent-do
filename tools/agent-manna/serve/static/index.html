@@ -24,13 +24,14 @@
       <p class="command">$ manna serve --status</p>
       <h1>BOARDS</h1>
       <p class="muted" id="summary-line">loading</p>
+      <div class="counts" id="totals"></div>
     </section>
     <section class="document-section">
       <div class="table-wrap"><table class="boards">
-        <thead><tr><th scope="col">board</th><th scope="col" class="num">active</th><th scope="col" class="num">ready</th><th scope="col" class="num">blocked</th><th scope="col" class="num">decision</th><th scope="col" class="num">dream</th><th scope="col" class="num">done</th><th scope="col" class="num">drift</th><th scope="col">updated</th><th scope="col">path</th></tr></thead>
+        <thead><tr><th scope="col">board</th><th scope="col" class="num">needs you</th><th scope="col" class="num">working</th><th scope="col" class="num">here</th><th scope="col" class="num">active</th><th scope="col" class="num">ready</th><th scope="col" class="num">blocked</th><th scope="col" class="num">decision</th><th scope="col" class="num">dream</th><th scope="col" class="num">done</th><th scope="col" class="num">drift</th><th scope="col">updated</th><th scope="col">path</th></tr></thead>
         <tbody id="boards-body"></tbody>
       </table></div>
-      <p class="note">A board appears here after <code>agent-do manna serve</code> runs inside its project once, or after <code>agent-do manna serve --scan &lt;dir&gt;</code>.</p>
+      <p class="note"><em>needs you</em>, <em>working</em>, and <em>here</em> come from each board's coord presence and pulse; the rest from its manna board. A board appears here after <code>agent-do manna serve</code> runs inside its project once, or after <code>agent-do manna serve --scan &lt;dir&gt;</code>.</p>
     </section>
     <footer class="footer"><p><span class="label">registry </span><strong id="registry-path"></strong></p></footer>
   </main>

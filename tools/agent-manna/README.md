@@ -436,11 +436,12 @@ context: |
 The human window. One read-only daemon on `127.0.0.1:7777` renders every
 registered board at `/` and this project at `/<name>`:
 
-- **now**: claimed work with the claimant's liveness from coord
+- **now**: claimed work with the claimant's liveness and coord pulse (needs-you / working, current tool, latest prompt), attention-first
+- **coordination**: who is here, what they hold, advisory claims with contention (two live owners on overlapping paths), drops
 - **next**: open, unblocked, in `handoff-order.yaml` priority
 - **needs decision**: titles led by `[DECISION]`, `[HUMAN]`, or `[OWNER]` (add a name for this machine: `serve --decision-marker "[NAME]"`)
 - **waiting**: the `blocked_by` graph in topological waves
-- **drift**: the last `reconcile --write-drift` findings (the page never runs reconcile)
+- **drift**: live findings from `manna reconcile --json` (read-only) when the board moves, with the written file's age beside them
 - **by track**, **dreams**, and a grep/filter table over everything
 - item drawers: description, blockers and dependents, every commit carrying the item's `Manna:` trailer, and one-click copy of the handoff path, the id, and the `show` command
 
@@ -450,6 +451,8 @@ agent-do manna serve --open     # same, and open it
 agent-do manna serve --scan ~/Projects        # register every board below a directory
 agent-do manna serve --status | --stop
 ```
+
+The index at `/` carries each board's needs-you / working / here counts from coord, so one page answers who needs me across every registered project. Board and git state re-derive on file change; presence re-reads every ten seconds and pushes only when it changed.
 
 Agents never read from it: `context`, `list`, and `show` remain the contract.
 Private claim proofs (`claim_token_hash`) never leave the board directory.
