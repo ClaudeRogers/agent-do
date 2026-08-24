@@ -43,7 +43,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [cloudflare](#cloudflare) | Cloudflare account management — zones, analytics (GraphQL), DNS, Workers, Pages, R2, security events | mixed | 18 |
 | [colab](#colab) | Google Colab notebook management | mixed | 4 |
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
-| [coord](#coord) | Project-local agent state and interrupt broker | mixed | 22 |
+| [coord](#coord) | Project-local agent state and interrupt broker | mixed | 23 |
 | [creds](#creds) | Secure credential storage and resolution for agent-do tools | mixed | 8 |
 | [cronitor](#cronitor) | Cronitor scheduled job and uptime monitoring | mixed | 11 |
 | [db](#db) | Control database clients | mixed | 5 |
@@ -1155,6 +1155,7 @@ Concurrency: `mixed`
 - manage advisory claims and a warn-only pre-commit guard over live claims and territories
 - point peers at files via drops, declare dependencies, publish artifacts with file pointers
 - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
+- reduce harness hook payloads into per-session pulse telemetry (status, latest prompt, activity, todo progress) and rank live peers attention-first
 
 **Commands**
 
@@ -1171,6 +1172,7 @@ Concurrency: `mixed`
 - `status`: Show current focus, needs, publishes, and interrupt counts
 - `interrupts`: Show current interrupts: interrupts [--mark-seen] [--limit \<n>]
 - `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] [--branch \<name>] | show | clear
+- `pulse`: Hook-fed session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse show [peer]
 - `claims`: List advisory claims
 - `claim`: Claim a file/path: claim \<path> [--reason \<text>] [--strength soft|strong]
 - `release`: Release a claim you own: release \<path>
@@ -1206,6 +1208,8 @@ agent-do coord publish add dm-sdk@1.2.2 --status ready --summary "private packag
 agent-do coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
 # see whether anything should interrupt me
 agent-do coord interrupts
+# see what a session is observably doing right now
+agent-do coord pulse show session-3f2a91
 # retire this session at the end of work
 agent-do coord stop --note "lane 14 shipped"
 ```
@@ -1213,9 +1217,9 @@ agent-do coord stop --note "lane 14 shipped"
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `aliases`, `claims`, `drops`, `history`, `need list`, `peers`, `publishes`, `status`, `territory`, `whoami`
-- Write (connect/interact/save): `alias`, `bye`, `claim soft`, `claim strong`, `drop`, `focus`, `guard`, `interrupts`, `need add`, `need clear`, `publish add`, `publish clear`, `release`, `role`, `stop`, `touch`
+- Write (connect/interact/save): `alias`, `bye`, `claim soft`, `claim strong`, `drop`, `focus`, `guard`, `interrupts`, `need add`, `need clear`, `publish add`, `publish clear`, `pulse`, `release`, `role`, `stop`, `touch`
 - destructive (irreversible data loss; confirm before auto-running): `bye`, `need clear`, `publish clear`
-- polymorphic (beat decided by payload or flag at call time): `guard`, `interrupts`
+- polymorphic (beat decided by payload or flag at call time): `guard`, `interrupts`, `pulse`
 - composite (one call performs several beats internally): `touch`
 
 ### creds
@@ -4798,7 +4802,7 @@ Concurrency: `mixed`
 - `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
 - `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
 - `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
-- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and writes them to the machine-wide store as dated preference lessons, each carrying the sentence verbatim
+- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and queues them for review (correction-candidates.jsonl, never injected), each carrying the sentence verbatim; a candidate becomes a lesson only through learn + promote
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history

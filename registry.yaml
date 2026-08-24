@@ -580,8 +580,8 @@ tools:
       counsel: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts
         mechanically from git and the newest run log
       harvest: Post-build consolidation scan; --corrections mines past sessions for corrections the
-        user typed and writes them to the machine-wide store as dated preference lessons, each
-        carrying the sentence verbatim
+        user typed and queues them for review (correction-candidates.jsonl, never injected), each
+        carrying the sentence verbatim; a candidate becomes a lesson only through learn + promote
       query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
       review: Post-sprint lesson extraction from git history
@@ -3821,6 +3821,7 @@ tools:
     - manage advisory claims and a warn-only pre-commit guard over live claims and territories
     - point peers at files via drops, declare dependencies, publish artifacts with file pointers
     - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
+    - reduce harness hook payloads into per-session pulse telemetry (status, latest prompt, activity, todo progress) and rank live peers attention-first
     commands:
       touch: Renew current agent presence lease and report active peers
       whoami: Show current coordination identity, session, pid, and runtime
@@ -3835,6 +3836,7 @@ tools:
       status: Show current focus, needs, publishes, and interrupt counts
       interrupts: 'Show current interrupts: interrupts [--mark-seen] [--limit <n>]'
       focus: 'Manage structured focus: focus set <goal> [--path <p>] [--phase <phase>] [--note <t>] [--blocking-on <ref>] [--last-ship <t>] [--branch <name>] | show | clear'
+      pulse: 'Hook-fed session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse show [peer]'
       claims: List advisory claims
       claim: 'Claim a file/path: claim <path> [--reason <text>] [--strength soft|strong]'
       release: 'Release a claim you own: release <path>'
@@ -3867,6 +3869,8 @@ tools:
       command: agent-coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
     - intent: see whether anything should interrupt me
       command: agent-coord interrupts
+    - intent: see what a session is observably doing right now
+      command: agent-coord pulse show session-3f2a91
     - intent: retire this session at the end of work
       command: agent-coord stop --note "lane 14 shipped"
     routing:
@@ -3904,11 +3908,13 @@ tools:
       - history
       - territory
       - guard
+      - pulse
       interact:
       - touch
       - alias
       - interrupts
       - focus
+      - pulse
       - claim soft
       - claim strong
       - release
@@ -3927,6 +3933,8 @@ tools:
         interrupts:
         - polymorphic
         guard:
+        - polymorphic
+        pulse:
         - polymorphic
         need clear:
         - destructive

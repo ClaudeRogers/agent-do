@@ -836,6 +836,134 @@ def test_agent_process_anchor(tmp_path: Path, env_base: dict[str, str]) -> None:
     )
 
 
+def pulse_event(payload: dict, *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(AGENT_DO), "coord", "pulse", "record", "--from-hook"],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        input=json.dumps(payload),
+    )
+
+
+def test_pulse(tmp_path: Path, env_base: dict[str, str]) -> None:
+    project = tmp_path / "pulse_project"
+    project.mkdir()
+
+    def session_env(name: str) -> dict[str, str]:
+        env = {k: v for k, v in env_base.items() if k not in THREAD_ENV_KEYS}
+        env["AGENT_DO_COORD_SESSION"] = name
+        return env
+
+    env_a = session_env("pulse-aaa")
+    env_b = session_env("pulse-bbb")
+    env_c = session_env("pulse-ccc")
+    env_d = session_env("pulse-ddd")
+
+    # Reducer basics: prompt, activity, todo, attention.
+    result = pulse_event(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "pulse-aaa", "cwd": str(project), "prompt": "fix the parser"},
+        cwd=project,
+        env=env_a,
+    )
+    require(result.returncode == 0 and result.stdout == "", f"from-hook must be silent success: {result.stdout!r} {result.stderr!r}")
+    pulse_event(
+        {
+            "hook_event_name": "PostToolUse",
+            "session_id": "pulse-aaa",
+            "cwd": str(project),
+            "tool_name": "TodoWrite",
+            "tool_input": {
+                "todos": [
+                    {"content": "write failing test", "status": "completed"},
+                    {"content": "fix unicode", "status": "in_progress"},
+                    {"content": "run suite", "status": "pending"},
+                ]
+            },
+        },
+        cwd=project,
+        env=env_a,
+    )
+    pulse_event(
+        {"hook_event_name": "Notification", "session_id": "pulse-aaa", "cwd": str(project), "message": "needs permission for Bash"},
+        cwd=project,
+        env=env_a,
+    )
+    shown = coord(["pulse", "show", "--json"], cwd=project, env=env_a)
+    require(shown.returncode == 0, f"pulse show failed: {shown.stderr}")
+    state = json.loads(shown.stdout)["pulse"]
+    require(state["status"] == "needs-user", f"expected needs-user, got {state['status']}")
+    require(state["latest_prompt"] == "fix the parser", f"latest_prompt wrong: {state}")
+    require(state["turns"] == 1 and state["event_count"] == 3, f"counters wrong: {state}")
+    require(state["todo"] == {"done": 1, "total": 3, "current": "fix unicode"}, f"todo wrong: {state['todo']}")
+    require(state["attention"] == {"message": "needs permission for Bash"}, f"attention wrong: {state}")
+
+    # B working, C present with no pulse, D finished.
+    pulse_event(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "pulse-bbb", "cwd": str(project), "prompt": "audit release notes"},
+        cwd=project,
+        env=env_b,
+    )
+    coord(["touch"], cwd=project, env=env_c)
+    pulse_event(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "pulse-ddd", "cwd": str(project), "prompt": "ship the docs"},
+        cwd=project,
+        env=env_d,
+    )
+    pulse_event({"hook_event_name": "Stop", "session_id": "pulse-ddd", "cwd": str(project)}, cwd=project, env=env_d)
+
+    # Unknown events are ignored, malformed stdin is silent success.
+    pulse_event({"hook_event_name": "SomeFutureEvent", "session_id": "pulse-ddd", "cwd": str(project)}, cwd=project, env=env_d)
+    garbage = subprocess.run(
+        [str(AGENT_DO), "coord", "pulse", "record", "--from-hook"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env_d,
+        input="not json",
+    )
+    require(garbage.returncode == 0 and garbage.stdout == "", "malformed stdin must be silent success")
+    shown_d = json.loads(coord(["pulse", "show", "--json"], cwd=project, env=env_d).stdout)["pulse"]
+    require(shown_d["status"] == "finished" and shown_d["event_count"] == 2, f"unknown event must not count: {shown_d}")
+
+    # Attention-first ordering among live peers: needs-user, working, no-pulse, finished.
+    peers = json.loads(coord(["peers", "--json"], cwd=project, env=env_c).stdout)["peers"]
+    order = [peer["agent_id"] for peer in peers]
+    expected = ["session-pulseaaa", "session-pulsebbb", "session-pulseccc", "session-pulseddd"]
+    require(order == expected, f"attention-first order wrong: {order}")
+    by_id = {peer["agent_id"]: peer for peer in peers}
+    require(by_id["session-pulseccc"]["pulse"] is None, "no-pulse peer must carry pulse: null (trust latch)")
+
+    # The payload's session_id outranks an inherited env pin.
+    pulse_event(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "pulse-bbb", "cwd": str(project), "prompt": "crossed env delivery"},
+        cwd=project,
+        env=env_a,
+    )
+    crossed = json.loads(coord(["pulse", "show", "--json"], cwd=project, env=env_b).stdout)["pulse"]
+    require(crossed["latest_prompt"] == "crossed env delivery", f"payload session_id must win: {crossed}")
+    intact = json.loads(coord(["pulse", "show", "--json"], cwd=project, env=env_a).stdout)["pulse"]
+    require(intact["latest_prompt"] == "fix the parser", f"env session's row must stay untouched: {intact}")
+
+    # Long prompts are clipped with an honest marker.
+    pulse_event(
+        {"hook_event_name": "UserPromptSubmit", "session_id": "pulse-ddd", "cwd": str(project), "prompt": "x" * 500},
+        cwd=project,
+        env=env_d,
+    )
+    clipped = json.loads(coord(["pulse", "show", "--json"], cwd=project, env=env_d).stdout)["pulse"]
+    require(len(clipped["latest_prompt"]) <= 160, f"prompt not clipped: {len(clipped['latest_prompt'])}")
+    require(clipped["latest_prompt"].endswith("…"), "clipped prompt must carry the truncation marker")
+
+    # bye clears the pulse row.
+    coord(["bye"], cwd=project, env=env_a)
+    gone = coord(["pulse", "show", "--json"], cwd=project, env=env_a)
+    require(gone.returncode == 2, f"pulse for a departed agent must be gone: {gone.stdout}")
+
+
 def test_liveness_dead_records_prune(tmp_path: Path, env_base: dict[str, str]) -> None:
     """Records whose process is verifiably gone age out like tombstones."""
     project = make_project(tmp_path, "deadprune")
@@ -879,6 +1007,7 @@ def main() -> int:
         test_structured_focus(tmp_path, env_base)
         test_isolation_nudge(tmp_path, env_base)
         test_drops_and_history(tmp_path, env_base)
+        test_pulse(tmp_path, env_base)
         test_v1_migration(tmp_path, env_base)
         test_agent_process_anchor(tmp_path, env_base)
         test_liveness_dead_records_prune(tmp_path, env_base)
