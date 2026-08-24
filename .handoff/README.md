@@ -62,3 +62,6 @@ Rules:
 | 28 | `mn-d2d67b` | open | none | `.handoff/28-mn-d2d67b-manna-done-handoffs-retire-to-handoff-archive-root-is-the-live-p.md` |
 | 29 | `mn-040aae` | blocked | `mn-d2d67b` | `.handoff/29b28-mn-040aae-manna-estate-wide-handoff-debris-cleanup-pre-structure-work-orde.md` |
 | 30 | `mn-386f70` | open | none | `.handoff/30-mn-386f70-harness-agent-substack-draft-publish-essays-through-substack-s-e.md` |
+| 31 | `mn-cbaf37` | in_progress | none | `.handoff/mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md` (held under live claim; expected `.handoff/31-mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md`) |
+| 32 | `mn-8e82f5` | open | none | `.handoff/32-mn-8e82f5-install-sh-register-agent-do-pulse-record-sh-in-the-hook-wrapper.md` |
+| 33 | `mn-7175d2` | in_progress | none | `.handoff/mn-7175d2-zpc-harvest-corrections-must-never-write-the-injected-global-sto.md` (held under live claim; expected `.handoff/33-mn-7175d2-zpc-remove-harvest-corrections-transcript-mined-quotes-are-not-l.md`) |

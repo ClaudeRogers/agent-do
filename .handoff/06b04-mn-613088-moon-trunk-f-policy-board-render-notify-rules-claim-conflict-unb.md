@@ -2,11 +2,12 @@
 workflow: 2
 manna: mn-613088
 track: mn-b7a0cc
-source: null
+source: Approved by Erik 2026-08-24; prototype aldebaran-group/moon-two/control-room
 base_commit: d6bad082a06b9c64f472151f399e3d576108ca38
 scope: 'Moon trunk F: policy board render + notify rules (claim_conflict/unblocked/floor_violation)'
-inputs: []
-binding: sha256:d07c05a21320a3ec079bf0a5fc96cf28ca25062c6ef328a97720c84f6f03232d
+inputs:
+- Approved by Erik 2026-08-24; prototype aldebaran-group/moon-two/control-room
+binding: sha256:e2895a60984fdf1bf14a719ae0768d1b94cedec06322e5c0a207edd8cbe6b8ee
 ---
 
 # Handoff: Moon trunk F: policy board render + notify rules (claim_conflict/unblocked/floor_violation)
