@@ -315,7 +315,16 @@ class Handler(SimpleHTTPRequestHandler):
         else:
             host = raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
         bound = str(self.server.server_address[0]).lower()
-        return host in LOOPBACK_HOSTS or host == bound
+        if host not in LOOPBACK_HOSTS and host != bound:
+            return False
+        # Same rule for a browser-sent Origin: absent is fine (navigation,
+        # curl); present, it must be a loopback page too.
+        origin = (self.headers.get("Origin") or "").strip().lower()
+        if origin and origin != "null":
+            origin_host = urllib.parse.urlsplit(origin).hostname or ""
+            if origin_host not in LOOPBACK_HOSTS and origin_host != bound:
+                return False
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         if not self.host_allowed():

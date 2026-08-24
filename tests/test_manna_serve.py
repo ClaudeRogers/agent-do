@@ -239,6 +239,13 @@ class RegistryAndHttpTests(unittest.TestCase):
                         self.fail(f"{host} was served: {resp.status}")
                 except urllib.error.HTTPError as err:
                     self.assertEqual(err.code, 403, host)
+            req = urllib.request.Request(base + "/api/boards", headers={"Origin": "http://evil.example"})
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(caught.exception.code, 403)
+            req = urllib.request.Request(base + "/api/health", headers={"Origin": base})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
             for host in ("localhost", f"localhost:{server.server_address[1]}", "[::1]:1", "127.0.0.1"):
                 req = urllib.request.Request(base + "/api/health", headers={"Host": host})
                 with urllib.request.urlopen(req, timeout=5) as resp:
