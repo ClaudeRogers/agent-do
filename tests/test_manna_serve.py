@@ -33,10 +33,10 @@ ISSUES = [
     {"id": "mn-cccccc", "title": "Claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-deadbeefdeadbeef", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "0" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-12T00:00:00Z"},
     {"id": "mn-dddddd", "title": "Waits on aaaaaa", "status": "blocked", "blocked_by": ["mn-aaaaaa"], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-eeeeee", "title": "Waits on dddddd", "status": "blocked", "blocked_by": ["mn-dddddd"], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
-    {"id": "mn-ffffff", "title": "[ERIK] Ratify the thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
+    {"id": "mn-ffffff", "title": "[DECISION] Ratify the thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-999999", "title": "Open but graph says blocked", "status": "open", "blocked_by": ["mn-bbbbbb"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
-    {"id": "mn-mentio", "title": "Retire the [ERIK] title convention", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
-    {"id": "mn-second", "title": "[P1-K] [erik] Rule on the second thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
+    {"id": "mn-mentio", "title": "Retire the [DECISION] title convention", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
+    {"id": "mn-second", "title": "[P1-K] [human] Rule on the second thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-dream1", "title": "A spark", "status": "open", "type": "dream", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-05T00:00:00Z"},
     {"id": "mn-done00", "title": "Shipped thing", "status": "done", "blocked_by": [], "track": "mn-track1", "legacy_migration": {"version": 1}, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-06T00:00:00Z"},
     {"id": "mn-cycle1", "title": "Cycle A", "status": "blocked", "blocked_by": ["mn-cycle2"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
@@ -175,6 +175,21 @@ class RegistryAndHttpTests(unittest.TestCase):
         slug2, fresh2 = serve_lib.register_board(other)
         self.assertEqual((slug2, fresh2), ("elsewhere--proj", True))
         self.assertEqual(serve_lib.register_board(self.root), ("proj", False))
+
+    def test_machine_added_marker_is_honored_and_never_in_code(self) -> None:
+        self.assertNotIn("[ADA]", board_lib.DECISION_MARKERS)
+        (self.root / ".manna" / "issues.jsonl").open("a", encoding="utf-8").write(
+            json.dumps({"id": "mn-named1", "title": "[Ada] Rule on the named thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"}) + "\n"
+        )
+        before = board_lib.summary(self.root, serve_lib.decision_markers())["decisions"]
+        with self.assertRaises(ValueError):
+            serve_lib.add_decision_marker("ERIK")
+        serve_lib.add_decision_marker("[ADA]")
+        serve_lib.add_decision_marker("[ada]")
+        self.assertEqual(serve_lib.load_registry_file()["decision_markers"], ["[ADA]"])
+        self.assertEqual(board_lib.summary(self.root, serve_lib.decision_markers())["decisions"], before + 1)
+        serve_lib.register_board(self.root)
+        self.assertEqual(serve_lib.load_registry_file()["decision_markers"], ["[ADA]"], "registering a board keeps the markers")
 
     def test_scan_finds_nested_boards_and_skips_noise(self) -> None:
         base = Path(self.tmp.name) / "estate"

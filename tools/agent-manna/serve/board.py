@@ -25,9 +25,10 @@ from typing import Any
 import yaml
 
 # Title conventions that mean "a human must rule before this moves". Manna has
-# no typed decision state yet; the board's own convention is the marker in the
-# title. Matched case-insensitively at the start of the title.
-DECISION_MARKERS = ("[ERIK]", "[HUMAN]", "[DECISION]")
+# no typed decision state yet; the board's own convention is a leading marker
+# in the title, matched case-insensitively. A machine adds its own names
+# (`manna serve --decision-marker "[NAME]"`); the shipped defaults name a role.
+DECISION_MARKERS = ("[DECISION]", "[HUMAN]", "[OWNER]")
 
 # Fields that never leave the board directory. claim_token_hash is the digest
 # of a private bearer token (SCHEMA.md); legacy_migration is admission
@@ -247,20 +248,20 @@ def match_peer(claimed_by: str | None, peers: list[dict[str, Any]]) -> dict[str,
 _LEADING_TAGS = re.compile(r"^\s*((?:\[[^\]]*\]\s*)+)")
 
 
-def is_decision(issue: dict[str, Any]) -> bool:
+def is_decision(issue: dict[str, Any], markers: tuple[str, ...] = DECISION_MARKERS) -> bool:
     """A marker counts only when it leads the title; a mention mid-sentence is prose."""
     match = _LEADING_TAGS.match(str(issue.get("title", "")))
     if not match:
         return False
     tags = {tag.upper() for tag in re.findall(r"\[[^\]]*\]", match.group(1))}
-    return any(marker in tags for marker in DECISION_MARKERS)
+    return any(marker.upper() in tags for marker in markers)
 
 
 def strip_markers(title: str) -> str:
     return re.sub(r"^(\s*\[[^\]]*\]\s*)+", "", title).strip() or title
 
 
-def derive(root: Path, agent_do: Path | None = None) -> dict[str, Any]:
+def derive(root: Path, agent_do: Path | None = None, markers: tuple[str, ...] = DECISION_MARKERS) -> dict[str, Any]:
     """Build the whole page model for one board root."""
     board_dir = root / ".manna"
     issues = read_issues(board_dir)
@@ -304,7 +305,7 @@ def derive(root: Path, agent_do: Path | None = None) -> dict[str, Any]:
             "order": order_index.get(issue["id"]),
             "blockers": blockers,
             "dependents": [],
-            "decision": is_decision(issue) and status != "done",
+            "decision": is_decision(issue, markers) and status != "done",
             "claimant": (
                 {
                     "label": issue.get("claimed_by"),
@@ -397,7 +398,8 @@ def derive(root: Path, agent_do: Path | None = None) -> dict[str, Any]:
         "board": {
             "path": ".manna/issues.jsonl",
             "workflow": board_meta.get("workflow"),
-            "handoff_dir": handoff_dir,
+            "decision_markers": list(markers),
+        "handoff_dir": handoff_dir,
             "issues_modified_at": mtime_iso(board_dir / "issues.jsonl"),
             "order_count": len(order),
         },
@@ -450,7 +452,7 @@ def signature(root: Path, gitdir: Path | None) -> str:
     return "|".join(parts)
 
 
-def summary(root: Path) -> dict[str, Any]:
+def summary(root: Path, markers: tuple[str, ...] = DECISION_MARKERS) -> dict[str, Any]:
     """Cheap index-row view of a board: counts and freshness, no git walk."""
     board_dir = root / ".manna"
     issues = read_issues(board_dir)
@@ -465,7 +467,7 @@ def summary(root: Path) -> dict[str, Any]:
             continue
         s = issue.get("status", "open")
         status_counts[s] = status_counts.get(s, 0) + 1
-        if is_decision(issue) and s != "done":
+        if is_decision(issue, markers) and s != "done":
             decisions += 1
     drift = read_drift(board_dir)
     latest = max((i.get("updated_at") or "" for i in issues), default="") or None

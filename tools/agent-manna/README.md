@@ -438,7 +438,7 @@ registered board at `/` and this project at `/<name>`:
 
 - **now**: claimed work with the claimant's liveness from coord
 - **next**: open, unblocked, in `handoff-order.yaml` priority
-- **needs decision**: titles carrying `[ERIK]`, `[HUMAN]`, or `[DECISION]`
+- **needs decision**: titles led by `[DECISION]`, `[HUMAN]`, or `[OWNER]` (add a name for this machine: `serve --decision-marker "[NAME]"`)
 - **waiting**: the `blocked_by` graph in topological waves
 - **drift**: the last `reconcile --write-drift` findings (the page never runs reconcile)
 - **by track**, **dreams**, and a grep/filter table over everything
@@ -447,7 +447,7 @@ registered board at `/` and this project at `/<name>`:
 ```bash
 agent-do manna serve            # register this board, start the daemon if needed, print the URL
 agent-do manna serve --open     # same, and open it
-agent-do manna serve --scan ~/Custom-Coding   # register every board below a directory
+agent-do manna serve --scan ~/Projects        # register every board below a directory
 agent-do manna serve --status | --stop
 ```
 

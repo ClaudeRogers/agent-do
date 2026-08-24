@@ -54,9 +54,9 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
 # handful of stat calls per client per second.
 POLL_INTERVAL_SECONDS = 1.0
 
-# Boards on this estate nest at most <root>/<project>/<sub>/.manna
-# (aldebaran-group/dm-ephemeris/.manna is the deepest today), so a scan
-# walks three directory levels below the root it is given.
+# A scan walks three directory levels below the root it is given: deep enough
+# for <root>/<project>/<sub-project>/.manna, the deepest layout this was built
+# against, and shallow enough never to crawl a home directory.
 SCAN_DEPTH = 3
 SCAN_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", ".manna", ".handoff"}
 
@@ -98,7 +98,7 @@ def log_path() -> Path:
 # ---------------------------------------------------------------- registry
 
 
-def load_registry() -> dict[str, dict[str, Any]]:
+def load_registry_file() -> dict[str, Any]:
     path = registry_path()
     if not path.is_file():
         return {}
@@ -106,15 +106,40 @@ def load_registry() -> dict[str, dict[str, Any]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    boards = data.get("boards") if isinstance(data, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def load_registry() -> dict[str, dict[str, Any]]:
+    boards = load_registry_file().get("boards")
     return boards if isinstance(boards, dict) else {}
 
 
-def save_registry(boards: dict[str, dict[str, Any]]) -> None:
+def decision_markers() -> tuple[str, ...]:
+    """Shipped role markers plus whatever this machine added; never a person's name in code."""
+    extra = load_registry_file().get("decision_markers")
+    extra = [m for m in extra if isinstance(m, str) and m.strip()] if isinstance(extra, list) else []
+    return tuple(dict.fromkeys([*board_lib.DECISION_MARKERS, *extra]))
+
+
+def save_registry(boards: dict[str, dict[str, Any]], markers: list[str] | None = None) -> None:
+    current = load_registry_file()
+    payload = {"version": 1, "boards": boards, "decision_markers": markers if markers is not None else current.get("decision_markers", [])}
     path = registry_path()
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"version": 1, "boards": boards}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
+
+
+def add_decision_marker(tag: str) -> list[str]:
+    tag = tag.strip()
+    if not (tag.startswith("[") and tag.endswith("]") and len(tag) > 2):
+        raise ValueError(f"a decision marker is a bracketed tag like [NAME], not {tag!r}")
+    current = load_registry_file()
+    markers = [m for m in current.get("decision_markers", []) if isinstance(m, str)]
+    if tag.upper() not in {m.upper() for m in markers}:
+        markers.append(tag)
+    save_registry(load_registry(), markers)
+    return markers
 
 
 def slug_for(root: Path, boards: dict[str, dict[str, Any]]) -> str:
@@ -216,7 +241,7 @@ class BoardCache:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
                 return cached
-        state = board_lib.derive(root, AGENT_DO)
+        state = board_lib.derive(root, AGENT_DO, decision_markers())
         state["slug"] = slug
         with self.lock:
             self.states[slug] = (sig, state)
@@ -232,7 +257,7 @@ def boards_index() -> dict[str, Any]:
     for slug, entry in sorted(boards.items()):
         root = Path(entry.get("path", ""))
         if root.is_dir() and (root / ".manna").is_dir():
-            row = board_lib.summary(root)
+            row = board_lib.summary(root, decision_markers())
         else:
             row = {"name": root.name, "root": str(root), "exists": False, "total": 0, "status_counts": {}, "dreams": 0, "decisions": 0, "drift_count": 0, "drift_generated_at": None, "latest_update": None, "issues_modified_at": None}
         row["slug"] = slug
@@ -241,7 +266,7 @@ def boards_index() -> dict[str, Any]:
     rows.sort(key=lambda r: (not r["exists"], r.get("latest_update") or ""), reverse=False)
     rows.sort(key=lambda r: r.get("latest_update") or "", reverse=True)
     rows.sort(key=lambda r: not r["exists"])
-    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path())}
+    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path()), "decision_markers": list(decision_markers())}
 
 
 def index_signature() -> str:
@@ -533,6 +558,9 @@ Options:
   --status         is the daemon up, which boards are registered
   --stop           stop the daemon
   --scan <dir>     register every board found up to three levels below <dir>
+  --decision-marker "[NAME]"
+                   add a leading title tag that means "a human must rule" on this
+                   machine (shipped defaults: [DECISION] [HUMAN] [OWNER])
   --foreground     run the daemon in this process (what the daemon itself runs)
 """
 
@@ -546,6 +574,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--scan", metavar="DIR")
+    parser.add_argument("--decision-marker", metavar="TAG", action="append", default=[])
     parser.add_argument("--foreground", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
     args = parser.parse_args(argv)
@@ -579,6 +608,18 @@ def main(argv: list[str]) -> int:
             for slug, path in payload["boards"].items():
                 print(f"  /{slug}  {path}")
         return 0
+
+    if args.decision_marker:
+        try:
+            for tag in args.decision_marker:
+                markers = add_decision_marker(tag)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        payload = {"decision_markers": list(decision_markers()), "added": markers}
+        print(json.dumps(payload, indent=2) if args.json else "decision markers: " + " ".join(payload["decision_markers"]))
+        if not args.scan and board_lib.find_board_root(Path.cwd()) is None:
+            return 0
 
     if args.scan:
         found = scan_boards(Path(args.scan))

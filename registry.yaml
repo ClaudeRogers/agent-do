@@ -4702,7 +4702,7 @@ tools:
     - intent: show me the board
       command: agent-manna serve --open
     - intent: list every board on this machine
-      command: agent-manna serve --scan ~/Custom-Coding
+      command: agent-manna serve --scan ~/Projects
     contracts:
       connect:
       - init
