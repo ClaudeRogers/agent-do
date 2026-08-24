@@ -431,6 +431,31 @@ context: |
   ## Blocked Issues (0)
 ```
 
+### `serve [--open] [--json] [--port N]`
+
+The human window. One read-only daemon on `127.0.0.1:7777` renders every
+registered board at `/` and this project at `/<name>`:
+
+- **now**: claimed work with the claimant's liveness from coord
+- **next**: open, unblocked, in `handoff-order.yaml` priority
+- **needs decision**: titles carrying `[ERIK]`, `[HUMAN]`, or `[DECISION]`
+- **waiting**: the `blocked_by` graph in topological waves
+- **drift**: the last `reconcile --write-drift` findings (the page never runs reconcile)
+- **by track**, **dreams**, and a grep/filter table over everything
+- item drawers: description, blockers and dependents, the sealed handoff, every commit carrying the item's `Manna:` trailer
+
+```bash
+agent-do manna serve            # register this board, start the daemon if needed, print the URL
+agent-do manna serve --open     # same, and open it
+agent-do manna serve --scan ~/Custom-Coding   # register every board below a directory
+agent-do manna serve --status | --stop
+```
+
+Agents never read from it: `context`, `list`, and `show` remain the contract.
+Private claim proofs (`claim_token_hash`) never leave the board directory.
+Implementation: `serve/serve.py` (daemon, registry under `$AGENT_DO_HOME/manna/serve/`)
+and `serve/board.py` (pure derivation), beside the Rust core.
+
 ## Architecture
 
 ### Storage

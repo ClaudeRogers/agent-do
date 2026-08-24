@@ -2539,6 +2539,7 @@ Concurrency: `write`
 - `dream`: File an idea spark on the nearest board or the global inbox
 - `lint`: Check board grammar and strict handoff linkage; findings exit 1
 - `reconcile`: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
+- `serve`: Read-only human board view on a fixed local port (7777); every registered board indexed at /, this project at /<name>; always prints the URL
 
 **Examples**
 

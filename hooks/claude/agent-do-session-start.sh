@@ -415,7 +415,8 @@ append_manna_board() {
 
 $board_block
 
-Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified."
+Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified.
+Human view: \`agent-do manna serve\` prints this board's URL (http://127.0.0.1:7777/<project>); hand it over whenever the board is asked for."
         fi
     fi
 

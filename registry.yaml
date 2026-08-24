@@ -4677,6 +4677,7 @@ tools:
       dream: File an idea spark on the nearest board or the global inbox
       lint: Check board grammar and strict handoff linkage; findings exit 1
       reconcile: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
+      serve: Read-only human board view on a fixed local port (7777); every registered board indexed at /, this project at /<name>; always prints the URL
     examples:
     - intent: initialize manna
       command: agent-manna init
@@ -4698,6 +4699,10 @@ tools:
       command: agent-manna order mn-abc123 1
     - intent: synchronize handoff filenames after a board change
       command: agent-manna sync
+    - intent: show me the board
+      command: agent-manna serve --open
+    - intent: list every board on this machine
+      command: agent-manna serve --scan ~/Custom-Coding
     contracts:
       connect:
       - init
@@ -4736,6 +4741,24 @@ tools:
         - composite
         reconcile:
         - polymorphic
+        serve:
+        - long_running
+    routing:
+      discover_keywords:
+      - show me the board
+      - open the board
+      - board website
+      - board url
+      - what's on the board
+      - manna dashboard
+      prompt_patterns:
+      - \b(show|open|see|view|give)\b.*\b(the )?board\b
+      - \bboard (url|link|website|page)\b
+      - \bmanna (dashboard|website|page)\b
+      recommended_entrypoints:
+      - agent-do manna serve --open
+      - agent-do manna context
+      default_command: serve
     concurrency: write
   learn:
     description: Learning and pattern improvement

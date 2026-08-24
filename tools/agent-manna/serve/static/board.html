@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Read-only human view of one manna board, live." />
+  <title>manna / board</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to board</a>
+  <header class="topbar">
+    <div class="prompt"><span class="prompt-mark">$</span><strong id="prompt-name">manna</strong><span class="muted">serve --watch</span></div>
+    <label class="search-label"><span class="muted">grep </span><input id="grep" type="search" placeholder="id, title, track, claimant" autocomplete="off" /></label>
+    <div class="topbar-state" aria-live="polite">
+      <a href="/">[all boards]</a>
+      <span class="separator">|</span>
+      <span id="connection-mark" class="connection-mark">○</span>
+      <span id="connection-label">connecting</span>
+      <span class="separator">|</span>
+      <span id="last-sync">waiting for state</span>
+      <button class="text-button" id="refresh-button" type="button">[refresh]</button>
+    </div>
+  </header>
+  <main id="main-content">
+    <section class="status-block" aria-labelledby="page-title">
+      <p class="command" id="command-line">$ manna context</p>
+      <h1 id="page-title">loading</h1>
+      <div class="status-lines">
+        <p><span class="label">repo</span><strong id="repo-state">loading</strong></p>
+        <p><span class="label">board</span><strong id="board-state">loading</strong></p>
+        <p><span class="label">drift</span><strong id="drift-state">loading</strong></p>
+        <p><span class="label">peers</span><strong id="peers-state">loading</strong></p>
+      </div>
+      <div class="counts" id="counts"></div>
+    </section>
+    <nav class="jump-nav" aria-label="Page sections">
+      <a href="#now">now</a><a href="#next">next</a><a href="#decisions">needs decision</a><a href="#waiting">waiting</a><a href="#drift">drift</a><a href="#tracks">tracks</a><a href="#dreams">dreams</a><a href="#all">all</a>
+    </nav>
+
+    <section class="document-section" id="now"><div class="section-line"><h2>## now</h2><span>claimed and in progress, with the claimant's liveness from coord</span></div><div class="task-list" id="now-list"></div></section>
+    <section class="document-section" id="next"><div class="section-line"><h2>## next</h2><span>open, nothing blocking, in handoff-order priority</span></div><div class="task-list" id="next-list"></div></section>
+    <section class="document-section" id="decisions"><div class="section-line"><h2>## needs decision</h2><span>a human rules before these move</span></div><div class="task-list" id="decision-list"></div></section>
+    <section class="document-section" id="waiting"><div class="section-line"><h2>## waiting</h2><span>blocked, layered by the blocker graph: a wave may start when the wave before it is done</span></div><div id="waves"></div></section>
+    <section class="document-section" id="drift"><div class="section-line"><h2>## drift</h2><span id="drift-age"></span></div><div class="log" id="drift-list"></div><p class="note">From the last <code>manna reconcile</code>. This page never runs reconcile; it reads what the last run left.</p></section>
+    <section class="document-section" id="tracks"><div class="section-line"><h2>## by track</h2><span>programs and what belongs to each</span></div><div id="track-list"></div></section>
+    <section class="document-section" id="dreams"><div class="section-line"><h2>## dreams</h2><span>parked sparks: visible, not claimable, until converted</span></div><div class="task-list" id="dream-list"></div></section>
+    <section class="document-section" id="all">
+      <div class="section-line"><h2>## all</h2><span id="inventory-count"></span></div>
+      <div class="filter-row" role="group" aria-label="Filter by state">
+        <button class="filter active" type="button" data-state="all">[all]</button>
+        <button class="filter" type="button" data-state="active">[active]</button>
+        <button class="filter" type="button" data-state="ready">[ready]</button>
+        <button class="filter" type="button" data-state="waiting">[waiting]</button>
+        <button class="filter" type="button" data-state="decision">[decision]</button>
+        <button class="filter" type="button" data-state="dream">[dream]</button>
+        <button class="filter" type="button" data-state="done">[done]</button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th scope="col">check</th><th scope="col">manna</th><th scope="col">work</th><th scope="col">state</th><th scope="col">updated</th></tr></thead>
+        <tbody id="inventory-body"></tbody>
+      </table></div>
+    </section>
+    <footer class="footer">
+      <p><span class="label">source </span><strong id="source-path">.manna/issues.jsonl</strong></p>
+      <p><span class="label">root </span><strong id="root-path"></strong></p>
+      <p><span class="label">mode </span><strong>read-only human view; agents use <code>agent-do manna context</code></strong></p>
+    </footer>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <noscript>This local page needs JavaScript to read the board.</noscript>
+</body>
+</html>
