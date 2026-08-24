@@ -197,11 +197,13 @@ def main() -> None:
 
     if record_nudge_event is not None:
         try:
+            # The lesson ids and the kind are the whole signal. The prompt
+            # rides through telemetry's own redaction (hash + short excerpt);
+            # a command is never logged, since a shell line can carry a token.
             record_nudge_event(
                 f"zpc_lesson_fired_{kind}", "zpc_trigger",
                 lessons=fresh, kind=kind, cwd=cwd,
                 prompt=value if kind == "prompt" else None,
-                command=value if kind == "command" else None,
             )
         except Exception:
             pass
