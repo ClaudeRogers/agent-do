@@ -269,6 +269,9 @@ class CliLifecycleTests(unittest.TestCase):
 
                 status = subprocess.run([str(wrapper), "serve", "--status", "--json"], cwd=root, env=env, capture_output=True, text=True, timeout=60)
                 self.assertTrue(json.loads(status.stdout)["running"])
+
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as resp:
+                    self.assertEqual(json.loads(resp.read())["source"], serve_lib.SOURCE_HASH)
             finally:
                 stopped = subprocess.run([str(wrapper), "serve", "--stop", "--json"], cwd=root, env=env, capture_output=True, text=True, timeout=60)
             self.assertIn(json.loads(stopped.stdout)["status"], {"stopped", "not_running"})

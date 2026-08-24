@@ -27,6 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import hashlib
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,17 @@ POLL_INTERVAL_SECONDS = 1.0
 # walks three directory levels below the root it is given.
 SCAN_DEPTH = 3
 SCAN_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", ".manna", ".handoff"}
+
+
+def source_hash() -> str:
+    """Identity of the Python the daemon runs; static files are read per request."""
+    digest = hashlib.sha256()
+    for name in ("serve.py", "board.py"):
+        digest.update((SERVE_DIR / name).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+SOURCE_HASH = source_hash()
 
 
 def utc_now_iso() -> str:
@@ -322,7 +334,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def route_api(self, parts: list[str], query: str) -> None:
         if parts == ["health"]:
-            return self.send_json({"server": SERVER_NAME, "pid": os.getpid(), "port": self.server.server_address[1], "boards": len(load_registry()), "started_at": getattr(self.server, "started_at", None)})
+            return self.send_json({"server": SERVER_NAME, "pid": os.getpid(), "port": self.server.server_address[1], "boards": len(load_registry()), "started_at": getattr(self.server, "started_at", None), "source": SOURCE_HASH})
         if parts == ["boards"]:
             return self.send_json(boards_index())
         if parts == ["events"]:
@@ -411,10 +423,17 @@ def ensure_daemon(host: str, port: int) -> dict[str, Any]:
     if existing and pid_alive(int(existing.get("pid", 0))):
         live = health(existing.get("host", host), int(existing.get("port", port)))
         if live and not live.get("foreign"):
-            return {"status": "running", "port": int(existing["port"]), "pid": int(existing["pid"]), "host": existing.get("host", host)}
+            if live.get("source") == SOURCE_HASH:
+                return {"status": "running", "port": int(existing["port"]), "pid": int(existing["pid"]), "host": existing.get("host", host)}
+            # The code on disk moved under the daemon: restart so the page
+            # renders the current derivation, not the one it booted with.
+            stop_daemon()
+            port = int(existing.get("port", port))
     probe = health(host, port)
     if probe and not probe.get("foreign"):
-        return {"status": "running", "port": port, "pid": probe.get("pid"), "host": host}
+        if probe.get("source") == SOURCE_HASH:
+            return {"status": "running", "port": port, "pid": probe.get("pid"), "host": host}
+        raise RuntimeError(f"a {SERVER_NAME} on port {port} runs different code and is not this home's daemon; stop it or pick another --port")
     if probe and probe.get("foreign"):
         raise RuntimeError(f"port {port} is held by something that is not {SERVER_NAME}; pick another with --port")
 
