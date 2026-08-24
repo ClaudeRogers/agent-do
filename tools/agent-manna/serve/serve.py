@@ -46,6 +46,7 @@ AGENT_DO = SERVE_DIR.parents[2] / "agent-do"
 DEFAULT_PORT = 7777
 DEFAULT_HOST = "127.0.0.1"
 SERVER_NAME = "manna-serve"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
 
 # The page reads as live when a change lands within the flow-of-thought
 # limit (Nielsen, Usability Engineering 1993: 1.0s). Polling file mtimes
@@ -304,7 +305,21 @@ class Handler(SimpleHTTPRequestHandler):
 
     # -- routing
 
+    def host_allowed(self) -> bool:
+        """Refuse DNS rebinding: a page elsewhere can point its own hostname at
+        127.0.0.1, and the browser would then send that hostname here. Only a
+        loopback name, or the address this daemon bound, may address it."""
+        raw = (self.headers.get("Host") or "").strip().lower()
+        if raw.startswith("["):
+            host = raw.split("]", 1)[0].lstrip("[")
+        else:
+            host = raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
+        bound = str(self.server.server_address[0]).lower()
+        return host in LOOPBACK_HOSTS or host == bound
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self.host_allowed():
+            return self.send_json({"error": "host not allowed; address this daemon by 127.0.0.1 or localhost"}, HTTPStatus.FORBIDDEN)
         parsed = urllib.parse.urlparse(self.path)
         parts = [urllib.parse.unquote(p) for p in parsed.path.split("/") if p]
 

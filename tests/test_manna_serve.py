@@ -230,6 +230,19 @@ class RegistryAndHttpTests(unittest.TestCase):
 
             status, _, _ = get("/nope")
             self.assertEqual(status, 404)
+
+            # DNS rebinding: a foreign Host header is refused everywhere
+            for host in ("evil.example", "evil.example:80", "127.0.0.1.evil.example"):
+                req = urllib.request.Request(base + "/api/boards", headers={"Host": host})
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self.fail(f"{host} was served: {resp.status}")
+                except urllib.error.HTTPError as err:
+                    self.assertEqual(err.code, 403, host)
+            for host in ("localhost", f"localhost:{server.server_address[1]}", "[::1]:1", "127.0.0.1"):
+                req = urllib.request.Request(base + "/api/health", headers={"Host": host})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 200, host)
             status, _, ctype = get("/static/app.js")
             self.assertEqual(status, 200)
             self.assertIn("javascript", ctype)
