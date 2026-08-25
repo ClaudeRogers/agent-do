@@ -140,7 +140,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │   ├── live/ + live.sh     # +live(...) runtime gating for desktop/browser control
 │   └── capture/            # Shared capture pipeline (browse + unbrowse)
 ├── hooks/
-│   ├── claude/             # Canonical Claude Code hooks (4 events)
+│   ├── claude/             # Canonical Claude Code hooks (SessionStart through SessionEnd)
 │   └── codex/              # Canonical Codex hooks + Stop quality gate
 ├── tools/agent-*           # 99 tools (standalone scripts + directory-based tools)
 ├── models.yaml             # Internal model roles: chains, capabilities, retired list
@@ -540,7 +540,7 @@ Project-local state-and-interrupt broker for parallel agents. State lives under 
 
 Canonical hooks live in the repo (`hooks/claude/`, `hooks/codex/`); installed hooks under `~/.claude/hooks/` and `~/.codex/hooks/` are thin version-tagged wrappers written by `install.sh` (`WRAPPER_VERSION` 2). Each wrapper resolves the repo root via `AGENT_DO_REPO`, then the `~/.agent-do/install-path` breadcrumb, adds `<repo>/lib/` to `sys.path` for Python hooks, and delegates (bash `exec`, Python `runpy.run_path`). `git pull` on the repo changes hook behavior on the next event with no reinstall. See docs/INTEGRATION.md for registration.
 
-All four Claude hooks are advisory: they inject context or run cleanup, and never block.
+Every Claude hook is advisory: they inject context or run cleanup, and never block.
 
 ### SessionStart (`hooks/claude/agent-do-session-start.sh`)
 
