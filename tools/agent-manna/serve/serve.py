@@ -446,6 +446,13 @@ class BoardCache:
     def glance(self, root: Path) -> dict[str, Any]:
         return self.bundle(root)["glance"]
 
+    def glance_if_warm(self, root: Path) -> dict[str, Any] | None:
+        """Whatever presence we already hold, however old; None means unread.
+        The fast index shows this instantly and the full read replaces it."""
+        with self.lock:
+            cached = self.bundles.get(str(root))
+        return cached["glance"] if cached else None
+
 
 CACHE = BoardCache()
 
@@ -453,11 +460,11 @@ CACHE = BoardCache()
 EMPTY_GLANCE = {"attention": {}, "needs_you": 0, "working": 0, "here": 0, "gone": 0}
 
 
-def index_row(slug: str, entry: dict[str, Any], markers: tuple[str, ...]) -> dict[str, Any]:
+def index_row(slug: str, entry: dict[str, Any], markers: tuple[str, ...], fast: bool = False) -> dict[str, Any]:
     root = Path(entry.get("path", ""))
     if root.is_dir() and (root / ".manna").is_dir():
         row = board_lib.summary(root, markers)
-        row["coord"] = CACHE.glance(root)
+        row["coord"] = CACHE.glance_if_warm(root) if fast else CACHE.glance(root)
     else:
         row = {"name": root.name, "root": str(root), "exists": False, "total": 0, "status_counts": {}, "dreams": 0, "decisions": 0, "drift_count": 0, "drift_generated_at": None, "latest_update": None, "issues_modified_at": None, "coord": EMPTY_GLANCE}
     row["slug"] = slug
@@ -530,16 +537,20 @@ def attach_resolved_relations(state: dict[str, Any], payload: dict[str, Any] | N
         federation["resolved"] = True
 
 
-def boards_index() -> dict[str, Any]:
+def boards_index(fast: bool = False) -> dict[str, Any]:
+    """The estate view. `fast` answers from what is already in hand — manna
+    counts always, presence only where a bundle is warm — so the page can
+    paint immediately and say honestly that coord is still being read."""
     boards = load_registry()
     markers = decision_markers()
     items = sorted(boards.items())
-    CACHE.refresh_bundles(registered_roots(boards))
+    if not fast:
+        CACHE.refresh_bundles(registered_roots(boards))
     # One coord read per board on a cold cache; fan out one worker per core
     # (os.cpu_count() is the authority) so 30+ boards answer in one read's time.
     workers = max(1, min(len(items) or 1, os.cpu_count() or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(lambda kv: index_row(kv[0], kv[1], markers), items))
+        rows = list(pool.map(lambda kv: index_row(kv[0], kv[1], markers, fast), items))
     # needs-you first, then freshest, missing boards last
     rows.sort(key=lambda r: r.get("latest_update") or "", reverse=True)
     rows.sort(key=lambda r: (not r["exists"], -(r.get("coord") or {}).get("needs_you", 0), -(r.get("coord") or {}).get("working", 0)))
@@ -548,7 +559,8 @@ def boards_index() -> dict[str, Any]:
         "working": sum((r.get("coord") or {}).get("working", 0) for r in rows),
         "here": sum((r.get("coord") or {}).get("here", 0) for r in rows),
     }
-    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path()), "decision_markers": list(markers), "totals": totals}
+    building = sum(1 for r in rows if r["exists"] and r.get("coord") is None)
+    return {"generated_at": utc_now_iso(), "boards": rows, "count": len(rows), "registry": str(registry_path()), "decision_markers": list(markers), "totals": totals, "building": building}
 
 
 def index_signature() -> str:
@@ -695,7 +707,8 @@ class Handler(SimpleHTTPRequestHandler):
         if parts == ["health"]:
             return self.send_json({"server": SERVER_NAME, "pid": os.getpid(), "port": self.server.server_address[1], "boards": len(load_registry()), "started_at": getattr(self.server, "started_at", None), "source": SOURCE_HASH, "digests": DIGESTS_ENABLED})
         if parts == ["boards"]:
-            return self.send_json(boards_index())
+            fast = urllib.parse.parse_qs(query).get("fast", ["0"])[0] == "1"
+            return self.send_json(boards_index(fast))
         if parts == ["events"]:
             return self.stream(index_signature, boards_index)
         return self.send_json({"error": "unknown api path"}, HTTPStatus.NOT_FOUND)

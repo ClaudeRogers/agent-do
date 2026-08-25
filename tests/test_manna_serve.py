@@ -493,7 +493,11 @@ class RegistryAndHttpTests(unittest.TestCase):
         original, serve_lib.AGENT_DO = serve_lib.AGENT_DO, stub
         try:
             serve_lib.CACHE.bundles.clear()
+            fast = serve_lib.boards_index(fast=True)
+            self.assertEqual(fast["building"], 1, "cold cache: presence not read yet")
+            self.assertIsNone(fast["boards"][0]["coord"], "null, never a fake zero")
             index = serve_lib.boards_index()
+            self.assertEqual(index["building"], 0)
             row = index["boards"][0]
             self.assertEqual(row["coord"]["needs_you"], 1)
             self.assertEqual(row["coord"]["working"], 1)

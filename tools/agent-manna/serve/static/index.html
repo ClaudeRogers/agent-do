@@ -25,9 +25,10 @@
     <section class="sheet-body">
       <div class="sheet-head"><span class="prompt">manna serve --status</span><span class="count" id="summary-line"></span></div>
       <div class="counts" id="totals"></div>
+      <div class="building" id="building" hidden><span class="spin"></span><span id="building-text"></span></div>
       <div class="table-wrap"><table class="boards">
         <thead><tr><th scope="col">board</th><th scope="col" class="num nowrap">needs you</th><th scope="col" class="num">working</th><th scope="col" class="num">here</th><th scope="col" class="num">active</th><th scope="col" class="num">ready</th><th scope="col" class="num">blocked</th><th scope="col" class="num">decision</th><th scope="col" class="num">dream</th><th scope="col" class="num">done</th><th scope="col" class="num">drift</th><th scope="col">updated</th></tr></thead>
-        <tbody id="boards-body"></tbody>
+        <tbody id="boards-body"><tr><td colspan="12" class="empty">reading the estate…</td></tr></tbody>
       </table></div>
     </section>
   </main>

@@ -231,3 +231,8 @@ button.verb:hover { text-decoration: underline; }
 /* estate counts are links, colored by their state */
 table.boards td.num a { color: inherit; }
 table.boards td.num a:hover { text-decoration: underline; }
+
+/* honest loading: a working line with a spinner, only while coord is unread */
+.building { display: flex; gap: var(--s2); align-items: baseline; padding: var(--s2) 0; color: var(--muted); }
+.building[hidden] { display: none; }
+.building .spin { color: var(--green); min-width: 1ch; }
