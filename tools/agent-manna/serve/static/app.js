@@ -79,12 +79,12 @@ function itemRow(r) {
   const sel = app.selected?.kind === "item" && app.selected.id === r.id;
   const st = r.effective;
   const needs = st === "active" && r.claimant?.attention === "needs-user";
-  const stateText = st === "waiting" && r.blockers?.length ? `blocked · ${r.blockers.map((b) => b.id.replace(/^mn-/, "")).slice(0, 3).join(", ")}` : needs ? "needs you" : label(st);
+  const stateText = st === "waiting" && r.blockers?.length ? `blocked · <span class="keep-case">${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).slice(0, 3).join(", "))}</span>` : esc(needs ? "needs you" : label(st));
   return `<div class="row ${needs ? "s-needs-user" : "s-" + esc(st)}${sel ? " selected" : ""}" data-item="${esc(r.id)}" role="button" tabindex="0">
     <span class="id">${esc(r.id)}</span>
     <span class="digest${r.digest ? "" : " fallback"}" title="${esc(r.title)}">${esc(rowText(r))}</span>
     <span class="track">${esc(shortTrack(r.track_title))}</span>
-    <span class="pill ${needs ? "c-needs-user" : cls(st)}">${esc(stateText)}</span>
+    <span class="pill ${needs ? "c-needs-user" : cls(st)}">${stateText}</span>
     <span class="prio">${r.order != null ? `#${r.order + 1}` : ""}</span>
   </div>`;
 }

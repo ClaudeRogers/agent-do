@@ -74,7 +74,9 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .row .digest.fallback { color: var(--muted); }
 .row .track { color: var(--faint); font-size: var(--t-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .prio { color: var(--faint); font-size: var(--t-meta); text-align: right; white-space: nowrap; }
-.pill { display: inline-block; justify-self: start; border: 1px solid currentColor; border-radius: 9px; padding: 0 7px; font-size: var(--t-meta); line-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+/* state is a word in caps, colored: no border, no fill (Erik, 2026-08-25) */
+.pill { display: inline-block; justify-self: start; padding: 0; font-size: var(--t-meta); line-height: 17px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.pill .keep-case { text-transform: none; letter-spacing: 0; }
 .c-active { color: var(--blue); } .c-ready { color: var(--green); } .c-waiting { color: var(--red); } .c-decision { color: var(--amber); }
 .c-dream { color: var(--violet); } .c-done { color: var(--green); } .c-muted { color: var(--muted); } .c-faint { color: var(--faint); }
 .c-needs-user { color: var(--amber); } .c-failed { color: var(--red); } .c-working { color: var(--blue); } .c-present, .c-idle { color: var(--muted); } .c-gone, .c-unseen, .c-finished, .c-ended { color: var(--faint); }
