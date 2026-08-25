@@ -302,3 +302,84 @@ def schedule(slug: str, issues: list[dict[str, Any]], caller: Callable = default
         _JOBS[slug] = thread
         thread.start()
         return True
+
+
+# ---------------------------------------------------------------- summaries
+# A digest is a line; a summary is the paragraph a reader wants when they
+# open the item: what it is, why it exists, what has to happen, what done
+# looks like. Written once per content hash, on first view, by the same
+# fast role; cached beside the digest; never stored in the board.
+
+SUMMARY_SYSTEM = (
+    "You explain software work items on a project board to the person who runs the project. "
+    "Write one or two short paragraphs in plain, direct language: what the item is about, why it exists "
+    "(the problem or the decision behind it), what has to be done, and what done looks like. "
+    "Use only what the item says; if something is unknown, say so in a few words rather than inventing it. "
+    "No headings, no bullet lists, no ids, no preamble, no restating the title."
+)
+
+# Two paragraphs the inspector can hold without scrolling at its default width:
+# measured on the built page (300px column, 12px mono) 900 characters is about
+# twelve lines. Longer answers are kept but the model is asked to stay under it.
+SUMMARY_MAX_CHARS = 900
+
+
+def summary_prompt(issue: dict[str, Any]) -> str:
+    parts = [f"title: {issue.get('title', '')}"]
+    if issue.get("track_title"):
+        parts.append(f"program: {issue['track_title']}")
+    if issue.get("status"):
+        parts.append(f"status: {issue['status']}")
+    if issue.get("description"):
+        parts.append(f"description: {' '.join(str(issue['description']).split())}")
+    blockers = [b.get("title") or b.get("id") for b in issue.get("blockers") or [] if isinstance(b, dict)]
+    if blockers:
+        parts.append("waits on: " + "; ".join(str(b) for b in blockers))
+    if issue.get("source"):
+        parts.append(f"source: {issue['source']}")
+    return f"Explain this item in at most {SUMMARY_MAX_CHARS} characters.\n\n" + "\n".join(parts)
+
+
+def default_summary_caller(prompt: str) -> tuple[str, str | None]:
+    from ai_router import ai_max_tokens, ai_requested, llm_call  # type: ignore
+
+    if not ai_requested(FLAG_NAME):
+        raise RuntimeError("model call not available (flag off or no provider credential)")
+    response = llm_call("fast", [{"role": "system", "content": SUMMARY_SYSTEM}, {"role": "user", "content": prompt}], max_tokens=ai_max_tokens())
+    return response.text.strip(), response.model
+
+
+def validate_summary(text: Any) -> str | None:
+    if not isinstance(text, str):
+        return None
+    body = text.strip()
+    if not body or body.lower().startswith(("#", "- ", "* ")):
+        return None
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", body) if p.strip()]
+    if not paragraphs:
+        return None
+    return "\n\n".join(paragraphs)
+
+
+def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[str, str | None]] = default_summary_caller) -> dict[str, Any]:
+    """Return {summary, model, cached} for one item, generating on a cache miss."""
+    cache = load_cache(slug)
+    h = content_hash(issue)
+    entry = cache.get(issue["id"]) or {}
+    if entry.get("summary") and entry.get("summary_hash") == h:
+        return {"summary": entry["summary"], "model": entry.get("summary_model"), "cached": True}
+    try:
+        text, model = caller(summary_prompt(issue))
+    except Exception as error:
+        return {"summary": None, "error": str(error)[:200], "cached": False}
+    body = validate_summary(text)
+    if not body:
+        return {"summary": None, "error": "no usable summary", "cached": False}
+    cache = load_cache(slug)  # re-read: the digest job may have written meanwhile
+    merged = dict(cache.get(issue["id"]) or {})
+    merged.update({"summary": body, "summary_hash": h, "summary_model": model})
+    if "hash" not in merged:
+        merged["hash"] = h
+    cache[issue["id"]] = merged
+    save_cache(slug, cache)
+    return {"summary": body, "model": model, "cached": False}

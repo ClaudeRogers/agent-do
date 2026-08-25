@@ -79,7 +79,7 @@ function itemRow(r) {
   const sel = app.selected?.kind === "item" && app.selected.id === r.id;
   const st = r.effective;
   const needs = st === "active" && r.claimant?.attention === "needs-user";
-  const stateText = st === "waiting" && r.blockers?.length ? `blocked · <span class="keep-case">${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).slice(0, 3).join(", "))}</span>` : esc(needs ? "needs you" : label(st));
+  const stateText = st === "waiting" && r.blockers?.length ? `blocked · <span class="keep-case">${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : esc(needs ? "needs you" : label(st));
   return `<div class="row ${needs ? "s-needs-user" : "s-" + esc(st)}${sel ? " selected" : ""}" data-item="${esc(r.id)}" role="button" tabindex="0">
     <span class="id">${esc(r.id)}</span>
     <span class="digest${r.digest ? "" : " fallback"}" title="${esc(r.title)}">${esc(rowText(r))}</span>
@@ -88,31 +88,32 @@ function itemRow(r) {
     <span class="prio">${r.order != null ? `#${r.order + 1}` : ""}</span>
   </div>`;
 }
-function section(lbl, cap, rows, empty) {
-  return `<div class="sheet-head"><span class="prompt">manna ${esc(lbl)}</span><span class="cap">${esc(cap)}</span></div><div class="list">${rows.length ? rows.map(itemRow).join("") : `<p class="empty">${esc(empty)}</p>`}</div>`;
+function section(lbl, rows, empty) {
+  return `<div class="sheet-head"><span class="prompt">manna ${esc(lbl)}</span><span class="count">${rows.length}</span></div><div class="list">${rows.length ? rows.map(itemRow).join("") : `<p class="empty">${esc(empty)}</p>`}</div>`;
 }
 function renderBoard(s) {
   const el = $("#board-list");
   if (app.mode === "timeline") { el.innerHTML = renderTimeline(s); return; }
   const f = (rows) => rows.filter((r) => trackOk(r) && matches(r));
   let html = "";
-  html += section("now", `${f(s.now || []).length} · claimed · liveness from coord`, f(s.now || []), "nothing claimed");
-  html += section("next", `${f(s.next || []).length} · unblocked · handoff order`, f(s.next || []), "nothing is ready");
+  html += section("now", f(s.now || []), "nothing claimed");
+  html += section("next", f(s.next || []), "nothing is ready");
   const waiting = [];
   for (const w of s.waves || []) for (const r of w.items) waiting.push(r);
   for (const r of s.unlayered || []) waiting.push(r);
-  html += section("waiting", `${f(waiting).length} · waves from the blocker graph`, f(waiting), "nothing is blocked");
-  if (app.chips.dreams) html += section("dreams", `${f(s.dreams || []).length} · parked · not claimable`, f(s.dreams || []), "no dreams parked");
+  html += section("waiting", f(waiting), "nothing is blocked");
+  if (app.chips.dreams) html += section("dreams", f(s.dreams || []), "no dreams parked");
   if (app.chips.done) {
     const done = (s.all || []).filter((r) => r.effective === "done").sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
-    html += section("done", `${f(done).length}`, f(done), "nothing done yet");
+    html += section("done", f(done), "nothing done yet");
   }
-  el.innerHTML = html;
+  el.innerHTML = colsHeader("board") + html;
+  fitColumns($("#sheet-board"), "board");
 }
 function renderTimeline(s) {
   const f = (rows) => rows.filter((r) => trackOk(r) && matches(r));
   const lane = (lbl, colorCls, rows) => rows.length ? `<div class="tl ${colorCls}"><span class="lbl">${esc(lbl)}</span><span class="bar"></span><div class="items">${rows.map((r) => `<span class="item${app.selected?.kind === "item" && app.selected.id === r.id ? " selected" : ""}" data-item="${esc(r.id)}" title="${esc(r.title)}"><span class="id">${esc(r.id)}</span>${esc(clip(rowText(r), 60))}${r.blockers?.length ? ` <span class="faint">← ${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : ""}</span>`).join("")}</div></div>` : "";
-  let html = `<div class="sheet-head"><span class="prompt">manna timeline</span><span class="cap">now → ready → waves → done</span></div>`;
+  let html = `<div class="sheet-head"><span class="prompt">manna timeline</span></div>`;
   html += lane("now", "c-active", f(s.now || []));
   html += lane("ready", "c-ready", f(s.next || []));
   for (const w of s.waves || []) html += lane(`wave ${w.wave}`, "c-waiting", f(w.items));
@@ -122,10 +123,11 @@ function renderTimeline(s) {
 }
 function renderInbox(s) {
   const rows = inboxRows(s);
-  $("#inbox-cap").textContent = rows.length ? `${rows.length} ask${rows.length === 1 ? "" : "s"} · ranked by verb` : "nothing wants you";
-  $("#inbox-list").innerHTML = rows.length ? rows.map((x) => `<div class="row inbox s-${esc(x.color)}" data-target-kind="${esc(x.target.kind)}" data-target-id="${esc(x.target.id)}" role="button" tabindex="0">
+  $("#inbox-cap").textContent = String(rows.length);
+  $("#inbox-list").innerHTML = colsHeader("inbox") + (rows.length ? rows.map((x) => `<div class="row inbox s-${esc(x.color)}" data-target-kind="${esc(x.target.kind)}" data-target-id="${esc(x.target.id)}" role="button" tabindex="0">
       <span class="kind">${esc(x.kind)}</span><span class="text">${esc(x.text)}</span><span class="pill verb ${cls(x.color)}">${esc(x.verb)}</span>
-    </div>`).join("") : `<p class="empty">Nothing is waiting on you.</p>`;
+    </div>`).join("") : `<p class="empty">Nothing is waiting on you.</p>`);
+  fitColumns($("#sheet-inbox"), "inbox");
 }
 function peerRow(p) {
   const sel = app.selected?.kind === "peer" && app.selected.id === p.agent_id;
@@ -145,26 +147,27 @@ function renderCoord(s) {
   const here = peers.filter((p) => p.attention !== "gone" && !needs.includes(p));
   const gone = peers.filter((p) => p.attention === "gone");
   const c = s.coord || { claims: [], contention: [], drops: [] };
-  const head = (l, cap) => `<div class="sheet-head"><span class="prompt">coord ${esc(l)}</span><span class="cap">${esc(cap)}</span></div>`;
-  let html = head("needs you", `${needs.length}`) + `<div class="list">${needs.length ? needs.map(peerRow).join("") : '<p class="empty">Nobody is waiting on you.</p>'}</div>`;
-  html += head("peers", `${here.length} here · ${gone.length} gone`) + `<div class="list">${here.length ? here.map(peerRow).join("") : '<p class="empty">No live sessions.</p>'}</div>`;
+  const head = (l, n) => `<div class="sheet-head"><span class="prompt">coord ${esc(l)}</span><span class="count">${esc(String(n))}</span></div>`;
+  let html = head("needs you", needs.length) + `<div class="list">${colsHeader("peer")}${needs.length ? needs.map(peerRow).join("") : '<p class="empty">Nobody is waiting on you.</p>'}</div>`;
+  html += head("peers", here.length) + `<div class="list">${colsHeader("peer")}${here.length ? here.map(peerRow).join("") : '<p class="empty">No live sessions.</p>'}</div>`;
   const claims = c.claims.filter((x) => !app.grep || `${x.path} ${x.owner} ${x.reason || ""}`.toLowerCase().includes(app.grep.toLowerCase()));
-  html += head("claims", `${claims.filter((x) => !x.stale).length} live${c.contention.length ? ` · ${c.contention.length} contended` : ""}`) + `<div class="list">${claims.length ? claims.map((x) => `<div class="row claim ${x.contended ? "s-waiting" : x.stale ? "s-gone" : "s-ready"}">
+  html += head("claims", claims.length) + `<div class="list">${colsHeader("claim")}${claims.length ? claims.map((x) => `<div class="row claim ${x.contended ? "s-waiting" : x.stale ? "s-gone" : "s-ready"}">
       <span class="text" title="${esc(x.path)}">${esc(x.path)}${x.reason ? `<span class="sub">${esc(x.reason)}</span>` : ""}</span>
       <span class="id" title="${esc(x.owner)}">${esc(x.owner_alias || x.owner)}</span>
       <span class="pill ${x.contended ? "c-waiting" : x.stale ? "c-faint" : "c-ready"}">${x.contended ? "contended" : x.stale ? `stale · ${esc(x.owner_status || "gone")}` : esc(x.strength || "claimed")}</span>
       <span class="age">${esc(ago(x.updated_at))}</span></div>`).join("") : '<p class="empty">No advisory claims.</p>'}</div>`;
-  html += head("drops", `${c.drops.length}`) + `<div class="list">${c.drops.length ? c.drops.map((d) => `<div class="row drop s-muted">
+  html += head("drops", c.drops.length) + `<div class="list">${colsHeader("drop")}${c.drops.length ? c.drops.map((d) => `<div class="row drop s-muted">
       <span class="id">${esc(d.owner)} → ${esc(d.for || "any")}</span>
       <span class="text">${esc(Array.isArray(d.path) ? d.path.join(", ") : d.path || "")}${d.note ? `<span class="sub">${esc(d.note)}</span>` : ""}</span>
       <span class="age">${esc(ago(d.created_at))}</span></div>`).join("") : '<p class="empty">No drops waiting.</p>'}</div>`;
-  if (gone.length) html += head("gone", `${gone.length} · dead, stopped, or stale`) + `<div class="list">${gone.map(peerRow).join("")}</div>`;
+  if (gone.length) html += head("gone", gone.length) + `<div class="list">${colsHeader("peer")}${gone.map(peerRow).join("")}</div>`;
   $("#coord-list").innerHTML = html;
+  for (const k of ["peer", "claim", "drop"]) fitColumns($("#sheet-coord"), k);
 }
 function renderDebug(s) {
   const d = s.drift || {};
   const kv = (k, v) => `<span>${esc(k)}</span><b>${v}</b>`;
-  let html = `<div class="sheet-head"><span class="prompt">manna debug</span><span class="cap">the record about the record</span></div>`;
+  let html = `<div class="sheet-head"><span class="prompt">manna debug</span></div>`;
   html += `<div class="kv">
     ${kv("drift", d.source === "reconcile" ? `${d.count} live · ${Object.entries(d.kinds || {}).map(([k, n]) => `${esc(k)} ${n}`).join(", ") || "clean"}` : `${d.count ?? 0} from file`)}
     ${kv("drift file", d.file?.present ? `${d.file.count} findings · written ${esc(ago(d.file.generated_at))} ago` : "no drift.yaml written yet")}
@@ -176,10 +179,11 @@ function renderDebug(s) {
     ${kv("markers", (s.board?.decision_markers || []).map(esc).join(" "))}
   </div>`;
   const rows = (d.findings || []).filter((f) => !app.grep || JSON.stringify(f).toLowerCase().includes(app.grep.toLowerCase()));
-  html += `<div class="sheet-head"><span class="prompt">manna reconcile</span><span class="cap">${rows.length} finding${rows.length === 1 ? "" : "s"}</span></div><div class="list">`;
+  html += `<div class="sheet-head"><span class="prompt">manna reconcile</span><span class="count">${rows.length}</span></div><div class="list">${colsHeader("finding")}`;
   html += rows.length ? rows.map((f) => `<div class="row finding s-decision"><span class="kind">${esc(f.kind)}</span><span class="id">${f.issue_id ? `<a href="#item/${esc(f.issue_id)}" data-item="${esc(f.issue_id)}">${esc(f.issue_id)}</a>` : ""}</span><span class="text">${esc(f.detail || "")}${f.evidence ? ` <span class="faint">(${esc(f.evidence)})</span>` : ""}${f.proposed_fix ? `<span class="sub">fix: ${esc(f.proposed_fix)}</span>` : ""}</span></div>`).join("") : '<p class="empty">No findings.</p>';
   html += "</div>";
   $("#debug-list").innerHTML = html;
+  fitColumns($("#sheet-debug"), "finding");
 }
 
 // ------------------------------------------------------------ inspector
@@ -192,6 +196,7 @@ function renderInspector(s) {
     if (!p) { el.innerHTML = '<p class="empty">that session is no longer on the board</p>'; return; }
     const pu = p.pulse || {};
     el.innerHTML = `<div class="head"><span class="pill ${cls(p.attention)}">${esc(attn(p.attention))}</span><span>${esc(p.runtime || "")}${p.role ? " · " + esc(p.role) : ""}</span></div>
+      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>
       <h2>${esc(p.alias || p.agent_id)}</h2>
       ${p.goal ? `<div class="digest-line">${esc(p.goal)}</div>` : ""}
       ${pu.latest_prompt ? `<div class="desc">“${esc(pu.latest_prompt)}”</div>` : ""}
@@ -202,8 +207,7 @@ function renderInspector(s) {
         ${pu.todo?.total ? `<span>todo</span><b>${esc(pu.todo.done)}/${esc(pu.todo.total)}${pu.todo.current ? " · " + esc(pu.todo.current) : ""}</b>` : ""}
         ${(p.holding || []).length ? `<span>holding</span><b>${p.holding.map((h) => `<a href="#item/${esc(h.id)}" data-item="${esc(h.id)}">${esc(h.id)}</a> ${esc(h.title)}`).join("<br>")}</b>` : ""}
         ${(p.paths || []).length ? `<span>paths</span><b>${p.paths.map(esc).join("<br>")}</b>` : ""}
-      </div>
-      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>`;
+      </div>`;
     bindCopy(); return;
   }
   const r = (s.all || []).find((x) => x.id === sel.id);
@@ -212,22 +216,44 @@ function renderInspector(s) {
   const cl = r.claimant;
   const relations = relationMarkup(r.relations || []);
   el.innerHTML = `<div class="head"><span>${esc(r.id)}</span><span class="pill ${cls(st)}">${esc(label(st))}</span>${r.order != null ? `<span>#${r.order + 1}</span>` : ""}${r.kind !== "item" ? `<span>${esc(r.kind)}</span>` : ""}</div>
+    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>
     <h2>${esc(r.title)}</h2>
     ${r.digest ? `<div class="digest-line">${esc(r.digest)}</div>` : ""}
+    <div class="summary" id="summary-block"><div class="tag">AI summary</div>${summaryBody(r.id)}</div>
     ${r.description ? `<div class="desc">${esc(r.description)}</div>` : ""}
     <div class="meta">
       <span>track</span><b>${esc(shortTrack(r.track_title) || "—")}</b>
       <span>updated</span><b>${esc(fmtDate(r.updated_at))} <span class="faint">${esc(ago(r.updated_at))} ago</span></b>
       ${r.source ? `<span>source</span><b>${esc(r.source)}</b>` : ""}
       ${cl ? `<span>claimed by</span><b>${esc(cl.label)} <span class="${cls(cl.attention)}">${esc(attn(cl.attention))}</span>${cl.pulse?.activity ? ` · ${esc(cl.pulse.activity)}` : ""}${cl.goal ? `<br><span class="faint">${esc(cl.goal)}</span>` : ""}</b>` : ""}
-      ${r.blockers?.length ? `<span>waits on</span><b>${r.blockers.map((b) => `<a href="#item/${esc(b.id)}" data-item="${esc(b.id)}">${esc(b.id)}</a> <span class="${cls(b.status === "blocked" ? "waiting" : b.status)}">${esc(label(b.status))}</span> ${esc(clip(b.title, 48))}`).join("<br>")}</b>` : ""}
+      ${r.blockers?.length ? `<span>waits on</span><b>${r.blockers.map((b) => `<a href="#item/${esc(b.id)}" data-item="${esc(b.id)}">${esc(b.id)}</a> <span class="${cls(b.status === "blocked" ? "waiting" : b.status)}">${esc(label(b.status))}</span> ${esc(b.title)}`).join("<br>")}</b>` : ""}
       ${r.dependents?.length ? `<span>unblocks</span><b>${r.dependents.map((d) => `<a href="#item/${esc(d)}" data-item="${esc(d)}">${esc(d)}</a>`).join(", ")}</b>` : ""}
       ${r.commits?.length ? `<span>commits</span><b>${r.commits.map((c) => `<span class="commit"><span class="sha">${esc(c.sha)}</span> ${esc(clip(c.subject, 56))} <span class="faint">${esc(ago(c.at))}</span></span>`).join("<br>")}</b>` : `<span>commits</span><b class="faint">none yet</b>`}
       ${r.prompt ? `<span>handoff</span><b class="faint">${esc(r.prompt)}</b>` : ""}
     </div>
-    ${relations}
-    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
+    ${relations}`;
   bindCopy();
+  ensureSummary(r.id);
+}
+const summaries = new Map(); // id -> {summary, error, pending}
+function summaryBody(id) {
+  const st = summaries.get(id);
+  if (!st || st.pending) return '<p class="pending">writing…</p>';
+  if (st.summary) return st.summary.split(/\n\n/).map((p) => `<p>${esc(p)}</p>`).join("");
+  return `<p class="pending">${esc(st.error || "no summary")}</p>`;
+}
+async function ensureSummary(id) {
+  const st = summaries.get(id);
+  if (st && (st.pending || st.summary)) return;
+  summaries.set(id, { pending: true });
+  try {
+    const r = await fetch(`${api("api/summary")}?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    const d = await r.json();
+    summaries.set(id, { summary: d.summary || null, error: d.error || null });
+  } catch (e) {
+    summaries.set(id, { summary: null, error: "summary request failed" });
+  }
+  if (app.selected?.kind === "item" && app.selected.id === id) { const el = $("#summary-block"); if (el) el.innerHTML = `<div class="tag">AI summary</div>${summaryBody(id)}`; }
 }
 function bindCopy() {
   $$("[data-copy]").forEach((b) => b.addEventListener("click", async (e) => {
@@ -237,6 +263,59 @@ function bindCopy() {
     catch { toast(`copy failed; select it: ${text}`); }
   }));
 }
+
+// ------------------------------------------------------------ columns
+// Every column except the flexible digest/text cell is fitted to its widest
+// cell. The font is monospace, so width = characters × advance, measured
+// once from the live font; the user may drag any grip (stored per browser)
+// and double-click it to return to the fit.
+const COLS_KEY = "manna-serve-cols";
+const COLS = {
+  board:   { vars: { "--w-id": ".id", "--w-track": ".track", "--w-state": ".pill", "--w-prio": ".prio" }, header: ["", "id", "digest", "track", "state", "#"], grips: ["--w-id", null, "--w-track", "--w-state", "--w-prio"] },
+  inbox:   { vars: { "--w-kind": ".kind", "--w-verb": ".verb" }, header: ["", "kind", "ask", "verb"], grips: ["--w-kind", null, "--w-verb"] },
+  peer:    { vars: { "--w-peer": ".id", "--w-hold": ".track", "--w-pstate": ".pill", "--w-age": ".age" }, header: ["", "session", "focus", "holding", "state", "age"], grips: ["--w-peer", null, "--w-hold", "--w-pstate", "--w-age"] },
+  claim:   { vars: { "--w-owner": ".id", "--w-cstate": ".pill", "--w-age": ".age" }, header: ["", "path", "owner", "state", "age"], grips: [null, "--w-owner", "--w-cstate", "--w-age"] },
+  drop:    { vars: { "--w-from": ".id", "--w-age": ".age" }, header: ["", "from → for", "drop", "age"], grips: ["--w-from", null, "--w-age"] },
+  finding: { vars: { "--w-fkind": ".kind", "--w-fid": ".id" }, header: ["", "kind", "item", "detail"], grips: ["--w-fkind", "--w-fid", null] },
+};
+function loadCols() { try { return JSON.parse(localStorage.getItem(COLS_KEY) || "{}") || {}; } catch { return {}; } }
+function saveCols(v) { try { localStorage.setItem(COLS_KEY, JSON.stringify(v)); } catch {} }
+let charAdvance = 0;
+function measureAdvance() {
+  const probe = document.createElement("span");
+  probe.textContent = "0".repeat(100); probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font:inherit;letter-spacing:.06em";
+  document.body.appendChild(probe); charAdvance = probe.getBoundingClientRect().width / 100; probe.remove();
+}
+function colsHeader(kind) {
+  const spec = COLS[kind];
+  return `<div class="cols ${kind}">${spec.header.map((h, i) => `<span>${esc(h)}${spec.grips[i - 1] !== undefined && spec.grips[i - 1] ? `<span class="grip" data-grip="${spec.grips[i - 1]}" data-kind="${kind}" title="drag · double-click to refit"></span>` : ""}</span>`).join("")}</div>`;
+}
+function fitColumns(container, kind) {
+  const spec = COLS[kind]; if (!spec || !container) return;
+  if (!charAdvance) measureAdvance();
+  const stored = loadCols()[kind] || {};
+  for (const [v, sel] of Object.entries(spec.vars)) {
+    if (stored[v]) { container.style.setProperty(v, `${stored[v]}px`); continue; }
+    let max = 0;
+    const rowSel = kind === "board" ? ".row:not(.inbox):not(.peer):not(.claim):not(.drop):not(.finding)" : `.row.${kind}`;
+    container.querySelectorAll(`${rowSel} ${sel}`).forEach((el) => { max = Math.max(max, el.textContent.trim().length); });
+    container.style.setProperty(v, max ? `${Math.ceil(max * charAdvance) + 2}px` : "auto");
+  }
+}
+function bindGrips() {
+  $$(".grip").forEach((g) => {
+    g.addEventListener("mousedown", (e) => {
+      e.preventDefault(); g.classList.add("active");
+      const kind = g.dataset.kind, v = g.dataset.grip, container = g.closest(".sheet-body");
+      const startX = e.clientX, startW = parseFloat(getComputedStyle(container).getPropertyValue(v)) || g.parentElement.getBoundingClientRect().width;
+      const move = (ev) => { const w = Math.max(24, Math.round(startW + ev.clientX - startX)); container.style.setProperty(v, `${w}px`); g._w = w; };
+      const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); g.classList.remove("active"); if (g._w) { const all = loadCols(); all[kind] = { ...(all[kind] || {}), [v]: g._w }; saveCols(all); } };
+      window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+    });
+    g.addEventListener("dblclick", () => { const kind = g.dataset.kind, v = g.dataset.grip; const all = loadCols(); if (all[kind]) { delete all[kind][v]; saveCols(all); } fitColumns(g.closest(".sheet-body"), kind); });
+  });
+}
+window.addEventListener("manna-view-changed", () => { charAdvance = 0; renderAll(); });
 
 // ------------------------------------------------------------ chrome
 function renderChrome(s) {
@@ -267,6 +346,7 @@ function showSheet(name) {
 function renderAll() {
   const s = app.state; if (!s) return;
   renderChrome(s); renderInbox(s); renderBoard(s); renderCoord(s); renderDebug(s); renderInspector(s);
+  bindGrips();
 }
 
 // ------------------------------------------------------------ selection + routing

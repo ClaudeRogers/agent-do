@@ -17,7 +17,7 @@ const setConn = (ok, label) => { $("#connection-mark").textContent = ok ? "●" 
 
 function render(state) {
   const rows = state.boards || [];
-  $("#summary-line").textContent = `${rows.length} boards · ${rows.filter((b) => b.exists).length} present`;
+  $("#summary-line").textContent = String(rows.length);
   const t = state.totals || {};
   $("#totals").innerHTML = [
     t.needs_you ? `<span class="n c-needs-user">${t.needs_you}</span> <span class="muted">need you</span>` : `<span class="n faint">0</span> <span class="muted">need you</span>`,

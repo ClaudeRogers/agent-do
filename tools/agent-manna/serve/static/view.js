@@ -34,6 +34,7 @@
     root.setProperty("--inspector-w", `${w}px`);
     const sizeEl = $("#view-size"); if (sizeEl) sizeEl.textContent = `${size}px`;
     const fontEl = $("#view-font"); if (fontEl && fontEl.value !== view.font) fontEl.value = view.font;
+    window.dispatchEvent(new Event("manna-view-changed"));
   }
 
   function popover() {

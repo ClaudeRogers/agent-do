@@ -382,6 +382,30 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(report["missing"], 2)
 
 
+class SummaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(); os.environ["AGENT_DO_HOME"] = self.tmp.name
+        self.row = {"id": "mn-aaaaaa", "title": "First ready thing", "description": "Make the first thing.", "status": "open", "kind": "item"}
+    def tearDown(self) -> None:
+        os.environ.pop("AGENT_DO_HOME", None); self.tmp.cleanup()
+    def test_summary_generated_once_then_cached_until_content_changes(self) -> None:
+        calls = []
+        def caller(prompt): calls.append(prompt); return "It is the first thing.\n\nMake it, then it is done.", "stub"
+        a = digest_lib.summarize("proj", self.row, caller=caller)
+        self.assertFalse(a["cached"]); self.assertEqual(a["summary"].count("\n\n"), 1)
+        b = digest_lib.summarize("proj", self.row, caller=caller)
+        self.assertTrue(b["cached"]); self.assertEqual(len(calls), 1)
+        self.row["description"] = "Changed."
+        c = digest_lib.summarize("proj", self.row, caller=caller)
+        self.assertFalse(c["cached"]); self.assertEqual(len(calls), 2)
+        cache = digest_lib.load_cache("proj"); self.assertIn("summary", cache["mn-aaaaaa"])
+    def test_summary_failure_invents_nothing(self) -> None:
+        def caller(prompt): raise RuntimeError("no credential")
+        out = digest_lib.summarize("proj", self.row, caller=caller)
+        self.assertIsNone(out["summary"]); self.assertIn("no credential", out["error"])
+        self.assertIsNone(digest_lib.validate_summary("- a bullet list"))
+
+
 class RegistryAndHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -530,6 +554,17 @@ class RegistryAndHttpTests(unittest.TestCase):
                 req = urllib.request.Request(base + "/api/health", headers={"Host": host})
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     self.assertEqual(resp.status, 200, host)
+            status, _, _ = get("/proj/api/summary?id=mn-nope")
+            self.assertEqual(status, 404)
+            original_flag, original_caller = serve_lib.DIGESTS_ENABLED, digest_lib.default_summary_caller
+            serve_lib.DIGESTS_ENABLED = True
+            digest_lib.default_summary_caller = lambda prompt: ("A short explanation.", "stub")
+            try:
+                status, body, _ = get("/proj/api/summary?id=mn-aaaaaa")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["summary"], "A short explanation.")
+            finally:
+                serve_lib.DIGESTS_ENABLED, digest_lib.default_summary_caller = original_flag, original_caller
             status, app, ctype = get("/static/app.js")
             self.assertEqual(status, 200)
             self.assertIn("javascript", ctype)

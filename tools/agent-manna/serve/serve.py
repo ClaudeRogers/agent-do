@@ -583,6 +583,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(state)
         if rest == ["api", "events"]:
             return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
+        if rest == ["api", "summary"]:
+            return self.send_summary(slug, root, parsed.query)
         return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
 
     def route_api(self, parts: list[str], query: str) -> None:
@@ -593,6 +595,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parts == ["events"]:
             return self.stream(index_signature, boards_index)
         return self.send_json({"error": "unknown api path"}, HTTPStatus.NOT_FOUND)
+
+    def send_summary(self, slug: str, root: Path, query: str) -> None:
+        _send_summary(self, slug, root, query)
 
     def stream(self, signature_fn, payload_fn) -> None:
         """Server-sent events: a fresh payload whenever the signature moves."""
@@ -615,6 +620,19 @@ class Handler(SimpleHTTPRequestHandler):
                 time.sleep(POLL_INTERVAL_SECONDS)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
+
+
+def _send_summary(handler: "Handler", slug: str, root: Path, query: str) -> None:
+    issue_id = urllib.parse.parse_qs(query).get("id", [""])[0]
+    _, state = CACHE.state(slug, root)
+    row = next((r for r in state.get("all", []) if r.get("id") == issue_id), None)
+    if row is None:
+        return handler.send_json({"error": "no such item on this board"}, HTTPStatus.NOT_FOUND)
+    if not DIGESTS_ENABLED:
+        return handler.send_json({"id": issue_id, "summary": None, "error": "summaries need a model credential (AGENT_DO_SERVE_AI)"})
+    result = digest_lib.summarize(slug, row)
+    result["id"] = issue_id
+    return handler.send_json(result)
 
 
 def run_server(host: str, port: int) -> None:
