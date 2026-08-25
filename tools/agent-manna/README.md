@@ -465,6 +465,17 @@ agent-do manna serve --decision-marker "[NAME]"   # a leading title tag that mea
 agent-do manna serve --status | --stop
 ```
 
+**Reconcile by click.** Drift shows up as inbox asks, each with a verb that is
+a button: `close` (an item whose work landed: `claim` then `done`), `rule`
+(a stale dream: `promote` or `delete`, delete on a second click), `sync`
+(work-order filenames behind their priority), `apply` (the two repairs
+`reconcile --fix` calls safe). A click runs exactly that manna verb through the
+daemon's own pinned identity (`$AGENT_DO_HOME/manna/serve/identity.json`, mode
+600, the same `MANNA_SESSION_ID` + `MANNA_SESSION_TOKEN` pin scripted lanes
+use), behind the loopback Host/Origin checks and a per-process token the page
+carries; manna's own refusals print on the row verbatim. Nothing on the page
+edits a file. The SessionEnd hook applies the same two safe repairs.
+
 Agents never read from it: `context`, `list`, and `show` remain the contract.
 Private claim proofs (`claim_token_hash`) never leave the board directory.
 Implementation: `serve/serve.py` (daemon, registry, two-clock cache),

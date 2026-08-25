@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import signal
+import re
 import subprocess
 import sys
 import threading
@@ -93,6 +94,80 @@ def serve_home() -> Path:
 
 def registry_path() -> Path:
     return serve_home() / "boards.json"
+
+
+def identity_path() -> Path:
+    return serve_home() / "identity.json"
+
+
+def serve_identity() -> dict[str, str]:
+    """The daemon's own manna identity: a public label plus a private bearer
+    token, pinned the way scripted lanes pin theirs (README: MANNA_SESSION_ID
+    + MANNA_SESSION_TOKEN). Created once, mode 600, never sent to a page."""
+    path = identity_path()
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("session_id") and data.get("token"):
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    import secrets
+    data = {"session_id": f"serve-{secrets.token_hex(8)}", "token": secrets.token_hex(32), "created_at": utc_now_iso()}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return data
+
+
+# One token per daemon process, handed to the page inside its state (same
+# origin only) and required on every write: a cross-site page cannot read it.
+import secrets as _secrets
+ACT_TOKEN = _secrets.token_hex(16)
+
+# What a click may run. Every action is a manna verb; nothing edits a file.
+ACTIONS = {
+    "fix": {"argv": ["manna", "reconcile", "--fix", "--json"], "needs_id": False, "confirm": False},
+    "sync": {"argv": ["manna", "sync"], "needs_id": False, "confirm": False},
+    "close": {"argv": None, "needs_id": True, "confirm": False},   # claim then done
+    "promote": {"argv": ["manna", "update", "{id}", "--type", "item"], "needs_id": True, "confirm": False},
+    "delete": {"argv": ["manna", "delete", "{id}"], "needs_id": True, "confirm": True},
+}
+
+
+def run_manna(root: Path, argv: list[str]) -> dict[str, Any]:
+    ident = serve_identity()
+    env = {**os.environ, "MANNA_SESSION_ID": ident["session_id"], "MANNA_SESSION_TOKEN": ident["token"]}
+    try:
+        done = subprocess.run([str(AGENT_DO), *argv], cwd=str(root), env=env, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"code": -1, "stdout": "", "stderr": str(error)[:400]}
+    return {"code": done.returncode, "stdout": done.stdout[-4000:], "stderr": done.stderr[-4000:]}
+
+
+def perform(slug: str, root: Path, action: str, issue_id: str | None, confirm: bool) -> dict[str, Any]:
+    spec = ACTIONS.get(action)
+    if not spec:
+        return {"ok": False, "error": "unknown action"}
+    if spec["needs_id"] and not (issue_id and re.fullmatch(r"mn-[0-9a-f]{6,}", issue_id)):
+        return {"ok": False, "error": "an item id is required"}
+    if spec["confirm"] and not confirm:
+        return {"ok": False, "error": "confirm required", "needs_confirm": True}
+    steps = []
+    if action == "close":
+        for argv in (["manna", "claim", issue_id], ["manna", "done", issue_id]):
+            result = run_manna(root, argv)
+            steps.append({"argv": argv, **result})
+            if result["code"] != 0:
+                break
+    else:
+        argv = [a.replace("{id}", issue_id or "") for a in spec["argv"]]
+        steps.append({"argv": argv, **run_manna(root, argv)})
+    ok = all(st["code"] == 0 for st in steps)
+    with CACHE.lock:  # the next read re-derives; the file signature will move anyway
+        CACHE.states.pop(slug, None)
+        CACHE.bits.pop(str(root), None)
+    sys.stdout.write(f"[act] {slug} {action} {issue_id or ''} -> {'ok' if ok else 'refused'}\n"); sys.stdout.flush()
+    return {"ok": ok, "action": action, "id": issue_id, "steps": steps}
 
 
 def daemon_path() -> Path:
@@ -356,6 +431,8 @@ class BoardCache:
         state["slug"] = slug
         state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
         state["coord_refresh_seconds"] = COORD_REFRESH_SECONDS
+        state["act_token"] = ACT_TOKEN
+        state["actor"] = serve_identity()["session_id"]
         # Digests: cached lines attach now; missing ones generate in the
         # background, and the cache file's change re-signs the page.
         report = digest_lib.apply(slug, state["all"])
@@ -557,6 +634,26 @@ class Handler(SimpleHTTPRequestHandler):
             if origin_host not in LOOPBACK_HOSTS and origin_host != bound:
                 return False
         return True
+
+    def do_POST(self) -> None:  # noqa: N802
+        if not self.host_allowed():
+            return self.send_json({"error": "host not allowed"}, HTTPStatus.FORBIDDEN)
+        parsed = urllib.parse.urlparse(self.path)
+        parts = [urllib.parse.unquote(p) for p in parsed.path.split("/") if p]
+        if len(parts) != 3 or parts[1:] != ["api", "act"]:
+            return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
+        root = self.resolve_board(parts[0])
+        if root is None:
+            return self.send_json({"error": "no such board"}, HTTPStatus.NOT_FOUND)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except (ValueError, OSError):
+            return self.send_json({"error": "bad request body"}, HTTPStatus.BAD_REQUEST)
+        if not isinstance(body, dict) or body.get("token") != ACT_TOKEN:
+            return self.send_json({"error": "act token missing or stale; reload the page"}, HTTPStatus.FORBIDDEN)
+        result = perform(parts[0], root, str(body.get("action") or ""), body.get("id") if isinstance(body.get("id"), str) else None, bool(body.get("confirm")))
+        return self.send_json(result, HTTPStatus.OK if result.get("ok") or result.get("needs_confirm") else HTTPStatus.CONFLICT)
 
     def do_GET(self) -> None:  # noqa: N802
         if not self.host_allowed():

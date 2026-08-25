@@ -38,7 +38,7 @@ function matches(r) {
 function trackOk(r) { return !app.track || r.track === app.track || (app.track === "(none)" && !r.track); }
 
 // The inbox is asks only: every row is who/what · the ask · the verb you perform.
-const VERB_RANK = ["grant", "fix", "rule", "split", "close", "read", "launch"];
+const VERB_RANK = ["grant", "fix", "rule", "split", "close", "apply", "sync", "fix doc", "read", "launch"];
 function inboxRows(s) {
   const out = [];
   for (const p of s.peers || []) {
@@ -47,7 +47,17 @@ function inboxRows(s) {
   }
   for (const r of s.decisions || []) out.push({ kind: "decision", color: "decision", text: rowText(r), verb: "rule", target: { kind: "item", id: r.id } });
   for (const c of (s.coord?.contention || [])) out.push({ kind: "contention", color: "waiting", text: `${c.paths.join(", ")} · ${c.owners.join(" and ")}`, verb: "split", target: { kind: "sheet", id: "coord" } });
-  for (const f of (s.drift?.findings || [])) if (f.kind === "landed_open" && f.issue_id) out.push({ kind: "landed", color: "decision", text: `${f.issue_id} landed (${f.evidence || "commit"}) but is still open`, verb: "close", target: { kind: "item", id: f.issue_id } });
+  const findings = s.drift?.findings || [];
+  const byId = new Map((s.all || []).map((r) => [r.id, r]));
+  for (const f of findings) {
+    if (f.kind === "landed_open" && f.issue_id) out.push({ kind: "landed", color: "decision", text: `${rowText(byId.get(f.issue_id) || { title: f.issue_id })} · landed in ${f.evidence || "a commit"}, still open`, verb: "close", target: { kind: "item", id: f.issue_id }, act: { action: "close", id: f.issue_id } });
+    else if (f.kind === "stale_dream" && f.issue_id) out.push({ kind: "dream", color: "dream", text: `${rowText(byId.get(f.issue_id) || { title: f.issue_id })} · parked since ${f.evidence?.replace(/^created_at /, "") || "a while"}`, verb: "rule", target: { kind: "item", id: f.issue_id }, act: { action: "rule", id: f.issue_id } });
+    else if (f.kind === "doc_reference") out.push({ kind: "doc", color: "muted", text: `${f.detail || "a document names a missing item"} · ${f.evidence || ""}`, verb: "fix doc", target: { kind: "sheet", id: "debug" } });
+  }
+  const behind = findings.filter((f) => f.kind === "handoff_presentation").length;
+  if (behind) out.push({ kind: "handoffs", color: "muted", text: `${behind} work-order filename${behind === 1 ? "" : "s"} behind their priority`, verb: "sync", target: { kind: "sheet", id: "debug" }, act: { action: "sync" } });
+  const safe = findings.filter((f) => /dead claim|resolved blocker|recompute status|remove resolved/i.test(`${f.kind} ${f.detail} ${f.proposed_fix}`)).length;
+  if (safe) out.push({ kind: "repairs", color: "muted", text: `${safe} safe repair${safe === 1 ? "" : "s"} (dead claims, resolved blockers)`, verb: "apply", target: { kind: "sheet", id: "debug" }, act: { action: "fix" } });
   for (const d of (s.coord?.drops || [])) out.push({ kind: "drop", color: "muted", text: `${Array.isArray(d.path) ? d.path.join(", ") : d.path || "note"} · ${clip(d.note || "", 80)} · from ${d.owner}`, verb: "read", target: { kind: "sheet", id: "coord" } });
   const first = (s.next || [])[0];
   if (first) out.push({ kind: "ready", color: "ready", text: `${rowText(first)} · priority #${(first.order ?? 0) + 1}`, verb: "launch", target: { kind: "item", id: first.id } });
@@ -74,6 +84,40 @@ function relationMarkup(rows) {
     </p>`;
   }).join("")}</div>`;
 }
+
+// ------------------------------------------------------------ acting
+// A click runs one manna verb through the daemon's own identity. Nothing else
+// on this page writes. Delete asks for a second click; refusals print verbatim.
+const acts = new Map(); // "action:id" -> {pending, ok, note, armed}
+function actNote(result) {
+  if (result.ok) return result.action === "close" ? "closed" : result.action === "sync" ? "synced" : result.action === "fix" ? "applied" : result.action === "promote" ? "promoted to item" : "deleted";
+  const step = (result.steps || []).find((x) => x.code !== 0);
+  const text = (step && (step.stderr || step.stdout).trim().split("\n").slice(-1)[0]) || result.error || "refused";
+  return `refused: ${text}`;
+}
+async function act(action, id, confirm) {
+  const key = `${action}:${id || ""}`;
+  acts.set(key, { pending: true }); renderInbox(app.state);
+  try {
+    const r = await fetch(api("api/act"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, id: id || null, confirm: !!confirm, token: app.state?.act_token }) });
+    const d = await r.json();
+    acts.set(key, { pending: false, ok: !!d.ok, note: actNote({ ...d, action }) });
+    toast(actNote({ ...d, action }));
+  } catch (e) { acts.set(key, { pending: false, ok: false, note: "refused: request failed" }); }
+  renderInbox(app.state);
+  fetchState();
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  const action = b.dataset.act, id = b.dataset.actId || null;
+  if (action === "delete") {
+    const key = `rule:${id}`; const st = acts.get(key) || {};
+    if (st.armed !== "delete") { acts.set(key, { ...st, armed: "delete" }); renderInbox(app.state); window.setTimeout(() => { const cur = acts.get(key); if (cur?.armed === "delete") { acts.set(key, { ...cur, armed: null }); renderInbox(app.state); } }, 4000); return; }
+    acts.set(key, { armed: null }); act("delete", id, true); return;
+  }
+  act(action, id, false);
+}, true);
 
 // ------------------------------------------------------------ rendering: rows
 function itemRow(r) {
@@ -130,9 +174,20 @@ function renderTimeline(s) {
 function renderInbox(s) {
   const rows = inboxRows(s);
   $("#inbox-cap").textContent = String(rows.length);
-  $("#inbox-list").innerHTML = colsHeader("inbox") + (rows.length ? rows.map((x) => `<div class="row inbox s-${esc(x.color)}" data-target-kind="${esc(x.target.kind)}" data-target-id="${esc(x.target.id)}" role="button" tabindex="0">
-      <span class="kind">${esc(x.kind)}</span><span class="text">${esc(x.text)}</span><span class="pill verb ${cls(x.color)}">${esc(x.verb)}</span>
-    </div>`).join("") : `<p class="empty">Nothing is waiting on you.</p>`);
+  $("#inbox-list").innerHTML = colsHeader("inbox") + (rows.length ? rows.map((x, i) => {
+    const key = x.act ? `${x.act.action}:${x.act.id || ""}` : "";
+    const ruleState = x.act?.action === "rule" ? (acts.get(`promote:${x.act.id}`) || acts.get(`delete:${x.act.id}`)) : null;
+    const st = key ? (acts.get(key) || ruleState) : null;
+    let verbCell;
+    if (!x.act) verbCell = `<span class="pill verb ${cls(x.color)}">${esc(x.verb)}</span>`;
+    else if (st?.pending) verbCell = `<span class="pill verb c-muted">working…</span>`;
+    else if (x.act.action === "rule") verbCell = `<span class="verb-group"><button type="button" class="pill verb c-ready" data-act="promote" data-act-id="${esc(x.act.id)}">promote</button><button type="button" class="pill verb c-waiting" data-act="delete" data-act-id="${esc(x.act.id)}">${st?.armed === "delete" ? "delete · confirm" : "delete"}</button></span>`;
+    else verbCell = `<button type="button" class="pill verb ${cls(x.color)}" data-act="${esc(x.act.action)}" data-act-id="${esc(x.act.id || "")}">${esc(x.verb)}</button>`;
+    const note = st && !st.pending && st.note ? `<span class="act-note ${st.ok ? "c-done" : "c-waiting"}">${esc(st.note)}</span>` : "";
+    return `<div class="row inbox s-${esc(x.color)}" data-target-kind="${esc(x.target.kind)}" data-target-id="${esc(x.target.id)}" role="button" tabindex="0">
+      <span class="kind">${esc(x.kind)}</span><span class="text">${esc(x.text)}${note}</span>${verbCell}
+    </div>`;
+  }).join("") : `<p class="empty">Nothing is waiting on you.</p>`);
   fitColumns($("#sheet-inbox"), "inbox");
 }
 function peerRow(p) {
@@ -352,10 +407,7 @@ function renderStrip(s) {
     if (Number.isFinite(age) && Number.isFinite(cadence) && age > 2 * cadence) parts.push(`<span class="warn">presence stale ${Math.round(age)}s</span>`);
   } else {
     const d = s.drift || {};
-    const kinds = Object.keys(d.kinds || {}).length;
     if (d.source !== "reconcile" && !d.present) parts.push(`<span class="bad">reconcile unavailable</span>`);
-    else if (d.count) parts.push(`<span class="warn">▲ ${d.count} drift</span> · ${kinds} kind${kinds === 1 ? "" : "s"}`);
-    else parts.push("drift clean");
     const dg = s.digests || {};
     if (dg.missing) parts.push(`digests ${dg.ready}/${dg.ready + dg.missing}${dg.generating ? " …" : ""}`);
   }

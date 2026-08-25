@@ -77,14 +77,20 @@ def make_stub_agent_do(directory: Path) -> Path:
     import shlex
     script = directory / "agent-do"
     script.write_text(
-        "#!/usr/bin/env python3\nimport json, sys\n"
+        "#!/usr/bin/env python3\nimport json, os, sys\n"
         f"PEERS = {STUB_PEERS!r}\nRECON = {STUB_RECONCILE!r}\nCLAIMS = {STUB_CLAIMS!r}\nDROPS = {STUB_DROPS!r}\n"
         "a = sys.argv[1:]\n"
         "if a[:3] == ['coord', 'peers', '--json']: print(json.dumps(PEERS)); sys.exit(0)\n"
         "if a[:3] == ['coord', 'claims', '--json']: print(json.dumps(CLAIMS)); sys.exit(0)\n"
         "if a[:3] == ['coord', 'drops', '--json']: print(json.dumps(DROPS)); sys.exit(0)\n"
         "if a[:2] == ['coord', 'need']: print(json.dumps({'success': True, 'needs': []})); sys.exit(0)\n"
+
         "if a[:3] == ['manna', 'reconcile', '--json']: print(json.dumps(RECON)); sys.exit(1)\n"
+        "if a[:1] == ['manna'] and os.environ.get('STUB_LOG'):\n"
+        "    import pathlib\n"
+        "    log = pathlib.Path(os.environ['STUB_LOG']); log.write_text((log.read_text() if log.exists() else '') + ' '.join(a) + '|' + os.environ.get('MANNA_SESSION_ID','') + '\\n')\n"
+        "    if a[1:3] == ['done', 'mn-10c4ed']: print('Refusing: claimed by another session', file=sys.stderr); sys.exit(2)\n"
+        "    print('ok'); sys.exit(0)\n"
         "sys.exit(2)\n",
         encoding="utf-8",
     )
@@ -505,6 +511,51 @@ class RegistryAndHttpTests(unittest.TestCase):
         finally:
             serve_lib.AGENT_DO = original
             serve_lib.CACHE.bundles.clear()
+
+    def test_act_endpoint_runs_manna_verbs_under_the_daemon_identity(self) -> None:
+        serve_lib.register_board(self.root)
+        stub = make_stub_agent_do(Path(self.tmp.name))
+        log = Path(self.tmp.name) / "stub.log"
+        os.environ["STUB_LOG"] = str(log)
+        original, serve_lib.AGENT_DO = serve_lib.AGENT_DO, stub
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve_lib.Handler)
+        server.daemon_threads = True; server.stopping = False; server.started_at = "test"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def post(path, payload):
+            req = urllib.request.Request(base + path, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as err:
+                return err.code, json.loads(err.read() or b"{}")
+
+        try:
+            token = serve_lib.ACT_TOKEN
+            self.assertEqual(post("/proj/api/act", {"action": "fix"})[0], 403, "no token, no write")
+            self.assertEqual(post("/proj/api/act", {"action": "nope", "token": token})[0], 409)
+            status, d = post("/proj/api/act", {"action": "close", "id": "mn-aaaaaa", "token": token})
+            self.assertEqual(status, 200, d); self.assertTrue(d["ok"]); self.assertEqual([st["argv"][1] for st in d["steps"]], ["claim", "done"])
+            status, d = post("/proj/api/act", {"action": "delete", "id": "mn-d0ea11", "token": token})
+            self.assertEqual(status, 200, d); self.assertTrue(d.get("needs_confirm"), "delete asks first")
+            status, d = post("/proj/api/act", {"action": "delete", "id": "mn-d0ea11", "token": token, "confirm": True})
+            self.assertTrue(d["ok"], d)
+            status, d = post("/proj/api/act", {"action": "close", "id": "mn-10c4ed", "token": token})
+            self.assertEqual(status, 409); self.assertFalse(d["ok"]); self.assertIn("another session", d["steps"][-1]["stderr"])
+            status, d = post("/proj/api/act", {"action": "sync", "token": token}); self.assertTrue(d["ok"])
+            ran = log.read_text()
+            ident = serve_lib.serve_identity()["session_id"]
+            self.assertTrue(ident.startswith("serve-"))
+            self.assertIn(f"manna claim mn-aaaaaa|{ident}", ran)
+            self.assertIn(f"manna delete mn-d0ea11|{ident}", ran)
+            self.assertIn("manna sync|", ran)
+            self.assertEqual(ran.count("manna delete mn-d0ea11"), 1, "delete ran once, after the confirm")
+            self.assertEqual(oct(serve_lib.identity_path().stat().st_mode & 0o777), "0o600")
+        finally:
+            serve_lib.AGENT_DO = original
+            os.environ.pop("STUB_LOG", None)
+            server.stopping = True; server.shutdown(); server.server_close()
 
     def test_http_surface(self) -> None:
         serve_lib.register_board(self.root)

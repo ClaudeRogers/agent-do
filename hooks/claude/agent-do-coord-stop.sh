@@ -56,7 +56,9 @@ if [ -d .manna ]; then
     # Same session anchor manna claims used during the session, so the drift
     # file's session field names who last reconciled.
     [ -n "$SESSION_ID" ] && export MANNA_SESSION_ID="$SESSION_ID"
-    bounded_run 4 "$AGENT_DO" manna reconcile --write-drift --json >/dev/null 2>&1
+    # --fix applies only the two repairs the tool itself calls safe (abandon dead
+    # claims, unblock resolved blockers); judgment findings stay findings.
+    bounded_run 4 "$AGENT_DO" manna reconcile --fix --write-drift --json >/dev/null 2>&1
 fi
 
 exit 0

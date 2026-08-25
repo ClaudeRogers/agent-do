@@ -213,3 +213,9 @@ table.boards td.nowrap { white-space: nowrap; }
 .answer p { margin: 0 0 var(--s2); line-height: 1.5; }
 .answer p:last-child { margin-bottom: 0; }
 .answer .pending { color: var(--faint); }
+
+/* inbox actions: the verb is the button */
+button.verb { cursor: pointer; }
+button.verb:hover { text-decoration: underline; }
+.verb-group { display: flex; gap: var(--s3); justify-self: end; }
+.act-note { display: block; font-size: var(--t-meta); }
