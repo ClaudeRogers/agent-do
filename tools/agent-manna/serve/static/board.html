@@ -7,6 +7,7 @@
   <meta name="description" content="Read-only human view of one manna board, live." />
   <title>manna / board</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/view.js"></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -21,6 +22,8 @@
     <label class="grep"><span class="sr">grep</span><input id="grep" type="search" placeholder="grep" autocomplete="off" /></label>
     <div class="topbar-right">
       <button class="text-button" id="jump-button" type="button" title="⌘K">jump ▾</button>
+      <span class="sep">|</span>
+      <span id="view-host"></span>
       <span class="sep">|</span>
       <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
       <span class="sep">|</span>
@@ -51,6 +54,7 @@
         <div id="debug-list"></div>
       </div>
     </section>
+    <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="Resize inspector" title="drag · double-click to reset"></div>
     <aside id="inspector" class="inspector" aria-label="Inspector"><p class="empty">select a row</p></aside>
   </main>
 

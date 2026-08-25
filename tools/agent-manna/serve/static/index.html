@@ -7,12 +7,15 @@
   <meta name="description" content="Every registered manna board on this machine, live." />
   <title>manna / boards</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/view.js"></script>
   <script src="/static/index.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <nav class="crumb" aria-label="Estate"><strong>estate</strong></nav>
     <div class="topbar-right" aria-live="polite">
+      <span id="view-host"></span>
+      <span class="sep">|</span>
       <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
       <span class="sep">|</span>
       <span id="last-sync">waiting for state</span>
