@@ -315,6 +315,7 @@ def main() -> int:
 
         env = os.environ.copy()
         env["AGENT_DO_HOME"] = str(project / ".agent-do-home")
+        env["PATH"] = f"{ROOT}:{env.get('PATH', '')}"
         env["AGENT_DO_BOOTSTRAP_PROMPT_MODE"] = "native"
         env["AGENT_DO_BOOTSTRAP_AUTO_RESPONSE"] = "bootstrap"
 
