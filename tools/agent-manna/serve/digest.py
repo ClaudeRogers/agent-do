@@ -331,16 +331,17 @@ def schedule(slug: str, issues: list[dict[str, Any]], caller: Callable = default
 
 SUMMARY_SYSTEM = (
     "You explain software work items on a project board to the person who runs the project. "
-    "Write one or two short paragraphs in plain, direct language: what the item is about, why it exists "
+    "Write one short paragraph in plain, direct language: what the item is about, why it exists "
     "(the problem or the decision behind it), what has to be done, and what done looks like. "
     "Use only what the item says; if something is unknown, say so in a few words rather than inventing it. "
     "No headings, no bullet lists, no ids, no preamble, no restating the title."
 )
 
-# Two paragraphs the inspector can hold without scrolling at its default width:
-# measured on the built page (300px column, 12px mono) 900 characters is about
-# twelve lines. Longer answers are kept but the model is asked to stay under it.
-SUMMARY_MAX_CHARS = 900
+# One paragraph the inspector holds above the title without pushing it out of
+# view: measured on the built page (300px column, 12px mono, ~36 characters a
+# line) 450 characters is about twelve lines. The cap is part of the cache key,
+# so changing it regenerates every summary on its next view.
+SUMMARY_MAX_CHARS = 450
 
 
 def summary_prompt(issue: dict[str, Any]) -> str:
@@ -384,7 +385,7 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
     """Return {summary, model, cached} for one item, generating on a cache miss."""
     caller = caller or default_summary_caller  # resolved at call time, so a test can stand in for the model
     cache = load_cache(slug)
-    h = content_hash(issue)
+    h = f"{content_hash(issue)}:{SUMMARY_MAX_CHARS}"
     entry = cache.get(issue["id"]) or {}
     if entry.get("summary") and entry.get("summary_hash") == h:
         return {"summary": entry["summary"], "model": entry.get("summary_model"), "cached": True}
@@ -399,7 +400,7 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
     merged = dict(cache.get(issue["id"]) or {})
     merged.update({"summary": body, "summary_hash": h, "summary_model": model})
     if "hash" not in merged:
-        merged["hash"] = h
+        merged["hash"] = content_hash(issue)
     cache[issue["id"]] = merged
     save_cache(slug, cache)
     return {"summary": body, "model": model, "cached": False}

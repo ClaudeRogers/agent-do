@@ -196,7 +196,6 @@ function renderInspector(s) {
     if (!p) { el.innerHTML = '<p class="empty">that session is no longer on the board</p>'; return; }
     const pu = p.pulse || {};
     el.innerHTML = `<div class="head"><span class="pill ${cls(p.attention)}">${esc(attn(p.attention))}</span><span>${esc(p.runtime || "")}${p.role ? " · " + esc(p.role) : ""}</span></div>
-      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>
       <h2>${esc(p.alias || p.agent_id)}</h2>
       ${p.goal ? `<div class="digest-line">${esc(p.goal)}</div>` : ""}
       ${pu.latest_prompt ? `<div class="desc">“${esc(pu.latest_prompt)}”</div>` : ""}
@@ -207,7 +206,8 @@ function renderInspector(s) {
         ${pu.todo?.total ? `<span>todo</span><b>${esc(pu.todo.done)}/${esc(pu.todo.total)}${pu.todo.current ? " · " + esc(pu.todo.current) : ""}</b>` : ""}
         ${(p.holding || []).length ? `<span>holding</span><b>${p.holding.map((h) => `<a href="#item/${esc(h.id)}" data-item="${esc(h.id)}">${esc(h.id)}</a> ${esc(h.title)}`).join("<br>")}</b>` : ""}
         ${(p.paths || []).length ? `<span>paths</span><b>${p.paths.map(esc).join("<br>")}</b>` : ""}
-      </div>`;
+      </div>
+      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>`;
     bindCopy(); return;
   }
   const r = (s.all || []).find((x) => x.id === sel.id);
@@ -216,10 +216,9 @@ function renderInspector(s) {
   const cl = r.claimant;
   const relations = relationMarkup(r.relations || []);
   el.innerHTML = `<div class="head"><span>${esc(r.id)}</span><span class="pill ${cls(st)}">${esc(label(st))}</span>${r.order != null ? `<span>#${r.order + 1}</span>` : ""}${r.kind !== "item" ? `<span>${esc(r.kind)}</span>` : ""}</div>
-    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>
+    <details class="summary" id="summary-block"${summaryOpen() ? " open" : ""}><summary class="tag">AI summary</summary><div class="summary-body">${summaryBody(r.id)}</div></details>
     <h2>${esc(r.title)}</h2>
     ${r.digest ? `<div class="digest-line">${esc(r.digest)}</div>` : ""}
-    <div class="summary" id="summary-block"><div class="tag">AI summary</div>${summaryBody(r.id)}</div>
     ${r.description ? `<div class="desc">${esc(r.description)}</div>` : ""}
     <div class="meta">
       <span>track</span><b>${esc(shortTrack(r.track_title) || "—")}</b>
@@ -231,11 +230,15 @@ function renderInspector(s) {
       ${r.commits?.length ? `<span>commits</span><b>${r.commits.map((c) => `<span class="commit"><span class="sha">${esc(c.sha)}</span> ${esc(clip(c.subject, 56))} <span class="faint">${esc(ago(c.at))}</span></span>`).join("<br>")}</b>` : `<span>commits</span><b class="faint">none yet</b>`}
       ${r.prompt ? `<span>handoff</span><b class="faint">${esc(r.prompt)}</b>` : ""}
     </div>
-    ${relations}`;
+    ${relations}
+    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
   bindCopy();
   ensureSummary(r.id);
 }
 const summaries = new Map(); // id -> {summary, error, pending}
+const SUMMARY_OPEN_KEY = "manna-serve-summary-open";
+function summaryOpen() { try { return localStorage.getItem(SUMMARY_OPEN_KEY) !== "0"; } catch { return true; } }
+document.addEventListener("toggle", (e) => { if (e.target?.id === "summary-block") { try { localStorage.setItem(SUMMARY_OPEN_KEY, e.target.open ? "1" : "0"); } catch {} } }, true);
 function summaryBody(id) {
   const st = summaries.get(id);
   if (!st || st.pending) return '<p class="pending">writing…</p>';
@@ -253,7 +256,7 @@ async function ensureSummary(id) {
   } catch (e) {
     summaries.set(id, { summary: null, error: "summary request failed" });
   }
-  if (app.selected?.kind === "item" && app.selected.id === id) { const el = $("#summary-block"); if (el) el.innerHTML = `<div class="tag">AI summary</div>${summaryBody(id)}`; }
+  if (app.selected?.kind === "item" && app.selected.id === id) { const el = $("#summary-block .summary-body"); if (el) el.innerHTML = summaryBody(id); }
 }
 function bindCopy() {
   $$("[data-copy]").forEach((b) => b.addEventListener("click", async (e) => {
