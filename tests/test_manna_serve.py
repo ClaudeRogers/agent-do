@@ -408,6 +408,14 @@ class SummaryTests(unittest.TestCase):
         self.assertTrue(out["summary"].endswith("."), "cut at a sentence end")
         self.assertEqual(len(calls), 2, "one shorten pass before the trim")
 
+    def test_ask_cites_only_known_ids(self) -> None:
+        rows = [{"id": "mn-aaaaaa", "title": "First", "kind": "item", "effective": "ready"}, {"id": "mn-bbbbbb", "title": "Second", "kind": "item", "effective": "done"}]
+        out = digest_lib.ask(rows, "  which one is done?  ", caller=lambda prompt: ("mn-bbbbbb is done; mn-zzzzzz is not on the board.", "stub"))
+        self.assertEqual(out["cited"], ["mn-bbbbbb"])
+        self.assertIn("QUESTION: which one is done?", digest_lib.ask_prompt(rows, "which one is done?"))
+        def boom(prompt): raise RuntimeError("timed out")
+        self.assertEqual(digest_lib.ask(rows, "x", caller=boom)["error"], "timeout")
+
     def test_summary_failure_invents_nothing(self) -> None:
         def caller(prompt): raise RuntimeError("no credential")
         out = digest_lib.summarize("proj", self.row, caller=caller)
@@ -574,6 +582,16 @@ class RegistryAndHttpTests(unittest.TestCase):
                 self.assertEqual(json.loads(body)["summary"], "A short explanation.")
             finally:
                 serve_lib.DIGESTS_ENABLED, digest_lib.default_summary_caller = original_flag, original_caller
+            original_flag, original_ask = serve_lib.DIGESTS_ENABLED, digest_lib.default_ask_caller
+            serve_lib.DIGESTS_ENABLED = True
+            digest_lib.default_ask_caller = lambda prompt: ("mn-aaaaaa covers it.", "stub")
+            try:
+                status, body, _ = get("/proj/api/ask?q=does+anything+cover+the+first+thing")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["cited"], ["mn-aaaaaa"])
+            finally:
+                serve_lib.DIGESTS_ENABLED, digest_lib.default_ask_caller = original_flag, original_ask
+
             status, app, ctype = get("/static/app.js")
             self.assertEqual(status, 200)
             self.assertIn("javascript", ctype)

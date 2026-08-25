@@ -19,10 +19,8 @@
       <button class="tab active" role="tab" data-sheet="board" type="button">board</button>
       <button class="tab" role="tab" data-sheet="coord" type="button">coordination <span class="badge" data-badge="coord"></span></button>
     </div>
-    <label class="grep"><span class="sr">grep</span><input id="grep" type="search" placeholder="grep" autocomplete="off" /></label>
+    <label class="grep"><span class="sr">ask or grep</span><input id="grep" type="search" placeholder="ask AI · grep · ⌘K" autocomplete="off" /></label>
     <div class="topbar-right">
-      <button class="text-button" id="jump-button" type="button" title="⌘K">jump ▾</button>
-      <span class="sep">|</span>
       <span id="view-host"></span>
       <span class="sep">|</span>
       <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
@@ -33,6 +31,7 @@
 
   <main class="cockpit">
     <section id="sheet" class="sheet" aria-live="polite">
+      <div id="answer" class="answer" hidden></div>
       <div class="sheet-body" id="sheet-inbox" hidden>
         <div class="sheet-head"><span class="prompt">manna inbox</span><span class="count" id="inbox-cap"></span></div>
         <div class="list" id="inbox-list"></div>
@@ -63,12 +62,6 @@
     <button class="text-button strip-debug" id="debug-button" type="button">debug ▸</button>
   </footer>
 
-  <div class="palette" id="palette" hidden>
-    <div class="palette-box" role="dialog" aria-label="Jump">
-      <input id="palette-input" type="text" placeholder="sheet, item, peer, board…" autocomplete="off" />
-      <div id="palette-results"></div>
-    </div>
-  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <noscript>This local page needs JavaScript to read the board.</noscript>
 </body>

@@ -586,6 +586,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
         if rest == ["api", "summary"]:
             return self.send_summary(slug, root, parsed.query)
+        if rest == ["api", "ask"]:
+            question = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+            if not DIGESTS_ENABLED:
+                return self.send_json({"answer": None, "cited": [], "error": "asking needs a model credential (AGENT_DO_SERVE_AI)"})
+            _, state = CACHE.state(slug, root)
+            return self.send_json(digest_lib.ask(state.get("all", []), question))
         return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
 
     def route_api(self, parts: list[str], query: str) -> None:

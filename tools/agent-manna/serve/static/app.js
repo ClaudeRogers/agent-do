@@ -30,6 +30,7 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.ad
 // ------------------------------------------------------------ derived
 const rowText = (r) => r.digest || r.title;
 function matches(r) {
+  if (app.answer && !app.answer.pending && app.answer.cited?.length) return app.answer.cited.includes(r.id);
   if (!app.grep) return true;
   const hay = [r.id, r.title, r.digest, r.track_title, r.claimant?.label, r.description].filter(Boolean).join(" ").toLowerCase();
   return hay.includes(app.grep.toLowerCase());
@@ -328,23 +329,39 @@ function renderChrome(s) {
   $("[data-badge=inbox]").textContent = asks ? String(asks) : "";
   const needs = (s.attention?.["needs-user"] || 0) + (s.attention?.failed || 0);
   $("[data-badge=coord]").textContent = needs ? String(needs) : "";
-  const d = s.drift || {};
-  $("#strip-slug").textContent = s.board?.board_id ? `[${s.name}] ${s.board.board_id}` : `[${s.name}]`;
-  $("#strip-drift").innerHTML = d.count ? `<span class="warn">▲ ${d.count} drift</span>` : `drift clean`;
-  $("#strip-file").textContent = d.file?.present ? `file ${ago(d.file.generated_at)}` : "no drift file";
-  $("#strip-health").textContent = `presence ${s.coord_refreshed_ago ?? "?"}s · ${s.git?.dirty_paths ?? 0} dirty · ${(s.peers || []).filter((p) => p.attention !== "gone").length} here`;
-  const dg = s.digests || {};
-  $("#strip-digests").textContent = dg.missing ? `digests ${dg.ready}/${dg.ready + dg.missing}${dg.generating ? " …" : ""}` : (dg.ready ? `digests ${dg.ready}` : "");
+  renderStrip(s);
   const sel = $("#track-filter");
   const current = sel.value;
   const tracks = (s.tracks || []).map((t) => [t.id || "(none)", shortTrack(t.title)]);
   sel.innerHTML = `<option value="">track ▾</option>` + tracks.map(([id, t]) => `<option value="${esc(id)}"${id === current ? " selected" : ""}>${esc(t)}</option>`).join("");
+}
+// The strip: board facts on board sheets, coordination facts on the coordination sheet,
+// and a word only when something is off. Silence is the health signal.
+function renderStrip(s) {
+  const el = $("#strip-items"); if (!el || !s) return;
+  const parts = [];
+  if (app.sheet === "coord") {
+    const here = (s.peers || []).filter((p) => p.attention !== "gone").length;
+    parts.push(`${here} here`, `${s.git?.dirty_paths ?? 0} dirty`);
+    const age = Number(s.coord_refreshed_ago), cadence = Number(s.coord_refresh_seconds);
+    if (Number.isFinite(age) && Number.isFinite(cadence) && age > 2 * cadence) parts.push(`<span class="warn">presence stale ${Math.round(age)}s</span>`);
+  } else {
+    const d = s.drift || {};
+    const kinds = Object.keys(d.kinds || {}).length;
+    if (d.source !== "reconcile" && !d.present) parts.push(`<span class="bad">reconcile unavailable</span>`);
+    else if (d.count) parts.push(`<span class="warn">▲ ${d.count} drift</span> · ${kinds} kind${kinds === 1 ? "" : "s"}`);
+    else parts.push("drift clean");
+    const dg = s.digests || {};
+    if (dg.missing) parts.push(`digests ${dg.ready}/${dg.ready + dg.missing}${dg.generating ? " …" : ""}`);
+  }
+  el.innerHTML = parts.map((x) => `<span>${x}</span>`).join("");
 }
 function showSheet(name) {
   app.sheet = name;
   $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.sheet === name));
   for (const id of ["inbox", "board", "coord", "debug"]) $(`#sheet-${id}`).hidden = id !== name;
   $("#debug-button").textContent = name === "debug" ? "debug ▾" : "debug ▸";
+  if (app.state) renderStrip(app.state);
 }
 function renderAll() {
   const s = app.state; if (!s) return;
@@ -370,11 +387,11 @@ function readHash() {
   else if (["inbox", "board", "coord", "debug"].includes(kind)) app.sheet = kind;
 }
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-item], [data-peer], [data-target-kind], .tab, .chip, .mode, #debug-button, #jump-button");
+  const t = e.target.closest("[data-item], [data-peer], [data-target-kind], .tab, .chip, .mode, #debug-button");
   if (!t) return;
   if (t.matches(".tab")) { showSheet(t.dataset.sheet); history.replaceState(null, "", `#${t.dataset.sheet}`); return; }
   if (t.matches("#debug-button")) { showSheet(app.sheet === "debug" ? "board" : "debug"); return; }
-  if (t.matches("#jump-button")) { openPalette(); return; }
+
   if (t.matches(".chip")) { const c = t.dataset.chip; if (c === "live") { app.chips = { done: false, dreams: false }; } else { app.chips[c] = !app.chips[c]; } $$(".chip").forEach((x) => x.classList.toggle("active", x.dataset.chip === "live" ? !app.chips.done && !app.chips.dreams : !!app.chips[x.dataset.chip])); renderBoard(app.state); return; }
   if (t.matches(".mode")) { app.mode = t.dataset.mode; $$(".mode").forEach((x) => x.classList.toggle("active", x === t)); renderBoard(app.state); return; }
   if (t.dataset.targetKind) { e.preventDefault(); const k = t.dataset.targetKind, id = t.dataset.targetId; if (k === "sheet") { showSheet(id); history.replaceState(null, "", `#${id}`); } else select(k, id); return; }
@@ -382,42 +399,39 @@ document.addEventListener("click", (e) => {
   if (t.dataset.peer) { e.preventDefault(); select("peer", t.dataset.peer, { keepSheet: true }); return; }
 });
 document.addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
-  if (e.key === "Escape" && !$("#palette").hidden) { closePalette(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#grep").focus(); $("#grep").select(); return; }
+  if (e.key === "Escape") { clearAnswer(); if (document.activeElement === $("#grep")) { $("#grep").value = ""; app.grep = ""; renderAll(); } return; }
   if (e.key === "Enter" && e.target.matches(".row")) { e.target.click(); }
 });
 $("#track-filter").addEventListener("change", (e) => { app.track = e.target.value; renderBoard(app.state); });
-$("#grep").addEventListener("input", (e) => { app.grep = e.target.value.trim(); renderAll(); });
+$("#grep").addEventListener("input", (e) => { app.grep = e.target.value.trim(); if (app.answer && !app.answer.pending) { app.answer = null; renderAnswer(); } renderAll(); });
 
-// ------------------------------------------------------------ palette
-function paletteEntries(q) {
-  const s = app.state || {}; const ql = q.toLowerCase();
-  const out = [];
-  for (const [id, lbl] of [["inbox", "inbox"], ["board", "board"], ["coord", "coordination"], ["debug", "debug"]]) if (!ql || lbl.includes(ql)) out.push({ k: "sheet", what: lbl, sub: "", go: () => { showSheet(id); history.replaceState(null, "", `#${id}`); } });
-  for (const r of s.all || []) if (r.kind !== "track" && (!ql || [r.id, r.title, r.digest].filter(Boolean).join(" ").toLowerCase().includes(ql))) out.push({ k: "item", what: rowText(r), sub: `${r.id} · ${label(r.effective)}`, go: () => select("item", r.id) });
-  for (const p of s.peers || []) if (p.attention !== "gone" && (!ql || [p.agent_id, p.alias, p.goal].filter(Boolean).join(" ").toLowerCase().includes(ql))) out.push({ k: "peer", what: p.alias || p.agent_id, sub: `${attn(p.attention)}${p.goal ? " · " + clip(p.goal, 40) : ""}`, go: () => select("peer", p.agent_id) });
-  for (const b of (app.boards || [])) if (b.slug !== app.slug && (!ql || b.slug.toLowerCase().includes(ql))) out.push({ k: "board", what: b.slug, sub: `${b.coord?.needs_you ? b.coord.needs_you + " need you · " : ""}${(b.status_counts || {}).open || 0} ready`, go: () => { location.href = b.url; } });
-  return out.slice(0, 40);
+// ------------------------------------------------------------ ask
+// The bar greps as you type; Enter asks the model, which answers from the
+// board's own rows and cites ids. The answer sits above the sheet; its
+// cited ids become links and a filter until dismissed.
+app.answer = null;
+function clearAnswer() { if (app.answer) { app.answer = null; renderAnswer(); renderAll(); } }
+function renderAnswer() {
+  const box = $("#answer");
+  if (!app.answer) { box.hidden = true; box.innerHTML = ""; return; }
+  const a = app.answer;
+  box.hidden = false;
+  if (a.pending) { box.innerHTML = `<div class="answer-head"><span class="tag">AI answer</span><span class="faint">thinking…</span></div>`; return; }
+  const text = a.error ? `<p class="pending">${esc(a.error)}</p>` : esc(a.answer || "").replace(/\bmn-[0-9a-f]{6,}\b/g, (id) => `<a href="#item/${id}" data-item="${id}">${id}</a>`).split(/\n\n/).map((par) => `<p>${par}</p>`).join("");
+  box.innerHTML = `<div class="answer-head"><span class="tag">AI answer</span><span class="faint">${esc(a.question)}</span><button type="button" class="text-button" id="answer-close">[dismiss]</button></div>${text}`;
+  $("#answer-close")?.addEventListener("click", clearAnswer);
 }
-function renderPalette() {
-  const q = $("#palette-input").value.trim();
-  const entries = paletteEntries(q);
-  app.paletteEntries = entries;
-  app.paletteIndex = Math.min(app.paletteIndex, Math.max(0, entries.length - 1));
-  $("#palette-results").innerHTML = entries.length ? entries.map((e, i) => `<div class="presult${i === app.paletteIndex ? " active" : ""}" data-pi="${i}"><span class="k">${esc(e.k)}</span><span class="what">${esc(e.what)}</span><span class="k">${esc(e.sub)}</span></div>`).join("") : '<p class="empty">nothing matches</p>';
+async function ask(question) {
+  app.answer = { question, pending: true }; renderAnswer();
+  try {
+    const r = await fetch(`${api("api/ask")}?q=${encodeURIComponent(question)}`, { cache: "no-store" });
+    const d = await r.json();
+    app.answer = { question, answer: d.answer || null, cited: d.cited || [], error: d.error || null };
+  } catch (e) { app.answer = { question, error: "ask failed" }; }
+  renderAnswer(); renderAll();
 }
-function openPalette() {
-  $("#palette").hidden = false; app.paletteIndex = 0; $("#palette-input").value = ""; renderPalette(); $("#palette-input").focus();
-  if (!app.boards) fetch("/api/boards", { cache: "no-store" }).then((r) => r.json()).then((d) => { app.boards = d.boards || []; renderPalette(); }).catch(() => {});
-}
-function closePalette() { $("#palette").hidden = true; }
-$("#palette-input").addEventListener("input", () => { app.paletteIndex = 0; renderPalette(); });
-$("#palette-input").addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") { e.preventDefault(); app.paletteIndex = Math.min(app.paletteIndex + 1, app.paletteEntries.length - 1); renderPalette(); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); app.paletteIndex = Math.max(app.paletteIndex - 1, 0); renderPalette(); }
-  else if (e.key === "Enter") { const en = app.paletteEntries[app.paletteIndex]; if (en) { closePalette(); en.go(); } }
-});
-$("#palette").addEventListener("click", (e) => { const r = e.target.closest(".presult"); if (r) { const en = app.paletteEntries[Number(r.dataset.pi)]; closePalette(); en?.go(); } else if (e.target === $("#palette")) closePalette(); });
+$("#grep").addEventListener("keydown", (e) => { if (e.key === "Enter") { const q = e.target.value.trim(); if (q) { e.preventDefault(); ask(q); } } });
 
 // ------------------------------------------------------------ live
 function setConn(ok, text) { $("#connection-mark").textContent = ok ? "●" : "○"; $("#connection-mark").classList.toggle("live", ok); $("#connection-label").textContent = text; }

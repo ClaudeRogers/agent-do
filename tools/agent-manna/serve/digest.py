@@ -35,6 +35,7 @@ if str(REPO_LIB) not in sys.path:
 DIGEST_MAX_CHARS = 72
 
 FLAG_NAME = "AGENT_DO_SERVE_AI"
+_MN_ID = re.compile(r"\bmn-[0-9a-f]{6,}\b")
 
 # Items per model call. Measured 2026-08-24 on this board: 12 digests came
 # back in 5.0s through lib/ai_router (client timeout 30s, its
@@ -427,3 +428,61 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
     cache[issue["id"]] = merged
     save_cache(slug, cache)
     return {"summary": body, "model": model, "cached": False}
+
+
+# ---------------------------------------------------------------- ask
+# A question answered from the board's own rows, nothing else, citing ids.
+# Receipts-only: every claim names an item; "nothing on the board covers
+# this" is a valid answer.
+
+ASK_SYSTEM = (
+    "You answer questions about a software project board using only the rows you are given. "
+    "Cite the item id (mn-xxxxxx) for every item you mention, inline. If nothing on the board covers the "
+    "question, say so plainly. Two short paragraphs at most; no headings, no bullet lists, no preamble."
+)
+
+
+def _ask_rows(rows: list[dict[str, Any]]) -> list[str]:
+    out = []
+    for r in rows:
+        if r.get("kind") == "track":
+            continue
+        desc = " ".join(str(r.get("description") or "").split())
+        out.append(f"{r['id']} [{r.get('effective') or r.get('status')}] {r.get('digest') or r.get('title')}" + (f" — {desc}" if desc else ""))
+    return out
+
+
+def ask_prompt(rows: list[dict[str, Any]], question: str) -> str:
+    budget = _budget_bytes() - len(ASK_SYSTEM.encode("utf-8")) - len(question.encode("utf-8"))
+    lines, used, dropped = [], 0, 0
+    for line in _ask_rows(rows):
+        size = len(line.encode("utf-8")) + 1
+        if used + size > budget:
+            dropped += 1
+            continue
+        lines.append(line); used += size
+    note = f"\n\n({dropped} rows did not fit the model's input window and were left out.)" if dropped else ""
+    return f"QUESTION: {question}\n\nBOARD ROWS:\n" + "\n".join(lines) + note
+
+
+def default_ask_caller(prompt: str) -> tuple[str, str | None]:
+    from ai_router import ai_max_tokens, ai_requested, llm_call  # type: ignore
+
+    if not ai_requested(FLAG_NAME):
+        raise RuntimeError("model call not available (flag off or no provider credential)")
+    response = llm_call("fast", [{"role": "system", "content": ASK_SYSTEM}, {"role": "user", "content": prompt}], max_tokens=ai_max_tokens())
+    return response.text.strip(), response.model
+
+
+def ask(rows: list[dict[str, Any]], question: str, caller: Callable[[str], tuple[str, str | None]] | None = None) -> dict[str, Any]:
+    caller = caller or default_ask_caller
+    question = " ".join(question.split())
+    if not question:
+        return {"answer": None, "cited": [], "error": "empty question"}
+    try:
+        text, model = caller(ask_prompt(rows, question))
+    except Exception as error:
+        return {"answer": None, "cited": [], "error": safe_error(error, "ask")}
+    known = {r["id"] for r in rows}
+    cited = [i for i in dict.fromkeys(_MN_ID.findall(text)) if i in known]
+    return {"answer": text.strip(), "cited": cited, "model": model}

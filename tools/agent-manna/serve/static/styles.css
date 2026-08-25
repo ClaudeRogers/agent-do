@@ -38,7 +38,7 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .tab:hover { text-decoration: none; color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--text); }
 .badge { color: var(--amber); } .badge:empty { display: none; }
-.grep input { width: 220px; min-height: 24px; }
+.grep input { width: 320px; min-height: 24px; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--s1); color: var(--muted); white-space: nowrap; font-size: var(--t-small); }
 .connection-mark { color: var(--faint); } .connection-mark.live { color: var(--green); }
 
@@ -204,3 +204,12 @@ table.boards td.nowrap { white-space: nowrap; }
 .summary p { margin: 0 0 var(--s2); color: var(--text); line-height: 1.5; }
 .summary p:last-child { margin-bottom: 0; }
 .summary .pending { color: var(--faint); }
+
+/* AI answer above the sheet */
+.answer { margin: var(--s3) 0 var(--s1); padding: var(--s2) 0 var(--s3); border-bottom: 1px solid var(--line); max-width: 80ch; }
+.answer[hidden] { display: none; }
+.answer .answer-head { display: flex; gap: var(--s3); align-items: baseline; margin-bottom: var(--s2); }
+.answer .tag { color: var(--faint); font-size: var(--t-meta); letter-spacing: .06em; text-transform: uppercase; }
+.answer p { margin: 0 0 var(--s2); line-height: 1.5; }
+.answer p:last-child { margin-bottom: 0; }
+.answer .pending { color: var(--faint); }
