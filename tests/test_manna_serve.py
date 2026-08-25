@@ -399,6 +399,15 @@ class SummaryTests(unittest.TestCase):
         c = digest_lib.summarize("proj", self.row, caller=caller)
         self.assertFalse(c["cached"]); self.assertEqual(len(calls), 2)
         cache = digest_lib.load_cache("proj"); self.assertIn("summary", cache["mn-aaaaaa"])
+    def test_summary_never_exceeds_the_cap(self) -> None:
+        long = ("This sentence is here to make the summary far too long for the column. " * 12).strip()
+        calls = []
+        def caller(prompt): calls.append(prompt); return long, "stub"
+        out = digest_lib.summarize("proj", self.row, caller=caller)
+        self.assertLessEqual(len(out["summary"]), digest_lib.SUMMARY_MAX_CHARS)
+        self.assertTrue(out["summary"].endswith("."), "cut at a sentence end")
+        self.assertEqual(len(calls), 2, "one shorten pass before the trim")
+
     def test_summary_failure_invents_nothing(self) -> None:
         def caller(prompt): raise RuntimeError("no credential")
         out = digest_lib.summarize("proj", self.row, caller=caller)

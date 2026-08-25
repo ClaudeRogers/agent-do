@@ -342,6 +342,9 @@ SUMMARY_SYSTEM = (
 # line) 450 characters is about twelve lines. The cap is part of the cache key,
 # so changing it regenerates every summary on its next view.
 SUMMARY_MAX_CHARS = 450
+# Models hold a word count far better than a character count; 65 words of
+# this register measured 400–450 characters on the summaries written so far.
+SUMMARY_MAX_WORDS = 65
 
 
 def summary_prompt(issue: dict[str, Any]) -> str:
@@ -357,7 +360,7 @@ def summary_prompt(issue: dict[str, Any]) -> str:
         parts.append("waits on: " + "; ".join(str(b) for b in blockers))
     if issue.get("source"):
         parts.append(f"source: {issue['source']}")
-    return f"Explain this item in at most {SUMMARY_MAX_CHARS} characters.\n\n" + "\n".join(parts)
+    return f"Explain this item in one paragraph of at most {SUMMARY_MAX_WORDS} words (under {SUMMARY_MAX_CHARS} characters).\n\n" + "\n".join(parts)
 
 
 def default_summary_caller(prompt: str) -> tuple[str, str | None]:
@@ -381,11 +384,22 @@ def validate_summary(text: Any) -> str | None:
     return "\n\n".join(paragraphs)
 
 
+def fit_summary(text: str) -> str:
+    """Never longer than the cap: cut at the last sentence end inside it."""
+    if len(text) <= SUMMARY_MAX_CHARS:
+        return text
+    head = text[:SUMMARY_MAX_CHARS]
+    cut = max(head.rfind(". "), head.rfind("."), head.rfind("; "))
+    if cut > SUMMARY_MAX_CHARS // 2:
+        return head[: cut + 1].rstrip()
+    return head.rsplit(" ", 1)[0].rstrip() + "…"
+
+
 def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[str, str | None]] | None = None) -> dict[str, Any]:
     """Return {summary, model, cached} for one item, generating on a cache miss."""
     caller = caller or default_summary_caller  # resolved at call time, so a test can stand in for the model
     cache = load_cache(slug)
-    h = f"{content_hash(issue)}:{SUMMARY_MAX_CHARS}"
+    h = f"{content_hash(issue)}:{SUMMARY_MAX_CHARS}:{SUMMARY_MAX_WORDS}"
     entry = cache.get(issue["id"]) or {}
     if entry.get("summary") and entry.get("summary_hash") == h:
         return {"summary": entry["summary"], "model": entry.get("summary_model"), "cached": True}
@@ -394,6 +408,15 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
     except Exception as error:
         return {"summary": None, "error": safe_error(error, f"summary {issue.get('id')}"), "cached": False}
     body = validate_summary(text)
+    if body and len(body) > SUMMARY_MAX_CHARS:
+        try:  # one shorten pass, then the trim guarantees the cap
+            text2, model2 = caller(f"Shorten this to at most {SUMMARY_MAX_WORDS // 2 + 15} words, keeping the point:\n\n{body}")
+            body2 = validate_summary(text2)
+            if body2:
+                body, model = body2, model2 or model
+        except Exception as error:
+            safe_error(error, f"summary shorten {issue.get('id')}")
+        body = fit_summary(body)
     if not body:
         return {"summary": None, "error": "no usable summary", "cached": False}
     cache = load_cache(slug)  # re-read: the digest job may have written meanwhile
