@@ -30,7 +30,7 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.ad
 // ------------------------------------------------------------ derived
 const rowText = (r) => r.digest || r.title;
 function matches(r) {
-  if (app.answer && !app.answer.pending && app.answer.cited?.length) return app.answer.cited.includes(r.id);
+  if (app.answer && !app.answer.pending) return app.answer.cited?.length ? app.answer.cited.includes(r.id) : true;
   if (!app.grep) return true;
   const hay = [r.id, r.title, r.digest, r.track_title, r.claimant?.label, r.description].filter(Boolean).join(" ").toLowerCase();
   return hay.includes(app.grep.toLowerCase());

@@ -437,9 +437,17 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
 
 ASK_SYSTEM = (
     "You answer questions about a software project board using only the rows you are given. "
-    "Cite the item id (mn-xxxxxx) for every item you mention, inline. If nothing on the board covers the "
-    "question, say so plainly. Two short paragraphs at most; no headings, no bullet lists, no preamble."
+    "Read every row before answering, including rows marked done: a done item that covers the question "
+    "means the board covers it and the work is finished; say which state each cited item is in. "
+    "Cite the item id (mn-xxxxxx) inline for every item you mention, and never cite an id that is not in the rows. "
+    "If nothing on the board covers the question, say so plainly. "
+    "Two short paragraphs at most; no headings, no bullet lists, no preamble."
 )
+
+# Questions are rare and read by a person deciding something; the deep role
+# (the router's most capable chain) is worth its latency here. Digests and
+# summaries stay on the fast role because they run in bulk.
+ASK_ROLE = "deep"
 
 
 def _ask_rows(rows: list[dict[str, Any]]) -> list[str]:
@@ -452,8 +460,15 @@ def _ask_rows(rows: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _ask_budget_bytes() -> int:
+    from models import resolve  # type: ignore
+
+    window = int(resolve(ASK_ROLE)["capabilities"]["max_input_tokens"])
+    return window - len(ASK_SYSTEM.encode("utf-8"))
+
+
 def ask_prompt(rows: list[dict[str, Any]], question: str) -> str:
-    budget = _budget_bytes() - len(ASK_SYSTEM.encode("utf-8")) - len(question.encode("utf-8"))
+    budget = _ask_budget_bytes() - len(question.encode("utf-8"))
     lines, used, dropped = [], 0, 0
     for line in _ask_rows(rows):
         size = len(line.encode("utf-8")) + 1
@@ -470,7 +485,15 @@ def default_ask_caller(prompt: str) -> tuple[str, str | None]:
 
     if not ai_requested(FLAG_NAME):
         raise RuntimeError("model call not available (flag off or no provider credential)")
-    response = llm_call("fast", [{"role": "system", "content": ASK_SYSTEM}, {"role": "user", "content": prompt}], max_tokens=ai_max_tokens())
+    from ai_router import DEFAULT_CLIENT_TIMEOUT_SECONDS  # type: ignore
+
+    # One deep answer over this 122-row board measured 22.6s against the
+    # router's default client timeout; twice that default leaves room for a
+    # board twice the size before the answer is lost to the clock.
+    response = llm_call(
+        ASK_ROLE, [{"role": "system", "content": ASK_SYSTEM}, {"role": "user", "content": prompt}],
+        max_tokens=ai_max_tokens(), timeout_seconds=DEFAULT_CLIENT_TIMEOUT_SECONDS * 2,
+    )
     return response.text.strip(), response.model
 
 
