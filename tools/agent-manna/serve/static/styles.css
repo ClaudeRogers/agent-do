@@ -4,6 +4,7 @@
   --line: #30343a; --line-strong: #474d55;
   --text: #d8d9d2; --muted: #8d939c; --faint: #7c828b; /* faint measured 4.9:1 on --bg: the dpt contrast floor is 4.5:1 */
   --green: #83d18c; --amber: #e2b86b; --red: #ed7c83; --blue: #79b8e8; --violet: #b7a0e8;
+  --select: #f0925a; /* selection only: orange, so it never reads as a state (blue = in progress, amber = decision) */
   --mono: "SFMono-Regular", "Cascadia Code", "JetBrains Mono", "Roboto Mono", Menlo, Consolas, monospace;
   /* spacing scale (px): 4 8 12 16 24 32 */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
@@ -67,7 +68,7 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .row { position: relative; display: grid; grid-template-columns: var(--col-stripe) var(--w-id, auto) minmax(0, 1fr) var(--w-track, auto) var(--w-state, auto) var(--w-prio, auto); column-gap: var(--s3); align-items: center; min-height: var(--row-h); padding: 0; cursor: pointer; }
 .list .row:nth-child(even) { background: var(--zebra); }
 .row:hover { background: var(--raised); }
-.row.selected { background: var(--raised); box-shadow: inset 2px 0 0 var(--blue); }
+.row.selected { background: var(--raised); box-shadow: inset 3px 0 0 var(--select); }
 /* the severity stripe is paint, not text: a pseudo-element, colored by the row's state class */
 .row::before { content: ""; width: 3px; height: 14px; margin-left: 0; background: var(--stripe, var(--faint)); justify-self: start; }
 .row.s-active { --stripe: var(--blue); } .row.s-ready { --stripe: var(--green); } .row.s-waiting { --stripe: var(--red); } .row.s-decision { --stripe: var(--amber); }
@@ -105,7 +106,8 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .tl .bar { border-left: 2px solid currentColor; margin-left: 5px; }
 .tl .items { display: flex; flex-wrap: wrap; gap: 6px; padding: var(--s1) 0 var(--s3); }
 .tl .item { background: var(--surface); border: 1px solid var(--line); padding: 2px 8px; cursor: pointer; overflow-wrap: anywhere; }
-.tl .item:hover, .tl .item.selected { border-color: var(--line-strong); background: var(--raised); }
+.tl .item:hover { border-color: var(--line-strong); background: var(--raised); }
+.tl .item.selected { border-color: var(--select); background: var(--raised); }
 .tl .item .id { color: var(--muted); margin-right: 6px; }
 
 /* inspector */
@@ -186,7 +188,8 @@ table.boards td.nowrap { white-space: nowrap; }
 /* column header: one per list kind, with drag grips; double-click a grip to refit */
 .cols { display: grid; column-gap: var(--s3); align-items: center; height: 22px; color: var(--faint); font-size: var(--t-meta); letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid var(--line); user-select: none; }
 .cols > span { position: relative; white-space: nowrap; }
-.cols .grip { position: absolute; right: -8px; top: -4px; width: 9px; height: 30px; cursor: col-resize; }
+.cols .grip { position: absolute; top: -4px; width: 9px; height: 30px; cursor: col-resize; }
+.cols .grip-right { right: -8px; } .cols .grip-left { left: -8px; }
 .cols .grip::after { content: ""; position: absolute; left: 4px; top: 6px; width: 1px; height: 18px; background: var(--line); }
 .cols .grip:hover::after, .cols .grip.active::after { background: var(--line-strong); width: 2px; }
 .cols.board { grid-template-columns: var(--col-stripe) var(--w-id, auto) minmax(0, 1fr) var(--w-track, auto) var(--w-state, auto) var(--w-prio, auto); }
@@ -224,3 +227,7 @@ button.verb:hover { text-decoration: underline; }
 
 /* estate page: no inspector, so the right cluster simply sits at the right */
 .topbar-right.estate-right { width: auto; margin-left: auto; padding-left: 0; }
+
+/* estate counts are links, colored by their state */
+table.boards td.num a { color: inherit; }
+table.boards td.num a:hover { text-decoration: underline; }

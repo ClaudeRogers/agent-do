@@ -25,13 +25,14 @@ function render(state) {
     `<span class="n">${t.here || 0}</span> <span class="muted">sessions here</span>`,
   ].map((h) => `<span>${h}</span>`).join("");
   $("#registry-path").textContent = state.registry || "";
-  const cell = (n, cls) => `<td class="num ${n ? cls : "faint"}">${n ? (cls === "attn-needs-user" ? `<span class="pill c-needs-user">${n}</span>` : n) : "·"}</td>`;
+  // each count links into the board: #<sheet>[/<section>] is what the board page reads on load
+  const cell = (n, cls, b, target) => `<td class="num ${n ? cls : "faint"}">${n ? `<a class="${cls}" href="${esc(b.url)}#${target}">${n}</a>` : "·"}</td>`;
   $("#boards-body").innerHTML = rows.length ? rows.map((b) => {
     const sc = b.status_counts || {};
     const name = b.exists ? `<a href="${esc(b.url)}" title="${esc(b.root)}">${esc(b.slug)}</a>` : `<span class="faint" title="${esc(b.root)}">${esc(b.slug)}</span>`;
     return `<tr>
       <td class="nowrap">${name}${b.exists ? "" : ' <span class="faint">(missing)</span>'}</td>
-      ${cell(b.coord?.needs_you, "attn-needs-user")}${cell(b.coord?.working, "c-working")}${cell(b.coord?.here, "")}${cell(sc.in_progress, "c-active")}${cell(sc.open, "c-ready")}${cell(sc.blocked, "c-waiting")}${cell(b.decisions, "c-decision")}${cell(b.dreams, "c-dream")}${cell(sc.done, "c-done")}${cell(b.drift_count, "c-decision")}
+      ${cell(b.coord?.needs_you, "c-needs-user", b, "coord/needs")}${cell(b.coord?.working, "c-working", b, "coord/peers")}${cell(b.coord?.here, "", b, "coord/peers")}${cell(sc.in_progress, "c-active", b, "board/now")}${cell(sc.open, "c-ready", b, "board/next")}${cell(sc.blocked, "c-waiting", b, "board/waiting")}${cell(b.decisions, "c-decision", b, "inbox")}${cell(b.dreams, "c-dream", b, "board/dreams")}${cell(sc.done, "c-done", b, "board/done")}${cell(b.drift_count, "c-decision", b, "debug")}
       <td class="nowrap">${esc(fmtDate(b.latest_update))}</td>
     </tr>`;
   }).join("") : '<tr><td colspan="12" class="empty">No boards registered yet.</td></tr>';

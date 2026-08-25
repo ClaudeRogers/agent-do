@@ -4,7 +4,7 @@
 const app = {
   state: null, boards: null,
   slug: decodeURIComponent(location.pathname.split("/").filter(Boolean)[0] || ""),
-  sheet: "board", mode: "list", chips: { done: false, dreams: false }, track: "", grep: "",
+  sheet: "board", mode: "list", view: "live", track: "", grep: "",
   selected: null, // {kind: "item"|"peer", id}
   lastReceived: null, paletteIndex: 0, paletteEntries: [],
 };
@@ -146,14 +146,17 @@ function renderBoard(s) {
     const cited = app.answer.cited.map((id) => byId.get(id)).filter(Boolean);
     html += section("cited", cited, "the answer cites nothing on this board");
   }
-  html += section("now", f(s.now || []), "nothing claimed");
-  html += section("next", f(s.next || []), "nothing is ready");
-  const waiting = [];
-  for (const w of s.waves || []) for (const r of w.items) waiting.push(r);
-  for (const r of s.unlayered || []) waiting.push(r);
-  html += section("waiting", f(waiting), "nothing is blocked");
-  if (app.chips.dreams) html += section("dreams", f(s.dreams || []), "no dreams parked");
-  if (app.chips.done) {
+  const v = app.view;
+  if (v === "live" || v === "all") {
+    html += section("now", f(s.now || []), "nothing claimed");
+    html += section("next", f(s.next || []), "nothing is ready");
+    const waiting = [];
+    for (const w of s.waves || []) for (const r of w.items) waiting.push(r);
+    for (const r of s.unlayered || []) waiting.push(r);
+    html += section("waiting", f(waiting), "nothing is blocked");
+  }
+  if (v === "dreams" || v === "all") html += section("dreams", f(s.dreams || []), "no dreams parked");
+  if (v === "done" || v === "all") {
     const done = (s.all || []).filter((r) => r.effective === "done").sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
     html += section("done", f(done), "nothing done yet");
   }
@@ -164,11 +167,15 @@ function renderTimeline(s) {
   const f = (rows) => rows.filter((r) => trackOk(r) && matches(r));
   const lane = (lbl, colorCls, rows) => rows.length ? `<div class="tl ${colorCls}"><span class="lbl">${esc(lbl)}</span><span class="bar"></span><div class="items">${rows.map((r) => `<span class="item${app.selected?.kind === "item" && app.selected.id === r.id ? " selected" : ""}" data-item="${esc(r.id)}" title="${esc(r.title)}"><span class="id">${esc(r.id)}</span>${esc(clip(rowText(r), 60))}${r.blockers?.length ? ` <span class="faint">← ${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : ""}</span>`).join("")}</div></div>` : "";
   let html = `<div class="sheet-head"><span class="prompt">manna timeline</span></div>`;
-  html += lane("now", "c-active", f(s.now || []));
-  html += lane("ready", "c-ready", f(s.next || []));
-  for (const w of s.waves || []) html += lane(`wave ${w.wave}`, "c-waiting", f(w.items));
-  if ((s.unlayered || []).length) html += lane("unlayered", "c-faint", f(s.unlayered));
-  if (app.chips.done) html += lane("done", "c-faint", f((s.all || []).filter((r) => r.effective === "done")));
+  const v = app.view;
+  if (v === "live" || v === "all") {
+    html += lane("now", "c-active", f(s.now || []));
+    html += lane("ready", "c-ready", f(s.next || []));
+    for (const w of s.waves || []) html += lane(`wave ${w.wave}`, "c-waiting", f(w.items));
+    if ((s.unlayered || []).length) html += lane("unlayered", "c-faint", f(s.unlayered));
+  }
+  if (v === "dreams" || v === "all") html += lane("dreams", "c-dream", f(s.dreams || []));
+  if (v === "done" || v === "all") html += lane("done", "c-faint", f((s.all || []).filter((r) => r.effective === "done")));
   return html;
 }
 function renderInbox(s) {
@@ -335,12 +342,12 @@ function bindCopy() {
 // and double-click it to return to the fit.
 const COLS_KEY = "manna-serve-cols";
 const COLS = {
-  board:   { vars: { "--w-id": ".id", "--w-track": ".track", "--w-state": ".pill", "--w-prio": ".prio" }, header: ["", "id", "digest", "track", "state", "#"], grips: ["--w-id", null, "--w-track", "--w-state", "--w-prio"] },
-  inbox:   { vars: { "--w-kind": ".kind", "--w-verb": ".verb" }, header: ["", "kind", "ask", "verb"], grips: ["--w-kind", null, "--w-verb"] },
-  peer:    { vars: { "--w-peer": ".id", "--w-hold": ".track", "--w-pstate": ".pill", "--w-age": ".age" }, header: ["", "session", "focus", "holding", "state", "age"], grips: ["--w-peer", null, "--w-hold", "--w-pstate", "--w-age"] },
-  claim:   { vars: { "--w-owner": ".id", "--w-cstate": ".pill", "--w-age": ".age" }, header: ["", "path", "owner", "state", "age"], grips: [null, "--w-owner", "--w-cstate", "--w-age"] },
-  drop:    { vars: { "--w-from": ".id", "--w-age": ".age" }, header: ["", "from → for", "drop", "age"], grips: ["--w-from", null, "--w-age"] },
-  finding: { vars: { "--w-fkind": ".kind", "--w-fid": ".id" }, header: ["", "kind", "item", "detail"], grips: ["--w-fkind", "--w-fid", null] },
+  board:   [{ h: "" }, { h: "id", v: "--w-id", sel: ".id" }, { h: "digest", flex: true }, { h: "track", v: "--w-track", sel: ".track" }, { h: "state", v: "--w-state", sel: ".pill" }, { h: "#", v: "--w-prio", sel: ".prio" }],
+  inbox:   [{ h: "" }, { h: "kind", v: "--w-kind", sel: ".kind" }, { h: "ask", flex: true }, { h: "verb", v: "--w-verb", sel: ".verb, .verb-group" }],
+  peer:    [{ h: "" }, { h: "session", v: "--w-peer", sel: ".id" }, { h: "focus", flex: true }, { h: "holding", v: "--w-hold", sel: ".track" }, { h: "state", v: "--w-pstate", sel: ".pill" }, { h: "age", v: "--w-age", sel: ".age" }],
+  claim:   [{ h: "" }, { h: "path", flex: true }, { h: "owner", v: "--w-owner", sel: ".id" }, { h: "state", v: "--w-cstate", sel: ".pill" }, { h: "age", v: "--w-age", sel: ".age" }],
+  drop:    [{ h: "" }, { h: "from → for", v: "--w-from", sel: ".id" }, { h: "drop", flex: true }, { h: "age", v: "--w-age", sel: ".age" }],
+  finding: [{ h: "" }, { h: "kind", v: "--w-fkind", sel: ".kind" }, { h: "item", v: "--w-fid", sel: ".id" }, { h: "detail", flex: true }],
 };
 function loadCols() { try { return JSON.parse(localStorage.getItem(COLS_KEY) || "{}") || {}; } catch { return {}; } }
 function saveCols(v) { try { localStorage.setItem(COLS_KEY, JSON.stringify(v)); } catch {} }
@@ -351,19 +358,24 @@ function measureAdvance() {
   document.body.appendChild(probe); charAdvance = probe.getBoundingClientRect().width / 100; probe.remove();
 }
 function colsHeader(kind) {
-  const spec = COLS[kind];
-  return `<div class="cols ${kind}">${spec.header.map((h, i) => `<span>${esc(h)}${spec.grips[i - 1] !== undefined && spec.grips[i - 1] ? `<span class="grip" data-grip="${spec.grips[i - 1]}" data-kind="${kind}" title="drag · double-click to refit"></span>` : ""}</span>`).join("")}</div>`;
+  const cols = COLS[kind]; const flex = cols.findIndex((c) => c.flex);
+  return `<div class="cols ${kind}">${cols.map((c, i) => {
+    if (!c.v) return `<span>${esc(c.h)}</span>`;
+    const left = i > flex; // right of the flex column: the grip faces it on the left edge
+    return `<span>${esc(c.h)}<span class="grip ${left ? "grip-left" : "grip-right"}" data-grip="${c.v}" data-dir="${left ? -1 : 1}" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
+  }).join("")}</div>`;
 }
 function fitColumns(container, kind) {
-  const spec = COLS[kind]; if (!spec || !container) return;
+  const cols = COLS[kind]; if (!cols || !container) return;
   if (!charAdvance) measureAdvance();
   const stored = loadCols()[kind] || {};
-  for (const [v, sel] of Object.entries(spec.vars)) {
-    if (stored[v]) { container.style.setProperty(v, `${stored[v]}px`); continue; }
+  const rowSel = kind === "board" ? ".row:not(.inbox):not(.peer):not(.claim):not(.drop):not(.finding)" : `.row.${kind}`;
+  for (const c of cols) {
+    if (!c.v) continue;
+    if (stored[c.v]) { container.style.setProperty(c.v, `${stored[c.v]}px`); continue; }
     let max = 0;
-    const rowSel = kind === "board" ? ".row:not(.inbox):not(.peer):not(.claim):not(.drop):not(.finding)" : `.row.${kind}`;
-    container.querySelectorAll(`${rowSel} ${sel}`).forEach((el) => { max = Math.max(max, el.textContent.trim().length); });
-    container.style.setProperty(v, max ? `${Math.ceil(max * charAdvance) + 2}px` : "auto");
+    container.querySelectorAll(`${rowSel} :is(${c.sel})`).forEach((el) => { max = Math.max(max, el.textContent.trim().length + (el.classList.contains("verb-group") ? 3 : 0)); });
+    container.style.setProperty(c.v, max ? `${Math.ceil(max * charAdvance) + 2}px` : "auto");
   }
 }
 function bindGrips() {
@@ -372,7 +384,8 @@ function bindGrips() {
       e.preventDefault(); g.classList.add("active");
       const kind = g.dataset.kind, v = g.dataset.grip, container = g.closest(".sheet-body");
       const startX = e.clientX, startW = parseFloat(getComputedStyle(container).getPropertyValue(v)) || g.parentElement.getBoundingClientRect().width;
-      const move = (ev) => { const w = Math.max(24, Math.round(startW + ev.clientX - startX)); container.style.setProperty(v, `${w}px`); g._w = w; };
+      const dir = Number(g.dataset.dir) || 1;
+      const move = (ev) => { const w = Math.max(24, Math.round(startW + dir * (ev.clientX - startX))); container.style.setProperty(v, `${w}px`); g._w = w; };
       const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); g.classList.remove("active"); if (g._w) { const all = loadCols(); all[kind] = { ...(all[kind] || {}), [v]: g._w }; saveCols(all); } };
       window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
     });
@@ -441,7 +454,19 @@ function readHash() {
   if (!h) return;
   const [kind, id] = h.split("/");
   if (kind === "item" || kind === "peer") { app.selected = { kind, id: decodeURIComponent(id || "") }; if (kind === "peer") app.sheet = "coord"; }
-  else if (["inbox", "board", "coord", "debug"].includes(kind)) app.sheet = kind;
+  else if (["inbox", "board", "coord", "debug"].includes(kind)) {
+    app.sheet = kind;
+    app.landing = id || null;                       // a section to scroll to once the sheet has rendered
+    if (kind === "board" && (id === "dreams" || id === "done")) app.view = id;
+  }
+}
+// After the first render, scroll the section the hash named into view, once.
+function landOnSection() {
+  if (!app.landing) return;
+  const wanted = app.landing; app.landing = null;
+  const label = { now: "manna now", next: "manna next", waiting: "manna waiting", dreams: "manna dreams", done: "manna done", needs: "coord needs you", peers: "coord peers", claims: "coord claims", drops: "coord drops" }[wanted];
+  const head = label ? $$(".sheet-head .prompt").find((el) => el.textContent.trim() === label) : null;
+  if (head) head.closest(".sheet-head").scrollIntoView({ block: "start" });
 }
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-item], [data-peer], [data-target-kind], .tab, .chip, .mode, #debug-button");
@@ -449,7 +474,7 @@ document.addEventListener("click", (e) => {
   if (t.matches(".tab")) { showSheet(t.dataset.sheet); history.replaceState(null, "", `#${t.dataset.sheet}`); return; }
   if (t.matches("#debug-button")) { showSheet(app.sheet === "debug" ? "board" : "debug"); return; }
 
-  if (t.matches(".chip")) { const c = t.dataset.chip; if (c === "live") { app.chips = { done: false, dreams: false }; } else { app.chips[c] = !app.chips[c]; } $$(".chip").forEach((x) => x.classList.toggle("active", x.dataset.chip === "live" ? !app.chips.done && !app.chips.dreams : !!app.chips[x.dataset.chip])); renderBoard(app.state); return; }
+  if (t.matches(".chip")) { app.view = t.dataset.chip; $$(".chip").forEach((x) => x.classList.toggle("active", x.dataset.chip === app.view)); renderBoard(app.state); $("#sheet").scrollTo(0, 0); return; }
   if (t.matches(".mode")) { app.mode = t.dataset.mode; $$(".mode").forEach((x) => x.classList.toggle("active", x === t)); renderBoard(app.state); return; }
   if (t.dataset.targetKind) { e.preventDefault(); const k = t.dataset.targetKind, id = t.dataset.targetId; if (k === "sheet") { showSheet(id); history.replaceState(null, "", `#${id}`); } else select(k, id); return; }
   if (t.dataset.item) { e.preventDefault(); select("item", t.dataset.item, { keepSheet: app.sheet === "board" || app.sheet === "debug" }); return; }
@@ -492,7 +517,7 @@ $("#grep").addEventListener("keydown", (e) => { if (e.key === "Enter") { const q
 
 // ------------------------------------------------------------ live
 function setConn(ok, text) { $("#connection-mark").textContent = ok ? "●" : "○"; $("#connection-mark").classList.toggle("live", ok); $("#connection-label").textContent = text; }
-function receive(state) { app.state = state; app.lastReceived = new Date(); setConn(true, "live"); renderAll(); }
+function receive(state) { app.state = state; app.lastReceived = new Date(); setConn(true, "live"); renderAll(); landOnSection(); }
 async function fetchState() {
   try { const r = await fetch(api("api/state"), { cache: "no-store" }); if (!r.ok) throw new Error(`state request failed: ${r.status}`); receive(await r.json()); }
   catch (e) { setConn(false, "disconnected"); toast(e.message); }
@@ -505,6 +530,7 @@ function connect() {
 }
 readHash();
 showSheet(app.sheet);
+$$(".chip").forEach((x) => x.classList.toggle("active", x.dataset.chip === app.view));
 fetchState();
 connect();
 window.setInterval(() => { $("#last-sync").textContent = rel(app.lastReceived); }, 1000);
