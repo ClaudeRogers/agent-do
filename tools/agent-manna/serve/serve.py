@@ -355,6 +355,7 @@ class BoardCache:
         attach_resolved_relations(state, resolved_relations(root))
         state["slug"] = slug
         state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
+        state["coord_refresh_seconds"] = COORD_REFRESH_SECONDS
         # Digests: cached lines attach now; missing ones generate in the
         # background, and the cache file's change re-signs the page.
         report = digest_lib.apply(slug, state["all"])

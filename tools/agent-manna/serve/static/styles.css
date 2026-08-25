@@ -128,10 +128,12 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .commit .sha { color: var(--amber); }
 
 /* strip */
-.strip { height: var(--strip-h); display: flex; align-items: center; gap: var(--s4); padding: 0 max(var(--s4), calc((100% - var(--measure)) / 2)); background: var(--surface); border-top: 1px solid var(--line); color: var(--muted); font-size: var(--t-small); flex-shrink: 0; white-space: nowrap; overflow: hidden; }
-.strip-slug { color: var(--green); }
-.strip-debug { margin-left: auto; color: var(--muted); }
+/* the strip speaks only when something is off; what it says depends on the sheet; it sits under the inspector */
+.strip { height: var(--strip-h); display: flex; justify-content: flex-end; align-items: center; gap: var(--s4); padding: 0 max(var(--s4), calc((100% - var(--measure)) / 2)); background: var(--surface); border-top: 1px solid var(--line); color: var(--muted); font-size: var(--t-small); flex-shrink: 0; white-space: nowrap; overflow: hidden; }
+#strip-items { display: flex; gap: var(--s4); }
+.strip-debug { color: var(--muted); }
 .strip .warn { color: var(--amber); }
+.strip .bad { color: var(--red); }
 
 /* debug sheet */
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: var(--s1) var(--s3); padding: var(--s2) 0; font-size: var(--t-small); color: var(--muted); }
