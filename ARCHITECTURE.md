@@ -142,7 +142,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 ├── hooks/
 │   ├── claude/             # Canonical Claude Code hooks (4 events)
 │   └── codex/              # Canonical Codex hooks + Stop quality gate
-├── tools/agent-*           # 96 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 99 tools (standalone scripts + directory-based tools)
 ├── models.yaml             # Internal model roles: chains, capabilities, retired list
 ├── registry.yaml           # Master tool catalog with contracts
 └── test.sh                 # Test suite (gate inventory below)
@@ -173,7 +173,7 @@ Registries merge with higher priority overwriting lower:
 
 ## Contracts Layer
 
-The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 96 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 96 Declared: 96` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
+The five-beat mental model (Connect → Snapshot → Interact → Verify → Save) is machine-readable. All 99 tools declare `contracts:` blocks (`./agent-do harness contracts validate` prints `Tools: 96 Declared: 96` with zero errors and zero warnings). Snapshot/verify verbs are reads; connect/interact/save verbs are writes. Seven orthogonal attributes cover the shapes beats cannot express (`lib/registry.py:CONTRACT_ATTRIBUTES`):
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -214,7 +214,7 @@ No tool merges without a contracts declaration: the gate runs in `./test.sh` and
 
 ### Bounds: the second property the machine holds (`lib/bounds.py`)
 
-Contracts hold "which beats does this verb perform" across 96 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
+Contracts hold "which beats does this verb perform" across 99 tools without anyone remembering to. Bounds hold the next one: **a command that caps its output declares where the cap came from.** Same registry, same gate, same run — a doc line fixes nothing, and this repo measured what instructions are worth (518 lessons, zero structural readers).
 
 **Declaration** (`bounds:` beside `contracts:`), keyed by verb, or `*` for caps in shared library code that belong to no single verb. Four sources, and the source picks which enforcement applies:
 
@@ -432,6 +432,31 @@ metadata, Claim section, and both digests after taking the board lock. Loose
 comments and claim-like strings have no authority. Broken continuity exits 2
 with no claim.
 
+### The human window (`manna serve`)
+
+`agent-do manna serve` is the read cockpit for humans: one daemon on
+`127.0.0.1:7777` (Python, `tools/agent-manna/serve/`, beside the Rust core)
+renders every registered board at `/` — effective counts per board, each number
+linking to the exact section it counts — and each project at `/<name>` with
+three sheets (inbox · board · coordination), an inspector, a ⌘K jump/ask bar,
+and a status strip whose `debug ▸` opens live reconcile findings and the
+daemon's own numbers. Rows carry model-written one-line digests and each item a
+collapsible summary (fast role, hash-keyed cache under
+`$AGENT_DO_HOME/manna/serve/digests/`, outside the board, title as fallback);
+the bar's Enter asks the deep role a question answered from board rows only,
+citing ids. Two-clock cache: board+git state re-derives on file signature
+(that is where live `reconcile --json` and the trailer-commit log run);
+coord presence refreshes on a ten-second cadence with a content digest so
+streams push only on real change; both pages paint instantly from cheap reads
+and backfill. Loopback-only (Host and Origin checked), agents never read from
+it — `context|list|show` remain the contract — and `claim_token_hash` never
+leaves the board directory. Writes exist only as reconcile-by-click: inbox
+asks carry verb buttons (`close`, `promote`/`delete`, `sync`, `apply`) that
+POST one action each, guarded by a per-process page token, and the daemon runs
+exactly that manna verb under its own pinned identity
+(`$AGENT_DO_HOME/manna/serve/identity.json`, mode 600); manna's refusals
+surface verbatim. The page never edits a file.
+
 ### State machine
 
 - `claim` requires status `open` and no claimant; validation and transition are one locked operation, so concurrent claimers have exactly one winner
@@ -509,6 +534,7 @@ Project-local state-and-interrupt broker for parallel agents. State lives under 
 - **Board primitives**: advisory `claims` on paths, `needs` (declared dependencies), `publishes` (produced artifacts), and `drops` (file pointers handed to a peer, role, or anyone; pointers, never content). Interrupts are computed from this state (contention/notice/dependency/novelty), not delivered as chat.
 - **Guard**: `guard install` drops a warn-only pre-commit hook that flags staged paths hitting live claims or foreign territories; `guard check` runs the same check ad hoc.
 - **History**: `history [peer] [--limit N]` reads the events journal newest-first.
+- **Pulse** (`pulse record --from-hook` / `pulse show [peer]`): hook-fed per-session telemetry — status (`working`/`needs-user`/`finished`/`failed`/`ended`), latest prompt, current tool, TodoWrite progress — reduced from Claude Code hook payloads with no model call. `peers` sorts attention-first (needs-you > failed > working > present > idle; the dead sink) and renders pulse columns beside presence. Telemetry, never custody: a pulse row may route attention but is never evidence of what the board records.
 
 ## Hooks Architecture
 
@@ -550,7 +576,7 @@ Every decision (emit or suppress, with reason) lands in telemetry; `agent-do nud
 
 ### SessionEnd (`hooks/claude/agent-do-coord-stop.sh`)
 
-Presence-gated cleanup, always exit 0. In repos whose git dir already has a coord board, it re-exports `AGENT_DO_COORD_SESSION` from the payload's `session_id` and runs `coord stop --note "session ended"` (5s bound). In repos with `.manna/`, it pins `MANNA_SESSION_ID` the same way and runs `manna reconcile --write-drift --json` (4s bound), discarding the exit code: reconcile is advisory. The budget arithmetic is deliberate: 5s + 4s stays inside the hook's registered 10s timeout. Claude Code's `Stop` event fires every turn; session retirement belongs on `SessionEnd`, and agent-do registers nothing at `Stop`.
+Presence-gated cleanup, always exit 0. In repos whose git dir already has a coord board, it re-exports `AGENT_DO_COORD_SESSION` from the payload's `session_id` and runs `coord stop --note "session ended"` (5s bound). In repos with `.manna/`, it pins `MANNA_SESSION_ID` the same way and runs `manna reconcile --fix --write-drift --json` (4s bound), discarding the exit code. `--fix` applies only the two repairs the tool itself labels safe (abandon dead claims, unblock resolved blockers); every judgment finding stays a finding for the drift file. The budget arithmetic is deliberate: 5s + 4s stays inside the hook's registered 10s timeout. Claude Code's `Stop` event fires every turn; session retirement belongs on `SessionEnd`, and agent-do registers nothing at `Stop`.
 
 ### Codex
 

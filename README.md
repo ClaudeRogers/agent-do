@@ -346,6 +346,20 @@ surface coordination context when another agent is active in the same project,
 and record outcome telemetry so nudges can be measured instead of guessed. No
 hook hard-blocks work.
 
+### The human window
+
+`agent-do manna serve` starts one local daemon on `127.0.0.1:7777` and prints
+your board's URL. The front page lists every registered board with counts that
+mean what they say — each number links to exactly the items it counts. A
+board page is a cockpit: an inbox where every ask carries the verb you perform
+(grant · rule · split · close · read · launch) as a clickable button that runs
+the matching manna verb under the daemon's own identity; the board with
+one-line model-written digests, filters, and a timeline mode; coordination
+with live session pulse; an inspector with a collapsible AI summary per item;
+and a bar that greps as you type and, on Enter, asks a model a question
+answered from the board's own rows, citing item ids. Read-only by contract for
+agents — they keep `manna context|list|show` — and loopback-only by design.
+
 ## Multi-Agent Coordination
 
 ```bash
@@ -363,7 +377,9 @@ territories, place advisory claims on paths, publish artifacts, drop file
 pointers for each other, and read contention, notice, dependency, and novelty
 interrupts derived from all of it. A warn-only pre-commit guard
 (`agent-do coord guard install`) flags commits that touch another agent's live
-claims.
+claims. Every Claude Code hook event also feeds a per-session **pulse** —
+status, latest prompt, current tool, todo progress, no model involved — and
+`coord peers` sorts attention-first so whoever needs you sits at the top.
 
 ## Memory
 

@@ -29,7 +29,7 @@ What the installer actually does, in order:
 1. Symlinks `agent-do` into `~/.local/bin` (warns if that directory is not on `PATH`)
 2. Writes the repo path to `~/.agent-do/install-path` (the breadcrumb wrappers and hooks resolve)
 3. Generates the discovery index from `registry.yaml` via `bin/gen-index`
-4. Writes four Claude hook **wrappers** to `~/.claude/hooks/`: `agent-do-session-start.sh`, `agent-do-prompt-router.py`, `agent-do-pretooluse-check.py`, `agent-do-coord-stop.sh`
+4. Writes the Claude hook **wrappers** to `~/.claude/hooks/` (ten today): `agent-do-session-start.sh`, `agent-do-prompt-router.py`, `agent-do-correction-keys.py`, `agent-do-now-stamp.py`, `agent-do-pretooluse-check.py`, `agent-do-zpc-trigger.py`, `agent-do-quantity-check.py`, `agent-do-zpc-position-nudge.sh`, `agent-do-zpc-write-nudge.sh`, `agent-do-coord-stop.sh`
 5. Optionally writes five Codex wrappers to `~/.codex/hooks/` (the three event hooks plus `stop-quality-gate.sh`/`.py`)
 6. Installs Python dependencies (`pip3 install -r requirements.txt`)
 7. Interactively offers `npm install` for browse/unbrowse and `cargo build --release` for manna
@@ -145,7 +145,7 @@ The hooks decide what to inject by looking at the repo, not configuration:
 
 | Signal | Effect |
 |--------|--------|
-| `$CWD/.manna/` exists | SessionStart injects the Manna board (`manna context --max-tokens 1500`) and, when `.manna/drift.yaml` contains findings, the drift greeting; SessionEnd runs `manna reconcile --write-drift` |
+| `$CWD/.manna/` exists | SessionStart injects the Manna board (`manna context --max-tokens 1500`) and, when `.manna/drift.yaml` contains findings, the drift greeting; SessionEnd runs `manna reconcile --fix --write-drift` (`--fix` applies only the two safe repairs: dead claims abandoned, resolved blockers cleared) |
 | `<git-dir>/agent-do/coord/` exists | SessionEnd runs `coord stop`; SessionStart injects coord interrupts or a focus reminder when active peers exist |
 | `$CWD/.zpc/` exists | SessionStart mentions the experience journal and its status commands |
 | Frontend markers (package.json frameworks, `.tsx`/`.vue`/`.svelte` files, Flutter) | SessionStart injects the design-toolkit workflow |

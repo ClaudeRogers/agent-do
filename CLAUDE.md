@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-agent-do is a universal automation CLI for AI agents with 96 specialized tools. Two modes:
+agent-do is a universal automation CLI for AI agents with 99 specialized tools. Two modes:
 - **Structured API** (AI/scripts): `agent-do <tool> <command> [args...]` (instant, no LLM)
 - **Natural Language** (humans): `agent-do -n "what you want"` (LLM-routed via Claude)
 
@@ -139,7 +139,7 @@ agent-do                    # Main entry (bash): mode selection + tool dispatch
 │       ├── filter.js       # filterEntries: removes static assets, CDN, deduplicates
 │       ├── auth.js         # extractAuth: identifies auth patterns in captured traffic
 │       └── generator.js    # generateSkill: writes skill package to ~/.agent-do/skills/
-├── tools/agent-*           # 96 tools (standalone scripts + directory-based tools)
+├── tools/agent-*           # 99 tools (standalone scripts + directory-based tools)
 └── registry.yaml           # Master tool catalog: tool descriptions, commands, examples
 ```
 
@@ -216,7 +216,7 @@ Every tool in `registry.yaml` declares a `concurrency` field:
 | `write` | Has state-mutating commands | Must run serially |
 | `mixed` | Some commands read, some write | Orchestrator checks per-command |
 
-17 read-only tools (ocr, vision, metrics, dns, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 62 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
+17 read-only tools (ocr, vision, metrics, dns, etc.) can run concurrently. 17 write tools (render, vercel, namecheap, manna, etc.) must run serially. 65 mixed tools require per-command classification (screen, resend, and harness moved read → mixed once contracts review showed they carry write verbs). When spawning parallel agents, assign read-only tools freely; gate write tools behind sequential execution. Per-command read/write truth lives in `contracts:` blocks — snapshot/verify verbs are reads; connect/interact/save verbs are writes (verbs flagged `own_state` write only their own cache and stay parallel-safe). Orchestrators: `agent-do harness contracts surface --json` returns the full machine-readable safety surface (read_only/write/destructive/sensitive/long_running/passthrough/own_state verb lists).
 
 ### Universal Tool Pattern
 
@@ -231,7 +231,7 @@ The board (`.manna/`) is the single backlog; tracked `.handoff/` is the single w
 - **Single-truth rule:** memories and handoff docs point at mn- IDs; they never carry their own checklists.
 - **Pairing gate:** `manna create` generates the item handoff and reverse pointer; `.manna/handoff-order.yaml` owns priority, and `manna sync` derives dense numbered names, blocker gates, and the README index. Never rename a handoff manually. `claim` refuses broken, ignored, or mismatched pairs. Only `handoff seal` authorizes document edits. `manna lint` reports durable board files missing from the Git index as `workflow_tracking` with `git-tracked: no`; `manna reconcile` reports presentation drift and any live claim-bearing Markdown outside `.handoff/` as `workflow_sprawl`.
 - **Federation boundary:** every canonical board tracks `.manna/federation.yaml`; `manna init`, `manna migrate`, bootstrap repair, and inbox creation converge that public identity automatically. Cross-repo relations remain optional and are never issue fields or remote lifecycle gates. Use `manna federation init` only as an idempotent repair or manual backfill; add typed `counterpart|informed_by|depends_on|supersedes` declarations with `relate`; inspect locally with `relations` or derive `resolved|unavailable|missing|ambiguous` through `relations --resolve`. The serve registry is only a cache. Missing boards remain valid citations, `--check` fails only missing or ambiguous targets, and no relation changes claim, block, done, handoff, landed evidence, lint, or reconcile state. Normal clones and worktrees inherit one ID. Use `federation fork --reason <text>` only for an intentional project identity split; it archives inherited declarations and starts empty.
-- **Human window:** `agent-do manna serve` runs one read-only daemon on `127.0.0.1:7777`; `/` indexes every registered board, `/<project>` renders one (NOW / NEXT / NEEDS DECISION / WAITING waves / DRIFT / tracks / dreams / all). It always prints the project URL, so when the user asks to see the board, run it and hand over the link. Agents never read from it; the board's own commands remain the contract.
+- **Human window:** `agent-do manna serve` runs one daemon on `127.0.0.1:7777`; `/` indexes every registered board with effective counts that link to the section they count, `/<project>` is the cockpit (inbox of asks with verb buttons · board with digests, filters, and a timeline mode · coordination with pulse). It always prints the project URL, so when the user asks to see the board, run it and hand over the link. Agents never read from it; the board's own commands remain the contract. Its only writes are reconcile-by-click: a button POSTs one action and the daemon runs that one manna verb under its own pinned identity — the page never edits a file.
 - **Ownership gate:** Claude hooks export `CLAUDE_SESSION_ID`, Cursor persists its conversation id through the same input, and Codex supplies its opaque thread id; manna derives the ownership proof under the machine-local key (`~/.agent-do/manna/session-identity.key`), so a restarted process re-derives the same proof and keeps lifecycle authority over its claims. Scripted lanes may still pin `MANNA_SESSION_ID` plus secret `MANNA_SESSION_TOKEN` (explicit pins win). The board stores only the proof digest; a public owner label alone has no lifecycle authority. A landed orphaned claim — trailer commits prove the work, the owner can no longer present its proof, and the owning session is not active — is released and closed by `manna reconcile --fix`; the evidence authorizes, never the requester.
 - **This project's vocabulary** (data, not grammar): track rows mn-b7a0cc "Agentic Work OS" and mn-69368a "Companion / Second Chair"; item titles keep their program names ("Moon trunk A" through "Moon trunk G", "Companion: ...", "Charter Law N: ...", "Harness: ..."). The old title-prefix grammar built from those names was interim scaffolding; the typed fields replaced it, and prefixes surviving in titles are display only.
 
@@ -240,7 +240,7 @@ The board (`.manna/`) is the single backlog; tracked `.handoff/` is the single w
 1. Create executable at `tools/agent-<name>` (must support `--help` flag)
 2. Add entry to `registry.yaml` with `description`, `capabilities`, `commands`, `examples`
    - add `routing` metadata for discovery keywords, raw CLI equivalents, readiness hints, and project signals when the tool should participate in `suggest`, UserPromptSubmit AI catalog routing, or PreToolUse hard nudges
-3. **Declare `contracts:` — mandatory.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool without a contracts block. All 96 tools declare contracts; contract warnings must stay at zero.
+3. **Declare `contracts:` — mandatory.** Map each command verb to its beats (`connect`/`snapshot`/`interact`/`verify`/`save`) plus `attributes:` flags where they apply (`destructive`, `long_running`, `polymorphic`, `composite`, `sensitive`, `passthrough`). Draft it with `agent-do harness contracts propose --tool <name>`; the gate (`tests/test_contracts_gate.py`, run by `./test.sh` and CI) fails any registry tool without a contracts block. All 99 tools declare contracts; contract warnings must stay at zero.
 4. `--list` auto-discovers tools via filesystem scan of `tools/agent-*`
 
 ### Quantity authority
