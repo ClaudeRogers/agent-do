@@ -734,6 +734,10 @@ def summary(root: Path, markers: tuple[str, ...] = DECISION_MARKERS) -> dict[str
     """Cheap index-row view of a board: counts and freshness, no git walk."""
     board_dir = root / ".manna"
     issues = read_issues(board_dir)
+    # Effective rules, the same ones the board page renders with (the blocker
+    # graph outranks the status field), so an estate number always matches
+    # the section a click on it opens.
+    by_id = {i["id"]: i for i in issues}
     status_counts: dict[str, int] = {}
     dreams = 0
     decisions = 0
@@ -741,11 +745,24 @@ def summary(root: Path, markers: tuple[str, ...] = DECISION_MARKERS) -> dict[str
         if issue.get("type") == "track":
             continue
         if issue.get("type") == "dream":
-            dreams += 1
+            if issue.get("status") != "done":
+                dreams += 1
             continue
         s = issue.get("status", "open")
-        status_counts[s] = status_counts.get(s, 0) + 1
-        if is_decision(issue, markers) and s != "done":
+        blocked = any((by_id.get(dep) or {}).get("status") != "done" for dep in issue.get("blocked_by") or [])
+        decision = is_decision(issue, markers) and s != "done"
+        if s == "done":
+            key = "done"
+        elif s == "in_progress":
+            key = "active"
+        elif blocked:
+            key = "blocked"
+        elif decision:
+            key = "decision"
+        else:
+            key = "ready"
+        status_counts[key] = status_counts.get(key, 0) + 1
+        if decision:
             decisions += 1
     drift = read_drift(board_dir)
     latest = max((i.get("updated_at") or "" for i in issues), default="") or None
