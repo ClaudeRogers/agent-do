@@ -181,242 +181,6 @@ Natural-language and offline routing use three exit codes: `0` success, `1`
 error, `2` needs clarification. An orchestrator that sees `2` should ask a
 follow-up and retry with `--context`.
 
-## Work Boards
-
-`agent-do manna` is git-backed issue tracking built for agents. Session claims
-prevent two agents from working the same issue. `.manna/` is the only backlog,
-and `.handoff/` holds one portable work order for each actionable item.
-
-Every issue is a **track** (a named grouping with intent), an **item** on a
-track, or a **dream** (raw intake, exempt from tracking, converted or closed
-with a written reason). Commits that advance an item cite it with a
-`Manna: mn-xxxxxx` trailer. The board is the only backlog.
-
-```bash
-agent-do manna init
-agent-do manna migrate   # once, for an existing legacy board
-agent-do manna create "Fix auth redirect" --type item --track mn-a1b2c3 \
-  --source "docs/auth-audit.md"
-agent-do manna order mn-d4e5f6 1      # first-class board priority
-agent-do manna sync                    # derive names and the index
-agent-do manna handoff seal mn-d4e5f6   # after intentional handoff edits
-agent-do manna claim mn-d4e5f6
-agent-do manna done mn-d4e5f6
-```
-
-Beyond title and status, issues carry five schema fields: `type` (track, item,
-dream), `track` (the parent track), `source` (where the work came from), and
-`prompt` (the repository-relative `.handoff/` work order paired with the item),
-plus `handoff_digest` (the board-side SHA-256 binding over the canonical handoff,
-with its binding field normalized). Claimed rows also carry a digest of the
-session's private bearer token; the visible `claimed_by` label is not authority.
-On a strict board, `create` writes an HMAC-authenticated recoverable row/file
-transaction. Journal installation is atomic no-clobber, the signature includes
-the canonical project root, replay compares the complete board row, and
-recovery accepts only canonical `.handoff/` targets.
-`claim` validates and
-changes state under one board lock, so concurrent sessions have exactly one
-winner. It refuses missing, ignored, symlink-escaped, structurally invalid, or
-unsealed handoffs.
-
-`manna init` pins strict or legacy identity in `.manna/board.yaml`, then
-installs workflow version 2, `.manna/handoff-order.yaml`, and
-`.handoff/README.md` for strict boards. Initialization is one authenticated,
-board-locked transaction: it journals the exact prior and final bytes, installs
-every durable prerequisite, and publishes board identity last. A killed init
-therefore recovers on the next init instead of stranding an identityless board,
-and a repeated init is byte-stable. If a
-repository ignores `.manna/` or `.handoff/`, init adds
-the narrow unignore rules needed to keep workflow state in Git while leaving
-the runtime lock and transaction journal ignored. Removing `workflow.yaml`
-cannot disable strict validation; init restores it. Pre-workflow nonempty
-boards are classified explicitly as legacy and are not rearranged.
-`manna migrate` performs that rearrangement only when explicitly requested. A
-single authenticated whole-board journal creates sealed pairs for active
-items, grandfathers done history, exempts tracks and dreams, releases legacy
-claims without ownership proofs, and publishes strict identity last. The
-operation is crash-recoverable and idempotent; normal strict writes keep every
-Stage 0 fail-closed check.
-Both commands also converge the public board identity in
-`.manna/federation.yaml` through its own authenticated journal before reporting
-success. Repeating either command preserves the exact board ID and manifest
-bytes. If a process stops after workflow convergence but before federation
-convergence, the next `init` or `migrate` safely completes the missing phase.
-Restoration and ordinary metadata updates never recalculate a handoff seal;
-only `handoff seal` can authorize edited contents.
-An identityless write on a nonempty board names `migrate` directly. Empty
-boards still name `init`, and an authenticated init journal remains owned by
-init recovery.
-
-Priority is a first-class ordered list in `.manna/handoff-order.yaml`, not an
-inference from dependencies or filenames. `manna order <id> <position>` moves
-one paired item and synchronizes immediately. `manna sync` re-derives dense,
-fixed-width filenames after any other board mutation and regenerates the README
-index from the same snapshot. Width is at least two digits (`01..N`) and grows
-for the entire plan at 100 or more items (`001..N`); blocker markers use the
-same width. A bare name is safe to launch; `bMM...` means the
-item is held by the highest-numbered still-open blocker, while the complete
-dependency list remains in `blocked_by`. Claimed work orders never move. Their
-current number stays reserved until release, after which one sync converges.
-Completed pairs leave the numbered plan on sync and return to unnumbered,
-sealed history, so a bare numbered filename always means launchable work.
-Renames, prompt repoints, priority state, and the index share one authenticated,
-recoverable transaction; filenames are presentation and never authority.
-
-Every canonical Manna board carries a federation identity, but cross-repository
-lineage remains optional and never becomes remote lifecycle authority.
-`manna init`, `manna migrate`, bootstrap repair, and first-use inbox creation
-create `.manna/federation.yaml`; its
-public `board_id` plus local issue ID forms a portable target such as
-`manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6`. The declaration travels
-with Git. The machine-local `manna serve` registry only resolves it when a
-counterpart board is present; an absent board remains a valid `unavailable`
-citation.
-
-```bash
-agent-do manna federation init             # idempotent repair or manual backfill
-agent-do manna relate mn-a1b2c3 --kind informed_by \
-  --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6 \
-  --hint agent-do
-agent-do manna relations mn-a1b2c3 --resolve --check
-agent-do manna unrelate mn-a1b2c3 --kind informed_by \
-  --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
-agent-do manna federation fork --reason "intentional project fork"
-```
-
-Kinds are `counterpart`, `informed_by`, `depends_on`, and `supersedes`. None
-changes claim, block, done, handoff, or reconcile state in either repository.
-Resolution is one of `resolved`, `unavailable`, `missing`, or `ambiguous`;
-`--check` fails only for a present missing target or divergent replicas. A fork
-archives the inherited identity and relations, assigns a new board ID, and
-starts empty. Normal clones and worktrees inherit the tracked identity. Only an
-intentional independent project uses `federation fork`; Manna never infers
-relations merely because two boards are enrolled.
-
-Raw ideas enter through `dream`, which files the spark on the nearest board up
-the directory tree, or the global inbox when no board exists:
-
-```bash
-agent-do manna dream "Cache the registry parse" --source "profiling session"
-```
-
-Two commands keep the board honest:
-
-```bash
-agent-do manna lint              # board grammar check; findings exit 1
-agent-do manna sync              # converge generated handoff presentation
-agent-do manna reconcile         # drift between the board and reality
-agent-do manna reconcile --fix   # safe fixes: abandon dead claims,
-                                 # unblock resolved blockers
-```
-
-Lint also verifies durability, not just ignore rules. Each canonical board
-file that is visible but absent from the Git index produces a
-`workflow_tracking` finding with `git-tracked: no`.
-
-`reconcile` is receipts over testimony: it reads git history for `Manna:`
-trailers, probes whether claiming sessions are still alive, and checks blockers
-against actual state instead of trusting what the board says about itself. On
-strict boards it also detects active claim commands or prompt pointers living
-in any claim-bearing Markdown outside `.handoff/`, including neutral or
-symlinked roots, plus orphan files under `.handoff/`. Those
-workflow-integrity findings exit 1; informational drift stays advisory.
-
-## The Ambient Loop
-
-With the Claude Code hooks installed, board-driven work needs no ceremony:
-
-- **SessionStart** pins `AGENT_DO_COORD_SESSION` and persists the Claude or
-  Cursor host session id. Manna derives its private ownership proof from that
-  stable id under a machine-local key, so claims survive process restarts
-  without making the public owner label a credential. The hook then injects
-  the current board into context. If the previous session left unresolved
-  drift, the greeting includes it.
-- **SessionEnd** retires coordination presence and runs a bounded
-  `manna reconcile --write-drift` advisory, leaving findings in
-  `.manna/drift.yaml` for the next session's greeting.
-
-Everything is presence-gated: repositories without a `.manna/` board see none
-of it. Codex supplies its opaque thread id directly; Manna derives the same
-stable ownership proof under the machine-local key outside the repository.
-
-The wider hook model stays non-blocking by design: hooks suggest relevant tools
-at session start, route fuzzy user prompts to likely `agent-do` commands,
-surface coordination context when another agent is active in the same project,
-and record outcome telemetry so nudges can be measured instead of guessed. No
-hook hard-blocks work.
-
-### The human window
-
-<p align="center">
-  <img src="assets/manna-serve-board.png" alt="The manna serve cockpit: board sheet with digests, an item selected, its AI summary in the inspector" width="900" />
-</p>
-
-`agent-do manna serve` starts one local daemon on `127.0.0.1:7777` and prints
-your board's URL. The front page lists every registered board with counts that
-mean what they say — each number links to exactly the items it counts. A
-board page is a cockpit: an inbox where every ask carries the verb you perform
-(grant · rule · split · close · read · launch) as a clickable button that runs
-the matching manna verb under the daemon's own identity; the board with
-one-line model-written digests, filters, and a timeline mode; coordination
-with live session pulse; an inspector with a collapsible AI summary per item;
-and a bar that greps as you type and, on Enter, asks a model a question
-answered from the board's own rows, citing item ids. Read-only by contract for
-agents — they keep `manna context|list|show` — and loopback-only by design.
-
-## Multi-Agent Coordination
-
-```bash
-agent-do coord touch
-agent-do coord peers
-agent-do coord focus set "private Render networking" --path render.yaml --phase building
-agent-do coord claim render.yaml --reason "blueprint wiring"
-agent-do coord interrupts
-```
-
-`coord` is a shared state board, not an agent chat system. Presence is
-liveness-verified: a dead session can never read as an active peer. Agents
-declare roles (builder, auditor, researcher, overseer) with exclusive-writer
-territories, place advisory claims on paths, publish artifacts, drop file
-pointers for each other, and read contention, notice, dependency, and novelty
-interrupts derived from all of it. A warn-only pre-commit guard
-(`agent-do coord guard install`) flags commits that touch another agent's live
-claims. Every Claude Code hook event also feeds a per-session **pulse** —
-status, latest prompt, current tool, todo progress, no model involved — and
-`coord peers` sorts attention-first so whoever needs you sits at the top.
-
-## Memory
-
-Two memory systems with a clean division of labor:
-
-| | `context` | `zpc` |
-|---|---|---|
-| Holds | External reference docs | Lessons and decisions from real work |
-| Question it answers | What do the docs say? | What did we learn using them? |
-| Scope | Global (`~/.agent-do/context/`) | Per-project (`.zpc/`) |
-| Typical calls | `context retrieve`, `context fetch-llms` | `zpc learn`, `zpc decide`, `zpc patterns` |
-
-## Internal Model Roles
-
-Tools that need an LLM internally resolve it by role (fast, vision, deep)
-through `models.yaml` instead of hard-coding model IDs. `agent-do models
-resolve <role>` returns the current provider and model, and `agent-do models
-doctor` verifies the configured lists.
-
-## Credentials
-
-```bash
-agent-do creds required render            # what a tool needs
-agent-do creds store RENDER_API_KEY --stdin
-agent-do creds check --tool render
-```
-
-`creds required` is the public setup contract for every tool: required keys,
-optional keys, and feature-specific notes when a tool can run partially without
-a key. The dispatcher, router, and health checker resolve declared tool secrets
-from the secure store automatically, so secrets never appear in command
-arguments, shell history, or docs.
-
 ## Tool Tour
 
 96 registered tools. The flagships:
@@ -489,6 +253,147 @@ explicit runtime modifier, scoped and time-bounded:
 ```bash
 agent-do +live(scope=desktop,ttl=15m) macos click @g5
 ```
+
+## The Work OS
+
+Four subsystems turn a fleet of agents into a team: a shared backlog, a live
+coordination board, project memory, and the hooks that feed all three into
+every session without being asked.
+
+### Work boards
+
+`agent-do manna` is git-backed issue tracking built for agents. `.manna/` is
+the only backlog; every actionable item pairs with one portable work order in
+`.handoff/`; session claims mean two agents can never work the same item, and
+a claim is proven by a private token, not a label. Every issue is a **track**
+(a named program), an **item** on a track, or a **dream** (raw intake — parked
+until a human converts or closes it). Commits that advance an item cite it
+with a `Manna: mn-xxxxxx` trailer, so the history itself is the receipt.
+
+```bash
+agent-do manna init                    # once per repo (migrate admits a legacy board)
+agent-do manna create "Fix auth redirect" --track mn-a1b2c3 --source "docs/auth-audit.md"
+agent-do manna order mn-d4e5f6 1       # first-class priority
+agent-do manna claim mn-d4e5f6         # before working
+agent-do manna done mn-d4e5f6          # when verified
+agent-do manna dream "Cache the registry parse"   # park an idea
+```
+
+Three commands keep the board honest. `lint` checks the grammar. `sync`
+converges the generated work-order names and index. `reconcile` is receipts
+over testimony: it reads git history for trailers, probes whether claiming
+sessions are still alive, and checks blockers against actual state instead of
+trusting what the board says about itself — `--fix` applies the two repairs
+that need no judgment (abandon dead claims, unblock resolved blockers).
+
+Boards also carry a portable federation identity: an item can cite work on
+another repository's board (`manna relate mn-a1b2c3 --kind informed_by --to
+manna://<board-id>/<issue-id>`), the declaration travels with git, and
+resolution degrades honestly to `unavailable` when the counterpart board is
+absent. Lineage only — no relation ever changes claim, block, or done state
+in either repository.
+
+The machinery that keeps all of this true under crashes and concurrency —
+authenticated write-ahead journals, sealed handoffs, ownership proofs,
+strict-board validation, ordered filename presentation — is documented in
+[ARCHITECTURE.md](ARCHITECTURE.md)'s Manna Subsystem.
+
+### The human window
+
+<p align="center">
+  <img src="assets/manna-serve-board.png" alt="The manna serve cockpit: board sheet with digests, an item selected, its AI summary in the inspector" width="900" />
+</p>
+
+`agent-do manna serve` starts one local daemon on `127.0.0.1:7777` and prints
+your board's URL. The front page lists every registered board with counts that
+mean what they say — each number links to exactly the items it counts. A
+board page is a cockpit: an inbox where every ask carries the verb you perform
+(grant · rule · split · close · read · launch) as a clickable button that runs
+the matching manna verb under the daemon's own identity; the board with
+one-line model-written digests, filters, and a timeline mode; coordination
+with live session pulse; an inspector with a collapsible AI summary per item;
+and a bar that greps as you type and, on Enter, asks a model a question
+answered from the board's own rows, citing item ids. Read-only by contract for
+agents — they keep `manna context|list|show` — and loopback-only by design.
+
+### Multi-agent coordination
+
+```bash
+agent-do coord touch
+agent-do coord peers
+agent-do coord focus set "private Render networking" --path render.yaml --phase building
+agent-do coord claim render.yaml --reason "blueprint wiring"
+agent-do coord interrupts
+```
+
+`coord` is a shared state board, not an agent chat system. Presence is
+liveness-verified: a dead session can never read as an active peer. Agents
+declare roles (builder, auditor, researcher, overseer) with exclusive-writer
+territories, place advisory claims on paths, publish artifacts, drop file
+pointers for each other, and read contention, notice, dependency, and novelty
+interrupts derived from all of it. A warn-only pre-commit guard
+(`agent-do coord guard install`) flags commits that touch another agent's live
+claims. Every Claude Code hook event also feeds a per-session **pulse** —
+status, latest prompt, current tool, todo progress, no model involved — and
+`coord peers` sorts attention-first so whoever needs you sits at the top.
+
+### Memory
+
+Two memory systems with a clean division of labor:
+
+| | `context` | `zpc` |
+|---|---|---|
+| Holds | External reference docs | Lessons and decisions from real work |
+| Question it answers | What do the docs say? | What did we learn using them? |
+| Scope | Global (`~/.agent-do/context/`) | Per-project (`.zpc/`) |
+| Typical calls | `context retrieve`, `context fetch-llms` | `zpc learn`, `zpc decide`, `zpc patterns` |
+
+### The ambient loop
+
+With the Claude Code hooks installed, board-driven work needs no ceremony:
+
+- **SessionStart** pins `AGENT_DO_COORD_SESSION` and persists the Claude or
+  Cursor host session id. Manna derives its private ownership proof from that
+  stable id under a machine-local key, so claims survive process restarts
+  without making the public owner label a credential. The hook then injects
+  the current board into context. If the previous session left unresolved
+  drift, the greeting includes it.
+- **SessionEnd** retires coordination presence and runs a bounded
+  `manna reconcile --write-drift` advisory, leaving findings in
+  `.manna/drift.yaml` for the next session's greeting.
+
+Everything is presence-gated: repositories without a `.manna/` board see none
+of it. Codex supplies its opaque thread id directly; Manna derives the same
+stable ownership proof under the machine-local key outside the repository.
+
+The wider hook model stays non-blocking by design: hooks suggest relevant tools
+at session start, route fuzzy user prompts to likely `agent-do` commands,
+surface coordination context when another agent is active in the same project,
+and record outcome telemetry so nudges can be measured instead of guessed. No
+hook hard-blocks work.
+
+## Configuration
+
+### Credentials
+
+```bash
+agent-do creds required render            # what a tool needs
+agent-do creds store RENDER_API_KEY --stdin
+agent-do creds check --tool render
+```
+
+`creds required` is the public setup contract for every tool: required keys,
+optional keys, and feature-specific notes when a tool can run partially without
+a key. The dispatcher, router, and health checker resolve declared tool secrets
+from the secure store automatically, so secrets never appear in command
+arguments, shell history, or docs.
+
+### Internal model roles
+
+Tools that need an LLM internally resolve it by role (fast, vision, deep)
+through `models.yaml` instead of hard-coding model IDs. `agent-do models
+resolve <role>` returns the current provider and model, and `agent-do models
+doctor` verifies the configured lists.
 
 ## Architecture
 
