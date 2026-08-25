@@ -38,8 +38,10 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .tab:hover { text-decoration: none; color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--text); }
 .badge { color: var(--amber); } .badge:empty { display: none; }
-.grep input { width: 320px; min-height: 24px; }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--s1); color: var(--muted); white-space: nowrap; font-size: var(--t-small); }
+/* the bar fills the list width: from the tabs to the inspector's edge */
+.grep { flex: 1; min-width: 0; display: flex; }
+.grep input { width: 100%; min-height: 24px; }
+.topbar-right { flex: 0 0 auto; width: var(--inspector-w); box-sizing: border-box; padding-left: var(--s4); display: flex; justify-content: flex-end; align-items: center; gap: var(--s1); color: var(--muted); white-space: nowrap; font-size: var(--t-small); }
 .connection-mark { color: var(--faint); } .connection-mark.live { color: var(--green); }
 
 /* cockpit */
@@ -155,7 +157,7 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .toast.visible { opacity: 1; }
 
 @media (max-width: 1100px) { :root { --inspector-w: 260px; } }
-@media (max-width: 860px) { .cockpit { grid-template-columns: 1fr; } .inspector, .resizer { display: none; } .grep input { width: 120px; } }
+@media (max-width: 860px) { .cockpit { grid-template-columns: 1fr; } .inspector, .resizer { display: none; } .topbar-right { width: auto; margin-left: auto; } }
 
 /* estate index */
 .estate { flex: 1; min-height: 0; overflow: auto; padding: 0 max(var(--s4), calc((100% - var(--measure)) / 2)); }
