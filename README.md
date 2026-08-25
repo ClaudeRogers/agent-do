@@ -348,6 +348,10 @@ hook hard-blocks work.
 
 ### The human window
 
+<p align="center">
+  <img src="assets/manna-serve-board.png" alt="The manna serve cockpit: board sheet with digests, an item selected, its AI summary in the inspector" width="900" />
+</p>
+
 `agent-do manna serve` starts one local daemon on `127.0.0.1:7777` and prints
 your board's URL. The front page lists every registered board with counts that
 mean what they say — each number links to exactly the items it counts. A
