@@ -62,6 +62,24 @@ Budget: at most {DIGEST_MAX_CHARS} characters per digest, at most 10 words; aim 
 Drop parentheticals, lists of sub-parts, and program names; keep the one concrete thing delivered."""
 
 
+def safe_error(error: BaseException, where: str) -> str:
+    """A fixed code for clients and caches; the full exception goes to the
+    daemon log only. Provider errors can echo request detail, which must
+    never leave the process."""
+    text = str(error).lower()
+    if "not available" in text or "credential" in text:
+        code = "no_credential"
+    elif "timed out" in text or "timeout" in text:
+        code = "timeout"
+    elif "rate" in text and "limit" in text:
+        code = "rate_limited"
+    else:
+        code = "provider_error"
+    sys.stderr.write(f"{where}: {code}: {error!r}\n")
+    sys.stderr.flush()
+    return code
+
+
 def content_hash(issue: dict[str, Any]) -> str:
     material = json.dumps(
         {"t": issue.get("title", ""), "d": issue.get("description") or "", "k": issue.get("type") or "item"},
@@ -242,8 +260,9 @@ def generate(slug: str, issues: list[dict[str, Any]], caller: Callable[[str], tu
             mapping, model_used = caller(_prompt(chunk))
         except Exception as error:  # a failed call leaves rows on their titles; nothing is invented
             stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            code = safe_error(error, "digest batch")
             for issue in chunk:
-                cache[issue["id"]] = {"hash": content_hash(issue), "digest": None, "failed": str(error)[:200], "transient": True, "failed_at": stamp}
+                cache[issue["id"]] = {"hash": content_hash(issue), "digest": None, "failed": code, "transient": True, "failed_at": stamp}
                 failed += 1
             continue
         for issue in chunk:
@@ -262,7 +281,7 @@ def generate(slug: str, issues: list[dict[str, Any]], caller: Callable[[str], tu
             line = validate(mapping.get(issue["id"]), issue)
         except Exception as error:
             line = None
-            mapping = {"_error": str(error)[:200], "_transient": True}
+            mapping = {"_error": safe_error(error, "digest retry"), "_transient": True}
         if line:
             cache[issue["id"]] = {"hash": content_hash(issue), "digest": line, "model": model_used}
             written += 1
@@ -372,7 +391,7 @@ def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[st
     try:
         text, model = caller(summary_prompt(issue))
     except Exception as error:
-        return {"summary": None, "error": str(error)[:200], "cached": False}
+        return {"summary": None, "error": safe_error(error, f"summary {issue.get('id')}"), "cached": False}
     body = validate_summary(text)
     if not body:
         return {"summary": None, "error": "no usable summary", "cached": False}

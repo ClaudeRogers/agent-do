@@ -371,7 +371,7 @@ class DigestTests(unittest.TestCase):
         out = digest_lib.generate("proj", self.rows[:2], caller=caller)
         self.assertEqual(out["written"], 0)
         cache = digest_lib.load_cache("proj")
-        self.assertTrue(all(v["digest"] is None and v["failed"] and v["transient"] for v in cache.values()))
+        self.assertTrue(all(v["digest"] is None and v["failed"] == "no_credential" and v["transient"] for v in cache.values()))
         # transient: inside the cooldown the rows are not asked again; after it they are
         report = digest_lib.apply("proj", self.rows[:2])
         self.assertEqual(report["missing"], 0)
@@ -402,7 +402,7 @@ class SummaryTests(unittest.TestCase):
     def test_summary_failure_invents_nothing(self) -> None:
         def caller(prompt): raise RuntimeError("no credential")
         out = digest_lib.summarize("proj", self.row, caller=caller)
-        self.assertIsNone(out["summary"]); self.assertIn("no credential", out["error"])
+        self.assertIsNone(out["summary"]); self.assertEqual(out["error"], "no_credential", "a code, never the exception text")
         self.assertIsNone(digest_lib.validate_summary("- a bullet list"))
 
 
