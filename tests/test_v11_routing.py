@@ -331,6 +331,10 @@ def main() -> int:
             "expected native bootstrap hook to initialize the Manna workflow",
         )
         require(
+            (project / ".manna" / "federation.yaml").is_file(),
+            "expected native bootstrap hook to initialize federation identity",
+        )
+        require(
             (project / ".handoff" / "README.md").is_file(),
             "expected native bootstrap hook to initialize the handoff root",
         )

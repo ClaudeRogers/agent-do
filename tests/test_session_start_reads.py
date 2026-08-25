@@ -383,6 +383,74 @@ def test_legacy_board_migration_is_discoverable() -> None:
         )
 
 
+def test_strict_board_missing_federation_is_discoverable() -> None:
+    print("strict board federation enrollment discovery:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        board = project / ".manna"
+        handoff = project / ".handoff"
+        board.mkdir(parents=True)
+        handoff.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        (board / "issues.jsonl").write_text("", encoding="utf-8")
+        (board / "sessions.jsonl").write_text("", encoding="utf-8")
+        (board / "board.yaml").write_text(
+            "version: 1\nworkflow: strict\n", encoding="utf-8"
+        )
+        (board / "workflow.yaml").write_text(
+            "version: 2\nhandoff_dir: .handoff\n", encoding="utf-8"
+        )
+        (board / "handoff-order.yaml").write_text(
+            "version: 1\norder: []\n", encoding="utf-8"
+        )
+        (handoff / "README.md").write_text("# Handoffs\n", encoding="utf-8")
+        env = dict(os.environ)
+        env["AGENT_DO_HOME"] = str(root / "agent-do-home")
+
+        def recommend() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "bin" / "bootstrap"),
+                    "--recommend",
+                    "--json",
+                    "--cwd",
+                    str(project),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+        missing = recommend()
+        missing_payload = json.loads(missing.stdout)
+        check("missing federation recommendation exits 0", missing.returncode == 0, missing.stderr)
+        check(
+            "strict board missing federation returns to canonical init",
+            missing_payload.get("pending_actions") == ["manna_init"]
+            and missing_payload.get("commands") == ["agent-do manna init"],
+            repr(missing_payload),
+        )
+
+        (board / "federation.yaml").write_text(
+            "version: 1\n"
+            "board_id: mb-11111111111111111111111111111111\n"
+            "relations: []\n",
+            encoding="utf-8",
+        )
+        enrolled = recommend()
+        enrolled_payload = json.loads(enrolled.stdout)
+        check("enrolled federation recommendation exits 0", enrolled.returncode == 0, enrolled.stderr)
+        check(
+            "enrolled strict board has no bootstrap work",
+            enrolled_payload.get("needs_bootstrap") is False
+            and enrolled_payload.get("pending_actions") == [],
+            repr(enrolled_payload),
+        )
+
+
 def test_cursor_session_identity_is_restart_durable() -> None:
     print("Cursor session identity exports:")
     with tempfile.TemporaryDirectory() as tmp:
@@ -606,6 +674,7 @@ def main() -> int:
     test_interrupts_take_precedence()
     test_unreadable_answers_degrade_quietly()
     test_legacy_board_migration_is_discoverable()
+    test_strict_board_missing_federation_is_discoverable()
     test_session_identity_exports_are_complete_and_private()
     test_cursor_session_identity_is_restart_durable()
 

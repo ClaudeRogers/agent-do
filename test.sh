@@ -333,6 +333,7 @@ check_output "bootstrap --allow restores the offer" "may be offered" "$AGENT_DO"
 check_output "bootstrap initializes context, zpc, and workflow" "Initialized: context, zpc, manna" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
 check_cmd "bootstrap created project-local .zpc" test -d "$BOOTSTRAP_PROJECT/.zpc"
 check_cmd "bootstrap created project-local .manna workflow" test -f "$BOOTSTRAP_PROJECT/.manna/workflow.yaml"
+check_cmd "bootstrap created federation identity" test -f "$BOOTSTRAP_PROJECT/.manna/federation.yaml"
 check_cmd "bootstrap created tracked handoff root" test -f "$BOOTSTRAP_PROJECT/.handoff/README.md"
 
 echo

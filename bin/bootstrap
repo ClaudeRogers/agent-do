@@ -277,6 +277,7 @@ fi
 manna_workflow_healthy=false
 if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.yaml" \
     && -f "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" \
+    && -f "$project_root/.manna/federation.yaml" && ! -L "$project_root/.manna/federation.yaml" \
     && -f "$project_root/.handoff/README.md" && ! -L "$project_root/.handoff/README.md" ]] \
     && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml" \
     && grep -Eq '^version:[[:space:]]*2[[:space:]]*$' "$project_root/.manna/workflow.yaml"; then
@@ -293,7 +294,7 @@ if [[ "$wants_manna" == true ]]; then
         || [[ ! -f "$project_root/.manna/board.yaml" ]] \
         || { [[ "$manna_strict_marker" == true ]] && [[ "$manna_workflow_healthy" != true ]]; }; then
         pending_actions+=("manna_init")
-        pending_labels+=("manna + handoff workflow")
+        pending_labels+=("manna + handoff + federation workflow")
         pending_commands+=("agent-do manna init")
     fi
 fi
@@ -421,6 +422,7 @@ fi
 manna_workflow_healthy=false
 if [[ -f "$project_root/.manna/board.yaml" && ! -L "$project_root/.manna/board.yaml" \
     && -f "$project_root/.manna/workflow.yaml" && ! -L "$project_root/.manna/workflow.yaml" \
+    && -f "$project_root/.manna/federation.yaml" && ! -L "$project_root/.manna/federation.yaml" \
     && -f "$project_root/.handoff/README.md" && ! -L "$project_root/.handoff/README.md" ]] \
     && grep -Eq '^workflow:[[:space:]]*strict[[:space:]]*$' "$project_root/.manna/board.yaml" \
     && grep -Eq '^version:[[:space:]]*2[[:space:]]*$' "$project_root/.manna/workflow.yaml"; then
@@ -435,6 +437,7 @@ if [[ -d "$project_root/.zpc" ]]; then
 fi
 if [[ -d "$project_root/.manna" ]] \
     && [[ -f "$project_root/.manna/board.yaml" ]] \
+    && [[ -f "$project_root/.manna/federation.yaml" && ! -L "$project_root/.manna/federation.yaml" ]] \
     && { { [[ "$manna_strict_marker" != true ]] \
             && grep -Eq '^workflow:[[:space:]]*legacy[[:space:]]*$' "$project_root/.manna/board.yaml"; } \
         || [[ "$manna_workflow_healthy" == true ]]; }; then
