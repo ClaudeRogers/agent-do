@@ -147,14 +147,13 @@ function renderBoard(s) {
     html += section("cited", cited, "the answer cites nothing on this board");
   }
   const v = app.view;
-  if (v === "live" || v === "all") {
-    html += section("now", f(s.now || []), "nothing claimed");
-    html += section("next", f(s.next || []), "nothing is ready");
-    const waiting = [];
-    for (const w of s.waves || []) for (const r of w.items) waiting.push(r);
-    for (const r of s.unlayered || []) waiting.push(r);
-    html += section("waiting", f(waiting), "nothing is blocked");
-  }
+  const waiting = [];
+  for (const w of s.waves || []) for (const r of w.items) waiting.push(r);
+  for (const r of s.unlayered || []) waiting.push(r);
+  // a section view (now · next · waiting, from an estate link) shows that section alone
+  if (v === "live" || v === "all" || v === "now") html += section("now", f(s.now || []), "nothing claimed");
+  if (v === "live" || v === "all" || v === "next") html += section("next", f(s.next || []), "nothing is ready");
+  if (v === "live" || v === "all" || v === "waiting") html += section("waiting", f(waiting), "nothing is blocked");
   if (v === "dreams" || v === "all") html += section("dreams", f(s.dreams || []), "no dreams parked");
   if (v === "done" || v === "all") {
     const done = (s.all || []).filter((r) => r.effective === "done").sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
@@ -168,9 +167,9 @@ function renderTimeline(s) {
   const lane = (lbl, colorCls, rows) => rows.length ? `<div class="tl ${colorCls}"><span class="lbl">${esc(lbl)}</span><span class="bar"></span><div class="items">${rows.map((r) => `<span class="item${app.selected?.kind === "item" && app.selected.id === r.id ? " selected" : ""}" data-item="${esc(r.id)}" title="${esc(r.title)}"><span class="id">${esc(r.id)}</span>${esc(clip(rowText(r), 60))}${r.blockers?.length ? ` <span class="faint">← ${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : ""}</span>`).join("")}</div></div>` : "";
   let html = `<div class="sheet-head"><span class="prompt">manna timeline</span></div>`;
   const v = app.view;
-  if (v === "live" || v === "all") {
-    html += lane("now", "c-active", f(s.now || []));
-    html += lane("ready", "c-ready", f(s.next || []));
+  if (v === "live" || v === "all" || v === "now") html += lane("now", "c-active", f(s.now || []));
+  if (v === "live" || v === "all" || v === "next") html += lane("ready", "c-ready", f(s.next || []));
+  if (v === "live" || v === "all" || v === "waiting") {
     for (const w of s.waves || []) html += lane(`wave ${w.wave}`, "c-waiting", f(w.items));
     if ((s.unlayered || []).length) html += lane("unlayered", "c-faint", f(s.unlayered));
   }
@@ -459,7 +458,7 @@ function readHash() {
   else if (["inbox", "board", "coord", "debug"].includes(kind)) {
     app.sheet = kind;
     app.landing = id || null;                       // a section to scroll to once the sheet has rendered
-    if (kind === "board" && (id === "dreams" || id === "done")) app.view = id;
+    if (kind === "board" && ["dreams", "done", "now", "next", "waiting"].includes(id)) { app.view = id; app.landing = null; }
   }
 }
 // After the first render, scroll the section the hash named into view, once.
