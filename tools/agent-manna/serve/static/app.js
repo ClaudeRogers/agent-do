@@ -97,6 +97,11 @@ function renderBoard(s) {
   if (app.mode === "timeline") { el.innerHTML = renderTimeline(s); return; }
   const f = (rows) => rows.filter((r) => trackOk(r) && matches(r));
   let html = "";
+  if (app.answer && !app.answer.pending && app.answer.cited?.length) {
+    const byId = new Map((s.all || []).map((r) => [r.id, r]));
+    const cited = app.answer.cited.map((id) => byId.get(id)).filter(Boolean);
+    html += section("cited", cited, "the answer cites nothing on this board");
+  }
   html += section("now", f(s.now || []), "nothing claimed");
   html += section("next", f(s.next || []), "nothing is ready");
   const waiting = [];
@@ -191,7 +196,7 @@ function renderDebug(s) {
 function renderInspector(s) {
   const el = $("#inspector");
   const sel = app.selected;
-  if (!sel) { el.innerHTML = '<p class="empty">select a row · ⌘K to jump</p>'; return; }
+  if (!sel) { el.innerHTML = '<p class="empty">select a row · ⌘K to ask</p>'; return; }
   if (sel.kind === "peer") {
     const p = (s.peers || []).find((x) => x.agent_id === sel.id);
     if (!p) { el.innerHTML = '<p class="empty">that session is no longer on the board</p>'; return; }
