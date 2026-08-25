@@ -361,8 +361,9 @@ def validate_summary(text: Any) -> str | None:
     return "\n\n".join(paragraphs)
 
 
-def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[str, str | None]] = default_summary_caller) -> dict[str, Any]:
+def summarize(slug: str, issue: dict[str, Any], caller: Callable[[str], tuple[str, str | None]] | None = None) -> dict[str, Any]:
     """Return {summary, model, cached} for one item, generating on a cache miss."""
+    caller = caller or default_summary_caller  # resolved at call time, so a test can stand in for the model
     cache = load_cache(slug)
     h = content_hash(issue)
     entry = cache.get(issue["id"]) or {}
