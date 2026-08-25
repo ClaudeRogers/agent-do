@@ -171,7 +171,7 @@ table.boards tbody tr:nth-child(even) { background: var(--zebra); }
 table.boards tbody tr:hover { background: var(--raised); }
 table.boards td.num, table.boards th.num { text-align: right; }
 table.boards td.nowrap { white-space: nowrap; }
-.note { color: var(--faint); padding: var(--s3) 0; max-width: 90ch; }
+.note { color: var(--faint); padding: var(--s3) 0; }
 
 /* view popover */
 #view-host { position: relative; }
@@ -221,3 +221,6 @@ button.verb { cursor: pointer; }
 button.verb:hover { text-decoration: underline; }
 .verb-group { display: flex; gap: var(--s3); justify-self: end; }
 .act-note { display: block; font-size: var(--t-meta); }
+
+/* estate page: no inspector, so the right cluster simply sits at the right */
+.topbar-right.estate-right { width: auto; margin-left: auto; padding-left: 0; }
