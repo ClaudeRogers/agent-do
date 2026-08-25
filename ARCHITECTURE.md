@@ -328,6 +328,14 @@ and SessionStart surfaces `legacy board: run agent-do manna migrate` before a
 normal write reaches the fail-closed gate. A pending authenticated board-init
 journal stays on the init recovery path.
 
+After workflow convergence, both `manna init` and `manna migrate` converge the
+tracked `.manna/federation.yaml` identity under the same board lock and its
+separate authenticated federation journal. Command success is withheld until
+both phases are valid. A stop between phases leaves a complete local workflow
+that the next invocation safely enrolls without changing issue or handoff
+bytes. Bootstrap treats a missing federation manifest as incomplete setup, and
+the global inbox receives the same identity before its first dream is written.
+
 `manna migrate` is the explicit bridge for a nonempty legacy board, including
 a board left behind a premature strict identity. Under one board lock, its
 authenticated transaction generates sealed handoffs for all active items,
@@ -364,10 +372,11 @@ return to unnumbered paths, while the board and Git history retain provenance.
 
 ### Portable federation
 
-Cross-repository relations sit beside the issue state machine in the optional,
-tracked `.manna/federation.yaml`. They are not fields on `Issue`. Each board
-opts in to a public identity (`mb-` plus 32 lowercase hex characters), and an
-outbound edge names a local source, a closed relation kind, and a portable
+Cross-repository relations sit beside the issue state machine in the tracked
+`.manna/federation.yaml`. They are not fields on `Issue`. Every canonical board
+receives a public identity (`mb-` plus 32 lowercase hex characters), while
+relations remain optional. An outbound edge names a local source, a closed
+relation kind, and a portable
 `manna://<board_id>/<issue_id>` target. Normal clones and worktrees retain the
 ID as replicas. `manna federation fork --reason <text>` is the only identity
 split: it journals exact bytes, archives the inherited manifest, generates a

@@ -541,7 +541,14 @@ pub fn lint(base: &Path, issues: &[Issue]) -> Vec<FederationFinding> {
                 detail: format!("invalid federation manifest: {}", error),
             }),
         },
-        Ok(None) => {}
+        Ok(None) => findings.push(FederationFinding {
+            issue_id: "board".to_string(),
+            rule: "federation_identity",
+            detail: format!(
+                "durable federation identity {} is missing; run `agent-do manna init`",
+                FEDERATION_FILE
+            ),
+        }),
         Err(error) => findings.push(FederationFinding {
             issue_id: "board".to_string(),
             rule: "federation_shape",
@@ -855,11 +862,7 @@ fn transaction(
     }
 }
 
-pub fn initialize(
-    base: &Path,
-    store: &MannaStore,
-    _session: &SessionIdentity,
-) -> Result<FederationMutation> {
+pub fn initialize(base: &Path, store: &MannaStore) -> Result<FederationMutation> {
     store.with_board_lock(|| {
         recover_transaction_locked(base).map_err(rejected)?;
         let issues = store.load_issues_strict()?;
@@ -1657,7 +1660,7 @@ mod tests {
     #[test]
     fn relation_mutation_preserves_issue_bytes_and_enforces_owner() {
         let (temp, store, _) = setup();
-        initialize(temp.path(), &store, &session("ses_owner")).unwrap();
+        initialize(temp.path(), &store).unwrap();
         let mut claimed = store.load_issues_strict().unwrap()[0].clone();
         claimed.claim(&session("ses_owner")).unwrap();
         store
@@ -1697,7 +1700,7 @@ mod tests {
     #[test]
     fn open_and_done_sources_preserve_issue_and_handoff_bytes() {
         let (temp, store, issues) = setup();
-        initialize(temp.path(), &store, &session("ses_writer")).unwrap();
+        initialize(temp.path(), &store).unwrap();
         let mut done = issues[1].clone();
         done.status = IssueStatus::Done;
         store.recover_replace_issue(&issues[1], &done).unwrap();
@@ -1975,7 +1978,7 @@ mod tests {
                 .detail
                 .contains("archive exists but the active federation manifest is missing")
         }));
-        assert!(initialize(temp.path(), &store, &session("ses_writer"))
+        assert!(initialize(temp.path(), &store)
             .unwrap_err()
             .to_string()
             .contains("restore .manna/federation.yaml from Git"));
@@ -2062,13 +2065,16 @@ mod tests {
     }
 
     #[test]
-    fn boards_without_a_manifest_remain_opt_in() {
+    fn missing_manifest_is_readable_but_fails_convergence_lint() {
         let (temp, _, issues) = setup();
         let before = fs::read(temp.path().join(".manna/issues.jsonl")).unwrap();
         let state = status(temp.path(), &issues).unwrap();
         assert!(!state.enabled);
         assert_eq!(state.relations, 0);
-        assert!(lint(temp.path(), &issues).is_empty());
+        let findings = lint(temp.path(), &issues);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "federation_identity");
+        assert!(findings[0].detail.contains("agent-do manna init"));
         assert!(relations(temp.path(), &issues, None, false).is_err());
         assert_eq!(
             before,

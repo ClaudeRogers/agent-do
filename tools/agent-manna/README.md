@@ -89,7 +89,8 @@ nonempty legacy boards are classified explicitly and left unchanged. Strict
 mode is pinned independently in `.manna/board.yaml`; deleting the workflow
 config cannot turn validation off. Local ignore rules are narrowed so
 the board and work orders remain Git-visible while the runtime lock stays
-ignored.
+ignored. Every successful init also creates or preserves the tracked public
+identity in `.manna/federation.yaml`; no relation is inferred.
 
 ```bash
 agent-do manna init
@@ -107,6 +108,9 @@ gitignore_updated: false
 recovered_transactions: 0
 upgraded_items: 0
 restored_config: false
+federation_path: .manna/federation.yaml
+board_id: mb-5c54d1b4cce04f8b9f4418a9180ad87e
+federation_created: true
 ```
 
 ### `migrate`
@@ -142,7 +146,9 @@ unaffected strict row and handoff bytes. Unique
 hand-numbered prefixes seed first-class priority once; `manna sync` owns every
 name afterward. Board identity is published last, so interruption leaves a
 recoverable journal instead of a half-strict board. Repeating the command after
-success is a byte-stable no-op.
+success is a byte-stable no-op. Migration then creates or preserves the same
+tracked federation identity before reporting success. Its output includes
+`federation_path`, `board_id`, and whether that manifest was newly created.
 
 ```bash
 agent-do manna migrate

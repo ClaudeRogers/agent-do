@@ -29,6 +29,7 @@ pub const WORKFLOW_FILE: &str = ".manna/workflow.yaml";
 pub const BOARD_FILE: &str = ".manna/board.yaml";
 pub const HANDOFF_ORDER_FILE: &str = ".manna/handoff-order.yaml";
 pub const HANDOFF_README: &str = ".handoff/README.md";
+const FEDERATION_MANIFEST_FILE: &str = ".manna/federation.yaml";
 pub const HANDOFF_ARCHIVE_DIR: &str = ".handoff/.archive";
 const LEGACY_SOURCE_ARCHIVE_DIR: &str = ".handoff/.archive/legacy-sources";
 const HANDOFF_SYNC_STAGE_DIR: &str = ".handoff/.sync";
@@ -68,7 +69,7 @@ Rules:
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
-  `.manna/issues.jsonl`, and `.handoff/`.
+  `.manna/federation.yaml`, `.manna/issues.jsonl`, and `.handoff/`.
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -647,6 +648,12 @@ fn durable_paths() -> [&'static str; 6] {
     ]
 }
 
+fn durable_visibility_paths() -> impl Iterator<Item = &'static str> {
+    durable_paths()
+        .into_iter()
+        .chain([FEDERATION_MANIFEST_FILE])
+}
+
 fn git_path_tracked(base: &Path, relative: &Path) -> Result<bool, String> {
     let inside = Command::new("git")
         .current_dir(base)
@@ -704,13 +711,14 @@ fn workflow_gitignore_content(existing: &str) -> String {
     }
     if !existing.contains(marker) {
         updated.push_str(&format!(
-            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/handoff-order.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n",
+            "\n{}\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/handoff-order.yaml\n!.manna/federation.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n",
             marker
         ));
     } else {
         for rule in [
             "!.manna/board.yaml",
             "!.manna/handoff-order.yaml",
+            "!.manna/federation.yaml",
             ".manna/transactions/",
         ] {
             if !updated.lines().any(|line| line == rule) {
@@ -723,8 +731,7 @@ fn workflow_gitignore_content(existing: &str) -> String {
 }
 
 fn ensure_workflow_tracked(base: &Path) -> Result<bool, String> {
-    let ignored_before = durable_paths()
-        .into_iter()
+    let ignored_before = durable_visibility_paths()
         .map(|path| git_path_ignored(base, Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
     if ignored_before.iter().all(|ignored| !ignored) {
@@ -738,8 +745,7 @@ fn ensure_workflow_tracked(base: &Path) -> Result<bool, String> {
     if updated != existing {
         atomic_write_replace(&gitignore, &updated)?;
     }
-    let still_ignored: Vec<&str> = durable_paths()
-        .into_iter()
+    let still_ignored: Vec<&str> = durable_visibility_paths()
         .filter_map(|path| {
             git_path_ignored(base, Path::new(path))
                 .ok()
@@ -2859,8 +2865,7 @@ fn build_board_init(base: &Path) -> Result<BoardInitPreparation, String> {
         render_presentation_files(base, &issues, order_before.as_deref())?;
     let readme_before = read_optional_text(&base.join(HANDOFF_README), "handoff README")?;
 
-    let ignored = durable_paths()
-        .into_iter()
+    let ignored = durable_visibility_paths()
         .map(|path| git_path_ignored(base, Path::new(path)))
         .collect::<Result<Vec<_>, _>>()?;
     let gitignore = if ignored.iter().any(|ignored| *ignored) {
@@ -3072,7 +3077,7 @@ fn apply_board_init_files(base: &Path, transaction: &BoardInitTransaction) -> Re
     }
 
     if transaction.workflow.is_some() {
-        for relative in durable_paths() {
+        for relative in durable_visibility_paths() {
             if git_path_ignored(base, Path::new(relative))? {
                 return Err(format!(
                     "board init durable state is still ignored by Git: {}",
@@ -3644,23 +3649,22 @@ fn apply_legacy_migration_files(
         retire_legacy_source(base, source_archive)?;
     }
 
-    for relative in durable_paths()
-        .into_iter()
-        .map(Path::new)
+    for relative in durable_visibility_paths()
+        .map(PathBuf::from)
         .chain(
             transaction
                 .documents
                 .iter()
-                .map(|document| Path::new(document.handoff.as_str())),
+                .map(|document| PathBuf::from(&document.handoff)),
         )
         .chain(
             transaction
                 .source_archives
                 .iter()
-                .map(|archive| Path::new(archive.archive.as_str())),
+                .map(|archive| PathBuf::from(&archive.archive)),
         )
     {
-        if git_path_ignored(base, relative)? {
+        if git_path_ignored(base, &relative)? {
             return Err(format!(
                 "legacy migration durable state is ignored by Git: {}",
                 relative.display()
@@ -5436,7 +5440,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn stage_zero_gitignore_upgrade_adds_only_the_missing_order_rule() {
+    fn stage_zero_gitignore_upgrade_adds_missing_durable_rules_once() {
         let existing = "# agent-do workflow: .manna and .handoff are durable state\n!.manna/\n.manna/*\n!.manna/issues.jsonl\n!.manna/sessions.jsonl\n!.manna/board.yaml\n!.manna/workflow.yaml\n!.manna/drift.yaml\n.manna/board.lock\n.manna/transactions/\n!.handoff/\n!.handoff/**\n";
         let updated = workflow_gitignore_content(existing);
 
@@ -5458,6 +5462,13 @@ mod tests {
             updated
                 .lines()
                 .filter(|line| *line == "!.manna/handoff-order.yaml")
+                .count(),
+            1
+        );
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| *line == "!.manna/federation.yaml")
                 .count(),
             1
         );

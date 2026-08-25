@@ -146,7 +146,8 @@ agent-do bootstrap
 which stateful tools should be initialized for the current machine or
 repository. Every detected project gets the paired work-state scaffold:
 `.manna/` for the board and tracked `.handoff/` files for executable work
-orders. `bootstrap` initializes the pieces that are actually needed. When it
+orders, plus a tracked `.manna/federation.yaml` public board identity.
+`bootstrap` initializes the pieces that are actually needed. When it
 finds a nonempty pre-workflow board, the recommendation says `legacy board:
 run agent-do manna migrate`, and ordinary bootstrap runs that convergence path
 instead of sending the board through `init`.
@@ -236,6 +237,11 @@ items, grandfathers done history, exempts tracks and dreams, releases legacy
 claims without ownership proofs, and publishes strict identity last. The
 operation is crash-recoverable and idempotent; normal strict writes keep every
 Stage 0 fail-closed check.
+Both commands also converge the public board identity in
+`.manna/federation.yaml` through its own authenticated journal before reporting
+success. Repeating either command preserves the exact board ID and manifest
+bytes. If a process stops after workflow convergence but before federation
+convergence, the next `init` or `migrate` safely completes the missing phase.
 Restoration and ordinary metadata updates never recalculate a handoff seal;
 only `handoff seal` can authorize edited contents.
 An identityless write on a nonempty board names `migrate` directly. Empty
@@ -257,8 +263,10 @@ sealed history, so a bare numbered filename always means launchable work.
 Renames, prompt repoints, priority state, and the index share one authenticated,
 recoverable transaction; filenames are presentation and never authority.
 
-Cross-repository lineage is an optional federation layer, not remote lifecycle
-authority. A participating repository tracks `.manna/federation.yaml`, whose
+Every canonical Manna board carries a federation identity, but cross-repository
+lineage remains optional and never becomes remote lifecycle authority.
+`manna init`, `manna migrate`, bootstrap repair, and first-use inbox creation
+create `.manna/federation.yaml`; its
 public `board_id` plus local issue ID forms a portable target such as
 `manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6`. The declaration travels
 with Git. The machine-local `manna serve` registry only resolves it when a
@@ -266,7 +274,7 @@ counterpart board is present; an absent board remains a valid `unavailable`
 citation.
 
 ```bash
-agent-do manna federation init
+agent-do manna federation init             # idempotent repair or manual backfill
 agent-do manna relate mn-a1b2c3 --kind informed_by \
   --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6 \
   --hint agent-do
@@ -281,7 +289,9 @@ changes claim, block, done, handoff, or reconcile state in either repository.
 Resolution is one of `resolved`, `unavailable`, `missing`, or `ambiguous`;
 `--check` fails only for a present missing target or divergent replicas. A fork
 archives the inherited identity and relations, assigns a new board ID, and
-starts empty. Existing boards do nothing until `federation init` is run.
+starts empty. Normal clones and worktrees inherit the tracked identity. Only an
+intentional independent project uses `federation fork`; Manna never infers
+relations merely because two boards are enrolled.
 
 Raw ideas enter through `dream`, which files the spark on the nearest board up
 the directory tree, or the global inbox when no board exists:

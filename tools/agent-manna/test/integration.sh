@@ -105,8 +105,15 @@ echo ""
 echo "Test 1: init"
 output=$("$MANNA" init 2>&1) || true
 check_yaml "$output" "success: true" "init returns success"
+check_yaml "$output" "federation_created: true" "first init creates federation identity"
+check_yaml "$output" "federation_path: .manna/federation.yaml" "init reports the durable federation path"
+INIT_BOARD_ID=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+[[ "$INIT_BOARD_ID" =~ ^mb-[a-f0-9]{32}$ ]] \
+    && pass "init emits a 128-bit board identity" \
+    || fail "init emits a 128-bit board identity" "$INIT_BOARD_ID"
 [[ -d .manna ]] && pass ".manna directory created" || fail ".manna directory created" "Directory not found"
 [[ -f .manna/issues.jsonl ]] && pass "issues.jsonl created" || fail "issues.jsonl created" "File not found"
+[[ -f .manna/federation.yaml ]] && pass "federation.yaml created" || fail "federation.yaml created" "File not found"
 
 # ----------------------------------------------------------------------------
 # Test 1b: kill-mid-init recovery
@@ -146,20 +153,63 @@ wait "$init_pid" 2>/dev/null || true
 output=$("$MANNA_CORE" init 2>&1) || true
 check_yaml "$output" "success: true" "rerun recovers killed init"
 check_yaml "$output" "recovered_transactions: 1" "recovered init reports its journal"
-for durable in .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; do
+for durable in .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .manna/federation.yaml .handoff/README.md; do
     [[ -f "$durable" ]] && pass "recovered init publishes $durable" || fail "recovered init publishes $durable" "file missing"
 done
 transaction_files=$(find .manna/transactions -type f 2>/dev/null | wc -l | tr -d ' ')
 check_exit 0 "$transaction_files" "init recovery directory is empty at rest"
-init_state_before=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; } | git hash-object --stdin)
+init_state_before=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .manna/federation.yaml .handoff/README.md; } | git hash-object --stdin)
 output=$("$MANNA_CORE" init 2>&1) || true
 check_yaml "$output" "recovered_transactions: 0" "repeated init has no recovery work"
-init_state_after=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; } | git hash-object --stdin)
+check_yaml "$output" "federation_created: false" "repeated init preserves federation identity"
+init_state_after=$({ git hash-object .manna/issues.jsonl .manna/sessions.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .manna/federation.yaml .handoff/README.md; } | git hash-object --stdin)
 if [[ "$init_state_before" == "$init_state_after" ]]; then
     pass "repeated init is byte-stable after crash recovery"
 else
     fail "repeated init is byte-stable after crash recovery" "$init_state_before -> $init_state_after"
 fi
+cd "$TEST_DIR"
+
+# ----------------------------------------------------------------------------
+# Test 1c: kill between workflow and federation recovery
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test 1c: kill between workflow and federation recovery"
+CRASH_FEDERATION_DIR=$(mktemp -d)
+cd "$CRASH_FEDERATION_DIR"
+git init -q
+MANNA_TESTING=1 MANNA_TEST_INIT_PAUSE_BEFORE_FEDERATION_MS=30000 \
+    "$MANNA_CORE" init >init.log 2>&1 &
+init_pid=$!
+workflow_published=0
+for _ in $(seq 1 200); do
+    if [[ -f .manna/board.yaml ]] \
+        && [[ -f .manna/workflow.yaml ]] \
+        && [[ ! -e .manna/federation.yaml ]]; then
+        workflow_published=1
+        break
+    fi
+    if ! kill -0 "$init_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+if [[ "$workflow_published" -eq 1 ]]; then
+    pass "init exposes a recoverable workflow-before-federation boundary"
+else
+    fail "init exposes a recoverable workflow-before-federation boundary" "$(cat init.log 2>/dev/null || true)"
+fi
+kill -KILL "$init_pid" 2>/dev/null || true
+wait "$init_pid" 2>/dev/null || true
+[[ ! -e .manna/federation.yaml ]] \
+    && pass "killed init cannot report success without federation identity" \
+    || fail "killed init cannot report success without federation identity" "manifest unexpectedly exists"
+output=$("$MANNA_CORE" init 2>&1) || true
+check_yaml "$output" "success: true" "rerun converges workflow and federation"
+check_yaml "$output" "federation_created: true" "rerun creates the missing federation identity"
+[[ -f .manna/federation.yaml ]] \
+    && pass "rerun publishes federation identity" \
+    || fail "rerun publishes federation identity" "manifest missing"
 cd "$TEST_DIR"
 
 # ----------------------------------------------------------------------------
@@ -637,6 +687,10 @@ if [[ -f "$INBOX_HOME/inbox/.manna/issues.jsonl" ]]; then
 else
     fail "inbox board auto-initialized" "no issues.jsonl under $INBOX_HOME/inbox/.manna"
 fi
+INBOX_BOARD_ID=$(awk '/board_id:/ {print $2; exit}' "$INBOX_HOME/inbox/.manna/federation.yaml" 2>/dev/null || true)
+[[ "$INBOX_BOARD_ID" =~ ^mb-[a-f0-9]{32}$ ]] \
+    && pass "inbox board auto-enrolls in federation" \
+    || fail "inbox board auto-enrolls in federation" "$INBOX_BOARD_ID"
 cd "$GRAMMAR_DIR"
 rm -rf "$INBOX_HOME" "$NOBOARD_DIR"
 
@@ -1119,6 +1173,11 @@ fi
 
 output=$("$MANNA" init 2>&1) || true
 check_yaml "$output" "workflow: legacy" "legacy .handoff content does not imply strict board identity"
+check_yaml "$output" "federation_created: true" "legacy init enrolls the existing board"
+LEGACY_FEDERATION_ID=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+[[ "$LEGACY_FEDERATION_ID" =~ ^mb-[a-f0-9]{32}$ ]] \
+    && pass "legacy init emits a valid board identity" \
+    || fail "legacy init emits a valid board identity" "$LEGACY_FEDERATION_ID"
 rm -f .handoff/legacy-research.md
 
 # Reproduce the Stage 0 partial state: identity was published before the old
@@ -1136,6 +1195,8 @@ check_yaml "$output" "paired_items: 3" "migration generates every active item ha
 check_yaml "$output" "historical_rows: 1" "migration grandfathers done history"
 check_yaml "$output" "exempt_rows: 2" "migration exempts tracks and dreams"
 check_yaml "$output" "released_claims: 2" "migration releases unauthenticated legacy claims"
+check_yaml "$output" "federation_created: false" "migration preserves the identity created by legacy init"
+check_yaml "$output" "board_id: $LEGACY_FEDERATION_ID" "migration reports the preserved board identity"
 [[ ! -e .manna/transactions/legacy-board-migration.yaml ]] && pass "migration journal retires after commit" || fail "migration journal retires after commit" "journal still exists"
 handoff_count=$(find .handoff -maxdepth 1 -name 'mn-*.md' -type f | wc -l | tr -d ' ')
 check_exit 3 "$handoff_count" "migration creates exactly one unnumbered handoff per active item"
@@ -1222,6 +1283,11 @@ check_yaml "$output" "migrated: true" "mixed migration reports a state change"
 check_yaml "$output" "paired_items: 2" "mixed migration adopts only the two legacy active items"
 check_yaml "$output" "historical_rows: 1" "mixed migration grandfathers legacy history"
 check_yaml "$output" "released_claims: 2" "mixed migration releases only unauthenticated legacy claims"
+check_yaml "$output" "federation_created: true" "direct migration enrolls the existing board"
+MIXED_FEDERATION_ID=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+[[ "$MIXED_FEDERATION_ID" =~ ^mb-[a-f0-9]{32}$ ]] \
+    && pass "direct migration emits a valid board identity" \
+    || fail "direct migration emits a valid board identity" "$MIXED_FEDERATION_ID"
 MIXED_STRICT_LINE_AFTER=$(grep -F "\"id\":\"$MIXED_STRICT_ID\"" .manna/issues.jsonl)
 MIXED_STRICT_HASH_AFTER=$(git hash-object .handoff/campaigns/strict-native.md)
 if [[ "$MIXED_STRICT_LINE_BEFORE" == "$MIXED_STRICT_LINE_AFTER" && "$MIXED_STRICT_HASH_BEFORE" == "$MIXED_STRICT_HASH_AFTER" ]]; then
@@ -1237,10 +1303,11 @@ grep -Fq 'Preserve beta work-order content exactly.' .handoff/02b01-mn-b20002-le
     || fail "mixed migration preserves blocked legacy work order" "legacy content missing"
 check_yaml "$(cat .manna/handoff-order.yaml)" "- mn-b20001" "unique handmade prefixes seed first-class priority"
 
-mixed_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+mixed_state_before=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .manna/federation.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 output=$("$MANNA" migrate 2>&1) || true
 check_yaml "$output" "migrated: false" "second mixed migration is an idempotent no-op"
-mixed_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
+check_yaml "$output" "federation_created: false" "second mixed migration preserves federation identity"
+mixed_state_after=$({ git hash-object .manna/issues.jsonl .manna/board.yaml .manna/workflow.yaml .manna/handoff-order.yaml .manna/federation.yaml .handoff/README.md; find .handoff -type f -name '*.md' ! -name README.md | sort | while IFS= read -r file; do git hash-object "$file"; done; } | git hash-object --stdin)
 if [[ "$mixed_state_before" == "$mixed_state_after" ]]; then
     pass "second mixed migration preserves every durable byte"
 else
@@ -1613,21 +1680,21 @@ cd "$FED_SOURCE"
 git init -q
 git config user.name "Manna Federation Fixture"
 git config user.email "manna-federation@example.invalid"
-"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" init 2>&1) || true
+check_yaml "$output" "federation_created: true" "new source board auto-enrolls in federation"
+FED_SOURCE_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
 output=$("$MANNA" create "Federated source" 2>&1) || true
 FED_SOURCE_ID=$(extract_id "$output")
 "$MANNA" sync >/dev/null 2>&1
 output=$("$MANNA" federation status 2>&1) || true
-check_yaml "$output" "enabled: false" "existing board stays federation-disabled until opt-in"
+check_yaml "$output" "enabled: true" "new board reports federation identity immediately"
+check_yaml "$output" "board_id: $FED_SOURCE_BOARD" "federation status reports the init identity"
 output=$("$MANNA" federation init 2>&1) || true
-check_yaml "$output" "success: true" "federation init succeeds"
-check_yaml "$output" "changed: true" "first federation init writes identity"
-FED_SOURCE_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+check_yaml "$output" "success: true" "explicit federation init remains available"
+check_yaml "$output" "changed: false" "explicit federation init is an idempotent repair command"
 [[ "$FED_SOURCE_BOARD" =~ ^mb-[a-f0-9]{32}$ ]] \
-    && pass "federation init emits a 128-bit board identity" \
-    || fail "federation init emits a 128-bit board identity" "$FED_SOURCE_BOARD"
-output=$("$MANNA" federation init 2>&1) || true
-check_yaml "$output" "changed: false" "federation init is idempotent"
+    && pass "automatic enrollment emits a 128-bit board identity" \
+    || fail "automatic enrollment emits a 128-bit board identity" "$FED_SOURCE_BOARD"
 git add -- .manna .handoff
 git commit -qm "test: source federation fixture"
 
@@ -1635,11 +1702,13 @@ cd "$FED_TARGET"
 git init -q
 git config user.name "Manna Federation Fixture"
 git config user.email "manna-federation@example.invalid"
-"$MANNA" init >/dev/null 2>&1
+output=$("$MANNA" init 2>&1) || true
+FED_TARGET_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+check_yaml "$output" "federation_created: true" "new target board auto-enrolls in federation"
 output=$("$MANNA" create "Federated target" 2>&1) || true
 FED_TARGET_ID=$(extract_id "$output")
 output=$("$MANNA" federation init 2>&1) || true
-FED_TARGET_BOARD=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
+check_yaml "$output" "changed: false" "target federation repair preserves automatic identity"
 git add -- .manna .handoff
 git commit -qm "test: target federation fixture"
 

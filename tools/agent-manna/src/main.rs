@@ -466,6 +466,9 @@ struct InitData {
     recovered_transactions: usize,
     upgraded_items: usize,
     restored_config: bool,
+    federation_path: String,
+    board_id: String,
+    federation_created: bool,
 }
 
 #[derive(Serialize)]
@@ -477,6 +480,9 @@ struct MigrationData {
     historical_rows: usize,
     exempt_rows: usize,
     released_claims: usize,
+    federation_path: String,
+    board_id: String,
+    federation_created: bool,
 }
 
 #[derive(Serialize)]
@@ -815,11 +821,29 @@ fn load_board_workflow(store: &MannaStore) -> (Vec<Issue>, Option<WorkflowConfig
 // Command Implementations
 // ============================================================================
 
+fn pause_init_before_federation_for_test() {
+    if std::env::var("MANNA_TESTING").as_deref() != Ok("1") {
+        return;
+    }
+    let Ok(raw) = std::env::var("MANNA_TEST_INIT_PAUSE_BEFORE_FEDERATION_MS") else {
+        return;
+    };
+    let Ok(milliseconds) = raw.parse::<u64>() else {
+        return;
+    };
+    std::thread::sleep(std::time::Duration::from_millis(milliseconds.min(60_000)));
+}
+
 fn cmd_init() -> ! {
     let store = MannaStore::new(Path::new("."));
     let workflow = match initialize_workflow(Path::new("."), &store) {
         Ok(initialized) => initialized,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+    };
+    pause_init_before_federation_for_test();
+    let federation = match federation::initialize(Path::new("."), &store) {
+        Ok(initialized) => initialized,
+        Err(error) => handle_manna_error(error),
     };
 
     output_success(InitData {
@@ -840,6 +864,9 @@ fn cmd_init() -> ! {
             .map_or(0, |state| state.recovered_transactions),
         upgraded_items: workflow.as_ref().map_or(0, |state| state.upgraded_items),
         restored_config: workflow.as_ref().is_some_and(|state| state.restored_config),
+        federation_path: federation.path,
+        board_id: federation.federation.board_id,
+        federation_created: federation.changed,
     });
 }
 
@@ -852,6 +879,10 @@ fn cmd_migrate() -> ! {
         Ok(result) => result,
         Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
     };
+    let federation = match federation::initialize(Path::new("."), &store) {
+        Ok(initialized) => initialized,
+        Err(error) => handle_manna_error(error),
+    };
     output_success(MigrationData {
         migrated: result.migrated,
         recovered_transaction: result.recovered_transaction,
@@ -860,6 +891,9 @@ fn cmd_migrate() -> ! {
         historical_rows: result.historical_rows,
         exempt_rows: result.exempt_rows,
         released_claims: result.released_claims,
+        federation_path: federation.path,
+        board_id: federation.federation.board_id,
+        federation_created: federation.changed,
     });
 }
 
@@ -911,8 +945,7 @@ fn cmd_federation_init() -> ! {
         );
     }
     let _ = load_board_workflow(&store);
-    let session = require_session_identity();
-    match federation::initialize(Path::new("."), &store, &session) {
+    match federation::initialize(Path::new("."), &store) {
         Ok(result) => output_success(result),
         Err(error) => handle_manna_error(error),
     }
@@ -1974,6 +2007,9 @@ fn cmd_dream(
     }
     if let Err(error) = initialize_workflow(&board_dir, &store) {
         output_error(&error, EXIT_SYSTEM_ERROR);
+    }
+    if let Err(error) = federation::initialize(&board_dir, &store) {
+        handle_manna_error(error);
     }
 
     let existing_issues = match store.load_issues() {
@@ -3656,6 +3692,9 @@ mod tests {
                 recovered_transactions: 0,
                 upgraded_items: 0,
                 restored_config: false,
+                federation_path: ".manna/federation.yaml".to_string(),
+                board_id: "mb-11111111111111111111111111111111".to_string(),
+                federation_created: true,
             },
         };
 
@@ -3663,6 +3702,8 @@ mod tests {
         assert!(yaml.contains("success: true"));
         assert!(yaml.contains("initialized: true"));
         assert!(yaml.contains("path: .manna"));
+        assert!(yaml.contains("federation_path: .manna/federation.yaml"));
+        assert!(yaml.contains("board_id: mb-11111111111111111111111111111111"));
     }
 
     #[test]

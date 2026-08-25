@@ -11,7 +11,7 @@ All data is stored in `.manna/` directory:
 - `.manna/handoff-order.yaml` - First-class ordered priority for paired items
 - `.manna/drift.yaml` - Latest reconcile findings (written by `reconcile --write-drift`)
 - `.manna/workflow.yaml` - Strict workflow version and canonical handoff root
-- `.manna/federation.yaml` - Optional tracked board identity and outbound cross-board relations
+- `.manna/federation.yaml` - Required tracked board identity and optional outbound cross-board relations
 - `.manna/federation-archive/*.yaml` - Tracked manifests retired by an intentional project fork
 - `.manna/transactions/` - Ignored write-ahead journal for interrupted pair changes
 - `.manna/transactions/legacy-board-migration.yaml` - Authenticated whole-board admission journal, present only while migration is pending
@@ -26,8 +26,11 @@ Durable work orders live in tracked `.handoff/`:
 
 ## federation.yaml
 
-Federation is opt-in. A board without this file retains its existing behavior.
-`manna federation init` creates the file idempotently under the board-wide lock:
+Federation identity is default board infrastructure; cross-board relations are
+optional. `manna init`, `manna migrate`, bootstrap repair, and first-use global
+inbox creation create or preserve this file under the board-wide lock before
+reporting success. `manna federation init` remains an idempotent repair and
+manual backfill command:
 
 ```yaml
 version: 1
@@ -72,7 +75,8 @@ Manifest writes and forks share the board lock and an HMAC-authenticated,
 project-bound journal carrying exact before and after bytes. Recovery accepts
 only those exact states. Lint and reconcile validate local shape, sources,
 tracking, archive, and pending-transaction convergence without consulting the
-registry.
+registry. A missing manifest is readable as incomplete recovery state but fails
+lint with the exact `agent-do manna init` convergence command.
 
 ## issues.jsonl
 
