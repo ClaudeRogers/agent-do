@@ -418,6 +418,8 @@ function renderStrip(s) {
     parts.push(`${here} here`, `${s.git?.dirty_paths ?? 0} dirty`);
     const age = Number(s.coord_refreshed_ago), cadence = Number(s.coord_refresh_seconds);
     if (Number.isFinite(age) && Number.isFinite(cadence) && age > 2 * cadence) parts.push(`<span class="warn">presence stale ${Math.round(age)}s</span>`);
+  } else if (s.building) {
+    parts.push(`<span class="warn">still reading: commits · coord · live drift…</span>`);
   } else {
     const d = s.drift || {};
     if (d.source !== "reconcile" && !d.present) parts.push(`<span class="bad">reconcile unavailable</span>`);
@@ -519,6 +521,10 @@ $("#grep").addEventListener("keydown", (e) => { if (e.key === "Enter") { const q
 function setConn(ok, text) { $("#connection-mark").textContent = ok ? "●" : "○"; $("#connection-mark").classList.toggle("live", ok); $("#connection-label").textContent = text; }
 function receive(state) { app.state = state; app.lastReceived = new Date(); setConn(true, "live"); renderAll(); landOnSection(); }
 async function fetchState() {
+  // the cheap board first (instant), then the full one (commits, coord, live drift)
+  if (!app.state) {
+    try { const r = await fetch(api("api/state") + "?fast=1", { cache: "no-store" }); if (r.ok) receive(await r.json()); } catch (e) {}
+  }
   try { const r = await fetch(api("api/state"), { cache: "no-store" }); if (!r.ok) throw new Error(`state request failed: ${r.status}`); receive(await r.json()); }
   catch (e) { setConn(false, "disconnected"); toast(e.message); }
 }

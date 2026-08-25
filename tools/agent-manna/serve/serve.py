@@ -537,6 +537,16 @@ def attach_resolved_relations(state: dict[str, Any], payload: dict[str, Any] | N
         federation["resolved"] = True
 
 
+def fast_state(slug: str, root: Path) -> dict[str, Any]:
+    """The board from its cheap reads alone — issues, order, drift file,
+    cached digests — so the page paints at once; commits, coord presence,
+    and live drift arrive with the full state. `building` marks the gaps."""
+    state = board_lib.derive(root, None, decision_markers(), live=False, peers=[], coord=board_lib.EMPTY_COORD, trailers={})
+    digest_lib.apply(slug, state["all"])
+    state.update({"slug": slug, "act_token": ACT_TOKEN, "actor": serve_identity()["session_id"], "coord_refresh_seconds": COORD_REFRESH_SECONDS, "coord_refreshed_ago": None, "building": True})
+    return state
+
+
 def boards_index(fast: bool = False) -> dict[str, Any]:
     """The estate view. `fast` answers from what is already in hand — manna
     counts always, presence only where a bundle is warm — so the page can
@@ -689,6 +699,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not rest:
             return self.send_page("board.html")
         if rest == ["api", "state"]:
+            if urllib.parse.parse_qs(parsed.query).get("fast", ["0"])[0] == "1":
+                return self.send_json(fast_state(slug, root))
             _, state = CACHE.state(slug, root)
             return self.send_json(state)
         if rest == ["api", "events"]:
