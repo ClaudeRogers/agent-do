@@ -181,7 +181,7 @@ def main() -> None:
         try:
             record_hook_decision(
                 event, "zpc_trigger", "emit" if fresh else "suppress",
-                cwd=cwd, reason=(
+                cwd=cwd, prompt=value, reason=(
                     "lesson_fired" if fresh
                     else ("already_delivered_this_session" if fired else "no_trigger_matched")
                 ),
@@ -197,14 +197,15 @@ def main() -> None:
 
     if record_nudge_event is not None:
         try:
-            # The lesson ids and the kind are the whole signal. Neither the
-            # prompt nor the command is logged: a shell line can carry a
-            # token, and a prompt can carry anything at all (a789605's
-            # doctrine covers both). Pattern-based redaction is not a
-            # boundary; omission is.
+            # The trigger value (prompt / command / path) rides along through
+            # telemetry's central prompt_fields policy: stable hash plus a
+            # redact_text 160-char excerpt. Erik ruled 2026-08-26 that
+            # debuggability outranks the residual-leak risk of redacted
+            # excerpts in this local log; the earlier omission (a789605 and
+            # the later prompt= drop) was agent doctrine he never ratified.
             record_nudge_event(
                 f"zpc_lesson_fired_{kind}", "zpc_trigger",
-                lessons=fresh, kind=kind, cwd=cwd,
+                lessons=fresh, kind=kind, cwd=cwd, prompt=value,
             )
         except Exception:
             pass
