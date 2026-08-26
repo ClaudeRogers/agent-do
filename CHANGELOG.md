@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- README rewritten as one essay for the human reader (the workshop, the vessel, the dharma of receipts): every institution presented with its evidence, no agent commands beyond the install, logo plus cockpit and coordination screenshots placed in the sections they depict. Chosen from fifteen candidates across three clean-room rounds.
+- `manna serve`: a `recent` chip on the board sheet renders every entry (items, dreams, done, blocked) as one flat list sorted by last activity with an age column, linkable at `#board/recent`; the inspector now shows `filed` (created) beside `touched` (updated) for every item.
+- UserPromptSubmit hooks no longer time out under load: the prompt router invokes the coord tool script directly instead of paying the dispatcher's per-call interpreter tax twice, defers the provider SDK import until an AI routing call actually happens, and the four UserPromptSubmit hook ceilings rise 5s→10s in the registration spec (lesson les-2a750a).
+- zpc-trigger telemetry carries the trigger value again (prompt/command/path) through telemetry's central policy — stable hash plus redacted 160-char excerpt — restoring nudge debuggability; ruled by Erik 2026-08-26, recorded as dec-ef3bbd.
+- DPT: remaining canon false-positives retired across four perception layers, with controlled fixtures under `tools/agent-dpt/fixtures/`. (mn-55530d)
+- Stop-time quality gates now read a per-session touch ledger (`lib/touch_ledger.py`, PostToolUse-fed) instead of inferring agent action from `git status`, so another lane's edits or human-dropped files no longer trigger false "design work without a browser" advisories; Claude and Codex hooks ship wired, Codex stop gate updated to match.
+
 ## v1.5 (2026-08-25)
 
 - `manna serve` reconciles by click: drift appears in the inbox as asks whose verbs are buttons (`close`, `rule` → promote/delete, `sync`, `apply`), each running exactly one manna verb through the daemon's own pinned identity behind the loopback checks and a per-process token; refusals print verbatim, delete needs a second click, nothing edits a file. The strip no longer counts drift. The bar asks the deep model a question answered from the board's rows with cited ids; the jump palette is gone (⌘K focuses the bar). Each item carries a collapsible AI summary under 450 characters; columns fit their content and can be dragged; nothing is clipped. The SessionEnd hook applies `reconcile --fix`'s two safe repairs. (mn-1e71e2)

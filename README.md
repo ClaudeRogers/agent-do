@@ -1,109 +1,84 @@
-# agent-do
+<p align="center"><img src="assets/agent-do-logo.png" alt="agent-do" width="360"></p>
 
-<p align="center">
-  <img src="assets/agent-do-logo.png" alt="agent-do logo" width="360" />
-</p>
+**A vessel for a mind that has none, in a workshop where memory was plentiful and practice was not. Drops into Claude Code, Codex, or Cursor today; nothing new to learn.**
 
-<p align="center"><strong>The world-facing outer harness for AI coding agents.</strong></p>
+Picture a workshop where every worker arrives each morning with notes from yesterday and none of yesterday's habits. The notes are good. They say what was done and what went wrong. They do not say how things are done here, so every worker reads them and then invents the day's method from scratch, and by evening the shop has run one more way of doing everything and kept none of them. Memory is plentiful in that shop. Practice never accumulates. Telling the workers how things are done does not fix it either; an instruction is read in the morning and reinvented by noon. What fixes it is holding the way in the shop's own machinery: a job list that will not hand out work nobody has claimed, a sign-in sheet that shows who is really in the building, a journal read aloud at the start of every shift, a foreman whose only duty is the reading and the filing, and a receipt kept for every act, so that the right way is what the shop does, whichever worker is doing it. The old word for a way of acting that holds regardless of who is acting is dharma, and that is what the shop needs.
 
-AI coding agents are strong inside a repository. They read files, write code, run
-tests, and reason through local changes.
+That workshop is a fleet of AI coding agents. A session (one run of an agent, from the moment it starts to the moment it stops) is a worker; it arrives with memory files and instruction files, and it still starts the job over. The workers have a second problem, and it shows up the moment one of them reaches past the repository. Inside the repository a worker is capable: it reads files, edits them, runs the tests, reasons about a diff. Step outside and the same mind has no eyes for a web page, no hands for a database, no way to tell whether another worker is in the same directory, and nowhere to keep a key. Each time it needs one of those it improvises a vessel: a `curl` line with a pasted token, a throwaway browser script, a number guessed into a config file, a secret copied into a shell profile. The improvised vessel works once and is gone by the next shift, unchecked.
 
-The hard part is everything that is not your code: browsers, authentication, cloud
-services, databases, screenshots, design review, work tracking, project memory,
-PR triage, notifications, and the local machine itself.
+agent-do is the workshop's answer to both problems: a standard vessel every worker picks up at clock-in, and a dharma the shop holds so that no worker has to. A human installs it once. After that only agents use it, and they use it from the shell, because the shell is the one interface every coding agent already has:
 
-`agent-do` gives agents one durable command contract for that outer world:
-
-```bash
+```
 agent-do <tool> <command> [args...]
 ```
 
-One law runs all of it: snapshot before you act, keep receipts. Every tool
-declares that law as a machine-readable contract, and the work boards hold it
-too: status comes from receipts, never testimony.
+Behind that shape sit 99 tools exposing 906 commands. What follows is the company as a worker meets it: the tools on the bench, the sign-in sheet, the job list on the wall, the journal, the foreman, and the owner's window; then why it holds together, and where it is going. The tools appear only as evidence that each faculty and each institution is real.
 
-It looks like a CLI because the shell is the simplest contract every coding
-agent can already use. But it is not primarily a human productivity CLI.
+## The tools on the bench
 
-Humans install it, configure credentials, approve local-machine permissions, read
-outputs, and occasionally run commands directly for debugging. In normal use, the
-caller is the AI agent or its harness. The agent calls `agent-do` to browse,
-authenticate, inspect services, review PRs, query data, track work, coordinate
-with other agents, and verify results without inventing one-off shell glue.
+Every worker picks up the same vessel, and every part of it follows one rhythm: Connect, Snapshot, Interact, Verify, Save. That rhythm is the first article of the shop's dharma, and it is machine-readable. Each of the 906 commands is filed under one of those five beats in `registry.yaml` (6,365 lines), so the worker knows before it moves whether a command looks or acts.
 
-It is not a replacement for Claude Code, Codex, Cursor, or any other inner agent.
-It is the operating layer around them: structured tools, shared credentials,
-discoverability, readiness checks, hooks, work boards, and stateful workflows
-that make good agent behavior easier to repeat.
+### Eyes that return structure (snapshot)
 
-## Why It Exists
+A camera gives a mind pixels. A mind made of text needs the page as text with handles. `browse snapshot -i` returns a web page as a numbered list of its interactive elements, each with a reference such as `@e7` that the next command can click or fill. `db snapshot` returns a schema. `macos` returns the desktop as a tree of controls. Snapshot is the hinge, because an agent cannot reason about a state it has not seen as data, and to a mind that reads, a screenshot is a picture of data rather than data.
 
-Agents can improvise. That is useful until the session becomes a pile of custom
-curl calls, one-off Playwright scripts, raw vendor CLIs, copied secrets, and
-half-remembered setup steps.
+### Hands with a declared reach (interact, and the contracts on it)
 
-`agent-do` narrows that surface.
+A hand that does not know its own strength breaks things. So every command carries a declared reach. The registry classifies 520 verbs as read-only, 523 as writes, 59 as destructive, 24 as emitting secret material, and 11 as arbitrary-code escape hatches. A program running several workers at once reads that surface a single time and knows which commands can run side by side and which must wait their turn.
 
-- One command shape
-- One registry of tools, each with a machine-readable safety contract
-- One readiness and bootstrap path
-- One credential layer
-- One discoverability layer
-- One work-board grammar
-- One hook surface for nudges without hard-blocking work
+A declaration is only worth what checks it, and these are checked in three ways: no tool enters the registry without a complete declaration, every promised verb is compared against the tool's own help text, and the read-only verbs are actually run and graded on whether they behaved like reads. The checks live in the test suite and in the automated checks that run on every push. A tool that promises a verb it lacks fails the build.
 
-The goal is not abstraction for its own sake. The goal is repeatable agency:
-the agent should be able to inspect the world, act on it, verify the result, and
-leave behind enough structure for the next agent to continue.
+### A sense of whether the hand did what it meant (verify)
 
-## Mental Model
+Verify is the beat where the vessel checks its own act against the world. `browse wait --stable` blocks until the network is quiet and the page has stopped moving. `namecheap` reads a DNS record back from the provider after writing it and compares the bytes. `manna lint` grades the work board's grammar and exits nonzero on findings.
 
-Mature `agent-do` tools follow the same rhythm:
+The vessel also has a crude sense of visual craft, and it is worth saying exactly how crude. `dpt` scores a live web page from 0 to 100 against 65 rules across five layers of perception. In August the project tested it with controlled pages and wrote the result down in `.handoff/dpt-audit-2026-08-22.md`: a deliberately broken page scored 29, correctly, with four named faults; the owner's ratified design scored 67, and a banned neon template scored 66. One point apart. So dpt is proprioception, a sense of whether the act landed roughly where it should have. It stays on the bench as a floor check for unreadable text and invisible buttons, and workers are told never to chase its score. A faculty whose limits are written down beside it is worth more than one that is simply trusted.
 
-```text
-Connect -> Snapshot -> Interact -> Verify -> Save
-```
+### The key locker (creds)
 
-Snapshot is the hinge. An agent cannot reason well about a browser page, a
-database schema, a cloud service, or an iOS screen unless it can first see the
-current state in a structured way.
+27 tools declare the secrets they need. Those are stored once in the operating system's secure store, and the dispatcher resolves each one at the moment of the call and passes it to the tool as an environment variable, so a token never appears in a command line, a log, a document, or a commit. A worker never carries a key in a command or a note.
 
-```bash
-agent-do db connect mydb
-agent-do db snapshot
-agent-do db query "SELECT * FROM orders LIMIT 10"
-agent-do db disconnect
-```
+### Where the vessel ends (+live)
 
-### Contracts: the safety layer
+The worker's reach stops at the edge of the human's desktop. Commands that drive the visible desktop or a real browser window, and message delivery in the human's own name, refuse to run unless the command is prefixed with an explicit `+live(...)` modifier naming a scope, an application, and a time limit. Absent the modifier, the tool declines. The human's machine stays the human's.
 
-The rhythm is machine-readable. Every tool declares a `contracts:` block in
-`registry.yaml` mapping each command verb to its beats, with `attributes:` flags
-(destructive, long_running, polymorphic, composite, sensitive, passthrough) for
-the shapes a single beat cannot express. All 96 registered tools declare
-contracts; a tool cannot merge without one.
+## Who is in the building (coord)
 
-Orchestrators consume the declarations directly:
+A worker holding good tools still cannot feel the others in the room, and several agents routinely work one repository at once. So the workshop keeps a sign-in sheet under the repository's git directory, and it verifies the sheet against the operating system: a session counts as present only if its process still exists and that process's start time matches the one recorded, which is why a recycled process id can never wear a dead worker's identity. A session unseen for 48 hours turns idle; a dead one is marked dead and swept after 24 hours. Workers declare a role (builder, auditor, researcher, overseer), a goal, and the paths they own; two builders whose paths overlap are both interrupted, with the overlapping paths named, and an auditor stepping onto a builder's paths sends a courtesy notice. Handoffs between live workers are pointers to files on the sheet; no mailbox exists. The sheet also carries a pulse fed by the host program's own events: whether a worker is working, waiting on the human, failed, or finished, and what it last touched.
 
-```bash
-agent-do harness contracts surface --json
-```
+<p align="center"><img src="assets/manna-serve-coord.png" alt="The coordination sheet: liveness-verified workers with focus and holdings, a selected worker in the inspector, and live path claims" width="900"></p>
 
-That returns safety buckets (read_only, write, destructive, sensitive,
-long_running, passthrough, own_state) as verb lists, answering scheduling
-questions mechanically: which commands can run in parallel, which mutate state,
-which deserve confirmation before an agent runs them.
+## The job list on the wall (manna)
 
-Declarations are kept true, not trusted:
+With the room known, the worker takes a job. `manna` keeps the job list inside the repository, in `.manna/`, so it travels with the code and carries git history. Every entry is one of three kinds: a track, which names a program of work; an item, which is a job a worker may claim; or a dream, which is an idea nobody may build until the owner converts it. This repository's own board holds 128 entries: 83 done, 39 open, 5 blocked, 1 in progress. Of those, 3 are tracks and 8 are dreams.
 
-```bash
-agent-do harness contracts validate   # gate: registry shape + 96/96 coverage, runs in CI
-agent-do harness contracts drift      # registry promises vs live tool --help
-agent-do harness contracts audit      # behavioral probe of the read surface
-```
+Claiming is the move that matters, because two workers each starting from their own notes will cheerfully start the same job. A claim here is proven rather than labeled. When a worker claims an item, the board stores a fingerprint of a secret derived from that session's identity under a key that lives on the machine, outside the repository, readable only by the owner's account. A restarted process derives the same secret and keeps its authority over its claims. A worker who merely writes another worker's name on the entry gains nothing, because the name was never the credential. Status moves only through lifecycle verbs (claim, done, abandon, block, unblock); nobody can set a status by hand, and the tool refuses the attempt.
 
-## Install
+A stranger picking up a job needs the whole job on one page, so every claimable item is paired with exactly one work order under `.handoff/` (82 files): the exact claim command, the paths this worker owns, the neighboring paths it must leave alone, the project's memory pasted in verbatim (a fresh worker told to go and fetch context usually does not), and numbered verification steps. The order is sealed. A hash of its content is stored on the board entry; editing it requires an explicit reseal; a claim against an order whose seal is broken fails with nothing written. Priority is a numbered filename derived from one ordered list, so a bare number means "safe to start" and a `b` suffix means "held until that numbered blocker closes."
+
+## The journal and the library (zpc, context)
+
+While the worker works, the shop learns. `zpc` is the journal, kept per project in `.zpc/`. Here it holds 112 lessons and 32 decisions, plus 12 positions, where a position is a verdict filed together with the evidence that would change it. It is written by workers as they work and read aloud at every clock-in, fitted to a budget that is looked up from the model's published limits rather than typed. Two rules keep it honest. Entries arrive as dated claims that a live observation outranks, and an entry that turns out wrong is retracted by appending a correction with a receipt (nothing is ever edited or deleted, because the record of having been wrong is worth keeping). And a worker who wants to reverse a filed position without naming new evidence is refused: the tool quotes the worker's own falsifier back and writes nothing. Every read leaves a line in an access log; this repository's holds 861 lines.
+
+`context` is the library next door: reference documentation fetched from the web and indexed for search. It is kept separate from the journal on purpose, because what a manual says and what the shop learned using it are different kinds of knowledge and rot at different rates. Saved browser sessions and open database connections are the short-term kind of memory, so a worker does not log in again at every step.
+
+## The foreman (hooks)
+
+None of the above asks a worker to remember that any of it exists, because the dharma is held by the shop and the foreman does the reading and the filing. Hooks are small scripts the agent's host program runs at fixed moments; the installer registers 11 of them. At clock-in, inside a 10-second budget, the foreman pins the worker's identity, reads the job list aloud, reads the journal, reads the previous shift's drift report, and names any interrupts other workers have raised. During the shift the foreman nudges a worker who reaches for a raw command when a tool on the bench exists or types a number where a published limit should have been looked up, and, once per session, notes at turn's end when code changed and nothing was journaled. At clock-out, the foreman retires the worker's presence and runs the reconcile with only its two judgment-free repairs (release claims held by dead workers, clear blocked flags whose blockers are done), then writes `.manna/drift.yaml` for the next shift's greeting. None of these blocks anything; they add context and get out of the way. Every one of these steps is gated on presence: a repository with no board sees none of it.
+
+## Receipts the shift leaves behind (trailers, reconcile)
+
+What a shift leaves behind is what the next shift trusts. A commit that advances a job carries a trailer line, `Manna: mn-xxxxxx`, at the end of its message; 159 of this repository's 537 commits do. That single convention lets the job list be audited against git instead of against itself. `reconcile` runs 10 checks: jobs whose commits landed while the entry still says open, claims held by workers the operating system reports dead, blocked flags whose blockers have finished, dreams older than 14 days, work orders that point at nothing, and shadow work orders filed outside the canonical root. It reports everything and repairs only what needs no judgment.
+
+## The owner's window
+
+One human owns the workshop. The owner converts dreams into items (a worker who tries to claim a dream is refused with exit code 2, the code this system uses for "stopped on purpose, needs a human," and nothing is written) and rules on the questions the machine flags, looking in through `manna serve`: a page on `127.0.0.1:7777`, reachable only from this machine, that workers are handed the address of and never read from. Its inbox lists every ask in one shape, who is asking and what for, with the verb the owner performs as a button that runs exactly that one board command.
+
+<p align="center"><img src="assets/manna-serve-board.png" alt="The owner's window: the job list with one-line digests, an item selected, its summary and receipts in the inspector" width="900"></p>
+
+## The one thing a human does
+
+Open the shop.
 
 ```bash
 git clone https://github.com/ovachiever/agent-do.git
@@ -111,359 +86,43 @@ cd agent-do
 ./install.sh
 ```
 
-`agent-do` requires GNU Bash 4.4 or newer. macOS ships Bash 3.2, so install a
-current Bash first with `brew install bash`. The launcher finds Homebrew Bash
-even when the calling process has a system-only `PATH`, then keeps that same
-interpreter available through a Bash-only runtime shim for every dispatched
-tool without changing any other command precedence. If no supported Bash
-exists, installation and execution stop with an actionable error.
-Set `AGENT_DO_BASH=/absolute/path/to/bash` when a supported Bash lives outside
-the standard Homebrew, Linuxbrew, Nix, or local-bin paths.
-
-`install.sh` is idempotent. It symlinks `agent-do` into `~/.local/bin`, writes
-an install-path breadcrumb under `~/.agent-do/`, generates the discovery index
-from `registry.yaml`, installs Python dependencies, offers optional npm and
-cargo builds for the browser and board tools, and runs a health check.
-
-Hooks install as thin wrappers that delegate into the repo, so `git pull`
-updates hook behavior without re-running the installer. Claude Code hooks always
-install; Codex hooks install when `~/.codex/` exists (`--codex` forces,
-`--no-codex` skips). The installer prints the settings.json registration snippet
-and never edits your settings itself. `./install.sh --uninstall` removes the
-symlink and the wrappers.
-
-See [docs/INTEGRATION.md](docs/INTEGRATION.md) for hook registration and behavior.
-
-## First Run
-
-```bash
-agent-do --health
-agent-do bootstrap --recommend
-agent-do bootstrap
-```
-
-`--health` checks whether the harness is usable. `bootstrap --recommend` shows
-which stateful tools should be initialized for the current machine or
-repository. Every detected project gets the paired work-state scaffold:
-`.manna/` for the board and tracked `.handoff/` files for executable work
-orders, plus a tracked `.manna/federation.yaml` public board identity.
-`bootstrap` initializes the pieces that are actually needed. When it
-finds a nonempty pre-workflow board, the recommendation says `legacy board:
-run agent-do manna migrate`, and ordinary bootstrap runs that convergence path
-instead of sending the board through `init`.
-
-## Finding The Right Tool
-
-When the agent knows the tool:
-
-```bash
-agent-do <tool> <command> [args...]
-```
-
-When the agent knows the goal but not the tool:
-
-```bash
-agent-do --list                          # full registered inventory
-agent-do find playwright                 # keyword search across the registry
-agent-do suggest "check render logs"     # task to likely tool and command
-agent-do suggest --project               # likely tools for this repository
-```
-
-When a human or harness wants natural-language routing:
-
-```bash
-agent-do -n "take an iOS screenshot"        # LLM-routed
-agent-do --offline "check render logs"      # pattern-matched, no API key
-agent-do --how "review PRs waiting for me"  # explain the route, then run it
-```
-
-Natural-language and offline routing use three exit codes: `0` success, `1`
-error, `2` needs clarification. An orchestrator that sees `2` should ask a
-follow-up and retry with `--context`.
-
-## Tool Tour
-
-96 registered tools. The flagships:
-
-| Tool | What it does |
-|---|---|
-| `browse` | Headless browser with @ref element selection, SSO/MFA login handoff into headless state, persistent auth sessions, API capture and replay |
-| `auth` | Site-level auth orchestration: probes the live checkpoint, advances one safe step at a time, ensures authenticated state through a strategy ladder |
-| `manna` | Git-backed work boards: tracks, items, dreams, claims, lint, reconcile |
-| `coord` | Shared state board for parallel agents: presence, roles, territories, claims, interrupts |
-| `gh` | GitHub PR work-state: inbox, review, unresolved threads, checks, audit with deploy probes |
-| `db` | Database client for PostgreSQL, MySQL, SQLite: connect, snapshot schema, query |
-| `excel` | Workbook automation: read and write cells, formulas, sheets |
-| `dpt` | Design Perception Tensor: 65-rule visual quality scoring of the full live page, 0-100 |
-
-The rest of the catalog covers cloud platforms (`render`, `vercel`, `supabase`,
-`cloudflare`, `gcp`, `docker`, `k8s`), identity providers (`clerk`, `okta`),
-domains and email infrastructure (`namecheap`, `dns`, `resend`), devices and
-desktops (`ios`, `android`, `macos`, `screen`, `hardware`), perception
-(`vision`, `ocr`, `image`, `video`, `audio`), documents and data (`sheets`,
-`pdf`, `pdf2md`, `jupyter`), knowledge surfaces (`obsidian`, `notion`,
-`calendar`), and communication (`email`, `sms`, `slack`, `meetings`), plus a
-root `notify` contract that routes one message across providers.
-
-See [docs/TOOLS.md](docs/TOOLS.md) for the full map, and
-`agent-do <tool> --help` for command details.
-
-### Browser automation
-
-```bash
-agent-do browse open https://app.example.com
-agent-do browse snapshot -i
-agent-do browse fill @e3 "admin@example.com"
-agent-do browse click @e7
-agent-do browse wait --stable
-```
-
-For authenticated sessions:
-
-```bash
-agent-do browse login https://app.example.com   # headed window for SSO/MFA
-agent-do browse login done --save mysite        # transfer auth to headless
-agent-do browse session load mysite             # instant auth next session
-```
-
-### GitHub review work
-
-```bash
-agent-do gh inbox
-agent-do gh audit owner/repo#123 --reply --probe-deploys
-```
-
-`gh audit` inspects PR metadata, checks, unresolved threads, changed files,
-diff content, lockfile blast radius, and deployment hints, and can draft
-engineering review text with concrete fix guidance.
-
-### Visual QA
-
-```bash
-agent-do browse open http://localhost:7847
-agent-do dpt score          # scores the page open in the browse daemon
-agent-do dpt violations     # fix list sorted by impact
-```
-
-### Live desktop control
-
-Commands that drive the visible desktop or a real browser window require an
-explicit runtime modifier, scoped and time-bounded:
-
-```bash
-agent-do +live(scope=desktop,ttl=15m) macos click @g5
-```
-
-## The Work OS
-
-Four subsystems turn a fleet of agents into a team: a shared backlog, a live
-coordination board, project memory, and the hooks that feed all three into
-every session without being asked.
-
-### Work boards
-
-`agent-do manna` is git-backed issue tracking built for agents. `.manna/` is
-the only backlog; every actionable item pairs with one portable work order in
-`.handoff/`; session claims mean two agents can never work the same item, and
-a claim is proven by a private token, not a label. Every issue is a **track**
-(a named program), an **item** on a track, or a **dream** (raw intake — parked
-until a human converts or closes it). Commits that advance an item cite it
-with a `Manna: mn-xxxxxx` trailer, so the history itself is the receipt.
-
-```bash
-agent-do manna init                    # once per repo (migrate admits a legacy board)
-agent-do manna create "Fix auth redirect" --track mn-a1b2c3 --source "docs/auth-audit.md"
-agent-do manna order mn-d4e5f6 1       # first-class priority
-agent-do manna claim mn-d4e5f6         # before working
-agent-do manna done mn-d4e5f6          # when verified
-agent-do manna dream "Cache the registry parse"   # park an idea
-```
-
-Three commands keep the board honest. `lint` checks the grammar. `sync`
-converges the generated work-order names and index. `reconcile` is receipts
-over testimony: it reads git history for trailers, probes whether claiming
-sessions are still alive, and checks blockers against actual state instead of
-trusting what the board says about itself — `--fix` applies the two repairs
-that need no judgment (abandon dead claims, unblock resolved blockers).
-
-Boards also carry a portable federation identity: an item can cite work on
-another repository's board (`manna relate mn-a1b2c3 --kind informed_by --to
-manna://<board-id>/<issue-id>`), the declaration travels with git, and
-resolution degrades honestly to `unavailable` when the counterpart board is
-absent. Lineage only — no relation ever changes claim, block, or done state
-in either repository.
-
-The machinery that keeps all of this true under crashes and concurrency —
-authenticated write-ahead journals, sealed handoffs, ownership proofs,
-strict-board validation, ordered filename presentation — is documented in
-[ARCHITECTURE.md](ARCHITECTURE.md)'s Manna Subsystem.
-
-### The human window
-
-<p align="center">
-  <img src="assets/manna-serve-board.png" alt="The manna serve cockpit: board sheet with digests, an item selected, its AI summary in the inspector" width="900" />
-</p>
-
-`agent-do manna serve` starts one local daemon on `127.0.0.1:7777` and prints
-your board's URL. The front page lists every registered board with counts that
-mean what they say — each number links to exactly the items it counts. A
-board page is a cockpit: an inbox where every ask carries the verb you perform
-(grant · rule · split · close · read · launch) as a clickable button that runs
-the matching manna verb under the daemon's own identity; the board with
-one-line model-written digests, filters, and a timeline mode; coordination
-with live session pulse; an inspector with a collapsible AI summary per item;
-and a bar that greps as you type and, on Enter, asks a model a question
-answered from the board's own rows, citing item ids. Read-only by contract for
-agents — they keep `manna context|list|show` — and loopback-only by design.
-
-### Multi-agent coordination
-
-```bash
-agent-do coord touch
-agent-do coord peers
-agent-do coord focus set "private Render networking" --path render.yaml --phase building
-agent-do coord claim render.yaml --reason "blueprint wiring"
-agent-do coord interrupts
-```
-
-`coord` is a shared state board, not an agent chat system. Presence is
-liveness-verified: a dead session can never read as an active peer. Agents
-declare roles (builder, auditor, researcher, overseer) with exclusive-writer
-territories, place advisory claims on paths, publish artifacts, drop file
-pointers for each other, and read contention, notice, dependency, and novelty
-interrupts derived from all of it. A warn-only pre-commit guard
-(`agent-do coord guard install`) flags commits that touch another agent's live
-claims. Every Claude Code hook event also feeds a per-session **pulse** —
-status, latest prompt, current tool, todo progress, no model involved — and
-`coord peers` sorts attention-first so whoever needs you sits at the top.
-
-### Memory
-
-Two memory systems with a clean division of labor:
-
-| | `context` | `zpc` |
-|---|---|---|
-| Holds | External reference docs | Lessons and decisions from real work |
-| Question it answers | What do the docs say? | What did we learn using them? |
-| Scope | Global (`~/.agent-do/context/`) | Per-project (`.zpc/`) |
-| Typical calls | `context retrieve`, `context fetch-llms` | `zpc learn`, `zpc decide`, `zpc patterns` |
-
-### The ambient loop
-
-With the Claude Code hooks installed, board-driven work needs no ceremony:
-
-- **SessionStart** pins `AGENT_DO_COORD_SESSION` and persists the Claude or
-  Cursor host session id. Manna derives its private ownership proof from that
-  stable id under a machine-local key, so claims survive process restarts
-  without making the public owner label a credential. The hook then injects
-  the current board into context. If the previous session left unresolved
-  drift, the greeting includes it.
-- **SessionEnd** retires coordination presence and runs a bounded
-  `manna reconcile --write-drift` advisory, leaving findings in
-  `.manna/drift.yaml` for the next session's greeting.
-
-Everything is presence-gated: repositories without a `.manna/` board see none
-of it. Codex supplies its opaque thread id directly; Manna derives the same
-stable ownership proof under the machine-local key outside the repository.
-
-The wider hook model stays non-blocking by design: hooks suggest relevant tools
-at session start, route fuzzy user prompts to likely `agent-do` commands,
-surface coordination context when another agent is active in the same project,
-and record outcome telemetry so nudges can be measured instead of guessed. No
-hook hard-blocks work.
-
-## Configuration
-
-### Credentials
-
-```bash
-agent-do creds required render            # what a tool needs
-agent-do creds store RENDER_API_KEY --stdin
-agent-do creds check --tool render
-```
-
-`creds required` is the public setup contract for every tool: required keys,
-optional keys, and feature-specific notes when a tool can run partially without
-a key. The dispatcher, router, and health checker resolve declared tool secrets
-from the secure store automatically, so secrets never appear in command
-arguments, shell history, or docs.
-
-### Internal model roles
-
-Tools that need an LLM internally resolve it by role (fast, vision, deep)
-through `models.yaml` instead of hard-coding model IDs. `agent-do models
-resolve <role>` returns the current provider and model, and `agent-do models
-doctor` verifies the configured lists.
-
-## Architecture
-
-At runtime, the core is plain:
-
-```text
-agent-do <tool> <command>
-        |
-        v
-tools/agent-<name>
-```
-
-The supporting layers are:
-
-- `registry.yaml` for tool metadata, routing hints, and contracts
-- `models.yaml` for internal model roles
-- `tools/` for tool implementations
-- `lib/` for shared helpers
-- `hooks/claude/` and `hooks/codex/` for harness integration
-- `bin/` for routing, health, bootstrap, and discovery
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system map.
-
-## Requirements
-
-- GNU Bash 4.4+
-- Python 3.10+
-- Node.js 18+ for browser tooling
-- Rust for `manna`
-- `tmux` for terminal-session tooling
-- Optional API keys for providers you want to use
-
-Install Python dependencies with:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Security
-
-Do not put secrets in repos, logs, screenshots, or review comments. Use
-`agent-do creds` for API keys and tokens; declared secrets resolve from the
-secure store at execution time.
-
-`agent-do context` fetches public reference material without browser cookies or
-saved auth state. HTML sources are cached locally with raw provenance plus
-extracted searchable text. Agent-facing context output redacts common token,
-key, secret, signature, password, auth, and credential query parameters.
-
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
-
-## Development
-
-Run the root smoke suite:
-
-```bash
-./test.sh
-```
-
-Selected deeper checks:
-
-```bash
-cd tools/agent-browse && npm test
-cd tools/agent-manna && cargo test
-bash tools/agent-context/test/integration.sh
-bash tools/agent-manna/test/integration.sh
-```
-
-Contribution guidance lives in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+It needs GNU Bash 4.4 or newer (macOS ships 3.2; `brew install bash` first), Python 3.10 or newer, Node 18 or newer for the browser tool, and Rust if you want the work board built locally. The installer symlinks the command, installs the foreman's scripts, asks before registering them (registration is what makes them fire; an unregistered hook is inert), and runs a health check. From then on the human types nothing. Workers pick up the tools and run the shop. The one thing a human may be handed back is a link to the job list on `127.0.0.1:7777`, where the shift can be watched.
+
+## Why it holds together
+
+Every part of the shop trades in one unit, the receipt, and that is why the parts are one system rather than a collection. The vessel produces receipts: a snapshot before every act and a check after it, so a worker's claim to have done something arrives with the thing that shows it. The sign-in sheet is a receipt of presence, verified against the operating system rather than asserted. A claim on the job list is a receipt of ownership, a proof rather than a name. A commit trailer is a receipt in git, where the shop's own history can be audited against the list on the wall. A journal entry is a receipt of learning that carries the evidence that would overturn it. The foreman's only job is moving receipts across the boundary between shifts, reading them in at clock-in and writing them out at clock-out. And the owner rules on receipts through the window, never on testimony. Take any one institution away and the others still run; take the receipt away and none of them do. That is the whole dharma in one rule, and it is the property that lets a worker vanish mid-shift without loss and lets a stranger continue the work as if it were their own.
+
+The shop is also its own first customer. This repository was built inside the institutions it describes: 537 commits, 159 with a board trailer, 334 with a co-author line naming a model or an editor, twelve co-author identities in the log, and one person behind 496 of the 537. The job list you read about is the list that scheduled the work; the journal is the one the work was learned in; the contracts gate was turned on this catalog first, with a grandfather list ratcheted to empty and then deleted. Nothing here was enforced on anyone else before it was enforced here.
+
+## Built while building
+
+Nor was it built in a quiet room and taken to market afterward. It was cut in the middle of a body of work by one person and a fleet, and every one of those builds runs on it today:
+
+- **Aldebaran Group**, an estate of `dm-*` repositories built as a supply chain, instrument to vault to packaging to kitchen to menu, under one law: consumers consume contracted faces, and nothing touches an engine directly. The instrument measures astronomical truth with every quantity stamped and a refusal in place of every guess; a governance layer holds every judgment number as proposed until the owner ratifies it; a deep-science lane points many symbolic frames at one floor; the kernel serving production today has a byte-frozen predecessor as its witness and a greenfield successor on paper, behind a gate that bars the old code as an ingredient. 292 commits at the root and 195 in the instrument; 242 board entries; 179 work orders; 106 lessons.
+- **Versova Supply**, where a floor manager at an egg producer asks the ERP a question in plain English and gets an answer that arrives with its receipts. The agent has nothing to answer from except its tools: ten purpose-built, read-only ones (look up an item; pull its purchase history; search 100 indexed machine manuals; recommend an order against Min/Max; translate a GL code; total a vendor's spend; search every column of the transaction record; and, for packaging, demand forecast, inbound loads, and days on hand) plus one escape hatch, a single read-only SELECT over curated views whose executed SQL is attached to the answer so the operator sees exactly what ran. Every claim about a manual must cite the PDF chunk and page; every claim about buying must cite the tool that returned it; a source no tool returned this turn cannot be cited; text inside manuals and rows is evidence and never instruction. A parts answer cross-references by rule: what the manual says the part is, and whether the company actually buys it, from whom, at which site, requested by whom. Part numbers and vendor names are fuzzy-merged and the merge is shown, and a part named in chat opens as a card. So "which grease do we buy most for this model of grader, at which facility, and who does the buying" is one question with one grounded answer, and when the evidence is thin the agent says what is known, what is missing, and the next step. Read-only against the ERP by contract. 265 commits since May, 116 with trailers; 101 board items, 88 done; 19 lessons.
+- **Versova Research**, a strategic-intelligence platform whose contract is a request in and a twenty-to-forty-page report out, in hours, of the kind a strategy consultancy bills weeks for. Two pipelines share one chain of gates. External research sends eight specialists out into the world (market, technology, finance, data, competitive, regulatory, implementation, risk) with source-tiered citations. Internal analysis takes uploaded spreadsheets, data files, and documents and puts eight other specialists on them (data engineering, statistics, simulation, visualization, domain, financial, risk, implementation): the data science the company used to buy from a university, ten thousand dollars and a month's wait for one trial's analysis, now runs in a few hours for about forty dollars. Before either swarm runs, a three-reviewer pre-flight panel plus a chair reads the whole input for reality, logic, and sufficiency, and pauses the job when a human must decide. After it, a panel of three readers drawn across labs and verified by a different lab returns a verdict in plain code, remediation is held to two bounded rounds, two independent judges classify the report at publish time, and a single publish authority checks ownership and the exact hash of the reviewed input, compares and sets, reads its own write back, and only then notifies. Reports leave as PDF, slides, and audio through an authenticated portal. 550 commits; 32 board items, 18 done; 23 work orders; 44 lessons.
+- **Palingenesis**, an autonomous innovation system for any field with a body of prior research: construction, health care, agriculture, wherever the written record of what humans have tried can be pattern-matched across time and turned into new ideas that carry a lineage, each one born of parents and mutations, judged, and then proven in simulation before anyone spends a dollar on real-world R&D. The purpose is economic: make regenerative practice cheaper than extraction, one proven idea at a time. Regenerative egg production is the first proof and the first market. The plant is five wheels that each own their database schema and runtime boundary and speak only through events: Eureka ingests research into a knowledge graph and runs durable research commissions; Symbiont scores alignment, manages attractors, and detects drift; Innovation generates candidates it calls prophets, has a twenty-five-agent council evaluate them, evolves the survivors, and keeps a long memory; the Simulator, in Rust, runs council debate against physics and systems models; Portfolio turns what survives into market intelligence, intellectual property, and revenue plans. Over all of it sits a SCADA-style command center with tracing, metrics, and a gateway, and one launcher that brings the whole plant up. 408 commits; 38 board items; 34 work orders; 200 lessons, the largest journal in the estate.
+- **the orient**, a research campaign into one question, whether reality shows evidence of orientation, run under a method rather than an opinion: a claim's strength is the number of independent frames it survives (physics, mathematics, biology, neuroscience, philosophy of mind, first-person report, comparative religion, anthropology, the history of science), so nine candidate lanes each carry a steelman, a deflation, and a stated kill-test, and every candidate ends in exactly one state: strong, weak, retired, or undetermined. Lanes run blind to each other, selected lanes re-run on a different model family and with the framing inverted, the synthesizer never grades its own synthesis, the red team is a fresh session on a different model holding only the artifacts, and its findings enter the report unedited. Phase one was ratified after four review sittings, with two campaign laws ruled on the way; the deliverable is a ledger, and "underdetermined, and here is exactly why" counts as success. 87 commits in 12 days, 82 with trailers; 46 board items, 29 done; 28 lessons.
+- **Scale Mechanics**, a standing experiment in steering frontier models toward new, verified physical theory, whose payload is a scale-dependent information-processing account of measurement, gravity, and cosmology. Three generations are preserved in full: the raw first draft, the forensic sweep that found fourteen fatal defects in it, the repairs, and the gauntlet that certified the third; verifier fleets ran until two consecutive independent passes found nothing. Every headline number is computed by the repository's own derivation engine from stated inputs and locked by a test that fails if the paper and the code ever disagree. The record states its own limit, that adversarial self-verification cannot certify physical truth, so five kill conditions are registered in advance for reality to grade, among them a neutrino mass sum and a dark-energy sign. 19 commits, 12 with trailers; 14 board items; 15 work orders; 30 lessons.
+- **Holy Ghostty**, the fleet's cockpit: a product fork of the Ghostty terminal in which the unit is a session, never a tab. Claude, Codex, OpenCode, and shell sessions run on tmux, locally or over SSH, in a roster that shows each agent's state through a six-state indicator fed by the agent's own lifecycle hooks, notifies once and deterministically when one replies, needs you, or fails, tracks every session's git snapshot and worktree, joins GitHub attention, alerts, and board triage into one inbox, and after a tmux server dies restores every interrupted session to the exact conversation it was in. The next release watches the account's usage windows once a minute and tells every running session to checkpoint and pause before a cap lands. 91 Swift files and 44,926 lines on top of upstream, with 14,817 lines of tests; 271 commits of its own since April; 102 trailers; 73 work orders; 86 board items.
+- **The expense pipeline**, small, and the same law at desk scale. It collects invoice PDFs from three sources (a mailbox queried over the Graph API, 318 receipts on the first pass; vendor billing portals driven through a real browser, plus a browserless sweep of Stripe-hosted invoices; and manual drops), matches each to an expense with a three-tier scoring engine (merchant plus date within three days plus amount within a dollar, then merchant plus date within a week, then merchant alone), fills the expense system's five fields, attaches the receipt, and carries a cleanup path for attachments it got wrong. Its own handoff records the day a lazy fallback attached the alphabetically first of eighty receipts to every matching expense, two to four times over, against a system with no bulk delete: the cheapest lesson this estate ever paid for receipts over testimony.
+
+Each of the seven larger builds carries a board, sealed work orders, a sign-in sheet, and a journal, because each is built by the same person with the same fleet under the same rules, and the rules were cut where the builds broke: the sign-in sheet was rebuilt around incidents from multi-session builds, the design scorer was demoted to a floor check the week the Palingenesis redesign was about to ship on its say-so, and the policy layer now on the board began as a claim-enforcement problem inside a Versova build. None of those could be run without this. This could not have been built without them. Those are the receipts.
+
+## Where this is going
+
+Three moves, all on the board, in a program the board calls Moon: seven trunks lettered A through G, one already done.
+
+**The agent operating system.** Today the shop's rules live in the tools. The next layer makes them data: one committed policy file per repository or organization stating which model tiers may take which class of work, how a job may be claimed, and what evidence a commit must carry. The harness stamps every commit with the model, effort, and session that produced it (the design's own reason: models misreport, so the harness writes the stamp). A session checks its own floor before it spends a token, and the merge gate refuses anything under-floor, unclaimed, out of order, or unproven. Advisory in the session, binding at the gate: no worker is bricked mid-flight, and nothing silent reaches main. The six questions the design says a team should never have to ask aloud (what next, who has it, is my branch current, was the model strong enough, can we prove it, what is actually live) become answers the machine gives all day.
+
+**Multiple humans in the loop.** The same ambient loop that serves the workers serves the people. A developer on the team gets the job list at session start, claims with one command that also assigns the GitHub issue (the atomic claim the whole team sees within seconds), and has evidence stamps written by installed hooks without thinking about them. The owner's window becomes the team's window, with each ask routed to whoever holds that decision. And the shop already spans buildings: since v1.5 every board carries a portable identity (this one is `mb-615bf342bcb87e41e7d54a7c6c0b84ae`) and can cite work on another repository's board, so a program that crosses repositories stays one graph, and a missing counterpart degrades to "unavailable" instead of a broken link.
+
+**The complete outer harness for any inner harness.** The inner harness (Claude Code, Codex, Cursor, whatever ships next) does the thinking. agent-do is everything around it: the vessel, the sign-in sheet, the job list, the journal, the foreman, the receipts, the window. Hooks ship for three inner harnesses today (twelve scripts for Claude Code, six for Codex, four for Cursor), and any inner harness that can run a shell command can pick up the tools without hooks at all, because the shell is the contract. The dharma never moves when the model does. Swap the inner harness or the model mid-program: the same board, the same receipts, the same journal, the same rules. A company can change who sits at the bench without changing the company.
+
+## What it means that this exists
+
+A team that runs ten agents without something like this pays for the same job twice, starts blocked work because the dependency graph lived in a document nobody read, ships work from a model that was too weak for it, and cannot say a month later which model wrote which commit. The usual remedy is to ask the people to be careful, and carefulness is a property of a person, which does not scale to five developers and ten agents with the lead asleep. This is the other remedy: a dharma held in the machine, so that nobody has to be careful. A vessel whose every act keeps a receipt, and a shop that reads the receipts to whoever arrives next. Intelligence is now the cheap part. What is scarce is an institution that intelligence can work inside of without remembering that it exists, and that is what was built here, on itself and on seven real builds, first.
+
+Give the mind a vessel whose every act keeps a receipt, and build every institution as if no habit survives the shift, because here none does; the handoff, never the recollection, is the continuity.
+
+The full system map is in [ARCHITECTURE.md](ARCHITECTURE.md); hook wiring is in [docs/INTEGRATION.md](docs/INTEGRATION.md); the tool catalog is generated into [docs/TOOLS.md](docs/TOOLS.md). MIT license.
