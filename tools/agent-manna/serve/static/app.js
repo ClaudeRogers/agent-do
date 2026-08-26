@@ -347,7 +347,7 @@ function bindCopy() {
 // cell. The font is monospace, so width = characters × advance, measured
 // once from the live font; the user may drag any grip (stored per browser)
 // and double-click it to return to the fit.
-const COLS_KEY = "manna-serve-cols";
+const COLS_KEY = "manna-serve-cols-v2"; // v2: widths stored under the old key were fitted by a buggy measure
 const COLS = {
   board:   [{ h: "" }, { h: "id", v: "--w-id", sel: ".id" }, { h: "digest", flex: true }, { h: "track", v: "--w-track", sel: ".track", max: 30 }, { h: "state", v: "--w-state", sel: ".pill", max: 24 }, { h: "#", v: "--w-prio", sel: ".prio" }],
   inbox:   [{ h: "" }, { h: "kind", v: "--w-kind", sel: ".kind" }, { h: "ask", flex: true }, { h: "verb", v: "--w-verb", sel: ".verb, .verb-group" }],
@@ -371,8 +371,8 @@ function colsHeader(kind, relabel) {
     if (i <= flex) {
       // Left of the flex column: a right-edge grip resizes this column and
       // the flex absorbs the difference, so this boundary moves as dragged.
-      if (!c.v) return `<span>${esc(h)}</span>`;
-      return `<span>${esc(h)}<span class="grip grip-right" data-grip="${c.v}" data-dir="1" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
+      if (!c.v) return `<span><span class="hl">${esc(h)}</span></span>`;
+      return `<span><span class="hl">${esc(h)}</span><span class="grip grip-right" data-grip="${c.v}" data-dir="1" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
     }
     const prev = cols[i - 1];
     // Right of the flex column the widths sum to a constant (flex takes the
@@ -383,7 +383,7 @@ function colsHeader(kind, relabel) {
     const grip = prev.flex
       ? `<span class="grip grip-left" data-grip="${c.v}" data-dir="-1" data-kind="${kind}" title="drag · double-click to refit"></span>`
       : `<span class="grip grip-left" data-grip="${prev.v}" data-dir="1" data-take="${c.v}" data-kind="${kind}" title="drag · double-click to refit"></span>`;
-    return `<span>${esc(h)}${grip}</span>`;
+    return `<span><span class="hl">${esc(h)}</span>${grip}</span>`;
   }).join("")}</div>`;
 }
 function fitColumns(container, kind) {
@@ -391,14 +391,21 @@ function fitColumns(container, kind) {
   if (!charAdvance) measureAdvance();
   const stored = loadCols()[kind] || {};
   const rowSel = kind === "board" ? ".row:not(.inbox):not(.peer):not(.claim):not(.drop):not(.finding)" : `.row.${kind}`;
-  for (const c of cols) {
-    if (!c.v) continue;
-    if (stored[c.v]) { container.style.setProperty(c.v, `${stored[c.v]}px`); continue; }
+  const headers = container.querySelectorAll(`.cols.${kind} > span`);
+  cols.forEach((c, idx) => {
+    if (!c.v) return;
+    if (stored[c.v]) { container.style.setProperty(c.v, `${stored[c.v]}px`); return; }
+    // Measure real pixels: char-count × advance drifts a few px per cell and
+    // the drift becomes a horizontal scrollbar. The header is the floor, so
+    // an empty column (nobody holding anything) never collapses under its
+    // own label.
     let max = 0;
-    container.querySelectorAll(`${rowSel} :is(${c.sel})`).forEach((el) => { max = Math.max(max, el.textContent.trim().length + (el.classList.contains("verb-group") ? 3 : 0)); });
-    if (c.max) max = Math.min(max, c.max); // long values clip with ellipsis; the full text rides the cell's title
-    container.style.setProperty(c.v, max ? `${Math.ceil(max * charAdvance) + 2}px` : "auto");
-  }
+    container.querySelectorAll(`${rowSel} :is(${c.sel})`).forEach((el) => { max = Math.max(max, el.scrollWidth + (el.classList.contains("verb-group") ? 3 * charAdvance : 0)); });
+    if (c.max) max = Math.min(max, Math.ceil(c.max * charAdvance)); // clip long values; the full text rides the cell's title
+    const label = headers[idx]?.querySelector(".hl");
+    if (label) max = Math.max(max, Math.ceil(label.scrollWidth) + 6);
+    container.style.setProperty(c.v, max ? `${Math.ceil(max) + 4}px` : "auto");
+  });
 }
 function bindGrips() {
   $$(".grip").forEach((g) => {

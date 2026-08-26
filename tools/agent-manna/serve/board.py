@@ -488,8 +488,10 @@ def derive(
     issues = read_issues(board_dir)
     order = read_order(board_dir)
     drift_file = read_drift(board_dir)
-    if drift_live is None and live:
-        drift_live = live_drift(root, agent_do)
+    # No silent recompute when drift was not handed in: reconcile serializes
+    # on the board lock (measured 40s+ under contention), so the caller owns
+    # when it runs and the written drift file carries the meantime, with its
+    # age beside it.
     if drift_live:
         drift = {**drift_live, "source": "reconcile", "present": True, "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
     else:

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Cockpit pages never wait on reconcile: live drift computes in a background thread per board (reconcile serializes on the board lock; measured 40s+ of convoy on a busy 242-row board), the page ships the last finished findings with the drift file's age beside them, and the stream pushes the fresh result when it lands. A board's full state on the worst measured board: 47s → 1.6s.
+- The daemon watches its own source and restarts in place when the code on disk changes; previously only a CLI touch noticed, and an untouched daemon served day-old code indefinitely (observed).
+- Column fitting measures real pixels with the header label as a floor (inline labels get a box; a stretched header span reports its column width, which ratcheted columns wider on every fit). Fixes clipped AGE cells, the sliver horizontal scrollbar, empty columns collapsing under their labels, and the ragged STATE column on sparse boards.
+- The coordination sheet paints from the fast state too, with presence included whenever the daemon's bundle is warm.
 - Cockpit columns behave on boards with long track names: track and state columns clamp with ellipsis (full text in the tooltip), leading `[TRACK]`-style markers are stripped from display, and a boundary drag between two fixed columns transfers width across that boundary so the divider you grab is the divider that moves. Long blocker lists no longer crush the digest column.
 - The cockpit resolves coord state through the coord tool script instead of the agent-do dispatcher, cutting each presence refresh from 1.5-2s (worse under load) to ~0.4s; the two serve HTTP tests that flaked under machine load pass again.
 - `manna serve` no longer assumes port 7777: the first run asks the OS for a free port and keeps it in `$AGENT_DO_HOME/manna/serve/config.json`, so printed URLs stay stable without colliding with whatever another machine already runs there; `--port` and `MANNA_SERVE_PORT` override one invocation. README screenshots retaken at full resolution and linked to their originals so a click zooms.

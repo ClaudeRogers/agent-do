@@ -190,6 +190,7 @@ table.boards td.nowrap { white-space: nowrap; }
 /* column header: one per list kind, with drag grips; double-click a grip to refit */
 .cols { display: grid; column-gap: var(--s3); align-items: center; height: 22px; color: var(--faint); font-size: var(--t-meta); letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid var(--line); user-select: none; }
 .cols > span { position: relative; white-space: nowrap; }
+.cols .hl { display: inline-block; } /* inline spans report scrollWidth 0; the fit floor needs a box */
 .cols .grip { position: absolute; top: -4px; width: 9px; height: 30px; cursor: col-resize; }
 .cols .grip-right { right: -8px; } .cols .grip-left { left: -8px; }
 .cols .grip::after { content: ""; position: absolute; left: 4px; top: 6px; width: 1px; height: 18px; background: var(--line); }

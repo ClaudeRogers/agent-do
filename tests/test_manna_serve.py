@@ -292,7 +292,13 @@ class LiveDerivationTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.root = make_board(Path(cls.tmp.name) / "proj")
         cls.stub = make_stub_agent_do(Path(cls.tmp.name))
-        cls.state = board_lib.derive(cls.root, agent_do=cls.stub, live=True)
+        # The caller owns drift now: reconcile serializes on the board lock
+        # (measured 40s+ under contention), so derive never recomputes it
+        # silently; serve hands in a background-computed value the same way.
+        cls.state = board_lib.derive(
+            cls.root, agent_do=cls.stub, live=True,
+            drift_live=board_lib.live_drift(cls.root, cls.stub),
+        )
         cls.by_id = {r["id"]: r for r in cls.state["all"]}
 
     @classmethod
