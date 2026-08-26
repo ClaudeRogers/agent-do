@@ -46,7 +46,7 @@ The worker's reach stops at the edge of the human's desktop. Commands that drive
 
 A worker holding good tools still cannot feel the others in the room, and several agents routinely work one repository at once. So the workshop keeps a sign-in sheet under the repository's git directory, and it verifies the sheet against the operating system: a session counts as present only if its process still exists and that process's start time matches the one recorded, which is why a recycled process id can never wear a dead worker's identity. A session unseen for 48 hours turns idle; a dead one is marked dead and swept after 24 hours. Workers declare a role (builder, auditor, researcher, overseer), a goal, and the paths they own; two builders whose paths overlap are both interrupted, with the overlapping paths named, and an auditor stepping onto a builder's paths sends a courtesy notice. Handoffs between live workers are pointers to files on the sheet; no mailbox exists. The sheet also carries a pulse fed by the host program's own events: whether a worker is working, waiting on the human, failed, or finished, and what it last touched.
 
-<p align="center"><img src="assets/manna-serve-coord.png" alt="The coordination sheet: liveness-verified workers with focus and holdings, a selected worker in the inspector, and live path claims" width="900"></p>
+<p align="center"><a href="assets/manna-serve-coord.png"><img src="assets/manna-serve-coord.png" alt="The coordination sheet: liveness-verified workers with focus and holdings, a selected worker in the inspector, and live path claims" width="900"></a></p>
 
 ## The job list on the wall (manna)
 
@@ -72,9 +72,9 @@ What a shift leaves behind is what the next shift trusts. A commit that advances
 
 ## The owner's window
 
-One human owns the workshop. The owner converts dreams into items (a worker who tries to claim a dream is refused with exit code 2, the code this system uses for "stopped on purpose, needs a human," and nothing is written) and rules on the questions the machine flags, looking in through `manna serve`: a page on `127.0.0.1:7777`, reachable only from this machine, that workers are handed the address of and never read from. Its inbox lists every ask in one shape, who is asking and what for, with the verb the owner performs as a button that runs exactly that one board command.
+One human owns the workshop. The owner converts dreams into items (a worker who tries to claim a dream is refused with exit code 2, the code this system uses for "stopped on purpose, needs a human," and nothing is written) and rules on the questions the machine flags, looking in through `manna serve`: a page on a loopback port only this machine can reach, picked free on first run and kept thereafter so the address stays stable, that workers are handed and never read from. Its inbox lists every ask in one shape, who is asking and what for, with the verb the owner performs as a button that runs exactly that one board command.
 
-<p align="center"><img src="assets/manna-serve-board.png" alt="The owner's window: the job list with one-line digests, an item selected, its summary and receipts in the inspector" width="900"></p>
+<p align="center"><a href="assets/manna-serve-board.png"><img src="assets/manna-serve-board.png" alt="The owner's window: the job list with one-line digests, an item selected, its summary and receipts in the inspector" width="900"></a></p>
 
 ## The one thing a human does
 
@@ -86,7 +86,7 @@ cd agent-do
 ./install.sh
 ```
 
-It needs GNU Bash 4.4 or newer (macOS ships 3.2; `brew install bash` first), Python 3.10 or newer, Node 18 or newer for the browser tool, and Rust if you want the work board built locally. The installer symlinks the command, installs the foreman's scripts, asks before registering them (registration is what makes them fire; an unregistered hook is inert), and runs a health check. From then on the human types nothing. Workers pick up the tools and run the shop. The one thing a human may be handed back is a link to the job list on `127.0.0.1:7777`, where the shift can be watched.
+It needs GNU Bash 4.4 or newer (macOS ships 3.2; `brew install bash` first), Python 3.10 or newer, Node 18 or newer for the browser tool, and Rust if you want the work board built locally. The installer symlinks the command, installs the foreman's scripts, asks before registering them (registration is what makes them fire; an unregistered hook is inert), and runs a health check. From then on the human types nothing. Workers pick up the tools and run the shop. The one thing a human may be handed back is a link to the job list, where the shift can be watched.
 
 ## Why it holds together
 

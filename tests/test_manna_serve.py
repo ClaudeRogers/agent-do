@@ -144,6 +144,28 @@ class DerivationTests(unittest.TestCase):
         self.assertNotIn("claim_token_hash", payload)
         self.assertNotIn("legacy_migration", payload)
 
+    def test_port_is_picked_free_once_and_kept(self) -> None:
+        # No shipped default port: first resolution asks the OS for a free
+        # one and persists it; every later resolution returns the same.
+        import importlib
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("AGENT_DO_HOME")
+            os.environ["AGENT_DO_HOME"] = tmp
+            try:
+                importlib.reload(serve_lib)
+                first = serve_lib.resolved_port()
+                second = serve_lib.resolved_port()
+                self.assertEqual(first, second)
+                self.assertTrue(0 < first < 65536)
+                on_disk = json.loads((Path(tmp) / "manna" / "serve" / "config.json").read_text())
+                self.assertEqual(on_disk["port"], first)
+            finally:
+                if old is None:
+                    os.environ.pop("AGENT_DO_HOME", None)
+                else:
+                    os.environ["AGENT_DO_HOME"] = old
+                importlib.reload(serve_lib)
+
     def test_rows_carry_both_timestamps_for_the_recent_view(self) -> None:
         # The recent chip sorts on updated_at and the inspector shows
         # filed (created_at) beside touched (updated_at); both must ship.

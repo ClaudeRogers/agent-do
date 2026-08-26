@@ -435,7 +435,7 @@ with no claim.
 ### The human window (`manna serve`)
 
 `agent-do manna serve` is the read cockpit for humans: one daemon on
-`127.0.0.1:7777` (Python, `tools/agent-manna/serve/`, beside the Rust core)
+a stable loopback port, picked free on first run and kept in `$AGENT_DO_HOME/manna/serve/config.json` (Python, `tools/agent-manna/serve/`, beside the Rust core)
 renders every registered board at `/` — effective counts per board, each number
 linking to the exact section it counts — and each project at `/<name>` with
 three sheets (inbox · board · coordination), an inspector, a ⌘K jump/ask bar,

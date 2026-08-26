@@ -54,7 +54,7 @@ SYSTEM = (
 
 EXAMPLES = f"""Examples of good digests (each counted, all under {DIGEST_MAX_CHARS} characters):
 - Add gh issue verbs and pr create --declare to the gh tool  (57)
-- Render the board as a live read-only page on port 7777  (51)
+- Render the board as a live read-only page on the local port  (51)
 - Refuse batch promotion to global; one lesson per call  (52)
 - Warn at install when a hook wrapper has no registration  (55)
 - Stop the write-nudge misreading a bound worktree  (49)

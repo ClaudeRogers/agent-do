@@ -43,9 +43,12 @@ import digest as digest_lib  # noqa: E402
 STATIC_DIR = SERVE_DIR / "static"
 AGENT_DO = Path(os.environ.get("MANNA_SERVE_AGENT_DO") or (SERVE_DIR.parents[2] / "agent-do"))
 
-# 7777 is a name, not a bound: chosen 2026-08-24 for a port anyone on
-# the estate can remember. Override with --port or MANNA_SERVE_PORT.
-DEFAULT_PORT = 7777
+# The port is machine-local configuration, never a shipped constant: one
+# machine's memorable number is another machine's occupied port. First run
+# asks the OS for a free port (bind to 0), persists the pick in
+# $AGENT_DO_HOME/manna/serve/config.json, and every later run reuses it, so
+# printed URLs and bookmarks stay stable. --port and MANNA_SERVE_PORT
+# override one invocation without rewriting the config.
 DEFAULT_HOST = "127.0.0.1"
 SERVER_NAME = "manna-serve"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
@@ -94,6 +97,29 @@ def serve_home() -> Path:
 
 def registry_path() -> Path:
     return serve_home() / "boards.json"
+
+
+def config_path() -> Path:
+    return serve_home() / "config.json"
+
+
+def resolved_port() -> int:
+    """The daemon's stable port: read from config, or pick a free one once."""
+    import socket
+
+    try:
+        port = int(json.loads(config_path().read_text())["port"])
+        if 0 < port < 65536:
+            return port
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((DEFAULT_HOST, 0))
+        port = probe.getsockname()[1]
+    tmp = config_path().with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"port": port}) + "\n")
+    tmp.replace(config_path())
+    return port
 
 
 def identity_path() -> Path:
@@ -879,13 +905,15 @@ Human window onto the board. Read-only. Agents keep `manna context|list|show`.
 
 Running inside a project registers its board with the estate daemon, starts
 the daemon if needed, and prints the project URL:
-  http://127.0.0.1:7777/<project>      this board
-  http://127.0.0.1:7777/               every registered board
+  http://127.0.0.1:<port>/<project>    this board
+  http://127.0.0.1:<port>/             every registered board
 
 Options:
   --open           open the project page in the default browser
   --json           machine-readable result
-  --port N         daemon port (default 7777, or MANNA_SERVE_PORT)
+  --port N         daemon port (default: free port picked on first run and
+                   kept in $AGENT_DO_HOME/manna/serve/config.json; env
+                   override MANNA_SERVE_PORT)
   --host H         bind address (default 127.0.0.1; keep it local)
   --status         is the daemon up, which boards are registered
   --stop           stop the daemon
@@ -901,7 +929,8 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agent-do manna serve", add_help=False)
     parser.add_argument("--open", action="store_true")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("MANNA_SERVE_PORT", DEFAULT_PORT)))
+    env_port = os.environ.get("MANNA_SERVE_PORT")
+    parser.add_argument("--port", type=int, default=int(env_port) if env_port else None)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--stop", action="store_true")
@@ -910,6 +939,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--foreground", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
     args = parser.parse_args(argv)
+    if args.port is None:
+        args.port = resolved_port()
 
     if args.help:
         print(HELP, end="")

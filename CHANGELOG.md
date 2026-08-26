@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `manna serve` no longer assumes port 7777: the first run asks the OS for a free port and keeps it in `$AGENT_DO_HOME/manna/serve/config.json`, so printed URLs stay stable without colliding with whatever another machine already runs there; `--port` and `MANNA_SERVE_PORT` override one invocation. README screenshots retaken at full resolution and linked to their originals so a click zooms.
 - README rewritten as one essay for the human reader (the workshop, the vessel, the dharma of receipts): every institution presented with its evidence, no agent commands beyond the install, logo plus cockpit and coordination screenshots placed in the sections they depict. Chosen from fifteen candidates across three clean-room rounds.
 - `manna serve`: a `recent` chip on the board sheet renders every entry (items, dreams, done, blocked) as one flat list sorted by last activity with an age column, linkable at `#board/recent`; the inspector now shows `filed` (created) beside `touched` (updated) for every item.
 - UserPromptSubmit hooks no longer time out under load: the prompt router invokes the coord tool script directly instead of paying the dispatcher's per-call interpreter tax twice, defers the provider SDK import until an AI routing call actually happens, and the four UserPromptSubmit hook ceilings rise 5s→10s in the registration spec (lesson les-2a750a).
