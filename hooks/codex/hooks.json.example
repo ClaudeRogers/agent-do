@@ -28,6 +28,12 @@
             "command": "python3 ~/.codex/hooks/agent-do-now-stamp.py",
             "timeout": 5,
             "statusMessage": "Stamping the current time"
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/agent-do-pulse-record.sh",
+            "timeout": 5,
+            "statusMessage": "Recording session pulse"
           }
         ]
       }
@@ -43,6 +49,16 @@
             "statusMessage": "Checking agent-do tool preference"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/agent-do-pulse-record.sh",
+            "timeout": 5,
+            "statusMessage": "Recording session pulse"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -53,6 +69,12 @@
             "command": "python3 ~/.codex/hooks/agent-do-touch-ledger.py",
             "timeout": 5,
             "statusMessage": "Recording touched files"
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/agent-do-pulse-record.sh",
+            "timeout": 5,
+            "statusMessage": "Recording session pulse"
           }
         ]
       }
@@ -65,6 +87,12 @@
             "command": "~/.codex/hooks/stop-quality-gate.sh",
             "timeout": 30,
             "statusMessage": "Finalizing turn"
+          },
+          {
+            "type": "command",
+            "command": "~/.codex/hooks/agent-do-pulse-record.sh",
+            "timeout": 5,
+            "statusMessage": "Recording session pulse"
           }
         ]
       }

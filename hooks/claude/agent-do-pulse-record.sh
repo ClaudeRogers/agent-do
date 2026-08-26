@@ -1,7 +1,9 @@
 #!/bin/bash
-# Pulse hook: forward one Claude Code hook payload (stdin JSON) into coord's
-# per-session pulse telemetry. Registered on UserPromptSubmit, PreToolUse,
-# PostToolUse, Notification, Stop, StopFailure, and SessionEnd.
+# Pulse hook: forward one harness hook payload (stdin JSON) into coord's
+# per-session pulse telemetry. Harness-neutral: Claude Code and Codex emit the
+# same event names and JSON shape, so one script serves both. Registered on
+# UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop, StopFailure,
+# and SessionEnd (Claude); Codex registers the events it fires.
 # Telemetry only and silent by contract: exit 0 always, print nothing, and
 # record only in projects that already run coord — this hook never creates a
 # board where none exists. (Concept from Warp's hook-fed agent status surface;
