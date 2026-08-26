@@ -13,7 +13,7 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 const api = (p) => `/${encodeURIComponent(app.slug)}/${p}`;
 const clip = (t, n) => { const v = String(t || "").replace(/\s+/g, " ").trim(); return v.length > n ? v.slice(0, n - 1) + "…" : v; };
-const shortTrack = (t) => String(t || "").replace(/^\s*track\s*:\s*/i, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+const shortTrack = (t) => String(t || "").replace(/^\s*(?:\[[^\]]{1,24}\]\s*)+/, "").replace(/^\s*track\s*:\s*/i, "").replace(/\s*\([^)]*\)\s*$/, "").trim();
 
 const LABEL = { active: "in progress", ready: "ready", waiting: "blocked", decision: "decision", dream: "dream", done: "done", track: "track" };
 const label = (s) => LABEL[s] || String(s || "").replaceAll("_", " ");
@@ -124,13 +124,14 @@ function itemRow(r, opts) {
   const sel = app.selected?.kind === "item" && app.selected.id === r.id;
   const st = r.effective;
   const needs = st === "active" && r.claimant?.attention === "needs-user";
+  const statePlain = st === "waiting" && r.blockers?.length ? `blocked · ${r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", ")}` : needs ? "needs you" : label(st);
   const stateText = st === "waiting" && r.blockers?.length ? `blocked · <span class="keep-case">${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : esc(needs ? "needs you" : label(st));
   const last = opts?.age ? esc(ago(r.updated_at)) : r.order != null ? `#${r.order + 1}` : "";
   return `<div class="row ${needs ? "s-needs-user" : "s-" + esc(st)}${sel ? " selected" : ""}" data-item="${esc(r.id)}" role="button" tabindex="0">
     <span class="id">${esc(r.id)}</span>
     <span class="digest${r.digest ? "" : " fallback"}" title="${esc(r.title)}">${esc(rowText(r))}</span>
-    <span class="track">${esc(shortTrack(r.track_title))}</span>
-    <span class="pill ${needs ? "c-needs-user" : cls(st)}">${stateText}</span>
+    <span class="track" title="${esc(r.track_title || "")}">${esc(shortTrack(r.track_title))}</span>
+    <span class="pill ${needs ? "c-needs-user" : cls(st)}" title="${esc(statePlain)}">${stateText}</span>
     <span class="prio">${last}</span>
   </div>`;
 }
@@ -348,7 +349,7 @@ function bindCopy() {
 // and double-click it to return to the fit.
 const COLS_KEY = "manna-serve-cols";
 const COLS = {
-  board:   [{ h: "" }, { h: "id", v: "--w-id", sel: ".id" }, { h: "digest", flex: true }, { h: "track", v: "--w-track", sel: ".track" }, { h: "state", v: "--w-state", sel: ".pill" }, { h: "#", v: "--w-prio", sel: ".prio" }],
+  board:   [{ h: "" }, { h: "id", v: "--w-id", sel: ".id" }, { h: "digest", flex: true }, { h: "track", v: "--w-track", sel: ".track", max: 30 }, { h: "state", v: "--w-state", sel: ".pill", max: 24 }, { h: "#", v: "--w-prio", sel: ".prio" }],
   inbox:   [{ h: "" }, { h: "kind", v: "--w-kind", sel: ".kind" }, { h: "ask", flex: true }, { h: "verb", v: "--w-verb", sel: ".verb, .verb-group" }],
   peer:    [{ h: "" }, { h: "session", v: "--w-peer", sel: ".id" }, { h: "focus", flex: true }, { h: "holding", v: "--w-hold", sel: ".track" }, { h: "state", v: "--w-pstate", sel: ".pill" }, { h: "age", v: "--w-age", sel: ".age" }],
   claim:   [{ h: "" }, { h: "path", flex: true }, { h: "owner", v: "--w-owner", sel: ".id" }, { h: "state", v: "--w-cstate", sel: ".pill" }, { h: "age", v: "--w-age", sel: ".age" }],
@@ -367,9 +368,22 @@ function colsHeader(kind, relabel) {
   const cols = COLS[kind]; const flex = cols.findIndex((c) => c.flex);
   return `<div class="cols ${kind}">${cols.map((c, i) => {
     const h = relabel?.[c.h] ?? c.h;
-    if (!c.v) return `<span>${esc(h)}</span>`;
-    const left = i > flex; // right of the flex column: the grip faces it on the left edge
-    return `<span>${esc(h)}<span class="grip ${left ? "grip-left" : "grip-right"}" data-grip="${c.v}" data-dir="${left ? -1 : 1}" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
+    if (i <= flex) {
+      // Left of the flex column: a right-edge grip resizes this column and
+      // the flex absorbs the difference, so this boundary moves as dragged.
+      if (!c.v) return `<span>${esc(h)}</span>`;
+      return `<span>${esc(h)}<span class="grip grip-right" data-grip="${c.v}" data-dir="1" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
+    }
+    const prev = cols[i - 1];
+    // Right of the flex column the widths sum to a constant (flex takes the
+    // rest), so a boundary between two FIXED columns cannot move by resizing
+    // one of them: the drag must transfer width across the boundary (grow the
+    // left column, shrink the right by the same amount). Only the boundary
+    // adjacent to the flex column resizes a single column.
+    const grip = prev.flex
+      ? `<span class="grip grip-left" data-grip="${c.v}" data-dir="-1" data-kind="${kind}" title="drag · double-click to refit"></span>`
+      : `<span class="grip grip-left" data-grip="${prev.v}" data-dir="1" data-take="${c.v}" data-kind="${kind}" title="drag · double-click to refit"></span>`;
+    return `<span>${esc(h)}${grip}</span>`;
   }).join("")}</div>`;
 }
 function fitColumns(container, kind) {
@@ -382,6 +396,7 @@ function fitColumns(container, kind) {
     if (stored[c.v]) { container.style.setProperty(c.v, `${stored[c.v]}px`); continue; }
     let max = 0;
     container.querySelectorAll(`${rowSel} :is(${c.sel})`).forEach((el) => { max = Math.max(max, el.textContent.trim().length + (el.classList.contains("verb-group") ? 3 : 0)); });
+    if (c.max) max = Math.min(max, c.max); // long values clip with ellipsis; the full text rides the cell's title
     container.style.setProperty(c.v, max ? `${Math.ceil(max * charAdvance) + 2}px` : "auto");
   }
 }
@@ -389,14 +404,26 @@ function bindGrips() {
   $$(".grip").forEach((g) => {
     g.addEventListener("mousedown", (e) => {
       e.preventDefault(); g.classList.add("active");
-      const kind = g.dataset.kind, v = g.dataset.grip, container = g.closest(".sheet-body");
-      const startX = e.clientX, startW = parseFloat(getComputedStyle(container).getPropertyValue(v)) || g.parentElement.getBoundingClientRect().width;
+      const kind = g.dataset.kind, v = g.dataset.grip, take = g.dataset.take || null, container = g.closest(".sheet-body");
+      const cssW = (name) => parseFloat(getComputedStyle(container).getPropertyValue(name)) || 0;
+      const startX = e.clientX;
+      const startW = cssW(v) || (take ? g.parentElement.previousElementSibling : g.parentElement).getBoundingClientRect().width;
+      const startB = take ? (cssW(take) || g.parentElement.getBoundingClientRect().width) : 0;
       const dir = Number(g.dataset.dir) || 1;
-      const move = (ev) => { const w = Math.max(24, Math.round(startW + dir * (ev.clientX - startX))); container.style.setProperty(v, `${w}px`); g._w = w; };
-      const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); g.classList.remove("active"); if (g._w) { const all = loadCols(); all[kind] = { ...(all[kind] || {}), [v]: g._w }; saveCols(all); } };
+      const move = (ev) => {
+        let dx = dir * (ev.clientX - startX);
+        if (take) dx = Math.min(dx, startB - 24); // the shrinking side keeps its floor
+        const w = Math.max(24, Math.round(startW + dx));
+        container.style.setProperty(v, `${w}px`); g._w = w;
+        if (take) { const b = Math.round(startB - (w - startW)); container.style.setProperty(take, `${b}px`); g._b = b; }
+      };
+      const up = () => {
+        window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); g.classList.remove("active");
+        if (g._w) { const all = loadCols(); all[kind] = { ...(all[kind] || {}), [v]: g._w, ...(take && g._b ? { [take]: g._b } : {}) }; saveCols(all); }
+      };
       window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
     });
-    g.addEventListener("dblclick", () => { const kind = g.dataset.kind, v = g.dataset.grip; const all = loadCols(); if (all[kind]) { delete all[kind][v]; saveCols(all); } fitColumns(g.closest(".sheet-body"), kind); });
+    g.addEventListener("dblclick", () => { const kind = g.dataset.kind, v = g.dataset.grip, take = g.dataset.take || null; const all = loadCols(); if (all[kind]) { delete all[kind][v]; if (take) delete all[kind][take]; saveCols(all); } fitColumns(g.closest(".sheet-body"), kind); });
   });
 }
 window.addEventListener("manna-view-changed", () => { charAdvance = 0; renderAll(); });

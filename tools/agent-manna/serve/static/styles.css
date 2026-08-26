@@ -77,7 +77,9 @@ input, select { font: inherit; color: var(--text); background: var(--surface); b
 .row .id { color: var(--muted); white-space: nowrap; }
 .row .digest, .row .text { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; padding: 4px 0; }
 .row .digest.fallback { color: var(--muted); }
-.row .track { color: var(--faint); font-size: var(--t-meta); white-space: nowrap; }
+.row > * { min-width: 0; }
+.row .track { color: var(--faint); font-size: var(--t-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .prio { color: var(--faint); font-size: var(--t-meta); text-align: right; white-space: nowrap; }
 /* state is a word in caps, colored: no border, no fill (Erik, 2026-08-25) */
 .pill { display: inline-block; justify-self: start; padding: 0; font-size: var(--t-meta); line-height: 17px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }

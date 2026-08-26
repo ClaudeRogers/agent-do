@@ -250,10 +250,25 @@ def git_trailers(root: Path) -> dict[str, list[dict[str, Any]]]:
 # ---------------------------------------------------------------- coord
 
 
+def coord_cmd(agent_do: Path) -> list[str]:
+    """Invoke the coord tool script directly when it exists beside agent-do.
+
+    The dispatcher spends 1.5-2s per call on registry/creds/telemetry
+    interpreter spawns (worse under machine load), and presence refreshes
+    pay it on a cadence. coord declares no secrets, so the direct script is
+    behaviorally identical at ~0.4s."""
+    import sys as _sys
+
+    tool = Path(str(agent_do)).parent / "tools" / "agent-coord"
+    if tool.is_file():
+        return [_sys.executable, str(tool)]
+    return [str(agent_do), "coord"]
+
+
 def coord_peers(root: Path, agent_do: Path | None) -> list[dict[str, Any]]:
     if agent_do is None or not agent_do.is_file():
         return []
-    out = run([str(agent_do), "coord", "peers", "--json"], root, timeout=10)
+    out = run([*coord_cmd(agent_do), "peers", "--json"], root, timeout=10)
     if not out:
         return []
     try:
@@ -337,7 +352,7 @@ def attention_key(peer: dict[str, Any]) -> tuple:
 def coord_json(root: Path, agent_do: Path | None, *verb: str, key: str) -> list[dict[str, Any]]:
     if agent_do is None or not agent_do.is_file():
         return []
-    out = run([str(agent_do), "coord", *verb, "--json"], root, timeout=10)
+    out = run([*coord_cmd(agent_do), *verb, "--json"], root, timeout=10)
     if not out:
         return []
     try:

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Cockpit columns behave on boards with long track names: track and state columns clamp with ellipsis (full text in the tooltip), leading `[TRACK]`-style markers are stripped from display, and a boundary drag between two fixed columns transfers width across that boundary so the divider you grab is the divider that moves. Long blocker lists no longer crush the digest column.
+- The cockpit resolves coord state through the coord tool script instead of the agent-do dispatcher, cutting each presence refresh from 1.5-2s (worse under load) to ~0.4s; the two serve HTTP tests that flaked under machine load pass again.
 - `manna serve` no longer assumes port 7777: the first run asks the OS for a free port and keeps it in `$AGENT_DO_HOME/manna/serve/config.json`, so printed URLs stay stable without colliding with whatever another machine already runs there; `--port` and `MANNA_SERVE_PORT` override one invocation. README screenshots retaken at full resolution and linked to their originals so a click zooms.
 - README rewritten as one essay for the human reader (the workshop, the vessel, the dharma of receipts): every institution presented with its evidence, no agent commands beyond the install, logo plus cockpit and coordination screenshots placed in the sections they depict. Chosen from fifteen candidates across three clean-room rounds.
 - `manna serve`: a `recent` chip on the board sheet renders every entry (items, dreams, done, blocked) as one flat list sorted by last activity with an age column, linkable at `#board/recent`; the inspector now shows `filed` (created) beside `touched` (updated) for every item.
