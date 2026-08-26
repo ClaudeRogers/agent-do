@@ -26,7 +26,7 @@ Rules:
 - Completed pairs return to unnumbered sealed history on sync, so no numbered
   filename advertises work that is already done.
 - Commit `.manna/workflow.yaml`, `.manna/handoff-order.yaml`,
-  `.manna/issues.jsonl`, and `.handoff/`.
+  `.manna/federation.yaml`, `.manna/issues.jsonl`, and `.handoff/`.
 
 ## Generated index
 
@@ -55,14 +55,14 @@ Rules:
 | 21 | `mn-43932b` | open | none | `.handoff/21-mn-43932b-brief-contract-v2-verb-labels-scope-state-sentence-adopted-panel.md` |
 | 22 | `mn-f12284` | open | none | `.handoff/22-mn-f12284-harness-zpc-write-nudge-attributes-shared-checkout-drift-to-a-re.md` |
 | 23 | `mn-9668e9` | open | none | `.handoff/23-mn-9668e9-ci-triage-anchor-the-429-transient-hint-changelog-notes-the-gate.md` |
-| 24 | `mn-3086f2` | open | none | `.handoff/24-mn-3086f2-docs-estate-wide-refresh-to-as-is-state-readme-integration-archi.md` |
-| 25 | `mn-8b4a1c` | open | none | `.handoff/25-mn-8b4a1c-tests-suite-can-hang-forever-on-the-bootstrap-gui-dialog-pin-age.md` |
-| 26 | `mn-ee7d1e` | open | none | `.handoff/26-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
-| 27 | `mn-d2d67b` | open | none | `.handoff/27-mn-d2d67b-manna-done-handoffs-retire-to-handoff-archive-root-is-the-live-p.md` |
-| 28 | `mn-040aae` | blocked | `mn-d2d67b` | `.handoff/28b27-mn-040aae-manna-estate-wide-handoff-debris-cleanup-pre-structure-work-orde.md` |
-| 29 | `mn-386f70` | open | none | `.handoff/29-mn-386f70-harness-agent-substack-draft-publish-essays-through-substack-s-e.md` |
-| 30 | `mn-cbaf37` | in_progress | none | `.handoff/mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md` (held under live claim; expected `.handoff/30-mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md`) |
-| 31 | `mn-8e82f5` | open | none | `.handoff/31-mn-8e82f5-install-sh-register-agent-do-pulse-record-sh-in-the-hook-wrapper.md` |
-| 32 | `mn-7ec6dc` | open | none | `.handoff/32-mn-7ec6dc-design-rounds-bake-the-taste-elicitation-loop-into-agent-do.md` |
-| 33 | `mn-15fed0` | open | none | `.handoff/33-mn-15fed0-manna-typed-decision-state-replaces-the-erik-title-convention.md` |
-| 34 | `mn-8f9ef3` | blocked | `mn-404dd7` | `.handoff/34b04-mn-8f9ef3-board-view-policy-floor-layer-and-notify-rules-trunk-f-remainder.md` |
+| 24 | `mn-8b4a1c` | open | none | `.handoff/24-mn-8b4a1c-tests-suite-can-hang-forever-on-the-bootstrap-gui-dialog-pin-age.md` |
+| 25 | `mn-ee7d1e` | open | none | `.handoff/25-mn-ee7d1e-tests-record-ages-fails-in-a-worktree-when-the-primary-zpc-store.md` |
+| 26 | `mn-d2d67b` | open | none | `.handoff/26-mn-d2d67b-manna-done-handoffs-retire-to-handoff-archive-root-is-the-live-p.md` |
+| 27 | `mn-040aae` | blocked | `mn-d2d67b` | `.handoff/27b26-mn-040aae-manna-estate-wide-handoff-debris-cleanup-pre-structure-work-orde.md` |
+| 28 | `mn-386f70` | open | none | `.handoff/28-mn-386f70-harness-agent-substack-draft-publish-essays-through-substack-s-e.md` |
+| 29 | `mn-cbaf37` | in_progress | none | `.handoff/mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md` (held under live claim; expected `.handoff/29-mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md`) |
+| 30 | `mn-8e82f5` | open | none | `.handoff/30-mn-8e82f5-install-sh-register-agent-do-pulse-record-sh-in-the-hook-wrapper.md` |
+| 31 | `mn-7ec6dc` | open | none | `.handoff/31-mn-7ec6dc-design-rounds-bake-the-taste-elicitation-loop-into-agent-do.md` |
+| 32 | `mn-15fed0` | open | none | `.handoff/32-mn-15fed0-manna-typed-decision-state-replaces-the-erik-title-convention.md` |
+| 33 | `mn-8f9ef3` | blocked | `mn-404dd7` | `.handoff/33b04-mn-8f9ef3-board-view-policy-floor-layer-and-notify-rules-trunk-f-remainder.md` |
+| 34 | `mn-8f0319` | open | none | `.handoff/34-mn-8f0319-zpc-triggers-honest-delivery-receipts-in-process-matching.md` |
