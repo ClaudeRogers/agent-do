@@ -120,21 +120,22 @@ document.addEventListener("click", (e) => {
 }, true);
 
 // ------------------------------------------------------------ rendering: rows
-function itemRow(r) {
+function itemRow(r, opts) {
   const sel = app.selected?.kind === "item" && app.selected.id === r.id;
   const st = r.effective;
   const needs = st === "active" && r.claimant?.attention === "needs-user";
   const stateText = st === "waiting" && r.blockers?.length ? `blocked · <span class="keep-case">${esc(r.blockers.map((b) => b.id.replace(/^mn-/, "")).join(", "))}</span>` : esc(needs ? "needs you" : label(st));
+  const last = opts?.age ? esc(ago(r.updated_at)) : r.order != null ? `#${r.order + 1}` : "";
   return `<div class="row ${needs ? "s-needs-user" : "s-" + esc(st)}${sel ? " selected" : ""}" data-item="${esc(r.id)}" role="button" tabindex="0">
     <span class="id">${esc(r.id)}</span>
     <span class="digest${r.digest ? "" : " fallback"}" title="${esc(r.title)}">${esc(rowText(r))}</span>
     <span class="track">${esc(shortTrack(r.track_title))}</span>
     <span class="pill ${needs ? "c-needs-user" : cls(st)}">${stateText}</span>
-    <span class="prio">${r.order != null ? `#${r.order + 1}` : ""}</span>
+    <span class="prio">${last}</span>
   </div>`;
 }
-function section(lbl, rows, empty) {
-  return `<div class="sheet-head"><span class="prompt">manna ${esc(lbl)}</span><span class="count">${rows.length}</span></div><div class="list">${rows.length ? rows.map(itemRow).join("") : `<p class="empty">${esc(empty)}</p>`}</div>`;
+function section(lbl, rows, empty, opts) {
+  return `<div class="sheet-head"><span class="prompt">manna ${esc(lbl)}</span><span class="count">${rows.length}</span></div><div class="list">${rows.length ? rows.map((r) => itemRow(r, opts)).join("") : `<p class="empty">${esc(empty)}</p>`}</div>`;
 }
 function renderBoard(s) {
   const el = $("#board-list");
@@ -159,7 +160,11 @@ function renderBoard(s) {
     const done = (s.all || []).filter((r) => r.effective === "done").sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
     html += section("done", f(done), "nothing done yet");
   }
-  el.innerHTML = colsHeader("board") + html;
+  if (v === "recent") {
+    const recent = (s.all || []).slice().sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+    html += section("recent", f(recent), "board is empty", { age: true });
+  }
+  el.innerHTML = colsHeader("board", v === "recent" ? { "#": "age" } : null) + html;
   fitColumns($("#sheet-board"), "board");
 }
 function renderTimeline(s) {
@@ -175,6 +180,7 @@ function renderTimeline(s) {
   }
   if (v === "dreams" || v === "all") html += lane("dreams", "c-dream", f(s.dreams || []));
   if (v === "done" || v === "all") html += lane("done", "c-faint", f((s.all || []).filter((r) => r.effective === "done")));
+  if (v === "recent") html += lane("recent", "c-ready", f((s.all || []).slice().sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))));
   return html;
 }
 function renderInbox(s) {
@@ -289,7 +295,8 @@ function renderInspector(s) {
     ${r.description ? `<div class="desc">${esc(r.description)}</div>` : ""}
     <div class="meta">
       <span>track</span><b>${esc(shortTrack(r.track_title) || "—")}</b>
-      <span>updated</span><b>${esc(fmtDate(r.updated_at))} <span class="faint">${esc(ago(r.updated_at))} ago</span></b>
+      ${r.created_at ? `<span>filed</span><b>${esc(fmtDate(r.created_at))} <span class="faint">${esc(ago(r.created_at))} ago</span></b>` : ""}
+      <span>touched</span><b>${esc(fmtDate(r.updated_at))} <span class="faint">${esc(ago(r.updated_at))} ago</span></b>
       ${r.source ? `<span>source</span><b>${esc(r.source)}</b>` : ""}
       ${cl ? `<span>claimed by</span><b>${esc(cl.label)} <span class="${cls(cl.attention)}">${esc(attn(cl.attention))}</span>${cl.pulse?.activity ? ` · ${esc(cl.pulse.activity)}` : ""}${cl.goal ? `<br><span class="faint">${esc(cl.goal)}</span>` : ""}</b>` : ""}
       ${r.blockers?.length ? `<span>waits on</span><b>${r.blockers.map((b) => `<a href="#item/${esc(b.id)}" data-item="${esc(b.id)}">${esc(b.id)}</a> <span class="${cls(b.status === "blocked" ? "waiting" : b.status)}">${esc(label(b.status))}</span> ${esc(b.title)}`).join("<br>")}</b>` : ""}
@@ -356,12 +363,13 @@ function measureAdvance() {
   probe.textContent = "0".repeat(100); probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font:inherit;letter-spacing:.06em";
   document.body.appendChild(probe); charAdvance = probe.getBoundingClientRect().width / 100; probe.remove();
 }
-function colsHeader(kind) {
+function colsHeader(kind, relabel) {
   const cols = COLS[kind]; const flex = cols.findIndex((c) => c.flex);
   return `<div class="cols ${kind}">${cols.map((c, i) => {
-    if (!c.v) return `<span>${esc(c.h)}</span>`;
+    const h = relabel?.[c.h] ?? c.h;
+    if (!c.v) return `<span>${esc(h)}</span>`;
     const left = i > flex; // right of the flex column: the grip faces it on the left edge
-    return `<span>${esc(c.h)}<span class="grip ${left ? "grip-left" : "grip-right"}" data-grip="${c.v}" data-dir="${left ? -1 : 1}" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
+    return `<span>${esc(h)}<span class="grip ${left ? "grip-left" : "grip-right"}" data-grip="${c.v}" data-dir="${left ? -1 : 1}" data-kind="${kind}" title="drag · double-click to refit"></span></span>`;
   }).join("")}</div>`;
 }
 function fitColumns(container, kind) {
@@ -458,7 +466,7 @@ function readHash() {
   else if (["inbox", "board", "coord", "debug"].includes(kind)) {
     app.sheet = kind;
     app.landing = id || null;                       // a section to scroll to once the sheet has rendered
-    if (kind === "board" && ["dreams", "done", "now", "next", "waiting"].includes(id)) { app.view = id; app.landing = null; }
+    if (kind === "board" && ["dreams", "done", "now", "next", "waiting", "recent"].includes(id)) { app.view = id; app.landing = null; }
   }
 }
 // After the first render, scroll the section the hash named into view, once.

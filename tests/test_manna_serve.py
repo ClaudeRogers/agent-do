@@ -144,6 +144,13 @@ class DerivationTests(unittest.TestCase):
         self.assertNotIn("claim_token_hash", payload)
         self.assertNotIn("legacy_migration", payload)
 
+    def test_rows_carry_both_timestamps_for_the_recent_view(self) -> None:
+        # The recent chip sorts on updated_at and the inspector shows
+        # filed (created_at) beside touched (updated_at); both must ship.
+        for row in self.state["all"]:
+            self.assertIn("created_at", row, row["id"])
+            self.assertIn("updated_at", row, row["id"])
+
     def test_next_follows_handoff_order_then_unordered(self) -> None:
         self.assertEqual([r["id"] for r in self.state["next"]], ["mn-bbbbbb", "mn-aaaaaa", "mn-mentio"])
 
