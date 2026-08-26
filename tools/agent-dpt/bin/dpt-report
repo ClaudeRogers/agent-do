@@ -382,7 +382,10 @@ def narrate_spatial(sr, lines):
     undersized = tt.get('undersized', 0)
     if total_int > 0:
         tt_sev = 'good' if undersized == 0 else 'critical' if undersized > total_int * 0.5 else 'warning'
-        lines.append(f'  {icon(tt_sev)} Touch targets: {undersized}/{total_int} interactive elements below 44px minimum.')
+        floor_px = tt.get('floor_px', 24)
+        exempt = tt.get('inline_exempt', 0)
+        exempt_note = f' ({exempt} inline text link{"s" if exempt != 1 else ""} exempt per WCAG 2.5.8)' if exempt else ''
+        lines.append(f'  {icon(tt_sev)} Target size: {undersized}/{total_int} interactive elements below the {floor_px}px minimum.{exempt_note}')
         if undersized > 0:
             viols = tt.get('violations', [])[:3]
             for v in viols:

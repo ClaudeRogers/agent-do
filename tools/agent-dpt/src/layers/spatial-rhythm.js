@@ -87,19 +87,53 @@ function spatialRhythm(utils) {
     };
   }
 
-  // ─── SR-02: Touch Target Size ────────────────────────────────────
+  // ─── SR-02: Target Size ──────────────────────────────────────────
+  // WCAG 2.5.8 (AA, 2023): minimum target size is 24x24 CSS px, with an
+  // explicit exemption for targets that sit inline within a sentence or
+  // block of text — the surrounding prose disambiguates the click. The
+  // earlier 44px figure is Apple's touch-HIG number for finger-first
+  // surfaces; on desktop pages it condemned inline evidence links and
+  // 43px buttons, so 44 is reported as advisory context, never a failure.
+
+  const TARGET_FLOOR_PX = 24;       // WCAG 2.5.8 target-size minimum
+  const TOUCH_GUIDELINE_PX = 44;    // Apple HIG touch guideline (advisory)
+
+  function isInlineTextTarget(el) {
+    // Inline within text flow: the WCAG inline exemption. display:inline
+    // (not inline-block — a styled chip/button opts back into the floor)
+    // inside a prose container.
+    const display = window.getComputedStyle(el).display;
+    if (display !== 'inline') return false;
+    let parent = el.parentElement;
+    while (parent && parent !== document.body) {
+      if (['P', 'LI', 'TD', 'TH', 'FIGCAPTION', 'BLOCKQUOTE'].includes(parent.tagName)) return true;
+      if (window.getComputedStyle(parent).display !== 'inline') return false;
+      parent = parent.parentElement;
+    }
+    return false;
+  }
 
   function sr02_touchTargets() {
     const allElements = utils.queryVisible('*');
     const interactive = allElements.filter(el => utils.isInteractive(el) && utils.isOnPage(el));
     const violations = [];
+    let undersized = 0;
+    let inlineExempt = 0;
+    let subTouchGuideline = 0;
 
     for (const el of interactive) {
       const rect = el.getBoundingClientRect();
       const w = Math.round(rect.width);
       const h = Math.round(rect.height);
 
-      if (w < 44 || h < 44) {
+      if (w < TOUCH_GUIDELINE_PX || h < TOUCH_GUIDELINE_PX) subTouchGuideline++;
+
+      if (w < TARGET_FLOOR_PX || h < TARGET_FLOOR_PX) {
+        if (isInlineTextTarget(el)) {
+          inlineExempt++;
+          continue;
+        }
+        undersized++;
         if (violations.length < MAX_VIOLATIONS) {
           violations.push({
             selector: utils.getSelector(el),
@@ -110,14 +144,12 @@ function spatialRhythm(utils) {
       }
     }
 
-    const undersized = interactive.filter(el => {
-      const r = el.getBoundingClientRect();
-      return r.width < 44 || r.height < 44;
-    }).length;
-
     return {
       total_interactive: interactive.length,
+      floor_px: TARGET_FLOOR_PX,
       undersized: undersized,
+      inline_exempt: inlineExempt,
+      sub_touch_guideline_44: subTouchGuideline,
       violations: violations,
       pass: undersized === 0
     };

@@ -304,7 +304,21 @@ function chromaticField(utils) {
        el.tagName === 'SPAN' || el.tagName === 'SECTION')
     );
 
+    // Status chips share the semantic hue system by DESIGN: a GREENLIGHT
+    // verdict tag sharing green with the Advance button is one signaling
+    // system, not a leak of it. A chip is a status-hued element sized like
+    // one line of label text; its ceiling is derived, not chosen — two
+    // body-text line boxes (16px x 1.6 doubled, rounded to the 4px grid).
+    const CHIP_MAX_HEIGHT_PX = 52;
+
+    function isStatusChip(el, hsl) {
+      if (!utils.isStatusColor(hsl.h, utils.effectiveSaturation(hsl))) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.height > 0 && rect.height <= CHIP_MAX_HEIGHT_PX;
+    }
+
     let leakCount = 0;
+    let statusChipExempt = 0;
     const leakedSelectors = [];
 
     for (const el of nonInteractive) {
@@ -321,9 +335,13 @@ function chromaticField(utils) {
         );
 
         if (hueDist <= HUE_TOLERANCE) {
-          leakCount++;
-          if (leakedSelectors.length < MAX_VIOLATIONS) {
-            leakedSelectors.push(utils.getSelector(el));
+          if (isStatusChip(el, hsl)) {
+            statusChipExempt++;
+          } else {
+            leakCount++;
+            if (leakedSelectors.length < MAX_VIOLATIONS) {
+              leakedSelectors.push(utils.getSelector(el));
+            }
           }
           break; // count element once
         }
@@ -334,6 +352,7 @@ function chromaticField(utils) {
       primary_hue: primaryHue,
       interactive_uses: maxInteractive,
       non_interactive_leaks: leakCount,
+      status_chip_exempt: statusChipExempt,
       leaked_selectors: leakedSelectors,
       effective_saturation_threshold: 20,
       pass: leakCount === 0
@@ -666,8 +685,12 @@ function chromaticField(utils) {
     for (const entry of paletteResult.palette) {
       if (entry.hsl.s <= SAT_THRESHOLD) continue; // skip low-saturation
 
-      const role = entry.role; // 'status' or 'chromatic'
-      if (role !== 'status' && role !== 'chromatic') continue;
+      // Status colors are EXPECTED to differ in brightness: a deliberate
+      // luminance ordering (amber light, green mid, red dark) is what keeps
+      // verdicts tellable-apart for color-deficient readers. Only the
+      // decorative chromatic family owes brightness consistency.
+      const role = entry.role;
+      if (role !== 'chromatic') continue;
 
       // Parse hex back to RGB for brightness calc
       const r = parseInt(entry.hex.slice(1, 3), 16);
@@ -686,7 +709,7 @@ function chromaticField(utils) {
     let inconsistentGroups = 0;
     let maxDelta = 0;
 
-    for (const [role, colors] of roleGroups) {
+    for (const [, colors] of roleGroups) {
       if (colors.length < 2) continue;
       roleGroupsChecked++;
 

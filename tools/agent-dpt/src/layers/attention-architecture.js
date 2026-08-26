@@ -636,8 +636,22 @@ function attentionArchitecture(utils) {
       '[tabindex]:not([tabindex="-1"])', '[role="button"]:not([aria-disabled="true"])'
     ].join(', ');
 
+    // Sticky/fixed elements (decision bars, floating actions) live at the
+    // END of the DOM but render pinned mid-viewport — their geometry is
+    // detached from document flow, so comparing it against reading order
+    // manufactures a mismatch that no keyboard user experiences.
+    function inStickyOrFixed(el) {
+      let node = el;
+      while (node && node !== document.body) {
+        const position = window.getComputedStyle(node).position;
+        if (position === 'sticky' || position === 'fixed') return true;
+        node = node.parentElement;
+      }
+      return false;
+    }
+
     const allFocusable = Array.from(document.querySelectorAll(focusableSelector))
-      .filter(el => utils.isVisible(el) && utils.isOnPage(el));
+      .filter(el => utils.isVisible(el) && utils.isOnPage(el) && !inStickyOrFixed(el));
 
     // Separate elements with explicit tabindex > 0 from natural order
     const withTabindex = [];

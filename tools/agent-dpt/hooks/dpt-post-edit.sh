@@ -17,11 +17,40 @@ except: print('')
 
 [[ -z "$FILE_PATH" ]] && exit 0
 
-# Check if file is design-related
+# Is this edit design work? Same rules as hooks/codex/stop-quality-gate.py:
+#   - tests and tooling configs are never UI, whatever their name contains
+#   - a UI extension is UI
+#   - otherwise the basename's stem must BE a design-system name (theme,
+#     tokens, design-tokens, design-system) or start with one followed by
+#     "." or "-". Substring matching was the bug: "*global*" flagged
+#     test_global_hooks_nonblocking.py as a design file.
+#
+# Document/data trees (.handoff/, .dev/, docs/, fixtures/) are tracked
+# separately: they suppress the no-session WARNING below — "open the app"
+# is unfollowable for an archived text — but never the SCORING path. A
+# fixture page open in the live browser with a baseline is being iterated
+# on deliberately, and its edits deserve their score.
 IS_DESIGN=false
+IN_DOC_TREE=false
+BASENAME="${FILE_PATH##*/}"
+STEM="${BASENAME%.*}"
+STEM_HEAD="${STEM%%[.-]*}"
 case "$FILE_PATH" in
-    *.css|*.scss|*.less|*.html|*.jsx|*.tsx|*.vue|*.svelte) IS_DESIGN=true ;;
-    *tailwind.config*|*theme*|*styles*|*global*) IS_DESIGN=true ;;
+    */.handoff/*|*/.dev/*|*/docs/*|*/fixtures/*) IN_DOC_TREE=true ;;
+esac
+case "$BASENAME" in
+    test_*|*_test.py|*.test.*|*.spec.*|*.config.*|tailwind.*|postcss.*|vite.*|*.d.ts) ;;
+    *.css|*.scss|*.less|*.html|*.htm|*.jsx|*.tsx|*.vue|*.svelte|*.astro) IS_DESIGN=true ;;
+    *)
+        case "$STEM" in
+            theme|tokens|design-tokens|design-system) IS_DESIGN=true ;;
+            *)
+                case "$STEM_HEAD" in
+                    theme|tokens|design-tokens|design-system) IS_DESIGN=true ;;
+                esac
+                ;;
+        esac
+        ;;
 esac
 
 [[ "$IS_DESIGN" == false ]] && exit 0

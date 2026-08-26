@@ -50,13 +50,18 @@ function typographicSkeleton(utils) {
 
 
   // ── TS-01: Body Text Minimum Size ───────────────────────────────
+  // The 16px expectation is for READING text — paragraphs and list prose.
+  // Table cells, labels, and UI spans are data typography, where 13-14px
+  // is craft-correct; they answer only to the TS-02 12px absolute floor.
+  // Counting them here inflated canon pages to dozens of false violations.
 
   function ts01() {
     let minSize = Infinity;
     let violations = 0;
     const violationSelectors = [];
+    const proseEls = bodyTextEls.filter(el => el.tagName === 'P' || el.tagName === 'LI');
 
-    for (const el of bodyTextEls) {
+    for (const el of proseEls) {
       const size = fontSize(el);
       if (size > 0 && size < minSize) minSize = size;
       if (size < 16) {
@@ -307,11 +312,14 @@ function typographicSkeleton(utils) {
 
     const ratio = bodySize > 0 ? Math.round((h1Size / bodySize) * 100) / 100 : 0;
 
+    // 2.0-3.0 is the classic sweet spot; editorial display scale runs to
+    // ~4.5 (ratified Palingenesis hero 3.72x, recognitionoracle 4.16x) and
+    // is a choice, not an error. Below 1.5 the h1 fails to outrank body.
     return {
       h1_size: Math.round(h1Size * 100) / 100,
       body_size: Math.round(bodySize * 100) / 100,
       ratio,
-      pass: ratio >= 2.0 && ratio <= 3.0
+      pass: ratio >= 2.0 && ratio <= 4.5
     };
   }
 
