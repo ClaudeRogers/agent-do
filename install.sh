@@ -101,17 +101,18 @@ display_path() { case "$1" in "$HOME"/*) echo "~${1#"$HOME"}" ;; *) echo "$1" ;;
 # fire on the second.
 CLAUDE_SETTINGS_SPECS=(
     "SessionStart||agent-do-session-start.sh|10"
-    "UserPromptSubmit||agent-do-prompt-router.py|5"
-    "UserPromptSubmit||agent-do-correction-keys.py|5"
-    "UserPromptSubmit||agent-do-now-stamp.py|5"
+    "UserPromptSubmit||agent-do-prompt-router.py|10"
+    "UserPromptSubmit||agent-do-correction-keys.py|10"
+    "UserPromptSubmit||agent-do-now-stamp.py|10"
     "PreToolUse|Bash|agent-do-pretooluse-check.py|5"
-    "UserPromptSubmit||agent-do-zpc-trigger.py|5"
+    "UserPromptSubmit||agent-do-zpc-trigger.py|10"
     "PreToolUse|Bash|agent-do-zpc-trigger.py|5"
     "PostToolUse|Edit|Write|agent-do-zpc-trigger.py|5"
     "SessionEnd||agent-do-coord-stop.sh|10"
     "Stop||agent-do-zpc-write-nudge.sh|5"
     "PostToolUse|ExitPlanMode|agent-do-zpc-position-nudge.sh|5"
     "PostToolUse|Edit|Write|agent-do-quantity-check.py|5"
+    "PostToolUse|Edit|Write|MultiEdit|NotebookEdit|agent-do-touch-ledger.py|5"
 )
 
 # Emit the spec as event|matcher|command|timeout, with the command spelled the
@@ -372,6 +373,7 @@ uninstall() {
         "agent-do-prompt-router.py"
         "agent-do-now-stamp.py"
         "agent-do-pretooluse-check.py"
+        "agent-do-touch-ledger.py"
         "stop-quality-gate.sh"
         "stop-quality-gate.py"
     )
@@ -593,9 +595,9 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-zpc-write-nudge.sh|hooks/claude/agent-do-zpc-write-nudge.sh|sh|optional"
     "agent-do-zpc-position-nudge.sh|hooks/claude/agent-do-zpc-position-nudge.sh|sh|optional"
     "agent-do-quantity-check.py|hooks/claude/agent-do-quantity-check.py|py|required"
+    "agent-do-zpc-trigger.py|hooks/claude/agent-do-zpc-trigger.py|py|required"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do
-    "agent-do-zpc-trigger.py|hooks/claude/agent-do-zpc-trigger.py|py|required"
     IFS='|' read -r name rel kind requirement <<< "$spec"
     src="$REPO_DIR/$rel"
     dst="$CLAUDE_HOOKS_DIR/$name"
@@ -633,6 +635,7 @@ if [ "$should_install_codex" = "yes" ]; then
         "agent-do-prompt-router.py|hooks/codex/agent-do-prompt-router.py|py"
         "agent-do-now-stamp.py|hooks/claude/agent-do-now-stamp.py|py"
         "agent-do-pretooluse-check.py|hooks/codex/agent-do-pretooluse-check.py|py"
+        "agent-do-touch-ledger.py|hooks/codex/agent-do-touch-ledger.py|py"
         "stop-quality-gate.sh|hooks/codex/stop-quality-gate.sh|sh"
         "stop-quality-gate.py|hooks/codex/stop-quality-gate.py|py"
     )
