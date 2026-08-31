@@ -3028,6 +3028,76 @@ tools:
       - org-add-member
       - oauth-app-create
     concurrency: mixed
+  coderabbit:
+    description: Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+    capabilities:
+    - review tracked local changes against a base branch, with optional committed, uncommitted, or untracked scopes
+    - replay findings from the most recent local review without an API call
+    - check auth and connectivity via doctor command
+    - support free-tier browser OAuth or API key for unlimited headless use
+    commands:
+      review: Review tracked local changes against the base branch; forwards CodeRabbit review flags like --light, --committed, --uncommitted, --include-untracked, and --dir
+      findings: Re-read results from the most recent local review (no API call)
+      doctor: Verify installation, authentication, git state, and service connectivity
+      snapshot: Auth status, cr version, and last doctor summary
+      auth login: Authenticate via browser and update local CodeRabbit auth state (free tier, 3 reviews/hour)
+      auth org: Switch active CodeRabbit organization and update local CLI state
+    examples:
+    - intent: review my changes before opening a PR
+      command: agent-do coderabbit review
+    - intent: review changes against develop branch
+      command: agent-do coderabbit review --base develop
+    - intent: review untracked local files before a PR
+      command: agent-do coderabbit review --include-untracked
+    - intent: get structured JSON review output for agent processing
+      command: agent-do coderabbit review --json
+    - intent: replay last review results without an API call
+      command: agent-do coderabbit findings
+    - intent: check coderabbit auth and connectivity
+      command: agent-do coderabbit doctor
+    - intent: coderabbit status and auth summary
+      command: agent-do coderabbit snapshot --json
+    credentials:
+      optional:
+      - CODERABBIT_API_KEY
+      notes:
+      - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key."
+      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running."
+    routing:
+      discover_keywords:
+      - coderabbit
+      - local code review
+      - local review
+      - pre-pr review
+      - cr review
+      recommended_entrypoints:
+      - agent-do coderabbit review
+      - agent-do coderabbit doctor
+      default_command: review
+      raw_cli_equivalents:
+      - pattern: \bcr\b\s+(--agent|--base|--light|--committed|--uncommitted|--include-untracked|--dir|review)
+        replacement: agent-do coderabbit
+        example: agent-do coderabbit review --base develop
+        reason: agent-do coderabbit adds credential management and structured JSON output
+      project_signals:
+      - .coderabbit.yaml
+      - .coderabbit
+      readiness:
+        check: agent-do coderabbit doctor
+        fix: brew install coderabbit && agent-do coderabbit auth login
+        note: Free tier requires browser login saved by the CodeRabbit CLI; CODERABBIT_API_KEY is not passed through argv unless AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 is set in trusted automation
+    contracts:
+      connect:
+      - doctor
+      snapshot:
+      - snapshot
+      - findings
+      interact:
+      - review
+      save:
+      - auth login
+      - auth org
+    concurrency: mixed
   ci:
     description: Control CI/CD pipelines
     capabilities:
@@ -3123,7 +3193,10 @@ tools:
       discover_keywords:
       - github pull request
       - github pr
+      - github code review
+      - pr code review
       - pr review
+      - review my pr
       - review comments
       - unresolved threads
       - requested review

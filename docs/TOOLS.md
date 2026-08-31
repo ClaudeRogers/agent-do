@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (99 tools)
+## Summary (100 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -41,6 +41,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [clipboard](#clipboard) | Cross-app clipboard management | mixed | 4 |
 | [cloud](#cloud) | Control cloud providers (AWS, GCP, Azure) | mixed | 3 |
 | [cloudflare](#cloudflare) | Cloudflare account management — zones, analytics (GraphQL), DNS, Workers, Pages, R2, security events | mixed | 18 |
+| [coderabbit](#coderabbit) | Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR | mixed | 6 |
 | [colab](#colab) | Google Colab notebook management | mixed | 4 |
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
 | [coord](#coord) | Project-local agent state and interrupt broker | mixed | 23 |
@@ -1014,6 +1015,58 @@ agent-do cloudflare snapshot
 - Read-only (snapshot/verify; safe to parallelize): `analytics`, `bandwidth`, `dns`, `firewall-events`, `pages`, `r2-buckets`, `requests`, `snapshot`, `threats`, `top-countries`, `top-pages`, `visitors 24h`, `visitors 7d`, `workers`, `zone`, `zones`
 - Write (connect/interact/save): `dns-add`, `dns-del`, `dns-update`
 - destructive (irreversible data loss; confirm before auto-running): `dns-del`
+
+### coderabbit
+
+Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- review tracked local changes against a base branch, with optional committed, uncommitted, or untracked scopes
+- replay findings from the most recent local review without an API call
+- check auth and connectivity via doctor command
+- support free-tier browser OAuth or API key for unlimited headless use
+
+**Commands**
+
+- `review`: Review tracked local changes against the base branch; forwards CodeRabbit review flags like --light, --committed, --uncommitted, --include-untracked, and --dir
+- `findings`: Re-read results from the most recent local review (no API call)
+- `doctor`: Verify installation, authentication, git state, and service connectivity
+- `snapshot`: Auth status, cr version, and last doctor summary
+- `auth login`: Authenticate via browser and update local CodeRabbit auth state (free tier, 3 reviews/hour)
+- `auth org`: Switch active CodeRabbit organization and update local CLI state
+
+**Examples**
+
+```bash
+# review my changes before opening a PR
+agent-do coderabbit review
+# review changes against develop branch
+agent-do coderabbit review --base develop
+# review untracked local files before a PR
+agent-do coderabbit review --include-untracked
+# get structured JSON review output for agent processing
+agent-do coderabbit review --json
+# replay last review results without an API call
+agent-do coderabbit findings
+# check coderabbit auth and connectivity
+agent-do coderabbit doctor
+# coderabbit status and auth summary
+agent-do coderabbit snapshot --json
+```
+
+**Credentials**
+
+- Optional: `CODERABBIT_API_KEY`
+- Note: Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key.
+- Note: Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running.
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `findings`, `snapshot`
+- Write (connect/interact/save): `auth login`, `auth org`, `doctor`, `review`
 
 ### colab
 
