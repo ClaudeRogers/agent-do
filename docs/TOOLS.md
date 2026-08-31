@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (101 tools)
+## Summary (102 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -106,6 +106,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [sms](#sms) | SMS messaging | write | 8 |
 | [spec](#spec) | Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness | mixed | 5 |
 | [ssh](#ssh) | Control remote server sessions | write | 5 |
+| [substack](#substack) | Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session | mixed | 11 |
 | [supabase](#supabase) | Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db) | write | 64 |
 | [swarm](#swarm) | Multi-agent orchestration | write | 4 |
 | [tail](#tail) | Wrap dev commands, capture output to log files for AI agents | read | 11 |
@@ -4093,6 +4094,58 @@ agent-do ssh exec server1 'df -h'
 - Read-only (snapshot/verify; safe to parallelize): `list`
 - Write (connect/interact/save): `connect`, `download`, `upload`
 - passthrough (arbitrary-payload escape hatch; beat decided by the argument): `exec`
+
+### substack
+
+Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- convert markdown to Substack's ProseMirror document format
+- create and update drafts through the editor API
+- list drafts and recent published posts
+- publish a reviewed draft on explicit command (subscriber email only with --email)
+- verify a draft by reading it back and comparing against the local receipt or source file
+
+**Commands**
+
+- `connect`: Verify auth + save publication config: connect --publication \<url-or-subdomain> [--session name]
+- `snapshot`: Publication info + drafts + recent posts: snapshot [--json]
+- `drafts`: List drafts: drafts [--limit N]
+- `posts`: List recent published posts: posts [--limit N]
+- `get`: Fetch one draft: get \<id>
+- `convert`: Markdown to ProseMirror JSON, offline: convert \<file.md>
+- `draft`: Create a DRAFT (never publishes): draft \<file.md> [--title T] [--subtitle S]
+- `update`: Replace draft body/title: update \<id> \<file.md>
+- `publish`: Publish a reviewed draft: publish \<id> [--email]
+- `verify`: Read back and compare: verify \<id> [--file \<file.md>]
+- `receipts`: Local draft/publish receipts: receipts [--limit N]
+
+**Examples**
+
+```bash
+# post my essay to substack as a draft
+agent-do substack draft essay.md
+# connect to my substack publication
+agent-do substack connect --publication example.substack.com
+# list my substack drafts
+agent-do substack drafts
+# publish the reviewed substack draft
+agent-do substack publish 12345678
+# check the draft matches what I wrote
+agent-do substack verify 12345678 --file essay.md
+```
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `convert`, `drafts`, `get`, `posts`, `receipts`, `snapshot`, `verify`
+- Write (connect/interact/save): `connect`, `draft`, `publish`, `update`
+- destructive (irreversible data loss; confirm before auto-running): `publish`
+- sensitive (emits or persists secret material; guard output): `publish`
+- composite (one call performs several beats internally): `draft`, `publish`, `update`
+- own_state (writes only its own cache/state; parallel-safe): `connect`, `receipts`
 
 ### supabase
 

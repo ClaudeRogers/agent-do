@@ -5839,6 +5839,97 @@ tools:
         stop:
         - own_state
     concurrency: read
+  substack:
+    description: Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session
+    capabilities:
+    - convert markdown to Substack's ProseMirror document format
+    - create and update drafts through the editor API
+    - list drafts and recent published posts
+    - publish a reviewed draft on explicit command (subscriber email only with --email)
+    - verify a draft by reading it back and comparing against the local receipt or source file
+    commands:
+      connect: 'Verify auth + save publication config: connect --publication <url-or-subdomain> [--session name]'
+      snapshot: 'Publication info + drafts + recent posts: snapshot [--json]'
+      drafts: 'List drafts: drafts [--limit N]'
+      posts: 'List recent published posts: posts [--limit N]'
+      get: 'Fetch one draft: get <id>'
+      convert: 'Markdown to ProseMirror JSON, offline: convert <file.md>'
+      draft: 'Create a DRAFT (never publishes): draft <file.md> [--title T] [--subtitle S]'
+      update: 'Replace draft body/title: update <id> <file.md>'
+      publish: 'Publish a reviewed draft: publish <id> [--email]'
+      verify: 'Read back and compare: verify <id> [--file <file.md>]'
+      receipts: 'Local draft/publish receipts: receipts [--limit N]'
+    examples:
+    - intent: post my essay to substack as a draft
+      command: agent-substack draft essay.md
+    - intent: connect to my substack publication
+      command: agent-substack connect --publication example.substack.com
+    - intent: list my substack drafts
+      command: agent-substack drafts
+    - intent: publish the reviewed substack draft
+      command: agent-substack publish 12345678
+    - intent: check the draft matches what I wrote
+      command: agent-substack verify 12345678 --file essay.md
+    routing:
+      discover_keywords:
+      - substack
+      - substack draft
+      - substack post
+      - newsletter publish
+      - essay publish
+      prompt_patterns:
+      - \bsubstack\b
+      recommended_entrypoints:
+      - agent-do substack draft <file.md>
+      - agent-do substack snapshot
+      - agent-do substack drafts
+      default_command: snapshot
+      raw_cli_equivalents:
+      - pattern: \bcurl\b.*\bsubstack\.com/api\b
+        replacement: agent-do substack
+        example: agent-do substack draft essay.md
+        reason: agent-do substack speaks the editor API with the saved browse session's auth and converts markdown to ProseMirror
+      project_signals:
+      - substack
+      - newsletter
+      readiness:
+        check: agent-do substack snapshot
+        fix: agent-do browse login https://substack.com && agent-do browse session save substack --shared && agent-do substack connect --publication <subdomain>
+        note: Requires a saved agent-browse session holding substack.com cookies plus a one-time connect
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - snapshot
+      - drafts
+      - posts
+      - get
+      - convert
+      - receipts
+      interact:
+      - draft
+      - update
+      - publish
+      verify:
+      - verify
+      save:
+      - draft
+      - update
+      - publish
+      attributes:
+        draft:
+        - composite
+        update:
+        - composite
+        publish:
+        - composite
+        - destructive
+        - sensitive
+        connect:
+        - own_state
+        receipts:
+        - own_state
+    concurrency: mixed
   supabase:
     description: Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
     capabilities:
