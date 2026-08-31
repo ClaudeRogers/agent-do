@@ -261,15 +261,24 @@ function renderDebug(s) {
 }
 
 // ------------------------------------------------------------ inspector
+// Write the inspector only when its content actually changed: every state
+// push re-rendered it wholesale, and a copy button destroyed between a
+// press and its release swallows the click entirely — the "worked once,
+// then dead" bug. Equal HTML is skipped, so the nodes live on.
+function setInspector(el, html) {
+  if (el.__lastHtml === html) return;
+  el.__lastHtml = html;
+  el.innerHTML = html;
+}
 function renderInspector(s) {
   const el = $("#inspector");
   const sel = app.selected;
-  if (!sel) { el.innerHTML = '<p class="empty">select a row · ⌘K to ask</p>'; return; }
+  if (!sel) { setInspector(el, '<p class="empty">select a row · ⌘K to ask</p>'); return; }
   if (sel.kind === "peer") {
     const p = (s.peers || []).find((x) => x.agent_id === sel.id);
-    if (!p) { el.innerHTML = '<p class="empty">that session is no longer on the board</p>'; return; }
+    if (!p) { setInspector(el, '<p class="empty">that session is no longer on the board</p>'); return; }
     const pu = p.pulse || {};
-    el.innerHTML = `<div class="head"><span class="pill ${cls(p.attention)}">${esc(attn(p.attention))}</span><span>${esc(p.runtime || "")}${p.role ? " · " + esc(p.role) : ""}</span></div>
+    setInspector(el, `<div class="head"><span class="pill ${cls(p.attention)}">${esc(attn(p.attention))}</span><span>${esc(p.runtime || "")}${p.role ? " · " + esc(p.role) : ""}</span></div>
       <h2>${esc(p.alias || p.agent_id)}</h2>
       ${p.goal ? `<div class="digest-line">${esc(p.goal)}</div>` : ""}
       ${pu.latest_prompt ? `<div class="desc">“${esc(pu.latest_prompt)}”</div>` : ""}
@@ -281,15 +290,15 @@ function renderInspector(s) {
         ${(p.holding || []).length ? `<span>holding</span><b>${p.holding.map((h) => `<a href="#item/${esc(h.id)}" data-item="${esc(h.id)}">${esc(h.id)}</a> ${esc(h.title)}`).join("<br>")}</b>` : ""}
         ${(p.paths || []).length ? `<span>paths</span><b>${p.paths.map(esc).join("<br>")}</b>` : ""}
       </div>
-      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>`;
+      <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>`);
     return;
   }
   const r = (s.all || []).find((x) => x.id === sel.id);
-  if (!r) { el.innerHTML = '<p class="empty">that item is no longer on the board</p>'; return; }
+  if (!r) { setInspector(el, '<p class="empty">that item is no longer on the board</p>'); return; }
   const st = r.effective;
   const cl = r.claimant;
   const relations = relationMarkup(r.relations || []);
-  el.innerHTML = `<div class="head"><span>${esc(r.id)}</span><span class="pill ${cls(st)}">${esc(label(st))}</span>${r.order != null ? `<span>#${r.order + 1}</span>` : ""}${r.kind !== "item" ? `<span>${esc(r.kind)}</span>` : ""}</div>
+  setInspector(el, `<div class="head"><span>${esc(r.id)}</span><span class="pill ${cls(st)}">${esc(label(st))}</span>${r.order != null ? `<span>#${r.order + 1}</span>` : ""}${r.kind !== "item" ? `<span>${esc(r.kind)}</span>` : ""}</div>
     <details class="summary" id="summary-block"${summaryOpen() ? " open" : ""}><summary class="tag">AI summary</summary><div class="summary-body">${summaryBody(r.id)}</div></details>
     <h2>${esc(r.title)}</h2>
     ${r.digest ? `<div class="digest-line">${esc(r.digest)}</div>` : ""}
@@ -306,7 +315,7 @@ function renderInspector(s) {
       ${r.prompt ? `<span>handoff</span><b class="faint">${esc(r.prompt)}</b>` : ""}
     </div>
     ${relations}
-    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy-handoff="${esc(r.id)}" data-label="handoff" title="copy the handoff document">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
+    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy-handoff="${esc(r.id)}" data-label="handoff" title="copy the handoff document">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`);
   ensureSummary(r.id);
 }
 const summaries = new Map(); // id -> {summary, error, pending}
@@ -355,7 +364,11 @@ async function copyText(text, b, note) {
   }
   return ok;
 }
-document.addEventListener("click", (e) => {
+// Copy fires on pointerdown, not click: a click needs its button alive from
+// press to release, and a state push in between destroys the node — the
+// press itself is the earliest moment the node is provably alive, and it is
+// a user gesture, which the clipboard APIs require.
+document.addEventListener("pointerdown", (e) => {
   const b = e.target.closest?.("[data-copy],[data-copy-handoff]");
   if (!b) return;
   e.preventDefault(); e.stopPropagation();
@@ -365,6 +378,10 @@ document.addEventListener("click", (e) => {
     .then((r) => r.json())
     .then((d) => { if (d.content) copyText(d.content, b, `handoff ${d.path} (${d.content.length} chars)`); else toast(d.error || "no handoff content"); })
     .catch(() => toast("handoff request failed"));
+}, true);
+// The click that follows a copy press must not reach the row handler.
+document.addEventListener("click", (e) => {
+  if (e.target.closest?.("[data-copy],[data-copy-handoff]")) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 
 // ------------------------------------------------------------ columns
