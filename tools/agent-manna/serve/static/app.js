@@ -428,12 +428,59 @@ function colsHeader(kind, relabel) {
     return `<span><span class="hl">${esc(h)}</span>${grip}</span>`;
   }).join("")}</div>`;
 }
+// The digest/text cell is the row's actual content; a layout that wraps it
+// one word per line is a defect state, not a preference. Enough characters
+// for a clause is the floor, and it is checked against rendered pixels —
+// stored widths captured under an old fit, a narrower window, or a wild
+// drag are discarded the moment they starve the text column.
+const MIN_FLEX_CHARS = 24;
+function flexStarved(container, kind) {
+  const cols = COLS[kind]; const flexIdx = cols.findIndex((c) => c.flex);
+  const flexEl = container.querySelectorAll(`.cols.${kind} > span`)[flexIdx];
+  return !!flexEl && flexEl.getBoundingClientRect().width < MIN_FLEX_CHARS * charAdvance;
+}
+function shrinkToFit(container, kind) {
+  const cols = COLS[kind]; const flexIdx = cols.findIndex((c) => c.flex);
+  const headers = container.querySelectorAll(`.cols.${kind} > span`);
+  const flexEl = headers[flexIdx];
+  if (!flexEl) return;
+  const deficit = MIN_FLEX_CHARS * charAdvance - flexEl.getBoundingClientRect().width;
+  if (deficit <= 0) return;
+  const style = getComputedStyle(container);
+  const entries = [];
+  cols.forEach((c, idx) => {
+    if (!c.v) return;
+    const cur = parseFloat(style.getPropertyValue(c.v));
+    if (!cur) return;
+    const label = headers[idx]?.querySelector(".hl");
+    const floor = (label ? Math.ceil(label.scrollWidth) : 0) + 10;
+    if (cur > floor) entries.push({ v: c.v, cur, room: cur - floor });
+  });
+  const room = entries.reduce((a, x) => a + x.room, 0);
+  if (!room) return;
+  entries.forEach((x) => container.style.setProperty(x.v, `${Math.round(x.cur - Math.min(1, deficit / room) * x.room)}px`));
+}
 function fitColumns(container, kind) {
   const cols = COLS[kind]; if (!cols || !container) return;
   if (!charAdvance) measureAdvance();
-  const stored = loadCols()[kind] || {};
+  applyFit(container, kind, true);
+  if (!flexStarved(container, kind)) return;
+  const all = loadCols();
+  if (all[kind]) { delete all[kind]; saveCols(all); }
+  applyFit(container, kind, false);
+  if (!flexStarved(container, kind)) return;
+  shrinkToFit(container, kind);
+}
+function applyFit(container, kind, useStored) {
+  const cols = COLS[kind];
+  const stored = (useStored && loadCols()[kind]) || {};
   const rowSel = kind === "board" ? ".row:not(.inbox):not(.peer):not(.claim):not(.drop):not(.finding)" : `.row.${kind}`;
   const headers = container.querySelectorAll(`.cols.${kind} > span`);
+  // Measure content, never the current layout: a span stretched inside an
+  // oversized grid column reports the column's width as its own scrollWidth,
+  // and the bad width feeds itself back through the fit. Auto first, so
+  // every cell shrinks to what it actually holds before it is read.
+  cols.forEach((c) => { if (c.v && !stored[c.v]) container.style.setProperty(c.v, "auto"); });
   cols.forEach((c, idx) => {
     if (!c.v) return;
     if (stored[c.v]) { container.style.setProperty(c.v, `${stored[c.v]}px`); return; }
