@@ -44,6 +44,13 @@ EOF
     exit 1
 }
 
+# `estate` is the agent-facing read of the machine registry. It calls the
+# same derivation as /api/boards but never starts or contacts the daemon.
+if [[ "${1:-}" == "estate" ]]; then
+    shift
+    exec python3 "$SCRIPT_DIR/serve/estate.py" "$@"
+fi
+
 # `serve` is the human window (Python beside the Rust core): a read-only
 # daemon on a fixed local port rendering every registered board. It never
 # touches the board, so it lives outside manna-core's transactional spine.
@@ -62,7 +69,11 @@ case "${1:-}" in
         fi
         "$BINARY" "$@" 2>&1 | awk '
             { print }
-            /^  reconcile  / && !done { print "  serve      Serve the read-only human board view on a fixed local port (every board indexed at /)"; done = 1 }
+            /^  reconcile  / && !done {
+                print "  estate     Read every registered board as the /api/boards model without a daemon"
+                print "  serve      Serve the read-only human board view on a fixed local port (every board indexed at /)"
+                done = 1
+            }
         '
         exit "${PIPESTATUS[0]}"
         ;;
