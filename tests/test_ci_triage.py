@@ -99,6 +99,25 @@ def test_c1_branch_parse():
     require(facts["dependency"] == "zod", "got %r" % facts.get("dependency"))
 
 
+def test_c3_staging_push():
+    """A failed staging push is trunk-class, not silent C5.
+
+    Fleets that promote through a staging branch need staging breaks to
+    page; before this change they classified C5-unknown (facts-only)."""
+    cls, facts, conf = classify("o/r", run_fixture(event="push", headBranch="staging",
+                                                    defaultBranch="main"),
+                                "1", log_fetcher=NO_LOG)
+    require(cls == "C3-trunk-release", "staging push stayed silent: got %s" % cls)
+    require(facts.get("trunk") == "staging",
+            "staging trunk marker missing: %r" % facts.get("trunk"))
+    require(conf == "medium-high", "staging push confidence drifted: %s" % conf)
+    cls, facts, _ = classify("o/r", run_fixture(event="push", headBranch="main",
+                                                 defaultBranch="main"), "1", log_fetcher=NO_LOG)
+    require(cls == "C3-trunk-release", "default-branch push regressed: %s" % cls)
+    require("trunk" not in facts,
+            "default-branch push grew a trunk marker: %r" % facts.get("trunk"))
+
+
 def test_c3_c4():
     cls, _, _ = classify("o/r", run_fixture(workflowName="iOS App Store Build", event="push",
                                              headBranch="main", defaultBranch="main"),
