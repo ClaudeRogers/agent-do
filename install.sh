@@ -366,6 +366,9 @@ uninstall() {
         "agent-do-zpc-write-nudge.sh"
         "agent-do-zpc-position-nudge.sh"
         "agent-do-quantity-check.py"
+        "agent-do-zpc-trigger.py"
+        "agent-do-touch-ledger.py"
+        "agent-do-pulse-record.sh"
     )
     for hook in "${hooks[@]}"; do
         if [ -f "$CLAUDE_HOOKS_DIR/$hook" ]; then
@@ -604,6 +607,7 @@ CLAUDE_HOOK_SPECS=(
     "agent-do-zpc-position-nudge.sh|hooks/claude/agent-do-zpc-position-nudge.sh|sh|optional"
     "agent-do-quantity-check.py|hooks/claude/agent-do-quantity-check.py|py|required"
     "agent-do-zpc-trigger.py|hooks/claude/agent-do-zpc-trigger.py|py|required"
+    "agent-do-touch-ledger.py|hooks/claude/agent-do-touch-ledger.py|py|required"
     "agent-do-pulse-record.sh|hooks/claude/agent-do-pulse-record.sh|sh|optional"
 )
 for spec in "${CLAUDE_HOOK_SPECS[@]}"; do

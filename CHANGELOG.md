@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- install.sh installs the Claude wrapper for the touch ledger: the hook was registered in settings.json, listed for Codex, and covered by uninstall, but absent from the wrapper-install list, so clean installs registered a file that never existed and the stop-time quality gate silently fell back to git-status inference (found by Chris). A new test holds registration and wrapper installation coherent so the class dies.
+- agent-browse: `ws` 8.19.0 → 8.21.3, clearing two high advisories on the runtime WebSocket dependency (memory disclosure fixed 8.20.1; fragment-flood DoS fixed 8.21.0); 47/47 browse tests pass on the bump (also flagged by Chris).
 - Cockpit pages never wait on reconcile: live drift computes in a background thread per board (reconcile serializes on the board lock; measured 40s+ of convoy on a busy 242-row board), the page ships the last finished findings with the drift file's age beside them, and the stream pushes the fresh result when it lands. A board's full state on the worst measured board: 47s → 1.6s.
 - The daemon watches its own source and restarts in place when the code on disk changes; previously only a CLI touch noticed, and an untouched daemon served day-old code indefinitely (observed).
 - Column fitting measures real pixels with the header label as a floor (inline labels get a box; a stretched header span reports its column width, which ratcheted columns wider on every fit). Fixes clipped AGE cells, the sliver horizontal scrollbar, empty columns collapsing under their labels, and the ragged STATE column on sparse boards.
