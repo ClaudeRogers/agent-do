@@ -886,10 +886,21 @@ PYEOF
 }
 
 cmd_recover() {
+    # Verify-beat contract: a refusal must carry a clear reason. Guard the
+    # no-repository case up front the way the *_json siblings do, so a probe
+    # outside any repo yields a structured error instead of an empty report.
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        if [[ "$JSON_MODE" == "1" ]]; then
+            json_fail "not a git repository"
+        fi
+        echo "Error: not a git repository" >&2
+        return 1
+    fi
     JSON_MODE_VALUE="$JSON_MODE" python3 <<'PYEOF'
 import json
 import os
 import subprocess
+import sys
 
 def run(args):
     return subprocess.run(args, text=True, capture_output=True, check=False)
@@ -908,7 +919,13 @@ for line in (fsck.stdout + "\n" + fsck.stderr).splitlines():
     if len(parts) == 3 and parts[:2] == ["unreachable", "commit"]:
         unreachable.append(parts[2])
 
-payload = {"ok": fsck.returncode in (0, 1), "reflog": reflog, "unreachable_commits": sorted(set(unreachable))}
+ok = fsck.returncode in (0, 1)
+payload = {"ok": ok, "reflog": reflog, "unreachable_commits": sorted(set(unreachable))}
+if not ok:
+    # git fsck exits >1 on repository corruption or invocation failure; carry
+    # the reason so a nonzero exit is never a silent look-alike of success.
+    detail = (fsck.stderr or fsck.stdout or "").strip().splitlines()
+    payload["error"] = f"git fsck exited {fsck.returncode}" + (f": {detail[-1]}" if detail else "")
 if os.environ["JSON_MODE_VALUE"] == "1":
     print(json.dumps(payload))
 else:
@@ -920,7 +937,9 @@ else:
         print(f"  {commit}")
     if not payload["unreachable_commits"]:
         print("  (none)")
-raise SystemExit(0 if payload["ok"] else 1)
+    if not ok:
+        print(f"Error: {payload['error']}", file=sys.stderr)
+raise SystemExit(0 if ok else 1)
 PYEOF
 }
 
