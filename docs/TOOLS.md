@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (100 tools)
+## Summary (101 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -61,6 +61,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 24 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
+| [handbrake](#handbrake) | Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs | mixed | 7 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
 | [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 8 |
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
@@ -2031,6 +2032,62 @@ agent-do git sweep
 - Write (connect/interact/save): `branch`, `commit`, `pull`, `push`, `snap restore`, `stash`, `sweep`, `sync`, `worktree add`, `worktree remove`
 - destructive (irreversible data loss; confirm before auto-running): `snap restore`, `sweep`, `worktree remove`
 - polymorphic (beat decided by payload or flag at call time): `branch`, `sweep`
+
+### handbrake
+
+Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list available HandBrake encode presets by category
+- probe a video file's titles, duration, resolution, and audio/subtitle streams
+- transcode one file to MP4 with a chosen preset
+- batch-transcode every .mkv in a directory, skipping already-converted files
+- verify transcoded .mp4 outputs (files and sizes)
+- report HandBrake version and a preset-availability snapshot
+- structured JSON output parsed from HandBrakeCLI --json scan mode
+
+**Commands**
+
+- `presets`: List available encode presets
+- `scan`: Probe a file; list titles, streams, duration: scan \<input>
+- `convert`: Transcode one file to .mp4: convert \<input> [output]
+- `batch`: Transcode every .mkv in a directory: batch \<indir> \<outdir>
+- `verify`: List .mp4 outputs (dir) or check one file: verify \<path>
+- `version`: Show HandBrake version
+- `snapshot`: Version + preset availability (JSON)
+
+**Examples**
+
+```bash
+# list handbrake presets
+agent-do handbrake presets
+# probe a ripped mkv's streams
+agent-do handbrake scan ~/rips/title_t00.mkv --json
+# convert an mkv to mp4 for plex
+agent-do handbrake convert ~/rips/title_t00.mkv
+# convert with a specific preset and destination
+agent-do handbrake convert ~/rips/title_t00.mkv ~/plex/movie.mp4 --preset "HQ 1080p30 Surround"
+# convert all ripped mkvs in a folder to mp4
+agent-do handbrake batch ~/rips ~/plex
+# re-encode a folder even if outputs exist
+agent-do handbrake batch ~/rips ~/plex --overwrite
+# verify transcoded output files
+agent-do handbrake verify ~/plex
+# show what the convert command would run without executing
+agent-do handbrake convert ~/rips/title_t00.mkv --dry-run
+# get a HandBrake version and preset snapshot
+agent-do handbrake snapshot --json
+```
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `presets`, `scan`, `snapshot`, `verify`, `version`
+- Write (connect/interact/save): `batch`, `convert`
+- long_running (daemon/stream/session; may never return): `batch`, `convert`
+- composite (one call performs several beats internally): `batch`
 
 ### hardware
 
