@@ -61,8 +61,7 @@ Rules:
 | 27 | `mn-040aae` | blocked | `mn-d2d67b` | `.handoff/27b26-mn-040aae-manna-estate-wide-handoff-debris-cleanup-pre-structure-work-orde.md` |
 | 28 | `mn-386f70` | open | none | `.handoff/28-mn-386f70-harness-agent-substack-draft-publish-essays-through-substack-s-e.md` |
 | 29 | `mn-cbaf37` | in_progress | none | `.handoff/mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md` (held under live claim; expected `.handoff/29-mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md`) |
-| 30 | `mn-8e82f5` | open | none | `.handoff/30-mn-8e82f5-install-sh-register-agent-do-pulse-record-sh-in-the-hook-wrapper.md` |
-| 31 | `mn-7ec6dc` | open | none | `.handoff/31-mn-7ec6dc-design-rounds-bake-the-taste-elicitation-loop-into-agent-do.md` |
-| 32 | `mn-15fed0` | open | none | `.handoff/32-mn-15fed0-manna-typed-decision-state-replaces-the-erik-title-convention.md` |
-| 33 | `mn-8f9ef3` | blocked | `mn-404dd7` | `.handoff/33b04-mn-8f9ef3-board-view-policy-floor-layer-and-notify-rules-trunk-f-remainder.md` |
-| 34 | `mn-8f0319` | open | none | `.handoff/34-mn-8f0319-zpc-triggers-honest-delivery-receipts-in-process-matching.md` |
+| 30 | `mn-7ec6dc` | open | none | `.handoff/30-mn-7ec6dc-design-rounds-bake-the-taste-elicitation-loop-into-agent-do.md` |
+| 31 | `mn-15fed0` | open | none | `.handoff/31-mn-15fed0-manna-typed-decision-state-replaces-the-erik-title-convention.md` |
+| 32 | `mn-8f9ef3` | blocked | `mn-404dd7` | `.handoff/32b04-mn-8f9ef3-board-view-policy-floor-layer-and-notify-rules-trunk-f-remainder.md` |
+| 33 | `mn-8f0319` | open | none | `.handoff/33-mn-8f0319-zpc-triggers-honest-delivery-receipts-in-process-matching.md` |
