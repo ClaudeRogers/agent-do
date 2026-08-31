@@ -12,11 +12,11 @@ agent-do is the workshop's answer to both problems: a standard, known shape, tha
 agent-do <tool> <command> [args...]
 ```
 
-Behind that shape sit 99 tools exposing 906 commands. What follows is the company as a worker meets it: the tools on the bench, the sign-in sheet, the job list on the wall, the journal, the foreman, and the owner's window; then why it holds together, and where it is going. The tools appear only as evidence that each faculty and each institution is real.
+Behind that shape sit 101 tools exposing 919 commands. What follows is the company as a worker meets it: the tools on the bench, the sign-in sheet, the job list on the wall, the journal, the foreman, and the owner's window; then why it holds together, and where it is going. The tools appear only as evidence that each faculty and each institution is real.
 
 ## The tools on the bench
 
-Every worker picks up the same vessel, and every part of it follows one rhythm: Connect, Snapshot, Interact, Verify, Save. That rhythm is the first article of the shop's dharma, and it is machine-readable. Each of the 906 commands is filed under one of those five beats in `registry.yaml` (6,365 lines), so the worker knows before it moves whether a command looks or acts.
+Every worker picks up the same vessel, and every part of it follows one rhythm: Connect, Snapshot, Interact, Verify, Save. That rhythm is the first article of the shop's dharma, and it is machine-readable. Each of the 919 commands is filed under one of those five beats in `registry.yaml` (6,525 lines), so the worker knows before it moves whether a command looks or acts.
 
 ### Eyes that return structure (snapshot)
 
@@ -24,7 +24,7 @@ A camera gives a mind pixels. A mind made of text needs the page as text with ha
 
 ### Hands with a declared reach (interact, and the contracts on it)
 
-A hand that does not know its own strength breaks things. So every command carries a declared reach. The registry classifies 520 verbs as read-only, 523 as writes, 59 as destructive, 24 as emitting secret material, and 11 as arbitrary-code escape hatches. A program running several workers at once reads that surface a single time and knows which commands can run side by side and which must wait their turn.
+A hand that does not know its own strength breaks things. So every command carries a declared reach. The registry classifies 527 verbs as read-only, 529 as writes, 59 as destructive, 24 as emitting secret material, and 11 as arbitrary-code escape hatches. A program running several workers at once reads that surface a single time and knows which commands can run side by side and which must wait their turn.
 
 A declaration is only worth what checks it, and these are checked in three ways: no tool enters the registry without a complete declaration, every promised verb is compared against the tool's own help text, and the read-only verbs are actually run and graded on whether they behaved like reads. The checks live in the test suite and in the automated checks that run on every push. A tool that promises a verb it lacks fails the build.
 
@@ -64,7 +64,7 @@ While the worker works, the shop learns. `zpc` is the journal, kept per project 
 
 ## The foreman (hooks)
 
-None of the above asks a worker to remember that any of it exists, because the dharma is held by the shop and the foreman does the reading and the filing. Hooks are small scripts the agent's host program runs at fixed moments; the installer registers 11 of them. At clock-in, inside a 10-second budget, the foreman pins the worker's identity, reads the job list aloud, reads the journal, reads the previous shift's drift report, and names any interrupts other workers have raised. During the shift the foreman nudges a worker who reaches for a raw command when a tool on the bench exists or types a number where a published limit should have been looked up, and, once per session, notes at turn's end when code changed and nothing was journaled. At clock-out, the foreman retires the worker's presence and runs the reconcile with only its two judgment-free repairs (release claims held by dead workers, clear blocked flags whose blockers are done), then writes `.manna/drift.yaml` for the next shift's greeting. None of these blocks anything; they add context and get out of the way. Every one of these steps is gated on presence: a repository with no board sees none of it.
+None of the above asks a worker to remember that any of it exists, because the dharma is held by the shop and the foreman does the reading and the filing. Hooks are small scripts the agent's host program runs at fixed moments; the installer registers 12 of them. At clock-in, inside a 10-second budget, the foreman pins the worker's identity, reads the job list aloud, reads the journal, reads the previous shift's drift report, and names any interrupts other workers have raised. During the shift the foreman nudges a worker who reaches for a raw command when a tool on the bench exists or types a number where a published limit should have been looked up, and, once per session, notes at turn's end when code changed and nothing was journaled. At clock-out, the foreman retires the worker's presence and runs the reconcile with only its two judgment-free repairs (release claims held by dead workers, clear blocked flags whose blockers are done), then writes `.manna/drift.yaml` for the next shift's greeting. None of these blocks anything; they add context and get out of the way. Every one of these steps is gated on presence: a repository with no board sees none of it.
 
 ## Receipts the shift leaves behind (trailers, reconcile)
 
