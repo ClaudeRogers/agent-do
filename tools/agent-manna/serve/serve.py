@@ -786,6 +786,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
         if rest == ["api", "summary"]:
             return self.send_summary(slug, root, parsed.query)
+        if rest == ["api", "handoff"]:
+            return self.send_handoff(slug, root, parsed.query)
         if rest == ["api", "ask"]:
             question = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
             if not DIGESTS_ENABLED:
@@ -806,6 +808,35 @@ class Handler(SimpleHTTPRequestHandler):
 
     def send_summary(self, slug: str, root: Path, query: str) -> None:
         _send_summary(self, slug, root, query)
+
+    def send_handoff(self, slug: str, root: Path, query: str) -> None:
+        """The paired handoff document itself, for the copy button.
+
+        The board row names the file; the daemon still refuses to read outside
+        the handoff root — a hand-edited prompt field must not become a file
+        oracle for whatever the daemon's user can read.
+        """
+        issue_id = urllib.parse.parse_qs(query).get("id", [""])[0]
+        if not issue_id:
+            return self.send_json({"error": "id required"}, HTTPStatus.BAD_REQUEST)
+        _, state = CACHE.state(slug, root)
+        row = next((r for r in state.get("all", []) if r.get("id") == issue_id), None)
+        if row is None:
+            return self.send_json({"error": f"no issue {issue_id!r} on this board"}, HTTPStatus.NOT_FOUND)
+        prompt = row.get("prompt")
+        if not prompt:
+            return self.send_json({"error": f"{issue_id} has no paired handoff"}, HTTPStatus.NOT_FOUND)
+        handoff_root = (root / ".handoff").resolve()
+        local = (root / str(prompt)).resolve()
+        if not (local.is_relative_to(handoff_root) and local.suffix == ".md"):
+            return self.send_json({"error": "handoff path escapes .handoff/"}, HTTPStatus.FORBIDDEN)
+        if not local.is_file():
+            return self.send_json({"error": f"handoff file missing: {prompt}"}, HTTPStatus.NOT_FOUND)
+        return self.send_json({
+            "id": issue_id,
+            "path": str(prompt),
+            "content": local.read_text(encoding="utf-8", errors="replace"),
+        })
 
     def stream(self, signature_fn, payload_fn) -> None:
         """Server-sent events: a fresh payload whenever the signature moves."""

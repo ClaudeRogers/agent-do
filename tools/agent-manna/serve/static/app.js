@@ -282,7 +282,7 @@ function renderInspector(s) {
         ${(p.paths || []).length ? `<span>paths</span><b>${p.paths.map(esc).join("<br>")}</b>` : ""}
       </div>
       <div class="actions"><span class="muted">copy:</span><button type="button" data-copy="${esc(p.agent_id)}" data-label="session">[session]</button><button type="button" data-copy="agent-do coord pulse show ${esc(p.agent_id)}" data-label="pulse cmd">[pulse cmd]</button></div>`;
-    bindCopy(); return;
+    return;
   }
   const r = (s.all || []).find((x) => x.id === sel.id);
   if (!r) { el.innerHTML = '<p class="empty">that item is no longer on the board</p>'; return; }
@@ -306,8 +306,7 @@ function renderInspector(s) {
       ${r.prompt ? `<span>handoff</span><b class="faint">${esc(r.prompt)}</b>` : ""}
     </div>
     ${relations}
-    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy="${esc(r.prompt)}" data-label="handoff">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
-  bindCopy();
+    <div class="actions"><span class="muted">copy:</span>${r.prompt ? `<button type="button" data-copy-handoff="${esc(r.id)}" data-label="handoff" title="copy the handoff document">[handoff]</button>` : ""}<button type="button" data-copy="${esc(r.id)}" data-label="id">[id]</button><button type="button" data-copy="agent-do manna show ${esc(r.id)}" data-label="show cmd">[show cmd]</button></div>`;
   ensureSummary(r.id);
 }
 const summaries = new Map(); // id -> {summary, error, pending}
@@ -333,14 +332,40 @@ async function ensureSummary(id) {
   }
   if (app.selected?.kind === "item" && app.selected.id === id) { const el = $("#summary-block .summary-body"); if (el) el.innerHTML = summaryBody(id); }
 }
-function bindCopy() {
-  $$("[data-copy]").forEach((b) => b.addEventListener("click", async (e) => {
-    e.preventDefault(); e.stopPropagation();
-    const text = b.dataset.copy;
-    try { await navigator.clipboard.writeText(text); b.textContent = "[copied]"; b.classList.add("copied"); toast(`copied ${text}`); window.setTimeout(() => { b.textContent = `[${b.dataset.label}]`; b.classList.remove("copied"); }, 1600); }
-    catch { toast(`copy failed; select it: ${text}`); }
-  }));
+// Copy is delegated and capture-phase: buttons re-render with every state
+// push, so per-button listeners go stale the moment they are bound, and the
+// row's own click handler must never steal a copy click. The async clipboard
+// API can reject even on localhost; the textarea fallback runs inside the
+// same user gesture, where execCommand still works everywhere.
+async function copyText(text, b, note) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; }
+  catch {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+  }
+  if (ok) {
+    if (b) { b.textContent = "[copied]"; b.classList.add("copied"); window.setTimeout(() => { b.textContent = `[${b.dataset.label}]`; b.classList.remove("copied"); }, 1600); }
+    toast(`copied ${note || text}`);
+  } else {
+    toast(`copy failed; select it: ${text}`);
+  }
+  return ok;
 }
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("[data-copy],[data-copy-handoff]");
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  if (b.dataset.copy !== undefined) { copyText(b.dataset.copy, b); return; }
+  const id = b.dataset.copyHandoff;
+  fetch(`${api("api/handoff")}?id=${encodeURIComponent(id)}`, { cache: "no-store" })
+    .then((r) => r.json())
+    .then((d) => { if (d.content) copyText(d.content, b, `handoff ${d.path} (${d.content.length} chars)`); else toast(d.error || "no handoff content"); })
+    .catch(() => toast("handoff request failed"));
+}, true);
 
 // ------------------------------------------------------------ columns
 // Every column except the flexible digest/text cell is fitted to its widest
