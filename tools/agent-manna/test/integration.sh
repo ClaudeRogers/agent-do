@@ -116,6 +116,34 @@ INIT_BOARD_ID=$(echo "$output" | awk '/board_id:/ {print $2; exit}')
 [[ -f .manna/federation.yaml ]] && pass "federation.yaml created" || fail "federation.yaml created" "File not found"
 
 # ----------------------------------------------------------------------------
+# Test 1a: canonical derived state
+# ----------------------------------------------------------------------------
+echo ""
+echo "Test 1a: state --json"
+state_output=$(MANNA_STATE_AGENT_DO=none "$MANNA_CORE" state --json --cached-drift 2>&1) || true
+check_yaml "$state_output" '"success":true' "state JSON returns success"
+if STATE_OUTPUT="$state_output" python3 -c '
+import json, os
+data = json.loads(os.environ["STATE_OUTPUT"])
+required = {"all", "now", "next", "waves", "decisions", "dreams", "tracks", "peers", "coord", "drift", "federation", "git"}
+assert required <= data.keys(), required - data.keys()
+assert data["total"] == 0
+def keys(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield key
+            yield from keys(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from keys(child)
+assert not ({"claim_token_hash", "legacy_migration", "act_token", "actor"} & set(keys(data)))
+'; then
+    pass "state JSON exposes the full redacted board model"
+else
+    fail "state JSON exposes the full redacted board model" "$state_output"
+fi
+
+# ----------------------------------------------------------------------------
 # Test 1b: kill-mid-init recovery
 # ----------------------------------------------------------------------------
 echo ""

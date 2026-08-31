@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Board derivation for `manna serve`: one board directory in, one JSON view out.
+"""Read helpers and the core-state adapter for `manna serve`.
 
-Everything on the human page is derived here from what the board already
-stores. Nothing is authored: no lane config, no hand-listed horizon, no
-invented states. The inputs are the documented on-disk board (SCHEMA.md),
-the repository's git history, and coord's live presence. The output is a
-rendering for a human eye; agents keep `manna context|list|show`.
+The canonical whole-board derivation lives in the Rust core and is exposed as
+`manna state --json`. This module invokes that contract for the page and keeps
+the cheap raw/signature helpers used by the estate index. Nothing here authors
+board state.
 
-Read-only by construction: this module never writes into a project. It does
-not run `manna reconcile` (which writes drift.yaml); it reads the drift file
-the last reconcile left behind and reports its age.
+Read-only by construction: this module never writes into a project. Live state
+runs `manna reconcile --json` without `--write-drift`; cached state reads the
+last drift file and reports its age.
 """
 
 from __future__ import annotations
@@ -45,6 +44,7 @@ _MN_ID = re.compile(r"\bmn-[0-9a-f]{6,}\b")
 _BOARD_ID = re.compile(r"^mb-[0-9a-f]{32}$")
 _MANNA_URI = re.compile(r"^manna://mb-[0-9a-f]{32}/mn-[0-9a-f]{6,}$")
 RELATION_KINDS = frozenset({"counterpart", "informed_by", "depends_on", "supersedes"})
+MANNA_TOOL_DIR = Path(__file__).resolve().parent.parent
 
 
 def utc_now() -> datetime:
@@ -466,215 +466,57 @@ def strip_markers(title: str) -> str:
     return re.sub(r"^(\s*\[[^\]]*\]\s*)+", "", title).strip() or title
 
 
+def _state_binary() -> Path:
+    override = os.environ.get("MANNA_STATE_BINARY")
+    if override:
+        path = Path(override)
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+        raise RuntimeError(f"MANNA_STATE_BINARY is not executable: {path}")
+    wrapper = MANNA_TOOL_DIR / "agent-manna"
+    if wrapper.is_file() and os.access(wrapper, os.X_OK):
+        return wrapper
+    raise RuntimeError("manna state wrapper is unavailable")
+
+
 def derive(
     root: Path,
     agent_do: Path | None = None,
     markers: tuple[str, ...] = DECISION_MARKERS,
     live: bool = False,
-    *,
-    peers: list[dict[str, Any]] | None = None,
-    coord: dict[str, Any] | None = None,
-    drift_live: dict[str, Any] | None = None,
-    trailers: dict[str, list[dict[str, Any]]] | None = None,
+    **_: Any,
 ) -> dict[str, Any]:
-    """Build the whole page model for one board root.
-
-    `live` runs reconcile for current drift (the daemon does; tests and quick
-    summaries do not). Either way the file's findings and age are reported,
-    so the page can say how stale the last written reconcile is. The daemon
-    passes precomputed pieces so the expensive ones (reconcile, git log,
-    coord) are cached on their own clocks."""
-    board_dir = root / ".manna"
-    issues = read_issues(board_dir)
-    order = read_order(board_dir)
-    drift_file = read_drift(board_dir)
-    # No silent recompute when drift was not handed in: reconcile serializes
-    # on the board lock (measured 40s+ under contention), so the caller owns
-    # when it runs and the written drift file carries the meantime, with its
-    # age beside it.
-    if drift_live:
-        drift = {**drift_live, "source": "reconcile", "present": True, "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
-    else:
-        drift = {**drift_file, "source": "file", "file": {"present": drift_file["present"], "generated_at": drift_file["generated_at"], "count": drift_file["count"]}}
-    workflow = read_yaml(board_dir / "workflow.yaml")
-    board_meta = read_yaml(board_dir / "board.yaml")
-    federation = read_federation(board_dir)
-    git = git_summary(root)
-    if trailers is None:
-        trailers = git_trailers(root) if git["is_repo"] else {}
-    if peers is None:
-        peers = coord_peers(root, agent_do) if git["is_repo"] else []
-    if coord is None:
-        coord = coord_snapshot(root, agent_do, peers) if peers else EMPTY_COORD
-
-    by_id = {i["id"]: i for i in issues}
-    order_index = {issue_id: n for n, issue_id in enumerate(order)}
-    tracks = {i["id"]: i for i in issues if i.get("type") == "track"}
-    relations_by_source: dict[str, list[dict[str, Any]]] = {}
-    for relation in federation.get("relations") or []:
-        relations_by_source.setdefault(relation["from"], []).append(relation)
-
-    def kind(issue: dict[str, Any]) -> str:
-        return issue.get("type") or "item"
-
-    def unresolved(issue: dict[str, Any]) -> list[dict[str, Any]]:
-        out = []
-        for dep in issue.get("blocked_by") or []:
-            target = by_id.get(dep)
-            if target is None:
-                out.append({"id": dep, "status": "missing", "title": dep})
-            elif target.get("status") != "done":
-                out.append({"id": dep, "status": target.get("status"), "title": target.get("title", dep)})
-        return out
-
-    # Enrich every row once; sections are filters over this list.
-    rows: list[dict[str, Any]] = []
-    for issue in issues:
-        status = issue.get("status", "open")
-        blockers = unresolved(issue)
-        peer = match_peer(issue.get("claimed_by"), peers)
-        track_id = issue.get("track")
-        row = {
-            **issue,
-            "kind": kind(issue),
-            "title_plain": strip_markers(str(issue.get("title", ""))),
-            "track_title": tracks.get(track_id, {}).get("title") if track_id else None,
-            "order": order_index.get(issue["id"]),
-            "handoff_exists": (root / str(issue["prompt"])).is_file() if issue.get("prompt") else None,
-            "blockers": blockers,
-            "dependents": [],
-            "decision": is_decision(issue, markers) and status != "done",
-            "claimant": (
-                {
-                    "label": issue.get("claimed_by"),
-                    "liveness": peer.get("status") if peer else "unseen",
-                    "age": peer.get("age") if peer else None,
-                    "runtime": peer.get("runtime") if peer else None,
-                    "goal": peer.get("goal") if peer else None,
-                    "pulse": peer.get("pulse") if peer else None,
-                    "attention": peer.get("attention") if peer else "unseen",
-                }
-                if issue.get("claimed_by")
-                else None
-            ),
-            "commits": trailers.get(issue["id"], []),
-            "relations": [dict(relation) for relation in relations_by_source.get(issue["id"], [])],
-        }
-        # effective: what the graph says, not only what the status field says
-        if kind(issue) == "track":
-            row["effective"] = "track"
-        elif kind(issue) == "dream":
-            row["effective"] = "dream" if status != "done" else "done"
-        elif status == "done":
-            row["effective"] = "done"
-        elif status == "in_progress":
-            row["effective"] = "active"
-        elif blockers:
-            row["effective"] = "waiting"
-        elif row["decision"]:
-            row["effective"] = "decision"
-        else:
-            row["effective"] = "ready"
-        rows.append(row)
-
-    row_by_id = {r["id"]: r for r in rows}
-    for row in rows:
-        for dep in row.get("blocked_by") or []:
-            if dep in row_by_id:
-                row_by_id[dep]["dependents"].append(row["id"])
-    for peer in peers:
-        peer["holding"] = [
-            {"id": r["id"], "title": r["title"]}
-            for r in rows
-            if r.get("claimed_by") and r.get("status") == "in_progress" and match_peer(r["claimed_by"], [peer]) is peer
-        ]
-
-    def order_key(row: dict[str, Any]) -> tuple:
-        pos = row["order"]
-        return (pos is None, pos if pos is not None else 0, row.get("updated_at") or "", row["id"])
-
-    def now_key(row: dict[str, Any]) -> tuple:
-        claimant = row.get("claimant") or {}
-        rank = claimant.get("attention") or "unseen"
-        pos = ATTENTION_ORDER.index(rank) if rank in ATTENTION_ORDER else len(ATTENTION_ORDER)
-        return (pos, *order_key(row))
-
-    now_rows = sorted((r for r in rows if r["effective"] == "active"), key=now_key)
-    next_rows = sorted((r for r in rows if r["effective"] == "ready"), key=order_key)
-    decision_rows = sorted((r for r in rows if r["decision"] and r["effective"] != "done"), key=order_key)
-    waiting_rows = [r for r in rows if r["effective"] == "waiting"]
-    dream_rows = sorted((r for r in rows if r["effective"] == "dream"), key=lambda r: r.get("updated_at") or "", reverse=True)
-
-    # Waves: topological layers of the waiting set. Wave 1 waits only on
-    # non-waiting work (ready/active/decision); wave n waits on waves < n.
-    waves: list[dict[str, Any]] = []
-    remaining = {r["id"] for r in waiting_rows}
-    placed: set[str] = set()
-    while remaining:
-        layer = sorted(
-            (
-                row_by_id[i]
-                for i in remaining
-                if all(b["id"] not in remaining or b["id"] in placed for b in row_by_id[i]["blockers"])
-            ),
-            key=order_key,
+    """Read the canonical core model. Legacy keyword inputs are accepted so
+    callers can migrate without splitting the state contract; they are never
+    used to re-derive or overlay the core result."""
+    command = [str(_state_binary()), "state", "--json"]
+    if not live:
+        command.append("--cached-drift")
+    for marker in markers:
+        command.extend(["--decision-marker", marker])
+    env = dict(os.environ)
+    env["MANNA_STATE_AGENT_DO"] = str(agent_do) if agent_do is not None else "none"
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
         )
-        if not layer:
-            break
-        waves.append({"wave": len(waves) + 1, "items": layer})
-        for row in layer:
-            placed.add(row["id"])
-            remaining.discard(row["id"])
-    unlayered = sorted((row_by_id[i] for i in remaining), key=order_key)
-
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["effective"]] = counts.get(row["effective"], 0) + 1
-    status_counts: dict[str, int] = {}
-    for issue in issues:
-        s = issue.get("status", "open")
-        status_counts[s] = status_counts.get(s, 0) + 1
-
-    track_groups = []
-    for track_id, track in tracks.items():
-        members = sorted((r for r in rows if r.get("track") == track_id and r["kind"] != "track"), key=order_key)
-        track_groups.append({"id": track_id, "title": track.get("title"), "status": track.get("status"), "items": members})
-    orphans = sorted((r for r in rows if r["kind"] != "track" and not r.get("track")), key=order_key)
-    if orphans:
-        track_groups.append({"id": None, "title": "(no track)", "status": None, "items": orphans})
-
-    handoff_dir = workflow.get("handoff_dir") or ".handoff"
-    return {
-        "generated_at": iso(utc_now()),
-        "root": str(root),
-        "name": root.name,
-        "board": {
-            "path": ".manna/issues.jsonl",
-            "workflow": board_meta.get("workflow"),
-            "board_id": federation.get("board_id"),
-            "decision_markers": list(markers),
-        "handoff_dir": handoff_dir,
-            "issues_modified_at": mtime_iso(board_dir / "issues.jsonl"),
-            "order_count": len(order),
-        },
-        "git": git,
-        "peers": sorted(peers, key=attention_key),
-        "attention": {rank: sum(1 for p in peers if p.get("attention") == rank) for rank in ATTENTION_ORDER},
-        "coord": coord,
-        "counts": counts,
-        "status_counts": status_counts,
-        "total": len(issues),
-        "now": now_rows,
-        "next": next_rows,
-        "decisions": decision_rows,
-        "waves": waves,
-        "unlayered": unlayered,
-        "dreams": dream_rows,
-        "tracks": track_groups,
-        "drift": drift,
-        "federation": federation,
-        "all": sorted(rows, key=order_key),
-    }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"manna state failed: {error}") from error
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        detail = completed.stderr.strip()[:400] or "no JSON response"
+        raise RuntimeError(f"manna state failed: {detail}") from error
+    if completed.returncode != 0 or not isinstance(payload, dict) or payload.get("success") is not True:
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        raise RuntimeError(f"manna state failed: {detail or completed.stderr.strip()[:400]}")
+    return {key: value for key, value in payload.items() if key != "success"}
 
 
 # ---------------------------------------------------------------- signature

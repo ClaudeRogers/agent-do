@@ -7,9 +7,9 @@ inside a project registers that board, starts the daemon if it is not up,
 and always prints the project's URL, so any agent asked "show me the board"
 runs this and hands the link over.
 
-Agents do not read from this server. The page is a rendering of
-`manna context|list|show`, never a source; the only file it writes is its
-own registry under $AGENT_DO_HOME/manna/serve/.
+Agents do not read from this server. The page renders the canonical
+`manna state --json` contract; the only file it writes is its own registry
+under $AGENT_DO_HOME/manna/serve/.
 """
 
 from __future__ import annotations
@@ -74,10 +74,16 @@ SCAN_SKIP = {".git", "node_modules", "target", ".venv", "venv", "__pycache__", "
 
 
 def source_hash() -> str:
-    """Identity of the Python the daemon runs; static files are read per request."""
+    """Identity of the daemon and the core state contract it renders."""
     digest = hashlib.sha256()
-    for name in ("serve.py", "board.py", "digest.py"):
-        digest.update((SERVE_DIR / name).read_bytes())
+    for path in (
+        SERVE_DIR / "serve.py",
+        SERVE_DIR / "board.py",
+        SERVE_DIR / "digest.py",
+        SERVE_DIR.parent / "src" / "state.rs",
+        SERVE_DIR.parent / "src" / "main.rs",
+    ):
+        digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
 
@@ -191,7 +197,6 @@ def perform(slug: str, root: Path, action: str, issue_id: str | None, confirm: b
     ok = all(st["code"] == 0 for st in steps)
     with CACHE.lock:  # the next read re-derives; the file signature will move anyway
         CACHE.states.pop(slug, None)
-        CACHE.bits.pop(str(root), None)
     sys.stdout.write(f"[act] {slug} {action} {issue_id or ''} -> {'ok' if ok else 'refused'}\n"); sys.stdout.flush()
     return {"ok": ok, "action": action, "id": issue_id, "steps": steps}
 
@@ -348,21 +353,15 @@ DIGESTS_ENABLED = _digests_enabled()
 
 
 class BoardCache:
-    """Two clocks. Board and git state is keyed by a file signature and
-    recomputed only when those files move (that is where reconcile and the
-    git log live). Coord presence is refreshed on a cadence and carries a
-    content digest, so streams push only when presence actually changed."""
+    """Board state is keyed by durable/git signatures. Coord presence has its
+    own cadence and digest, so streams push when live attention changes even
+    if no repository file moved."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.gitdirs: dict[str, Path | None] = {}
-        self.bits: dict[str, tuple[str, dict[str, Any]]] = {}
         self.bundles: dict[str, dict[str, Any]] = {}
         self.states: dict[str, tuple[str, dict[str, Any]]] = {}
-        self.drifts: dict[str, Any] = {}
-        self.drift_jobs: dict[str, tuple[str, threading.Thread]] = {}
-        self.drift_done: dict[str, str] = {}
-        self.drift_stamps: dict[str, int] = {}
 
     def gitdir(self, root: Path) -> Path | None:
         key = str(root)
@@ -384,61 +383,6 @@ class BoardCache:
             return f"digests:{st.st_mtime_ns}:{st.st_size}"
         except OSError:
             return "digests:none"
-
-    # -- board + git clock
-
-    def board_bits(self, root: Path) -> tuple[str, dict[str, Any]]:
-        """Trailer commits now, drift findings from the last finished run.
-
-        Live drift is `manna reconcile --json`, and reconcile serializes on
-        the board lock with every other consumer (SessionEnd hooks, other
-        pages, the daemon's own refresh): measured 41.7s of lock convoy on a
-        242-row board. A page load never waits on it — the state ships the
-        last finished drift, a background run brings it current, and the
-        drift stamp in the stream signature pushes the update when it lands.
-        """
-        key = str(root)
-        sig = self.base_signature(root)
-        with self.lock:
-            cached = self.bits.get(key)
-            if cached and cached[0] == sig:
-                return cached
-        is_repo = self.gitdir(root) is not None
-        with self.lock:
-            last_drift = self.drifts.get(key)
-        value = {
-            "drift_live": last_drift,
-            "trailers": board_lib.git_trailers(root) if is_repo else {},
-        }
-        with self.lock:
-            self.bits[key] = (sig, value)
-        if is_repo:
-            self.schedule_drift(key, root, sig)
-        return sig, value
-
-    def schedule_drift(self, key: str, root: Path, sig: str) -> None:
-        """One background reconcile per board at a time, per base signature."""
-        with self.lock:
-            job = self.drift_jobs.get(key)
-            if job and job[0] == sig and job[1].is_alive():
-                return
-            done = self.drift_done.get(key)
-            if done == sig:
-                return
-
-            def run() -> None:
-                drift = board_lib.live_drift(root, AGENT_DO)
-                with self.lock:
-                    self.drifts[key] = drift
-                    self.drift_done[key] = sig
-                    cached = self.bits.get(key)
-                    if cached:
-                        cached[1]["drift_live"] = drift
-                    self.drift_stamps[key] = self.drift_stamps.get(key, 0) + 1
-
-            thread = threading.Thread(target=run, name=f"drift:{root.name}", daemon=True)
-            self.drift_jobs[key] = (sig, thread)
-            thread.start()
 
     # -- presence clock
 
@@ -475,12 +419,10 @@ class BoardCache:
     # -- the page
 
     def signature(self, root: Path, slug: str | None = None) -> str:
-        """What a board stream watches: board+git files, the presence digest,
-        the digest cache, and the drift stamp (bumped when a background
-        reconcile finishes, so the page updates without having waited)."""
+        """What a board stream watches: board/git files, live presence,
+        federation targets, and the optional digest cache."""
         sig = (self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
-               + "|federation:" + federation_signature()
-               + "|drift:" + str(self.drift_stamps.get(str(root), 0)))
+               + "|federation:" + federation_signature())
         if slug:
             sig += "|" + self.digest_signature(slug)
         return sig
@@ -491,13 +433,8 @@ class BoardCache:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
                 return cached
-        _, bits = self.board_bits(root)
         bundle = self.bundle(root)
-        state = board_lib.derive(
-            root, AGENT_DO, decision_markers(), live=True,
-            peers=bundle["peers"], coord=bundle["coord"], drift_live=bits["drift_live"], trailers=bits["trailers"],
-        )
-        attach_resolved_relations(state, resolved_relations(root))
+        state = board_lib.derive(root, AGENT_DO, decision_markers(), live=True)
         state["slug"] = slug
         state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
         state["coord_refresh_seconds"] = COORD_REFRESH_SECONDS
@@ -608,19 +545,13 @@ def attach_resolved_relations(state: dict[str, Any], payload: dict[str, Any] | N
 
 
 def fast_state(slug: str, root: Path) -> dict[str, Any]:
-    """The board from its cheap reads alone — issues, order, drift file,
-    cached digests, and coord presence when the daemon's bundle is warm —
-    so every sheet paints at once; commits and cold presence arrive with
-    the full state. `building` marks the gaps."""
+    """The cached-drift core model, so every sheet paints before live coord
+    and reconcile complete. `building` marks the intentional live-data gap."""
     with CACHE.lock:
         bundle = CACHE.bundles.get(str(root))
-    peers: list = []
-    coord = board_lib.EMPTY_COORD
-    if bundle is not None and time.monotonic() - bundle["fetched_at"] < COORD_REFRESH_SECONDS * 3:
-        peers, coord = bundle["peers"], bundle["coord"]
-    else:
+    if bundle is None or time.monotonic() - bundle["fetched_at"] >= COORD_REFRESH_SECONDS * 3:
         threading.Thread(target=lambda: CACHE.bundle(root), name=f"warm:{slug}", daemon=True).start()
-    state = board_lib.derive(root, None, decision_markers(), live=False, peers=peers, coord=coord, trailers={})
+    state = board_lib.derive(root, None, decision_markers(), live=False)
     digest_lib.apply(slug, state["all"])
     state.update({"slug": slug, "act_token": ACT_TOKEN, "actor": serve_identity()["session_id"], "coord_refresh_seconds": COORD_REFRESH_SECONDS, "coord_refreshed_ago": None, "building": True})
     return state

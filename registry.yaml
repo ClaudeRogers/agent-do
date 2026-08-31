@@ -4831,6 +4831,7 @@ tools:
       init: Initialize .manna plus the tracked .handoff workflow scaffold
       migrate: Atomically admit a legacy board into strict paired workflow state
       status: Show current session and claimed issues
+      state: Emit the full derived board model as JSON or YAML, including graph buckets, receipts, federation, drift, and coord attention
       create: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
       claim: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
       done: Mark a claimed issue as done
@@ -4862,6 +4863,8 @@ tools:
       command: agent-manna create 'Fix login bug'
     - intent: list all issues
       command: agent-manna list
+    - intent: read the complete derived board state
+      command: agent-manna state --json
     - intent: show issue details
       command: agent-manna show 1
     - intent: capture an idea for later
@@ -4893,6 +4896,7 @@ tools:
       - show
       - context
       - status
+      - state
       - federation
       - relations
       interact:

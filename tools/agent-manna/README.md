@@ -68,6 +68,9 @@ agent-do manna sync
 # List all issues
 agent-do manna list
 
+# Read the complete derived board model
+agent-do manna state --json
+
 # Claim an issue to work on
 agent-do manna claim mn-abc123
 
@@ -174,6 +177,26 @@ session_id: ses_abc123
 claimed_issues:
   - mn-def456
 ```
+
+### `state [--json]`
+
+Emit the canonical whole-board model used by native clients and `manna serve`.
+It joins the complete public issue rows with unresolved blockers, reverse
+dependents, handoff priority and existence, claimant liveness and pulse, Manna
+trailer commits, federation resolution, Git state, drift, and the derived
+`now`, `next`, `decisions`, `waves`, `dreams`, and `tracks` sections.
+
+```bash
+agent-do manna state --json
+```
+
+The output never includes `claim_token_hash`, `legacy_migration`, or the
+serve daemon's per-process `act_token` and `actor`. `description`,
+`blocked_by`, and `prompt` remain present when the board row carries them, so
+consumers do not need to join `list` and `show` themselves. Custom decision
+markers can be added with repeated `--decision-marker '[NAME]'` flags. Because
+the sections and counts claim whole-board coverage, a malformed JSONL row
+fails `state` closed instead of being silently omitted.
 
 ### `create <title> [description]`
 
@@ -482,10 +505,12 @@ use), behind the loopback Host/Origin checks and a per-process token the page
 carries; manna's own refusals print on the row verbatim. Nothing on the page
 edits a file. The SessionEnd hook applies the same two safe repairs.
 
-Agents never read from it: `context`, `list`, and `show` remain the contract.
+Agents never read from it: `state --json` is the complete board contract;
+`context`, `list`, and `show` remain the narrower task-oriented reads.
 Private claim proofs (`claim_token_hash`) never leave the board directory.
 Implementation: `serve/serve.py` (daemon, registry, two-clock cache),
-`serve/board.py` (pure derivation), `serve/digest.py` (digests), beside the Rust core.
+`serve/board.py` (core-state adapter and estate helpers), `serve/digest.py`
+(digests), and `src/state.rs` (the canonical derivation).
 
 ## Architecture
 

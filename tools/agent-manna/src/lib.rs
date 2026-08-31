@@ -6,5 +6,6 @@ pub mod federation;
 pub mod id;
 pub mod issue;
 pub mod reconcile;
+pub mod state;
 pub mod store;
 pub mod workflow;

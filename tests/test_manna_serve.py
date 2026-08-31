@@ -29,7 +29,7 @@ import serve as serve_lib  # noqa: E402
 
 ISSUES = [
     {"id": "mn-track1", "title": "TRACK: Program", "status": "open", "type": "track", "blocked_by": [], "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-01T00:00:00Z"},
-    {"id": "mn-aaaaaa", "title": "First ready thing", "status": "open", "blocked_by": [], "track": "mn-track1", "prompt": ".handoff/01-mn-aaaaaa-first.md", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-10T00:00:00Z"},
+    {"id": "mn-aaaaaa", "title": "First ready thing", "description": "Build the first ready thing.", "status": "open", "blocked_by": [], "track": "mn-track1", "prompt": ".handoff/01-mn-aaaaaa-first.md", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-10T00:00:00Z"},
     {"id": "mn-bbbbbb", "title": "Second ready thing", "status": "open", "blocked_by": [], "track": "mn-track1", "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-11T00:00:00Z"},
     {"id": "mn-cccccc", "title": "Claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-deadbeefdead0000", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "0" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-12T00:00:00Z"},
     {"id": "mn-cccc22", "title": "Second claimed thing", "status": "in_progress", "blocked_by": [], "track": "mn-track1", "claimed_by": "claude-0000aaaa1111ffff", "claimed_at": "2026-08-12T00:00:00Z", "claim_token_hash": "sha256:" + "1" * 64, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-13T00:00:00Z"},
@@ -40,7 +40,7 @@ ISSUES = [
     {"id": "mn-mentio", "title": "Retire the [DECISION] title convention", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-second", "title": "[P1-K] [human] Rule on the second thing", "status": "open", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-04T00:00:00Z"},
     {"id": "mn-dream1", "title": "A spark", "status": "open", "type": "dream", "blocked_by": [], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-05T00:00:00Z"},
-    {"id": "mn-done00", "title": "Shipped thing", "status": "done", "blocked_by": [], "track": "mn-track1", "legacy_migration": {"version": 1}, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-06T00:00:00Z"},
+    {"id": "mn-done00", "title": "Shipped thing", "description": "Document claim_token_hash and legacy_migration redaction.", "status": "done", "blocked_by": [], "track": "mn-track1", "legacy_migration": {"version": 1, "disposition": "history", "migrated_at": "2026-08-21T00:00:00Z"}, "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-06T00:00:00Z"},
     {"id": "mn-cycle1", "title": "Cycle A", "status": "blocked", "blocked_by": ["mn-cycle2"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
     {"id": "mn-cycle2", "title": "Cycle B", "status": "blocked", "blocked_by": ["mn-cycle1"], "created_at": "2026-08-02T00:00:00Z", "updated_at": "2026-08-03T00:00:00Z"},
 ]
@@ -70,6 +70,14 @@ STUB_RECONCILE = {"success": True, "findings": [
     {"kind": "landed_open", "issue_id": "mn-aaaaaa", "detail": "live finding", "evidence": "abc123", "proposed_fix": "claim and done"},
     {"kind": "stale_dream", "issue_id": "mn-dream1", "detail": "old dream", "evidence": "created 2026-08-02", "proposed_fix": "convert or close"},
 ]}
+
+
+def nested_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | set().union(*(nested_keys(child) for child in value.values()))
+    if isinstance(value, list):
+        return set().union(*(nested_keys(child) for child in value))
+    return set()
 
 
 def make_stub_agent_do(directory: Path) -> Path:
@@ -110,6 +118,7 @@ def make_board(root: Path) -> Path:
     board = root / ".manna"
     board.mkdir()
     (board / "issues.jsonl").write_text("".join(json.dumps(i) + "\n" for i in ISSUES), encoding="utf-8")
+    (board / "sessions.jsonl").write_text("", encoding="utf-8")
     (board / "handoff-order.yaml").write_text("version: 1\nitems:\n- mn-bbbbbb\n- mn-aaaaaa\n- mn-dddddd\n", encoding="utf-8")
     (board / "workflow.yaml").write_text("version: 2\nhandoff_dir: .handoff\n", encoding="utf-8")
     (board / "board.yaml").write_text("version: 1\nworkflow: strict\n", encoding="utf-8")
@@ -140,9 +149,46 @@ class DerivationTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def test_private_fields_never_leave_the_board(self) -> None:
-        payload = json.dumps(self.state)
-        self.assertNotIn("claim_token_hash", payload)
-        self.assertNotIn("legacy_migration", payload)
+        self.assertFalse({"claim_token_hash", "legacy_migration"} & nested_keys(self.state))
+
+    def test_state_cli_is_the_full_public_contract(self) -> None:
+        env = {**os.environ, "MANNA_STATE_AGENT_DO": "none"}
+        completed = subprocess.run(
+            [str(board_lib._state_binary()), "state", "--json", "--cached-drift"],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["total"], len(ISSUES))
+        ready = next(row for row in payload["all"] if row["id"] == "mn-aaaaaa")
+        self.assertEqual(ready["description"], "Build the first ready thing.")
+        self.assertIn("blocked_by", ready)
+        self.assertEqual(ready["prompt"], ".handoff/01-mn-aaaaaa-first.md")
+        private = {"claim_token_hash", "legacy_migration", "act_token", "actor"}
+        self.assertFalse(private & nested_keys(payload))
+
+    def test_serve_adapter_returns_the_core_model_without_a_second_derivation(self) -> None:
+        env = {**os.environ, "MANNA_STATE_AGENT_DO": "none"}
+        direct = subprocess.run(
+            [str(board_lib._state_binary()), "state", "--json", "--cached-drift"],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        expected = json.loads(direct.stdout)
+        expected.pop("success")
+        actual = board_lib.derive(self.root, agent_do=None)
+        expected.pop("generated_at")
+        actual.pop("generated_at")
+        self.assertEqual(actual, expected)
 
     def test_port_is_picked_free_once_and_kept(self) -> None:
         # No shipped default port: first resolution asks the OS for a free
@@ -632,7 +678,7 @@ class RegistryAndHttpTests(unittest.TestCase):
             status, body, _ = get("/proj/api/state")
             state = json.loads(body)
             self.assertEqual(state["slug"], "proj")
-            self.assertNotIn("claim_token_hash", body.decode())
+            self.assertFalse({"claim_token_hash", "legacy_migration"} & nested_keys(state))
 
             # No document viewer: the page hands out the handoff path, never the file.
             status, _, _ = get("/proj/handoff?path=.handoff/01-mn-aaaaaa-first.md")

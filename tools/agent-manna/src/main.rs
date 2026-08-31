@@ -23,6 +23,7 @@ use manna_core::reconcile::{
     claim_command_ids, extract_manna_ids, lint_board, manna_trailer_ids, parse_session_pid,
     prompt_pointer, Finding, FindingKind, LintFinding,
 };
+use manna_core::state::{derive_board_state, StateOptions, DEFAULT_DECISION_MARKERS};
 use manna_core::store::MannaStore;
 use manna_core::workflow::{
     attach_handoff, canonical_handoff_path, create_paired_issue, delete_paired_issue,
@@ -61,6 +62,21 @@ enum Commands {
 
     /// Show current session status
     Status,
+
+    /// Emit the canonical derived board model
+    State {
+        /// Emit JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+
+        /// Add a leading title marker that classifies a decision row
+        #[arg(long = "decision-marker", value_name = "TAG")]
+        decision_markers: Vec<String>,
+
+        /// Use the last written drift report instead of running read-only reconcile
+        #[arg(long, hide = true)]
+        cached_drift: bool,
+    },
 
     /// Create a new issue
     Create {
@@ -698,6 +714,24 @@ fn output_error(error: &str, exit_code: i32) -> ! {
         "{}",
         serde_yaml::to_string(&response).unwrap_or_else(|e| {
             format!("success: false\nerror: \"YAML serialization error: {}\"", e)
+        })
+    );
+    std::process::exit(exit_code);
+}
+
+/// Output an error response as JSON and exit with the specified code.
+fn output_error_json(error: &str, exit_code: i32) -> ! {
+    let response = ErrorResponse {
+        success: false,
+        error: error.to_string(),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&response).unwrap_or_else(|serialization| {
+            format!(
+                "{{\"success\":false,\"error\":\"JSON serialization error: {}\"}}",
+                serialization
+            )
         })
     );
     std::process::exit(exit_code);
@@ -1460,6 +1494,57 @@ fn cmd_list(
         output_success_json(IssueListData { issues: summaries });
     }
     output_success(IssueListData { issues: summaries });
+}
+
+fn cmd_state(json: bool, decision_markers: Vec<String>, cached_drift: bool) -> ! {
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) if json => output_error_json(
+            &format!("Cannot resolve current directory: {error}"),
+            EXIT_SYSTEM_ERROR,
+        ),
+        Err(error) => output_error(
+            &format!("Cannot resolve current directory: {error}"),
+            EXIT_SYSTEM_ERROR,
+        ),
+    };
+    let mut options = StateOptions::default();
+    for marker in decision_markers {
+        let marker = marker.trim().to_string();
+        if !(marker.starts_with('[') && marker.ends_with(']') && marker.len() > 2) {
+            let error =
+                format!("A decision marker is a bracketed tag like [OWNER], not {marker:?}");
+            if json {
+                output_error_json(&error, EXIT_USER_ERROR);
+            }
+            output_error(&error, EXIT_USER_ERROR);
+        }
+        if !options
+            .decision_markers
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&marker))
+        {
+            options.decision_markers.push(marker);
+        }
+    }
+    if options.decision_markers.is_empty() {
+        options.decision_markers = DEFAULT_DECISION_MARKERS
+            .iter()
+            .map(|marker| marker.to_string())
+            .collect();
+    }
+    if cached_drift {
+        options.live_drift = false;
+    }
+    let state = match derive_board_state(&root, &options) {
+        Ok(state) => state,
+        Err(error) if json => output_error_json(&error, EXIT_SYSTEM_ERROR),
+        Err(error) => output_error(&error, EXIT_SYSTEM_ERROR),
+    };
+    if json {
+        output_success_json(state);
+    }
+    output_success(state);
 }
 
 fn cmd_show(id: String) -> ! {
@@ -3169,6 +3254,11 @@ fn main() {
         Commands::Init => cmd_init(),
         Commands::Migrate => cmd_migrate(),
         Commands::Status => cmd_status(),
+        Commands::State {
+            json,
+            decision_markers,
+            cached_drift,
+        } => cmd_state(json, decision_markers, cached_drift),
         Commands::Create {
             title,
             description,
