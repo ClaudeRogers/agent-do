@@ -68,3 +68,6 @@ Rules:
 | 34 | `mn-62acb6` | open | none | `.handoff/34-mn-62acb6-security-keep-agent-psql-keychain-secrets-off-argv.md` |
 | 35 | `mn-4f6f2b` | open | none | `.handoff/35-mn-4f6f2b-security-audit-remaining-macos-keychain-writers-for-argv-exposur.md` |
 | 36 | `mn-9605b0` | open | none | `.handoff/36-mn-9605b0-security-remove-remaining-agent-psql-secret-subprocess-propagati.md` |
+| 37 | `mn-a7fd91` | blocked | `mn-5d7c5a` | `.handoff/37b38-mn-a7fd91-zpc-intuitions-estate-recurrence-graduates-into-agent-do-improve.md` |
+| 38 | `mn-5d7c5a` | open | none | `.handoff/38-mn-5d7c5a-zpc-fascia-one-shared-judgment-layer-both-organs-ride.md` |
+| 39 | `mn-fc5028` | blocked | `mn-5d7c5a` | `.handoff/39b38-mn-fc5028-zpc-gardener-the-per-repo-top-50-that-strengthens-as-it-shrinks.md` |
