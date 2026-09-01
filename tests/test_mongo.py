@@ -1065,6 +1065,16 @@ def main() -> int:
         check("redacted exception hides password", "s3cr3t" not in r.stderr)
         check("redacted exception masks userinfo", "mongodb://****@raise-config-error" in r.stderr)
 
+        malformed_leak_env = {
+            **base_env,
+            "MONGO_CONNECTION_APPDB": "mongodb://user:s3cr3t@fragment@raise-config-error:27017/appdb",
+        }
+        r = run([str(AGENT_DO), "mongo", "snapshot", "--connection", "appdb"], env=malformed_leak_env)
+        check("malformed URI exception redacts password", r.returncode != 0)
+        check("malformed URI exception hides all userinfo", "s3cr3t@fragment" not in r.stderr)
+        check("malformed URI exception masks last userinfo separator",
+              "mongodb://****@raise-config-error" in r.stderr)
+
         # import-from-aks when kubectl not installed gives clean error (not unhandled exception).
         # Inject a fake kubectl that exits 127 (command not found) to simulate missing binary
         # while keeping python3 and agent-do reachable.
