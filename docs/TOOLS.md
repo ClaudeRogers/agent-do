@@ -76,7 +76,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 26 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 27 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -2637,6 +2637,7 @@ Concurrency: `write`
 - `migrate`: Atomically admit a legacy board into strict paired workflow state
 - `status`: Show current session and claimed issues
 - `state`: Emit the full derived board model as JSON or YAML, including graph buckets, receipts, federation, drift, and coord attention
+- `estate`: Emit every registered board as the /api/boards model without starting or contacting the serve daemon
 - `create`: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
 - `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
@@ -2673,6 +2674,8 @@ agent-do manna create 'Fix login bug'
 agent-do manna list
 # read the complete derived board state
 agent-do manna state --json
+# read every registered manna board
+agent-do manna estate --json
 # show issue details
 agent-do manna show 1
 # capture an idea for later
@@ -2703,7 +2706,7 @@ agent-do manna relations --resolve --check
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `relations`, `show`, `state`, `status`
+- Read-only (snapshot/verify; safe to parallelize): `context`, `estate`, `lint`, `list`, `relations`, `show`, `state`, `status`
 - Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `federation`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `relate`, `sync`, `unblock`, `unrelate`, `update`
 - destructive (irreversible data loss; confirm before auto-running): `delete`, `federation`, `migrate`, `unrelate`
 - long_running (daemon/stream/session; may never return): `serve`

@@ -71,6 +71,9 @@ agent-do manna list
 # Read the complete derived board model
 agent-do manna state --json
 
+# Read every board registered on this machine
+agent-do manna estate --json
+
 # Claim an issue to work on
 agent-do manna claim mn-abc123
 
@@ -197,6 +200,25 @@ consumers do not need to join `list` and `show` themselves. Custom decision
 markers can be added with repeated `--decision-marker '[NAME]'` flags. Because
 the sections and counts claim whole-board coverage, a malformed JSONL row
 fails `state` closed instead of being silently omitted.
+
+### `estate [--json]`
+
+Emit every board in `$AGENT_DO_HOME/manna/serve/boards.json` through the same
+derivation used by `manna serve` at `/api/boards`, without starting, probing,
+or contacting the daemon. The command works outside a project and includes
+registered roots that no longer exist so clients can report registry drift
+instead of silently narrowing the estate.
+
+```bash
+agent-do manna estate --json
+```
+
+Each board row includes its root and slug, effective status counts, dreams,
+decisions, drift count and source timestamp, latest issue update, and the
+coord attention rollup (`needs_you`, `working`, `here`, and `gone`). The top
+level carries the registry path, decision markers, aggregate attention totals,
+and any still-building presence count. Output is YAML by default or JSON with
+`--json`.
 
 ### `create <title> [description]`
 
@@ -505,12 +527,14 @@ use), behind the loopback Host/Origin checks and a per-process token the page
 carries; manna's own refusals print on the row verbatim. Nothing on the page
 edits a file. The SessionEnd hook applies the same two safe repairs.
 
-Agents never read from it: `state --json` is the complete board contract;
-`context`, `list`, and `show` remain the narrower task-oriented reads.
+Agents never need the daemon: `state --json` is the complete board contract,
+and `estate --json` is the registered-board index contract. `context`, `list`,
+and `show` remain the narrower task-oriented reads.
 Private claim proofs (`claim_token_hash`) never leave the board directory.
 Implementation: `serve/serve.py` (daemon, registry, two-clock cache),
 `serve/board.py` (core-state adapter and estate helpers), `serve/digest.py`
-(digests), and `src/state.rs` (the canonical derivation).
+(digests), `serve/estate.py` (daemon-independent estate CLI adapter), and
+`src/state.rs` (the canonical derivation).
 
 ## Architecture
 
