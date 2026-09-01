@@ -177,17 +177,63 @@ creds_delete() {
     esac
 }
 
+# dump-keychain lists acct before svce in each genp record; split on
+# `keychain:` so a neighbor item's acct cannot leak. Attributes only (no -d).
+creds_parse_macos_keychain_accounts() {
+    local service="$1"
+    awk -v target="$service" '
+        /^keychain:/ { emit(); next }
+        /"acct"<blob>="/ {
+            line = $0
+            sub(/.*"acct"<blob>="/, "", line)
+            sub(/".*/, "", line)
+            acct = line
+            next
+        }
+        /"svce"<blob>="/ {
+            line = $0
+            sub(/.*"svce"<blob>="/, "", line)
+            sub(/".*/, "", line)
+            svce = line
+            next
+        }
+        END { emit() }
+        function emit() {
+            if (svce == target && acct != "") print acct
+            acct = ""
+            svce = ""
+        }
+    '
+}
+
 creds_list_store_macos() {
-    security dump-keychain 2>/dev/null | grep -A4 "\"svce\"<blob>=\"${AGENT_DO_CREDS_SERVICE}\"" | grep "\"acct\"" | sed 's/.*"\([^"]*\)".*/\1/' | sort -u
+    (
+        dump="$(mktemp "${TMPDIR:-/tmp}/agent-do-creds.XXXXXX")" || {
+            echo "Error: mktemp failed while enumerating macOS Keychain" >&2
+            exit 1
+        }
+        trap 'rm -f "$dump"' EXIT
+        security dump-keychain >"$dump" || {
+            echo "Error: failed to enumerate macOS Keychain (security dump-keychain exited $?)" >&2
+            exit 1
+        }
+        creds_parse_macos_keychain_accounts "$AGENT_DO_CREDS_SERVICE" <"$dump" | sort -u
+    )
 }
 
 creds_list_store_linux() {
     if command -v secret-tool &>/dev/null; then
-        secret-tool search --all service "$AGENT_DO_CREDS_SERVICE" 2>/dev/null | grep "account" | sed 's/.*= //' | sort -u
+        # Zero matches makes grep exit 1 which, under pipefail, would turn an
+        # empty store into a silent failure; empty is a valid outcome.
+        secret-tool search --all service "$AGENT_DO_CREDS_SERVICE" 2>/dev/null | grep "account" | sed 's/.*= //' | sort -u || true
     fi
 }
 
 creds_list_store_windows() {
+    if ! command -v powershell.exe &>/dev/null; then
+        echo "Error: powershell.exe not found; cannot enumerate stored secrets" >&2
+        return 1
+    fi
     AGENT_DO_CREDS_WIN_SERVICE="$AGENT_DO_CREDS_SERVICE" \
     powershell.exe -NoProfile -NonInteractive -Command '
         $root = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) ("agent-do\\creds\\" + $env:AGENT_DO_CREDS_WIN_SERVICE)
@@ -201,7 +247,10 @@ creds_list_store() {
         macos) creds_list_store_macos ;;
         linux) creds_list_store_linux ;;
         windows) creds_list_store_windows ;;
-        *) return 1 ;;
+        *)
+            echo "Error: unsupported platform '$AGENT_DO_CREDS_PLATFORM' for creds list" >&2
+            return 1
+            ;;
     esac
 }
 

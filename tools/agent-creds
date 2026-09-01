@@ -209,7 +209,18 @@ cmd_list() {
     local json="false"
     [[ "${1:-}" == "--json" ]] && { json="true"; shift; }
 
-    mapfile -t keys < <(creds_list_store 2>/dev/null || true)
+    local keys_raw
+    if ! keys_raw="$(creds_list_store)"; then
+        return 1
+    fi
+
+    local keys=()
+    if [[ -n "$keys_raw" ]]; then
+        while IFS= read -r key; do
+            [[ -n "$key" ]] && keys+=("$key")
+        done <<< "$keys_raw"
+    fi
+
     if [[ "$json" == "true" ]]; then
         python3 -c "
 import json, sys
