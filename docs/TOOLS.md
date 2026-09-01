@@ -68,7 +68,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [ide](#ide) | Control VS Code/Cursor editor | read | 5 |
 | [image](#image) | Image processing | mixed | 3 |
 | [ios](#ios) | Control iOS Simulator | mixed | 10 |
-| [jira](#jira) | Jira Cloud and Server/Data Center issue management — projects, issues, sprints, JQL search, and connection profiles | mixed | 20 |
+| [jira](#jira) | Jira issues, sprints, and JQL management | mixed | 20 |
 | [jupyter](#jupyter) | Control Jupyter notebooks | mixed | 4 |
 | [k8s](#k8s) | Control Kubernetes clusters | write | 5 |
 | [lab](#lab) | JupyterLab management | mixed | 4 |
@@ -2344,7 +2344,7 @@ agent-do ios shutdown
 
 ### jira
 
-Jira Cloud and Server/Data Center issue management — projects, issues, sprints, JQL search, and connection profiles
+Jira issues, sprints, and JQL management
 
 Concurrency: `mixed`
 
