@@ -123,12 +123,12 @@ def _request(
                 detail = "; ".join(str(x) for x in detail)
         except (json.JSONDecodeError, AttributeError):
             detail = raw or str(exc)
-        _err(f"Datadog API {exc.code}: {detail}")
+        _err(f"Datadog API {exc.code}: {detail}", code=2)
     except urllib.error.URLError as exc:
         reason = str(exc.reason)
         if "timed out" in reason.lower():
-            _err(f"Datadog API request timed out after {timeout}s")
-        _err(f"Datadog API request failed: {reason}")
+            _err(f"Datadog API request timed out after {timeout}s", code=2)
+        _err(f"Datadog API request failed: {reason}", code=2)
 
 
 def _print_json(obj: Any) -> None:
@@ -139,8 +139,22 @@ def _text(value: Any, default: str = "") -> str:
     return default if value is None else str(value)
 
 
+def _incident_dropdown(value: str) -> dict[str, str]:
+    """Build the OpenAPI IncidentFieldAttributesSingleValue representation."""
+    return {"type": "dropdown", "value": value}
+
+
+def _incident_field_value(attrs: dict[str, Any], name: str) -> str:
+    field = (attrs.get("fields") or {}).get(name) or {}
+    if isinstance(field, dict) and field.get("value") is not None:
+        return _text(field["value"])
+    # Older response payloads exposed severity directly.  This fallback keeps
+    # existing incidents readable while writes always use the current schema.
+    return _text(attrs.get(name))
+
+
 def _dry_run(args: argparse.Namespace, command: str, human_msg: str, **extra: Any) -> int:
-    preview: dict[str, Any] = {"tool": "datadog", "command": command, **extra}
+    preview: dict[str, Any] = {"tool": "datadog", "command": command, "dry_run": True, **extra}
     if args.json:
         _print_json(preview)
     else:
@@ -151,19 +165,22 @@ def _dry_run(args: argparse.Namespace, command: str, human_msg: str, **extra: An
 # ── monitors ──────────────────────────────────────────────────────────────────
 
 def cmd_monitors(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {"page_size": args.page_size}
+    # Datadog's v1 monitor pagination needs both page and page_size.  Sending
+    # only page_size has no useful paging semantics on this endpoint.
+    params: dict[str, Any] = {"page": args.page, "page_size": args.page_size}
     if args.tag:
         params["monitor_tags"] = args.tag
     if args.name:
         params["name"] = args.name
-    if args.state:
-        params["monitor_states"] = args.state
-
     data = _request("GET", "/monitor", params=params)
     monitors = data if isinstance(data, list) else []
+    # The v1 endpoint does not accept a monitor state query parameter.  Filter
+    # the complete response locally instead of claiming that the server did it.
+    if args.state:
+        monitors = [m for m in monitors if (m.get("overall_state") or "").lower() == args.state.lower()]
 
     if args.json:
-        _print_json({"monitors": monitors, "count": len(monitors)})
+        _print_json({"monitors": monitors, "count": len(monitors), "page": args.page, "page_size": args.page_size})
         return 0
 
     if not monitors:
@@ -385,13 +402,13 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 
 def cmd_metrics_list(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {}
-    if args.prefix:
-        params["filter[prefix]"] = args.prefix
-
-    data = _request("GET", "/metrics", params=params or None, api_version="v2")
+    data = _request("GET", "/metrics", api_version="v2")
     metrics_data = data.get("data") or []
     names = [m.get("id") for m in metrics_data if m.get("id")]
+    # /api/v2/metrics has no prefix filter.  Keep the user-facing option, but
+    # make it an explicit local filter rather than sending an ignored parameter.
+    if args.prefix:
+        names = [name for name in names if name.startswith(args.prefix)]
 
     if args.json:
         _print_json({"metrics": names, "count": len(names)})
@@ -463,15 +480,26 @@ def cmd_event_post(args: argparse.Namespace) -> int:
 # ── incidents ─────────────────────────────────────────────────────────────────
 
 def cmd_incidents(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {}
-    if args.state:
-        params["filter[state]"] = args.state
-
-    data = _request("GET", "/incidents", params=params or None, api_version="v2")
+    # The endpoint defaults to ten records.  Request the documented maximum,
+    # but expose the offset so a page never masquerades as a complete list.
+    data = _request("GET", "/incidents", params={
+        "page[size]": args.page_size,
+        "page[offset]": args.offset,
+    }, api_version="v2")
     incidents = data.get("data") or []
+    # Listing incidents does not accept filter[state].  Apply this supported
+    # CLI filter to the returned page, rather than sending a silent no-op.
+    if args.state:
+        incidents = [inc for inc in incidents if ((inc.get("attributes") or {}).get("state") or "").lower() == args.state]
 
     if args.json:
-        _print_json(data)
+        _print_json({
+            **data,
+            "data": incidents,
+            "page_size": args.page_size,
+            "offset": args.offset,
+            "has_more": len(incidents) >= args.page_size,
+        })
         return 0
 
     if not incidents:
@@ -480,10 +508,12 @@ def cmd_incidents(args: argparse.Namespace) -> int:
 
     for inc in incidents:
         attrs = inc.get("attributes") or {}
-        status = _text(attrs.get("status"))
-        severity = _text(attrs.get("severity"))
+        status = _text(attrs.get("state"))
+        severity = _incident_field_value(attrs, "severity")
         title = _text(attrs.get("title"))
         print(f"{inc.get('id', '')}  [{status:<8}] [{severity:<7}]  {title}")
+    if len(incidents) >= args.page_size:
+        print(f"Showing up to {args.page_size} incidents from offset {args.offset}; more may be available.")
     return 0
 
 
@@ -496,8 +526,8 @@ def cmd_incident_get(args: argparse.Namespace) -> int:
     attrs = inc.get("attributes") or {}
     print(f"ID:       {inc.get('id')}")
     print(f"Title:    {attrs.get('title')}")
-    print(f"Status:   {attrs.get('status')}")
-    print(f"Severity: {attrs.get('severity')}")
+    print(f"Status:   {attrs.get('state')}")
+    print(f"Severity: {_incident_field_value(attrs, 'severity')}")
     print(f"Created:  {attrs.get('created')}")
     if attrs.get("customer_impact_scope"):
         print(f"Impact:   {attrs['customer_impact_scope']}")
@@ -510,7 +540,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
         "customer_impacted": args.customer_impacted,
     }
     if args.severity:
-        attrs["severity"] = args.severity
+        attrs["fields"] = {"severity": _incident_dropdown(args.severity)}
 
     body: dict[str, Any] = {"data": {"type": "incidents", "attributes": attrs}}
 
@@ -524,7 +554,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
         _print_json(data)
         return 0
     print(f"Created incident {inc.get('id')}: {iattrs.get('title')}")
-    print(f"Status: {iattrs.get('status')}")
+    print(f"Status: {iattrs.get('state')}")
     return 0
 
 
@@ -532,10 +562,13 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
     attrs: dict[str, Any] = {}
     if args.title:
         attrs["title"] = args.title
+    fields: dict[str, Any] = {}
     if args.status:
-        attrs["status"] = args.status
+        fields["state"] = _incident_dropdown(args.status)
     if args.severity:
-        attrs["severity"] = args.severity
+        fields["severity"] = _incident_dropdown(args.severity)
+    if fields:
+        attrs["fields"] = fields
 
     if not attrs:
         _err("At least one of --title, --status, --severity is required")
@@ -563,7 +596,9 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
 
 def cmd_incident_resolve(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {
-        "data": {"type": "incidents", "id": args.id, "attributes": {"status": "resolved"}}
+        "data": {"type": "incidents", "id": args.id, "attributes": {
+            "fields": {"state": _incident_dropdown("resolved")},
+        }}
     }
 
     if args.dry_run:
@@ -573,7 +608,11 @@ def cmd_incident_resolve(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(data)
         return 0
-    print(f"Resolved incident {args.id}")
+    inc = data.get("data") or {}
+    state = ((inc.get("attributes") or {}).get("state") or "").lower()
+    if state != "resolved":
+        _err(f"Datadog returned incident {args.id} without a resolved state")
+    print(f"Resolved incident {inc.get('id', args.id)}")
     return 0
 
 
@@ -661,13 +700,27 @@ def cmd_slo_status(args: argparse.Namespace) -> int:
 # ── services ──────────────────────────────────────────────────────────────────
 
 def cmd_services(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {"page[size]": args.page_size}
+    params: dict[str, Any] = {"page[size]": args.page_size, "page[number]": args.page}
 
     data = _request("GET", "/services/definitions", params=params, api_version="v2")
     services = data.get("data") or []
+    pagination = (data.get("meta") or {}).get("pagination") or {}
+    total = pagination.get("total")
+    has_next = bool(pagination.get("next"))
+    truncated = has_next or (total is None and len(services) >= args.page_size)
+    if total is not None:
+        truncated = truncated or args.page * args.page_size < total
 
     if args.json:
-        _print_json({"services": services, "count": len(services)})
+        _print_json({
+            "services": services,
+            "count": len(services),
+            "page": args.page,
+            "page_size": args.page_size,
+            "total": total,
+            "has_next_page": has_next,
+            "truncated": truncated,
+        })
         return 0
 
     if not services:
@@ -681,6 +734,8 @@ def cmd_services(args: argparse.Namespace) -> int:
         team = schema.get("team") or ""
         desc = str(schema.get("description") or "")[:80]
         print(f"{name}  [{team}]  {desc}")
+    if truncated:
+        print(f"Showing page {args.page} ({len(services)} returned); more results are available.")
     return 0
 
 
@@ -718,7 +773,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     if len(errors) == fetch_count:
         # All sections failed — surface the error rather than showing empty data
         _err(f"Snapshot failed — all API requests errored. Check DD_API_KEY / DD_APP_KEY. "
-             f"Sections: {'; '.join(errors)}")
+             f"Sections: {'; '.join(errors)}", code=2)
 
     if errors:
         for e in errors:
@@ -737,6 +792,8 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
         },
         "recent_events": len(events),
         "slos": len(slos),
+        "degraded": bool(errors),
+        "errors": errors,
     }
 
     if args.json:
@@ -768,7 +825,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Datadog observability: monitors, logs, metrics, incidents, dashboards, SLOs",
         epilog=(
             "Exit codes: write-command --dry-run previews exit 0 without sending HTTP; "
-            "monitor-status and snapshot exit 1 when monitors are alerting."
+            "monitor-status and snapshot exit 1 when monitors are alerting; API errors exit 2."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON")
@@ -782,6 +839,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", help="Filter by tag (e.g. env:prod)")
     p.add_argument("--name", help="Filter by name substring")
     p.add_argument("--state", help="Filter by state: Alert, Warn, OK, No Data")
+    p.add_argument("--page", type=int, default=0, help="Page number (default: 0)")
     p.add_argument("--page-size", dest="page_size", type=int, default=100)
 
     # monitor
@@ -860,7 +918,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # incidents
     p = _sub("incidents", help="List incidents")
-    p.add_argument("--state", choices=["active", "stable", "resolved"], help="Filter by state")
+    p.add_argument("--state", choices=["active", "stable", "resolved"], help="Filter this page by state")
+    p.add_argument("--offset", type=int, default=0, help="Result offset (default: 0)")
+    p.add_argument("--page-size", dest="page_size", type=int, default=100, help="Results per page (default: 100)")
 
     # incident
     p = _sub("incident", help="Get one incident by ID")
@@ -905,6 +965,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # services
     p = _sub("services", help="List service catalog definitions")
+    p.add_argument("--page", type=int, default=1, help="Page number (default: 1)")
     p.add_argument("--page-size", dest="page_size", type=int, default=100)
 
     # snapshot

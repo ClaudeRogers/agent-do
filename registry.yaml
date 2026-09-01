@@ -5279,9 +5279,9 @@ tools:
       - incident-create
       - incident-update
       - incident-resolve
-       attributes:
-         monitor-delete:
-         - destructive
+      attributes:
+        monitor-delete:
+        - destructive
     concurrency: mixed
   resend:
     description: Resend domain management and DNS verification — exact records, verification state, and public DNS checks
