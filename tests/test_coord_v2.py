@@ -964,6 +964,228 @@ def test_pulse(tmp_path: Path, env_base: dict[str, str]) -> None:
     require(gone.returncode == 2, f"pulse for a departed agent must be gone: {gone.stdout}")
 
 
+def test_explicit_pulse(tmp_path: Path, env_base: dict[str, str]) -> None:
+    project = make_project(tmp_path, "explicit_pulse")
+    harness_session = "019d8abc-dead-7eef-9000-aabbccddeeff"
+    target_env = clean_env(env_base)
+    target_env["AGENT_DO_COORD_SESSION"] = harness_session
+    supervisor_env = clean_env(env_base)
+
+    pulse_event(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": harness_session,
+            "cwd": str(project),
+            "prompt": "keep the prompt and todo fields",
+        },
+        cwd=project,
+        env=target_env,
+    )
+    target_id = "session-019d8abcdead"
+    coord_root = project / ".git" / "agent-do" / "coord"
+    agents_before = (coord_root / "agents.json").read_bytes()
+
+    verdict_args = [
+        "pulse",
+        "record",
+        "--session",
+        harness_session,
+        "--status",
+        "needs-user",
+        "--activity",
+        "pane is waiting for input",
+        "--updated-at",
+        "2026-08-31T22:00:00-05:00",
+    ]
+    first = coord_json(verdict_args, cwd=project, env=supervisor_env)
+    require(first["changed"] is True, f"first explicit verdict must change the row: {first}")
+    require(first["pulse"]["agent_id"] == target_id, f"full harness id mapped to wrong row: {first}")
+    require(first["pulse"]["status"] == "needs-user", f"explicit status missing: {first}")
+    require(first["pulse"]["activity"] == "pane is waiting for input", f"activity missing: {first}")
+    require(first["pulse"]["updated_at"] == "2026-09-01T03:00:00Z", f"timestamp not normalized: {first}")
+    require(first["pulse"]["latest_prompt"] == "keep the prompt and todo fields", f"hook field lost: {first}")
+    require(first["pulse"]["event_count"] == 1, f"external verdict must not count as a hook event: {first}")
+    require(
+        (coord_root / "agents.json").read_bytes() == agents_before,
+        "external verdict must not renew or impersonate target presence",
+    )
+    require(
+        not (coord_root / "sessions.json").exists(),
+        "external verdict must not mint caller session bookkeeping",
+    )
+    shown_by_harness_id = coord_json(["pulse", "show", harness_session], cwd=project, env=supervisor_env)["pulse"]
+    require(shown_by_harness_id == first["pulse"], f"full harness id must read the shared row: {shown_by_harness_id}")
+
+    second = coord_json(verdict_args, cwd=project, env=supervisor_env)
+    require(
+        second["changed"] is False and second["pulse"] == first["pulse"],
+        f"duplicate verdict must be idempotent: {second}",
+    )
+
+    preserve_activity = coord_json(
+        [
+            "pulse",
+            "record",
+            "--session",
+            target_id,
+            "--status",
+            "idle",
+            "--updated-at",
+            "2026-09-01T03:00:01Z",
+        ],
+        cwd=project,
+        env=supervisor_env,
+    )["pulse"]
+    require(
+        preserve_activity["activity"] == "pane is waiting for input",
+        f"omitted activity must preserve its field: {preserve_activity}",
+    )
+    cleared = coord_json(
+        [
+            "pulse",
+            "record",
+            "--session",
+            harness_session,
+            "--status",
+            "finished",
+            "--clear-activity",
+            "--updated-at",
+            "2026-09-01T03:00:02Z",
+        ],
+        cwd=project,
+        env=supervisor_env,
+    )["pulse"]
+    require("activity" not in cleared, f"explicit clear must remove activity: {cleared}")
+
+    before_invalid = (coord_root / "pulse.json").read_bytes()
+    invalid = coord(
+        [
+            "pulse",
+            "record",
+            "--session",
+            harness_session,
+            "--status",
+            "failed",
+            "--updated-at",
+            "not-a-time",
+        ],
+        cwd=project,
+        env=supervisor_env,
+    )
+    require(invalid.returncode == 2, f"invalid explicit timestamp must fail closed: {invalid.stdout} {invalid.stderr}")
+    require((coord_root / "pulse.json").read_bytes() == before_invalid, "invalid explicit verdict mutated pulse state")
+
+    missing = coord(["pulse", "record", "--status", "working"], cwd=project, env=supervisor_env)
+    require(missing.returncode == 2, f"partial explicit verdict must fail: {missing.stdout} {missing.stderr}")
+
+    # The six-state vocabulary is shared with Holy. An explicit idle pulse
+    # ranks below a live peer with no pulse but above finished.
+    no_pulse_env = clean_env(env_base)
+    no_pulse_env["AGENT_DO_COORD_SESSION"] = "no-pulse"
+    finished_env = clean_env(env_base)
+    finished_env["AGENT_DO_COORD_SESSION"] = "finished-peer"
+    coord_json(["touch"], cwd=project, env=no_pulse_env)
+    coord_json(["touch"], cwd=project, env=finished_env)
+    coord_json(
+        [
+            "pulse",
+            "record",
+            "--session",
+            "finished-peer",
+            "--status",
+            "finished",
+            "--updated-at",
+            "2026-09-01T03:00:03Z",
+        ],
+        cwd=project,
+        env=supervisor_env,
+    )
+    coord_json(
+        [
+            "pulse",
+            "record",
+            "--session",
+            harness_session,
+            "--status",
+            "idle",
+            "--updated-at",
+            "2026-09-01T03:00:04Z",
+        ],
+        cwd=project,
+        env=supervisor_env,
+    )
+    peers = coord_json(["peers"], cwd=project, env=supervisor_env)["peers"]
+    order = [peer["agent_id"] for peer in peers]
+    require(
+        order.index("session-nopulse") < order.index(target_id) < order.index("session-finishedpeer"),
+        f"idle rank is wrong: {order}",
+    )
+
+    # Hook and supervisor writers share one lock. Concurrent hook events must
+    # all increment event_count while explicit field merges leave the JSON valid.
+    processes: list[subprocess.Popen[str]] = []
+    for index in range(4):
+        hook = subprocess.Popen(
+            [str(AGENT_DO), "coord", "pulse", "record", "--from-hook"],
+            cwd=project,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=target_env,
+        )
+        require(hook.stdin is not None, "hook writer did not expose stdin")
+        hook.stdin.write(
+            json.dumps(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": harness_session,
+                    "cwd": str(project),
+                    "tool_name": f"HookTool{index}",
+                }
+            )
+        )
+        hook.stdin.close()
+        hook.stdin = None
+        processes.append(hook)
+        processes.append(
+            subprocess.Popen(
+                [
+                    str(AGENT_DO),
+                    "coord",
+                    "pulse",
+                    "record",
+                    "--session",
+                    harness_session,
+                    "--status",
+                    "failed",
+                    "--activity",
+                    f"Supervisor verdict {index}",
+                    "--updated-at",
+                    f"2026-09-01T03:00:1{index}Z",
+                ],
+                cwd=project,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=supervisor_env,
+            )
+        )
+    for process in processes:
+        stdout, stderr = process.communicate()
+        require(process.returncode == 0, f"concurrent pulse writer failed: {stdout} {stderr}")
+    concurrent = coord_json(["pulse", "show", target_id], cwd=project, env=supervisor_env)["pulse"]
+    require(concurrent["event_count"] == 5, f"concurrent hook increments were lost: {concurrent}")
+    require(
+        concurrent["latest_prompt"] == "keep the prompt and todo fields",
+        f"concurrent merge lost hook-owned fields: {concurrent}",
+    )
+    require(
+        concurrent["status"] in {"working", "failed"},
+        f"concurrent status is not from a complete writer: {concurrent}",
+    )
+
+
 def test_liveness_dead_records_prune(tmp_path: Path, env_base: dict[str, str]) -> None:
     """Records whose process is verifiably gone age out like tombstones."""
     project = make_project(tmp_path, "deadprune")
@@ -1008,6 +1230,7 @@ def main() -> int:
         test_isolation_nudge(tmp_path, env_base)
         test_drops_and_history(tmp_path, env_base)
         test_pulse(tmp_path, env_base)
+        test_explicit_pulse(tmp_path, env_base)
         test_v1_migration(tmp_path, env_base)
         test_agent_process_anchor(tmp_path, env_base)
         test_liveness_dead_records_prune(tmp_path, env_base)

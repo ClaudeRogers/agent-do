@@ -1210,7 +1210,7 @@ Concurrency: `mixed`
 - manage advisory claims and a warn-only pre-commit guard over live claims and territories
 - point peers at files via drops, declare dependencies, publish artifacts with file pointers
 - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
-- reduce harness hook payloads into per-session pulse telemetry (status, latest prompt, activity, todo progress) and rank live peers attention-first
+- merge harness hook observations and timestamped external supervisor verdicts into shared six-state pulse telemetry without renewing target liveness, then rank live peers attention-first
 
 **Commands**
 
@@ -1227,7 +1227,7 @@ Concurrency: `mixed`
 - `status`: Show current focus, needs, publishes, and interrupt counts
 - `interrupts`: Show current interrupts: interrupts [--mark-seen] [--limit \<n>]
 - `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] [--branch \<name>] | show | clear
-- `pulse`: Hook-fed session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse show [peer]
+- `pulse`: Shared session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse record --session \<harness-session-id> --status \<working|needs-user|finished|failed|idle|ended> --updated-at \<RFC3339> [--activity \<note>|--clear-activity] | pulse show [peer|harness-session-id]
 - `claims`: List advisory claims
 - `claim`: Claim a file/path: claim \<path> [--reason \<text>] [--strength soft|strong]
 - `release`: Release a claim you own: release \<path>
@@ -1265,6 +1265,8 @@ agent-do coord drop add .dev/research-drops/report.md --for builder-a --note "ep
 agent-do coord interrupts
 # see what a session is observably doing right now
 agent-do coord pulse show session-3f2a91
+# record an external supervisor's evidence-backed session verdict
+agent-do coord pulse record --session 019d8abc-dead-7eef-9000-aabbccddeeff --status needs-user --activity "pane is waiting for input" --updated-at 2026-09-01T03:00:00Z
 # retire this session at the end of work
 agent-do coord stop --note "lane 14 shipped"
 ```
