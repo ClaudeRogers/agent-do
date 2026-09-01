@@ -11,12 +11,12 @@ function chromaticField(utils) {
   const allVisible = utils.queryVisible('*');
   const textElements = allVisible.filter(el => utils.isTextElement(el));
   const interactiveElements = allVisible.filter(el => utils.isInteractive(el));
-  const viewportElements = allVisible.filter(el => utils.isInViewport(el));
+  const pageElements = allVisible.filter(el => utils.isOnPage(el));
 
   // ─── CF-01: WCAG Text Contrast ────────────────────────────────────
 
   function cf01_textContrast() {
-    const sampled = textElements.slice(0, MAX_TEXT_SAMPLE);
+    const sampled = utils.sampleAcrossPage(textElements, MAX_TEXT_SAMPLE);
     const violations = [];
     let checkedCount = 0;
     let hardFailCount = 0;
@@ -119,7 +119,8 @@ function chromaticField(utils) {
       pass_rate: passRate,
       adjusted_pass_rate: adjustedPassRate,
       hard_failures: hardFailCount,
-      soft_failures: softFailCount
+      soft_failures: softFailCount,
+      pass: hardFailCount === 0
     };
 
     if (totalFails > MAX_VIOLATIONS) {
@@ -269,7 +270,7 @@ function chromaticField(utils) {
         const parsed = utils.parseColor(style[prop]);
         if (!parsed || parsed.a < 0.1) continue;
         const hsl = utils.rgbToHsl(parsed.r, parsed.g, parsed.b);
-        if (hsl.s >= 20) { // must be chromatic
+        if (utils.effectiveSaturation(hsl) >= 20) { // must be perceptually chromatic
           const bucket = Math.round(hsl.h / 10) * 10; // 10-degree buckets
           hueUsage[bucket] = (hueUsage[bucket] || 0) + 1;
         }
@@ -303,7 +304,21 @@ function chromaticField(utils) {
        el.tagName === 'SPAN' || el.tagName === 'SECTION')
     );
 
+    // Status chips share the semantic hue system by DESIGN: a GREENLIGHT
+    // verdict tag sharing green with the Advance button is one signaling
+    // system, not a leak of it. A chip is a status-hued element sized like
+    // one line of label text; its ceiling is derived, not chosen — two
+    // body-text line boxes (16px x 1.6 doubled, rounded to the 4px grid).
+    const CHIP_MAX_HEIGHT_PX = 52;
+
+    function isStatusChip(el, hsl) {
+      if (!utils.isStatusColor(hsl.h, utils.effectiveSaturation(hsl))) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.height > 0 && rect.height <= CHIP_MAX_HEIGHT_PX;
+    }
+
     let leakCount = 0;
+    let statusChipExempt = 0;
     const leakedSelectors = [];
 
     for (const el of nonInteractive) {
@@ -312,7 +327,7 @@ function chromaticField(utils) {
         const parsed = utils.parseColor(style[prop]);
         if (!parsed || parsed.a < 0.1) continue;
         const hsl = utils.rgbToHsl(parsed.r, parsed.g, parsed.b);
-        if (hsl.s < 20) continue;
+        if (utils.effectiveSaturation(hsl) < 20) continue;
 
         const hueDist = Math.min(
           Math.abs(hsl.h - primaryHue),
@@ -320,9 +335,13 @@ function chromaticField(utils) {
         );
 
         if (hueDist <= HUE_TOLERANCE) {
-          leakCount++;
-          if (leakedSelectors.length < MAX_VIOLATIONS) {
-            leakedSelectors.push(utils.getSelector(el));
+          if (isStatusChip(el, hsl)) {
+            statusChipExempt++;
+          } else {
+            leakCount++;
+            if (leakedSelectors.length < MAX_VIOLATIONS) {
+              leakedSelectors.push(utils.getSelector(el));
+            }
           }
           break; // count element once
         }
@@ -333,7 +352,9 @@ function chromaticField(utils) {
       primary_hue: primaryHue,
       interactive_uses: maxInteractive,
       non_interactive_leaks: leakCount,
+      status_chip_exempt: statusChipExempt,
       leaked_selectors: leakedSelectors,
+      effective_saturation_threshold: 20,
       pass: leakCount === 0
     };
   }
@@ -436,7 +457,7 @@ function chromaticField(utils) {
       return s > 40 && h >= 210 && h <= 260;
     }
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) continue;
@@ -483,7 +504,7 @@ function chromaticField(utils) {
     let fullSatElements = 0;
     const fullSatHues = new Set(); // 30-degree buckets
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       let found = false;
 
@@ -548,10 +569,10 @@ function chromaticField(utils) {
     const MAX_ELEMENTS = 200;
     const MAX_PAIRS = 10;
 
-    // Collect viewport elements with chromatic colors (S > 40%)
+    // Collect page elements with chromatic colors (S > 40%)
     const chromaticEls = [];
 
-    for (const el of viewportElements) {
+    for (const el of utils.sampleAcrossPage(pageElements, MAX_ELEMENTS)) {
       if (chromaticEls.length >= MAX_ELEMENTS) break;
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
@@ -613,9 +634,9 @@ function chromaticField(utils) {
     const HUE_BUCKET_SIZE = 30;
     const bucketAreas = {}; // bucket -> total pixel area
 
-    const viewportArea = window.innerWidth * window.innerHeight;
+    const scanArea = window.innerWidth * utils.documentHeight();
 
-    for (const el of viewportElements) {
+    for (const el of pageElements) {
       const style = window.getComputedStyle(el);
       const bgParsed = utils.parseColor(style.backgroundColor);
       if (!bgParsed || bgParsed.a < 0.1) continue;
@@ -635,7 +656,7 @@ function chromaticField(utils) {
     let overuseCount = 0;
 
     for (const [bucket, area] of Object.entries(bucketAreas)) {
-      const areaPct = Math.round((area / viewportArea) * 1000) / 10;
+      const areaPct = Math.round((area / scanArea) * 1000) / 10;
       hueAreas.push({ hue_bucket: parseInt(bucket), area_pct: areaPct });
       if (areaPct > AREA_THRESHOLD) {
         overuseCount++;
@@ -664,8 +685,12 @@ function chromaticField(utils) {
     for (const entry of paletteResult.palette) {
       if (entry.hsl.s <= SAT_THRESHOLD) continue; // skip low-saturation
 
-      const role = entry.role; // 'status' or 'chromatic'
-      if (role !== 'status' && role !== 'chromatic') continue;
+      // Status colors are EXPECTED to differ in brightness: a deliberate
+      // luminance ordering (amber light, green mid, red dark) is what keeps
+      // verdicts tellable-apart for color-deficient readers. Only the
+      // decorative chromatic family owes brightness consistency.
+      const role = entry.role;
+      if (role !== 'chromatic') continue;
 
       // Parse hex back to RGB for brightness calc
       const r = parseInt(entry.hex.slice(1, 3), 16);
@@ -684,7 +709,7 @@ function chromaticField(utils) {
     let inconsistentGroups = 0;
     let maxDelta = 0;
 
-    for (const [role, colors] of roleGroups) {
+    for (const [, colors] of roleGroups) {
       if (colors.length < 2) continue;
       roleGroupsChecked++;
 

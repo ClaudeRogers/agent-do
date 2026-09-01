@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # agent-do - Automation CLI with structured API (AI) and natural language (human)
 
-set -euo pipefail
-
-AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"
 # Resolve through symlinks (macOS readlink, single-level)
 _source="${BASH_SOURCE[0]}"
 if [ -L "$_source" ]; then
@@ -15,6 +12,18 @@ if [ -L "$_source" ]; then
     esac
 fi
 SCRIPT_DIR="$(cd "$(dirname "$_source")" && pwd)"
+
+if [ ! -r "$SCRIPT_DIR/lib/bash-runtime.sh" ]; then
+    echo "agent-do: missing runtime bootstrap: $SCRIPT_DIR/lib/bash-runtime.sh" >&2
+    exit 1
+fi
+# shellcheck source=lib/bash-runtime.sh
+source "$SCRIPT_DIR/lib/bash-runtime.sh"
+agent_do_ensure_supported_bash "$SCRIPT_DIR/agent-do" "$@" || exit $?
+
+set -euo pipefail
+
+AGENT_DO_HOME="${AGENT_DO_HOME:-$HOME/.agent-do}"
 
 # Ensure home directory exists
 mkdir -p "$AGENT_DO_HOME"

@@ -18,6 +18,15 @@ import tempfile
 from pathlib import Path
 
 
+_REPO_LIB = Path(__file__).resolve().parents[2] / "lib"
+if str(_REPO_LIB) not in sys.path:
+    sys.path.insert(0, str(_REPO_LIB))
+import touch_ledger  # type: ignore  # noqa: E402  (repo lib, resolved relative to this file)
+
+# The runtime whose registration decides whether the touch ledger is
+# authoritative. This file lives under hooks/codex/; a wrapper may override.
+RUNTIME = os.environ.get("AGENT_DO_HOOK_RUNTIME", "codex")
+
 UI_EXTENSIONS = {".tsx", ".jsx", ".html", ".htm", ".vue", ".svelte", ".astro", ".css", ".scss", ".less"}
 
 # Design-system filename hints for files that DON'T have a UI extension (e.g.
@@ -64,6 +73,18 @@ NON_UI_HTML_BASENAMES = {
 NON_UI_DIR_RE = re.compile(
     r"(?:^|/)(?:[a-z0-9_-]+-extension|chrome-extension|firefox-extension|"
     r"webextension|web-ext|browser-extension|extension)/",
+    re.I,
+)
+
+# Document/source/data trees: an .html file here is an archived source text,
+# a work-order attachment, a generated deliverable, or test data — not an app
+# surface anyone can `browse open`. These are this workspace's own conventions
+# (.handoff/ = the single work-order root, .dev/ = generated deliverables) plus
+# the universal docs/ and fixtures/ roots. Advisory advice ("open the app")
+# is unfollowable for these files, which is the tell that they never belonged
+# in the UI category.
+NON_UI_DOC_DIR_RE = re.compile(
+    r"(?:^|/)(?:\.handoff|\.dev|docs|fixtures)/",
     re.I,
 )
 
@@ -115,6 +136,38 @@ def git_changed_files(repo: str) -> list[str]:
     return sorted(files)
 
 
+def ledger_registered() -> bool:
+    return touch_ledger.hook_registered(RUNTIME)
+
+
+def changed_files_for_gate(repo: str, payload: dict) -> tuple[list[str], str]:
+    """The files this gate may attribute to the agent, and the evidence kind.
+
+    'ledger'   — the touch-ledger hook is registered, so the agent's own edit
+                 tools wrote every entry; the ledger is consumed here so the
+                 next Stop only sees what was touched after this one. An empty
+                 result means: this agent edited nothing this turn.
+    'worktree' — no ledger hook is registered; git drift is the only evidence
+                 left, and it cannot tell this agent's edits from another
+                 lane's, a dropped-in document, or pre-existing untracked files.
+                 The advisory says so.
+    """
+    if ledger_registered():
+        key, _ = touch_ledger.session_key(payload)
+        repo_root = Path(repo).resolve()
+        rels: set[str] = set()
+        for entry in touch_ledger.read_and_consume(key):
+            raw = entry.get("path")
+            if not raw:
+                continue
+            try:
+                rels.add(str(Path(raw).resolve().relative_to(repo_root)))
+            except ValueError:
+                continue
+        return sorted(rels), "ledger"
+    return git_changed_files(repo), "worktree"
+
+
 def ui_files(files: list[str]) -> list[str]:
     matches = []
     for rel in files:
@@ -126,6 +179,9 @@ def ui_files(files: list[str]) -> list[str]:
             continue
         # Skip browser-extension trees outright — no visual surface to evaluate.
         if NON_UI_DIR_RE.search(path):
+            continue
+        # Skip document/source/data trees — archived texts and fixtures, not UI.
+        if NON_UI_DOC_DIR_RE.search(path):
             continue
         # Skip known plumbing HTML basenames (offscreen.html, background.html,
         # etc.) even when they live outside an extension directory.
@@ -298,7 +354,7 @@ def build_response(payload: dict) -> dict:
     if not repo:
         return {"continue": True}
 
-    files = git_changed_files(repo)
+    files, evidence = changed_files_for_gate(repo, payload)
     ui = ui_files(files)
     writing = writing_files(files)
     stop_hook_active = bool(payload.get("stop_hook_active"))
@@ -307,14 +363,22 @@ def build_response(payload: dict) -> dict:
     advisory_reasons: list[str] = []
     system_messages: list[str] = []
 
+    # Worktree drift is weak evidence and the advisory must say so — it is the
+    # reading a gate falls back to only when nobody is writing ledgers.
+    drift_note = (
+        " (Evidence: worktree drift, because the agent-do touch-ledger hook is not registered for this runtime — "
+        "these files may not be this agent's edits; `install.sh --register-hooks` makes attribution exact.)"
+        if evidence == "worktree" else ""
+    )
+
     if ui:
         dpt = dpt_score_for_current_session(agent_do)
         if not stop_hook_active:
             if dpt is None:
                 advisory_reasons.append(
-                    "UI files changed (`%s`) without an active browser session for this Codex agent. "
-                    "Needed next if this was UI work: open the app with `agent-do browse open <dev-url>`, visually verify the page, and run `agent-do dpt score`."
-                    % summarize_paths(ui)
+                    "This agent edited UI files this turn (`%s`) without an active browser session. "
+                    "Needed next if this was UI work: open the app with `agent-do browse open <dev-url>`, visually verify the page, and run `agent-do dpt score`.%s"
+                    % (summarize_paths(ui), drift_note)
                 )
             elif dpt.get("error") == "engine_missing":
                 advisory_reasons.append(

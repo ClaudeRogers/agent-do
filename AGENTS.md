@@ -26,7 +26,7 @@ Applies to `agent-do/`.
 - `hooks/`: Claude Code integration hooks
 - `lib/`: shared library code (Python, Bash, Node.js)
 - `tests/`: test scripts
-- `tools/`: 96 tools (standalone scripts + directory-based tools)
+- `tools/`: 101 tools (standalone scripts + directory-based tools)
 - `agent-do`: main entry point (bash)
 - `registry.yaml`: master tool catalog
 - `models.yaml`: model roles and capability records for agent-do's own internal LLM calls
@@ -52,11 +52,11 @@ Applies to `agent-do/`.
 
 ## Work Tracking
 
-- The manna board (`.manna/`) is the single backlog. Board grammar and this project's vocabulary live in `CLAUDE.md` under "Manna Board Conventions": every issue is a track, an item on a track, or a dream; typed fields are set through the manna CLI, never by editing `.manna/issues.jsonl`.
+- The manna board (`.manna/`) is the single backlog and tracked `.handoff/` is the single work-order root. `agent-do bootstrap` installs both for every detected project. Board grammar and this project's vocabulary live in `CLAUDE.md` under "Manna Board Conventions": every issue is a track, an item on a track, or a dream; typed fields are set through the manna CLI, never by editing `.manna/issues.jsonl`.
 - Commits that advance an item cite it with a `Manna: mn-xxxxxx` trailer.
-- Issues and prompts pair: an issue carries a pointer to its work-order prompt (the `prompt:` field, or a description whose first line is the prompt path), and the prompt opens with the exact claim command. `manna reconcile` verifies the pairing in both directions.
-- Identity is pinned, not inferred: the SessionStart hook pins `MANNA_SESSION_ID` (and `AGENT_DO_COORD_SESSION`) from the session id, so claims anchor to sessions instead of transient CLI pids. Scripted lanes export `MANNA_SESSION_ID` explicitly.
-- Reconcile is the drift net: `manna lint` enforces board grammar; `manna reconcile [--fix]` detects landed-but-open items, dead-session claims, blocker desync, stale dreams, dangling track edges, and doc references to nonexistent issues. The SessionEnd hook runs it advisorily and writes `.manna/drift.yaml`, which the next SessionStart surfaces as a greeting.
+- Items and handoffs pair automatically: `manna create` writes the initial work order and its board pointer, and the handoff carries the exact claim command. `.manna/handoff-order.yaml` owns priority; `manna sync` transactionally derives dense `.handoff/<NN>[b<MM>]-<mn-id>-<slug>.md` names and the generated index. `claim` fails closed when the pair is broken. `manna reconcile` verifies both directions, reports presentation drift, and flags shadow roots as `workflow_sprawl`.
+- Identity is host-anchored and authenticated: Claude and Cursor persist a stable host session id, Codex supplies its opaque thread id, and Manna derives the proof under a machine-local key. `AGENT_DO_COORD_SESSION` anchors coordination separately. There is no transient-pid fallback, the visible owner label is not a credential, and scripted lanes export both `MANNA_SESSION_ID` and secret `MANNA_SESSION_TOKEN` explicitly.
+- Reconcile is the drift net: `manna lint` enforces board grammar and reports canonical board files absent from the Git index as `workflow_tracking` with `git-tracked: no`; `manna reconcile [--fix]` detects landed-but-open items, dead-session claims, blocker desync, stale dreams, dangling track edges, and doc references to nonexistent issues. The SessionEnd hook runs it advisorily and writes `.manna/drift.yaml`, which the next SessionStart surfaces as a greeting.
 
 ## Validation
 

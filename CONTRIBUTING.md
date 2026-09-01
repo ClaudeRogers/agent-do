@@ -84,9 +84,12 @@ verifies its own paths to completion. Splitting by phase (one agent researches,
 another implements, a third tests) hands the same files between agents and
 turns every boundary into a chance to lose context.
 
-A lane is staged as a self-contained prompt file at `.dev/session-prompts/NN-SLUG.md`,
-copied from **[`docs/LANE-PROMPT-TEMPLATE.md`](docs/LANE-PROMPT-TEMPLATE.md)**.
-The template carries the required sections and the reasons behind them: the
+A lane begins as a Manna item. `agent-do manna create` generates its canonical
+work order; `agent-do manna sync` gives it the derived
+`.handoff/<NN>[b<MM>]-<mn-id>-<slug>.md` name and refreshes the index. Stage the lane by expanding that file in place
+with **[`docs/LANE-PROMPT-TEMPLATE.md`](docs/LANE-PROMPT-TEMPLATE.md)**. Never
+copy the work order into `.dev/`, `.handoffs/`, or a campaign-local prompt
+tree. The template carries the required sections and the reasons behind them: the
 claim block, the pasted project-memory blob (`agent-do zpc inject --compact`,
 2000-char bound, pasted verbatim rather than left as a command for the agent to
 run), owned paths with named non-owned neighbors, `file:line` ground truth
@@ -94,10 +97,18 @@ verified during staging, the integration contract pinned character for
 character across every lane that consumes it, numbered verification, and the
 completion block.
 
-Each prompt pairs with a manna issue in both directions: the issue points at
-the prompt (`agent-do manna update <id> --prompt <absolute path>`) and the
-prompt opens with the claim commands for that issue. `agent-do manna reconcile`
-reports either half when it dangles. Agents coordinate through
+If `manna init` classifies an existing nonempty board as legacy, do not create
+pairs by hand. Run `agent-do manna migrate` once with the repository owner’s
+authorization. It admits the complete board through the recoverable migration
+journal; all later work uses the same strict create, seal, claim, and done path.
+
+Manna creates the pair in both directions: the item points at the generated
+handoff and the handoff opens with the exact claim command. `manna claim`
+refuses a broken pair; `agent-do manna reconcile` also reports shadow roots.
+Priority is changed with `agent-do manna order <id> <position>`, never by
+renaming files. Dependencies remain `blocked_by` edges; a bare synchronized
+filename is safe to launch, while `bMM` holds it for blocker priority `MM`.
+Agents coordinate through
 `agent-do coord` (focus, claims, publishes), not through chat.
 
 ## Code Conventions

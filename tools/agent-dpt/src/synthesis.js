@@ -132,8 +132,10 @@ function synthesis(cf, ts, sr, aa, co) {
   const familyCount = (ts06.families || []).length;
   const familyScore = familyCount <= 2 ? 100 : familyCount === 3 ? 50 : 0;
 
+  // Editorial display scale (to 4.5x) is a ratified choice, not an error
+  // (audit 2026-08-22: the 2.0-3.0 hard band scored the exemplar's hero 20).
   const h1Ratio = ts09.ratio || 0;
-  const h1Score = (h1Ratio >= 2.0 && h1Ratio <= 3.0) ? 100 : (h1Ratio >= 1.5 && h1Ratio <= 4.0) ? 60 : 20;
+  const h1Score = (h1Ratio >= 2.0 && h1Ratio <= 4.5) ? 100 : (h1Ratio >= 1.5 && h1Ratio <= 5.5) ? 70 : 20;
 
   // TS-17: Faux bold/italic (browser-synthesized = quality penalty)
   const ts17 = ts.ts17_faux_bold_italic || {};
@@ -426,7 +428,7 @@ function synthesis(cf, ts, sr, aa, co) {
   }
 
   if (totalInteractive > 0 && undersized === totalInteractive) {
-    criticalFailures.push(`${undersized}/${totalInteractive} touch targets undersized`);
+    criticalFailures.push(`${undersized}/${totalInteractive} targets below the ${sr02.floor_px || 24}px minimum (WCAG 2.5.8; inline text links exempt)`);
     if (undersized > 50) {
       hardFloors.push({ cap: 40, reason: `all ${undersized} touch targets undersized` });
     }

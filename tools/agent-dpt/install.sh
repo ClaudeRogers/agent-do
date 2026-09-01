@@ -4,6 +4,8 @@
 # Usage:
 #   ./install.sh              Full install (tool + hook + catalog)
 #   ./install.sh --tool-only  Just the agent-do symlink
+#   ./install.sh --hook-only  Refresh only the thin PostToolUse wrapper
+#   ./install.sh --catalog-only  Refresh only legacy discovery entries
 #   ./install.sh --uninstall  Remove all installed files
 
 set -euo pipefail
@@ -97,55 +99,25 @@ install_hook() {
 
     mkdir -p "$CLAUDE_HOOKS_DIR"
 
-    # Write the hook script
-    cat > "$CLAUDE_HOOKS_DIR/dpt-post-edit.sh" << 'HOOKEOF'
+    # Install only a stable delegate. Policy remains in the repo-owned hook, so
+    # pulls change behavior immediately and the installed copy cannot drift.
+    cat > "$CLAUDE_HOOKS_DIR/dpt-post-edit.sh" << HOOKEOF
 #!/usr/bin/env bash
-# DPT PostToolUse hook — auto-scores after CSS/HTML/JSX edits
-set -euo pipefail
-
-INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    print(data.get('tool_input', {}).get('file_path', ''))
-except: print('')
-" 2>/dev/null)
-
-[[ -z "$FILE_PATH" ]] && exit 0
-
-case "$FILE_PATH" in
-    *.css|*.scss|*.less|*.html|*.jsx|*.tsx|*.vue|*.svelte) ;;
-    *tailwind.config*|*theme*|*styles*|*global*) ;;
-    *) exit 0 ;;
-esac
-
-TMPDIR_ACTUAL="$(python3 -c 'import tempfile; print(tempfile.gettempdir())' 2>/dev/null)"
-SOCK=$(find "$TMPDIR_ACTUAL" -name 'agent-browser-*.sock' -type s 2>/dev/null | head -1)
-[[ -z "$SOCK" || ! -S "$SOCK" ]] && exit 0
-
-# Wait for HMR — the dev server needs time to recompile and push the update.
-# Without this, DPT scores the stale pre-edit page (false positives).
-sleep 2
-
-# Find agent-dpt — check PATH, then common locations
-AGENT_DPT=""
-if command -v agent-dpt &>/dev/null; then
-    AGENT_DPT="agent-dpt"
-elif command -v agent-do &>/dev/null; then
-    AGENT_DPT="agent-do dpt"
+# agent-do DPT hook wrapper v1 (managed by tools/agent-dpt/install.sh).
+set -uo pipefail
+repo="\${AGENT_DO_REPO:-}"
+if [[ -z "\$repo" && -f "\$HOME/.agent-do/install-path" ]]; then
+    repo="\$(cat "\$HOME/.agent-do/install-path" 2>/dev/null)"
 fi
-[[ -z "$AGENT_DPT" ]] && exit 0
-
-SCORE_OUTPUT=$($AGENT_DPT score --quiet --current 2>/dev/null) || exit 0
-
-if [[ -n "$SCORE_OUTPUT" ]]; then
-    python3 -c "
-import json
-output = {'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': '''$SCORE_OUTPUT'''}}
-print(json.dumps(output))
-"
+if [[ -z "\$repo" ]]; then
+    repo="$(cd "$DPT_DIR/../.." && pwd)"
 fi
+canonical="\$repo/tools/agent-dpt/hooks/dpt-post-edit.sh"
+if [[ ! -x "\$canonical" ]]; then
+    echo "[dpt-post-edit.sh wrapper] canonical hook missing or not executable: \$canonical" >&2
+    exit 0
+fi
+exec "\$canonical" "\$@"
 HOOKEOF
 
     chmod +x "$CLAUDE_HOOKS_DIR/dpt-post-edit.sh"
@@ -175,7 +147,20 @@ install_catalog() {
 
     if [[ -f "$FACTORY_CATALOG" ]]; then
         if grep -q "^  dpt:" "$FACTORY_CATALOG" 2>/dev/null; then
-            ok "Catalog entry already exists"
+            python3 - "$FACTORY_CATALOG" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+updated = text.replace(
+    "Design Perception Tensor - automated design quality scoring (72 " + "rules, 5 layers)",
+    "Design Perception Tensor - automated design quality scoring (65 rules, 5 layers)",
+)
+if updated != text:
+    path.write_text(updated)
+PY
+            ok "Catalog entry already exists (current count enforced)"
         else
             cat >> "$FACTORY_CATALOG" << 'CATEOF'
 
@@ -183,7 +168,7 @@ install_catalog() {
 
   dpt:
     category: meta
-    description: Design Perception Tensor - automated design quality scoring (72 rules, 5 layers)
+    description: Design Perception Tensor - automated design quality scoring (65 rules, 5 layers)
     commands:
       - scan [url]: Full scan, returns structured JSON
       - score [url]: Quick score + grade + dimensions
@@ -213,12 +198,25 @@ CATEOF
 
     if [[ -f "$FACTORY_INDEX" ]]; then
         if grep -q "dpt:" "$FACTORY_INDEX" 2>/dev/null; then
-            ok "Index entry already exists"
+            python3 - "$FACTORY_INDEX" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+updated = text.replace(
+    "Design quality scoring - 72 " + "rules across 5 perception layers, 0-100 score",
+    "Design quality scoring - 65 rules across 5 perception layers, 0-100 score",
+)
+if updated != text:
+    path.write_text(updated)
+PY
+            ok "Index entry already exists (current count enforced)"
         else
             # Add to tools section
             sed -i.bak '/^  # META/i\
   # DESIGN QUALITY\
-  dpt:       "Design quality scoring - 72 rules across 5 perception layers, 0-100 score"\
+  dpt:       "Design quality scoring - 65 rules across 5 perception layers, 0-100 score"\
 ' "$FACTORY_INDEX" && rm -f "${FACTORY_INDEX}.bak"
             ok "Index entry added to $FACTORY_INDEX"
         fi
@@ -258,6 +256,12 @@ echo ""
 case "${1:-}" in
     --tool-only)
         install_tool
+        ;;
+    --hook-only)
+        install_hook
+        ;;
+    --catalog-only)
+        install_catalog
         ;;
     --uninstall)
         uninstall

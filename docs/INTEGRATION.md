@@ -9,6 +9,14 @@ Everything below is presence-gated: repos without a `.manna/` board or a coord b
 
 ## Installation (install.sh)
 
+GNU Bash 4.4 or newer is a runtime requirement. On macOS, install it with
+`brew install bash`; the system Bash 3.2 is intentionally rejected. The
+installer and public launcher share one runtime selector, so sparse agent
+environments still execute the dispatcher and every child tool under the same
+supported Bash.
+Set `AGENT_DO_BASH=/absolute/path/to/bash` only when the supported interpreter
+lives outside the standard paths searched by the selector.
+
 ```bash
 ./install.sh                # Install; auto-installs Codex hooks if ~/.codex/ exists
 ./install.sh --codex        # Force Codex hook install even without ~/.codex/
@@ -21,7 +29,7 @@ What the installer actually does, in order:
 1. Symlinks `agent-do` into `~/.local/bin` (warns if that directory is not on `PATH`)
 2. Writes the repo path to `~/.agent-do/install-path` (the breadcrumb wrappers and hooks resolve)
 3. Generates the discovery index from `registry.yaml` via `bin/gen-index`
-4. Writes four Claude hook **wrappers** to `~/.claude/hooks/`: `agent-do-session-start.sh`, `agent-do-prompt-router.py`, `agent-do-pretooluse-check.py`, `agent-do-coord-stop.sh`
+4. Writes the Claude hook **wrappers** to `~/.claude/hooks/` (ten today): `agent-do-session-start.sh`, `agent-do-prompt-router.py`, `agent-do-correction-keys.py`, `agent-do-now-stamp.py`, `agent-do-pretooluse-check.py`, `agent-do-zpc-trigger.py`, `agent-do-quantity-check.py`, `agent-do-zpc-position-nudge.sh`, `agent-do-zpc-write-nudge.sh`, `agent-do-coord-stop.sh`
 5. Optionally writes five Codex wrappers to `~/.codex/hooks/` (the three event hooks plus `stop-quality-gate.sh`/`.py`)
 6. Installs Python dependencies (`pip3 install -r requirements.txt`)
 7. Interactively offers `npm install` for browse/unbrowse and `cargo build --release` for manna
@@ -120,9 +128,16 @@ SessionStart writes three exports to `CLAUDE_ENV_FILE`, which Claude Code source
 |--------|---------|
 | `PATH=<agent-do dir>:$PATH` | Every Bash call can invoke `agent-do` without installation assumptions |
 | `AGENT_DO_COORD_SESSION=<session_id>` | Coord identity anchors to the Claude session; every Bash call derives the same agent id, and SessionEnd retires exactly that identity |
-| `MANNA_SESSION_ID=<session_id>` | Manna claims carry the session id rather than a transient pid, so `manna reconcile` can probe them meaningfully (via coord peer status) instead of always finding a dead pid |
+| `CLAUDE_SESSION_ID=<session_id>` | Manna derives a stable private ownership proof under the machine-local key, so separate shell calls and restarted processes recover the same authority without storing a bearer token in the board |
 
-Both identity pins respect pre-existing values: an orchestrator that sets its own `AGENT_DO_COORD_SESSION` or `MANNA_SESSION_ID` (for example, one id per lane in a swarm) wins over the hook.
+Coord identity and a complete pre-existing Manna identity pair are respected.
+An incomplete Manna pair is neutralized so derivation can take over. Cursor's
+SessionStart adapter persists its conversation id as `CLAUDE_SESSION_ID`, using
+the same proof path as Claude. An orchestrator that pins one identity per lane
+must set both Manna variables. Codex has no hook environment export channel, so
+Manna derives the same private proof on each invocation from `CODEX_THREAD_ID`
+and a mode-0600 key under `$AGENT_DO_HOME/manna/`; plain shells without a host
+identity fail closed.
 
 ## Presence gating
 
@@ -130,11 +145,11 @@ The hooks decide what to inject by looking at the repo, not configuration:
 
 | Signal | Effect |
 |--------|--------|
-| `$CWD/.manna/` exists | SessionStart injects the Manna board (`manna context --max-tokens 1500`) and, when `.manna/drift.yaml` contains findings, the drift greeting; SessionEnd runs `manna reconcile --write-drift` |
+| `$CWD/.manna/` exists | SessionStart injects the Manna board (`manna context --max-tokens 1500`) and, when `.manna/drift.yaml` contains findings, the drift greeting; SessionEnd runs `manna reconcile --fix --write-drift` (`--fix` applies only the two safe repairs: dead claims abandoned, resolved blockers cleared) |
 | `<git-dir>/agent-do/coord/` exists | SessionEnd runs `coord stop`; SessionStart injects coord interrupts or a focus reminder when active peers exist |
 | `$CWD/.zpc/` exists | SessionStart mentions the experience journal and its status commands |
 | Frontend markers (package.json frameworks, `.tsx`/`.vue`/`.svelte` files, Flutter) | SessionStart injects the design-toolkit workflow |
-| `bootstrap --recommend` reports pending setup | SessionStart raises the bootstrap prompt (native macOS dialog by default, context ask otherwise; `AGENT_DO_BOOTSTRAP_PROMPT_MODE=native|context|disabled` overrides) |
+| `bootstrap --recommend` reports pending setup | SessionStart raises the bootstrap prompt (native macOS dialog by default, context ask otherwise; `AGENT_DO_BOOTSTRAP_PROMPT_MODE=native|context|disabled` overrides). A nonempty board without strict identity/config surfaces `legacy board: run agent-do manna migrate` |
 
 A repo with none of these gets the tooling reminder and project-scoped suggestions only.
 
@@ -204,14 +219,49 @@ These are the conventions the manna tooling checks mechanically; teams that foll
 
 **Commit trailers.** A trailer is a commit-body line that is exactly `Manna: mn-xxxxxx` (key case-sensitive, one id per line, multiple lines allowed). `manna reconcile` scans the last 500 commits for trailers and reports issues that landed but are still open (`landed_open`).
 
-**Session identity.** Set `MANNA_SESSION_ID` before claiming (the SessionStart hook does this automatically; swarm orchestrators typically pin one id per lane: `MANNA_SESSION_ID=lane6-internals agent-do manna claim mn-133ad6`). Claims made under a session id that coord later reports dead, stale, or stopped surface as `dead_claim` findings, and `reconcile --fix` releases them.
+**Session identity.** Claude and Cursor SessionStart hooks persist stable host
+session ids; Codex supplies its opaque thread id. Manna derives ownership from
+those ids plus a machine-local secret. Scripted lanes set both explicit values,
+for example:
+`MANNA_SESSION_ID=lane6-internals MANNA_SESSION_TOKEN=<32+-character-secret> agent-do manna claim mn-133ad6`.
+Claims made under an identity that coord later reports dead, stale, or stopped
+surface as `dead_claim` findings, and `reconcile --fix` releases only when the
+complete inspected row still matches.
 
-**Prompt pairing.** When an issue has a work-order prompt file, pair them explicitly:
+**Generated handoff pairing.** `agent-do bootstrap` runs `manna init` for new
+boards and strict-scaffold repair, and `manna migrate` for a detected nonempty
+legacy board. New boards receive `.manna/workflow.yaml` and a tracked
+`.handoff/` root. `manna create` generates one initial work order for each
+actionable item and stores the same repository-relative path in the issue's
+`prompt` field. `.manna/handoff-order.yaml` owns priority. `manna sync`
+transactionally derives dense `.handoff/<NN>[b<MM>]-<mn-id>-<slug>.md` names
+and the README index from board state. A bare filename is safe to launch;
+`bMM` names the highest-numbered still-open blocker. Tracks and dreams remain
+board-only.
 
-- the issue carries `--prompt /absolute/path/to/prompt.md` (or, as the interim convention, a description whose first line is `PROMPT: <path>`)
-- the prompt file contains the claim command for that issue (`... agent-do manna claim mn-xxxxxx`, any invocation prefix)
+The handoff contains exactly one claim target for its item. `manna claim`
+checks the file, pointer, claim command, canonical root, and Git visibility
+before it writes any state; a broken pair exits 2. `manna lint` checks the same
+contract as a board gate. It also reports `workflow_tracking` with
+`git-tracked: no` for each canonical board file that exists outside the Git
+index. `manna reconcile` checks both directions under
+`.handoff/` and reports `workflow_sprawl` when active local work appears under
+`.handoffs/`, `.dev/session-prompts/`, or nested `handoff-prompts/` roots. Bare
+id mentions are data, not claims; only `manna claim <id>` command lines bind.
+`manna lint` and `manna reconcile` also report filename/index drift with
+`agent-do manna sync` as the repair. A live claimed handoff is never renamed;
+its number stays reserved until release.
 
-`manna lint` flags pointers that resolve to no file. `manna reconcile` checks both directions: a pointer whose file never mentions the issue id (forward), and a staged prompt file whose claim command targets an issue that does not point back at it (reverse; the reverse scan covers `*.md` in the repo's prompt staging directory, `.dev/session-prompts/`). Bare id mentions in a file are data, not claims; only `manna claim <id>` command lines bind.
+Nonempty boards created before workflow version 1 remain legacy until an
+explicit `agent-do manna migrate`. The migration creates sealed handoffs for
+active items, grandfathers done rows, exempts tracks and dreams, releases
+claims without ownership proofs, and publishes strict identity last in one
+recoverable transaction. Their absolute pointers, `PROMPT:` description fallback,
+and `.dev/session-prompts/` reverse scan keep working. This compatibility path
+prevents an agent-do upgrade from rearranging a live campaign silently.
+An identityless nonempty board directs every caller to this migration command;
+an empty identityless board and an authenticated pending init journal direct
+the caller to `manna init`.
 
 **The loop.** Claim before working, `done` only after verification (done requires the claim), file stray ideas with `agent-do manna dream "<spark>"` (routes to the nearest board walking up from cwd, else the global inbox under `~/.agent-do/inbox`), and let SessionEnd's reconcile write `.manna/drift.yaml` so the next session starts by reconciling the board against reality.
 

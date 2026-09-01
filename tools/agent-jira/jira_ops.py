@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DRY_RUN_EXIT_CODE = 3
+DRY_RUN_EXIT_CODE = 0
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -199,11 +199,9 @@ class JiraClient:
         self.token = token
         self.server = server
         self.api_version = "2" if server else "3"
-        if server:
-            self._auth = "Bearer " + token
-        else:
-            raw = f"{email}:{token}".encode()
-            self._auth = "Basic " + base64.b64encode(raw).decode()
+        raw = f"{email}:{token}".encode()
+        self._basic_auth = "Basic " + base64.b64encode(raw).decode()
+        self._auth = "Bearer " + token if server else self._basic_auth
 
     def _api(self, path: str) -> str:
         return f"{self.base}/rest/api/{self.api_version}/{path.lstrip('/')}"
@@ -229,6 +227,9 @@ class JiraClient:
                 raw = resp.read()
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as exc:
+            if exc.code == 401 and self.server and self._auth != self._basic_auth:
+                self._auth = self._basic_auth
+                return self.request(method, url, body=body, suppress_errors=suppress_errors)
             body_bytes = exc.read()
             try:
                 detail = json.loads(body_bytes)
@@ -256,7 +257,7 @@ class JiraClient:
                suppress_errors: bool = False) -> Any:
         params: dict[str, Any] = {"jql": jql, "maxResults": max_results}
         if fields is not None:
-            params["fields"] = fields
+            params["fields"] = fields if self.server else [f.strip() for f in fields.split(",") if f.strip()]
         if self.server:
             return self.get(self._search(), params=params, suppress_errors=suppress_errors)
         return self.post(self._search(), params, suppress_errors=suppress_errors)
@@ -299,12 +300,17 @@ class JiraClient:
         if isinstance(body, str):
             return body
         if isinstance(body, dict):
-            content = body.get("content") or []
-            parts = []
-            for block in content:
-                for inline in (block.get("content") or []):
-                    if inline.get("type") == "text":
-                        parts.append(inline.get("text", ""))
+            parts: list[str] = []
+
+            def visit(node: Any) -> None:
+                if not isinstance(node, dict):
+                    return
+                if node.get("type") == "text":
+                    parts.append(str(node.get("text", "")))
+                for child in node.get("content") or []:
+                    visit(child)
+
+            visit(body)
             return " ".join(parts)
         return ""
 
@@ -594,17 +600,13 @@ def cmd_snapshot(argv: list[str]) -> None:
     projects = []
     for p in (projects_data or []):
         try:
-            result = client.search(
-                f"project = {p['key']} AND statusCategory != Done",
-                max_results=100,
-                fields="key",
-                suppress_errors=True,
-            )
-            if isinstance(result, dict) and result.get("_error"):
-                open_count = -1
+            jql = f"project = {_jql_quote(str(p['key']))} AND statusCategory != Done"
+            if client.server:
+                result = client.search(jql, max_results=0, suppress_errors=True)
+                open_count = -1 if result.get("_error") else result.get("total", 0)
             else:
-                issues = (result or {}).get("issues") or []
-                open_count = (result or {}).get("total", len(issues))
+                result = client.post("search/approximate-count", {"jql": jql}, suppress_errors=True)
+                open_count = -1 if result.get("_error") else result.get("count", -1)
         except Exception:
             open_count = -1
         projects.append({
@@ -807,7 +809,7 @@ def _issue_list(argv: list[str]) -> None:
     connection, json_mode, _ = _parse_common(argv[1:])
     client = _get_client(connection)
 
-    jql_parts = [f"project = {project}"]
+    jql_parts = [f"project = {_jql_quote(project)}"]
     if status:
         jql_parts.append(f"status = {_jql_quote(status)}")
     if assignee:
@@ -828,13 +830,15 @@ def _issue_list(argv: list[str]) -> None:
     result = client.search(jql, max_results=limit,
                            fields="summary,status,issuetype,priority,assignee,labels,created,updated")
     issues = [_fmt_issue(i, client) for i in (result.get("issues") or [])]
-    total = result.get("total", len(issues))
+    total = result.get("total")
+    is_complete = total is not None or result.get("isLast", True)
+    display_total = total if total is not None else (len(issues) if is_complete else f"≥{len(issues)}")
 
     if json_mode:
         _print_json({"tool": "issue_list", "timestamp": _now(),
-                     "data": {"project": project, "total": total, "count": len(issues), "issues": issues}})
+                     "data": {"project": project, "total": total, "count": len(issues), "is_complete": is_complete, "issues": issues}})
     else:
-        print(f"{project}  ({len(issues)} of {total})")
+        print(f"{project}  ({len(issues)} of {display_total})")
         for iss in issues:
             assignee_str = iss["assignee"] or "unassigned"
             print(f"  {iss['key']:<12} [{iss['status']:<16}] {iss['summary'][:60]}  ({assignee_str})")
@@ -949,29 +953,19 @@ def _issue_create(argv: list[str]) -> None:
         sys.exit(DRY_RUN_EXIT_CODE)
 
     result = client.post("issue", body, suppress_errors=True)
-    fallback_note = None
     if isinstance(result, dict) and result.get("_error"):
         message = str(result.get("_error", "")).lower()
         if issue_type.lower() != "task" and ("issuetype" in message or "issue type" in message):
-            fields["issuetype"] = {"name": "Task"}
-            body = {"fields": fields}
-            result = client.post("issue", body)
-            fallback_note = f"Requested issue type {issue_type!r} was rejected; created Task instead."
+            _err(f"Jira rejected issue type {issue_type!r}; no issue was created. Verify the project's available issue types and retry.")
         else:
             _err(str(result["_error"]))
     key = result.get("key", "?")
     url = f"{client.base}/browse/{key}"
     if json_mode:
         payload = {"key": key, "url": url}
-        if fallback_note:
-            payload["warning"] = fallback_note
-            payload["requested_issue_type"] = issue_type
-            payload["created_issue_type"] = "Task"
         _print_json(payload)
     else:
         print(f"Created {key}: {summary}")
-        if fallback_note:
-            print(f"  Warning: {fallback_note}")
         print(f"  {url}")
 
 
@@ -1377,13 +1371,15 @@ def cmd_search(argv: list[str]) -> None:
 
     result = client.search(jql, max_results=limit, fields=fields)
     issues = [_fmt_issue(iss, client) for iss in (result.get("issues") or [])]
-    total = result.get("total", len(issues))
+    total = result.get("total")
+    is_complete = total is not None or result.get("isLast", True)
+    display_total = total if total is not None else (len(issues) if is_complete else f"≥{len(issues)}")
 
     if json_mode:
         _print_json({"tool": "search", "timestamp": _now(),
-                     "data": {"jql": jql, "total": total, "count": len(issues), "issues": issues}})
+                     "data": {"jql": jql, "total": total, "count": len(issues), "is_complete": is_complete, "issues": issues}})
     else:
-        print(f"JQL: {jql}  ({len(issues)} of {total})")
+        print(f"JQL: {jql}  ({len(issues)} of {display_total})")
         for iss in issues:
             print(f"  {iss['key']:<12} [{iss['status']:<16}] {iss['summary'][:60]}")
 
@@ -1460,7 +1456,10 @@ def cmd_sprint(argv: list[str]) -> None:
         data = client.get(f"board/{board_id}/sprint", params={"state": "active"}, agile=True)
         sprints = data.get("values") or []
         if not sprints:
-            print("No active sprint found.")
+            if json_mode:
+                _print_json({"sprint": None, "issues": []})
+            else:
+                print("No active sprint found.")
             return
         sprint = sprints[0]
         sprint_id = sprint.get("id")

@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install pyyaml
-      - name: Install modern bash (runner ships 3.2; dispatcher needs mapfile)
+      - name: Install GNU Bash 4.4+ (runner ships 3.2)
         run: |
           brew list bash >/dev/null 2>&1 || brew install bash
           mkdir -p "$HOME/.cibin"

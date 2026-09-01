@@ -55,6 +55,17 @@ fi
 printf '%s\\n' "$ZPC_STUB_VERDICT"
 """
 
+RM_STUB = """#!/usr/bin/env bash
+# Widen the old publish-before-cleanup race into a deterministic test window.
+for path in "$@"; do
+    if [[ -n "${ZPC_STUB_RM_ERR_SLEEP:-}" && "$path" == *.err ]]; then
+        sleep "$ZPC_STUB_RM_ERR_SLEEP"
+        break
+    fi
+done
+exec /bin/rm "$@"
+"""
+
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -137,6 +148,9 @@ def main() -> None:
         stub = stub_dir / "claude"
         stub.write_text(STUB)
         stub.chmod(0o755)
+        rm_stub = stub_dir / "rm"
+        rm_stub.write_text(RM_STUB)
+        rm_stub.chmod(0o755)
 
         env = os.environ.copy()
         env["AGENT_DO_HOME"] = str(tmp / "agent-home")
@@ -358,6 +372,7 @@ def main() -> None:
         # ---- the refused flip fires the second opinion --------------------
 
         env["ZPC_STUB_SLEEP"] = str(STUB_SLEEP_SECONDS)
+        env["ZPC_STUB_RM_ERR_SLEEP"] = "1"
         before = digest(ledger)
 
         refused = run(project, env, "position", "flip", position_id)
@@ -396,6 +411,7 @@ def main() -> None:
             == {spawned[0].name} | {p.name for p in counsel_dir(project).glob("brief-*.md")},
             f"the workspace holds the verdict and its brief, nothing else: {list(counsel_dir(project).iterdir())}",
         )
+        env.pop("ZPC_STUB_RM_ERR_SLEEP")
 
         # ---- debounce: minutes, not keystrokes ----------------------------
 

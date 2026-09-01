@@ -135,7 +135,9 @@ for p in data.split(b"\x00"):
 
         if [[ -n "$encoded_output" ]]; then
             local -a encoded_lines=()
-            mapfile -t encoded_lines <<< "$encoded_output"
+            while IFS= read -r _snap_line; do
+                encoded_lines+=("$_snap_line")
+            done <<< "$encoded_output"
 
             # Place each encoded line at its original field index.
             if [[ ${#encoded_lines[@]} -eq $string_count ]]; then

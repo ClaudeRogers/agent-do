@@ -144,16 +144,22 @@ _position_counsel_run() {
             tail -c 2000 "$err" 2>/dev/null || true
             printf '\n```\n'
         fi
-    } > "${out}.new" 2>/dev/null && mv "${out}.new" "$out"
+    } > "${out}.new" 2>/dev/null || {
+        rm -f "$tmp" "${out}.new" 2>/dev/null || true
+        return 1
+    }
 
     # Scaffolding is not an artifact. The .partial always goes; the stderr file
     # goes with it unless the run failed and left something worth reading. A
     # successful run's stderr is only the brief's own path, which the artifact
-    # already carries, so keeping it would litter every success.
-    rm -f "$tmp" "${out}.new" 2>/dev/null || true
+    # already carries, so keeping it would litter every success. Clean these
+    # before publishing the completed artifact: once a reader can observe
+    # `status: complete`, no transient success files may remain.
+    rm -f "$tmp" 2>/dev/null || true
     if [[ "$status" -eq 0 || ! -s "$err" ]]; then
         rm -f "$err" 2>/dev/null || true
     fi
+    mv "${out}.new" "$out"
 }
 
 # Spawn the second opinion the refusal implies, without making the refusal wait

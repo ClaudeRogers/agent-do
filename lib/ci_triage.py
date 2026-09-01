@@ -203,7 +203,15 @@ def classify(repo, run, run_id, log_fetcher=None):
     if event in ("schedule", "release"):
         return "C3-trunk-release", facts, "medium-high"
 
-    if event in ("push", "workflow_dispatch") and facts["default_branch"] and branch == facts["default_branch"]:
+    if event in ("push", "workflow_dispatch") and (
+        (facts["default_branch"] and branch == facts["default_branch"])
+        or branch == "staging"
+    ):
+        # Staging branches are trunk-class for fleets that promote through
+        # staging: a failed staging push should page, not classify C5-silent.
+        # Marker lets consumers distinguish which trunk failed.
+        if branch == "staging":
+            facts["trunk"] = "staging"
         return "C3-trunk-release", facts, "medium-high"
 
     raw_log = log_fetcher(repo, run_id)

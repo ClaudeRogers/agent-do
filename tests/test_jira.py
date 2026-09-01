@@ -133,7 +133,7 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                         }
                     ],
                 })
-            elif "project = EMPTY" in jql:
+            elif '"EMPTY"' in jql:
                 self._send({"total": 0, "issues": [], "maxResults": 50})
             else:
                 self._send({
@@ -376,7 +376,7 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                         }
                     ],
                 })
-            elif "project = EMPTY" in jql:
+            elif '"EMPTY"' in jql:
                 self._send({"issues": [], "maxResults": body.get("maxResults", 50)})
             else:
                 self._send({
@@ -413,6 +413,12 @@ class JiraHandler(http.server.BaseHTTPRequestHandler):
                         },
                     ],
                 })
+        elif path == "/rest/api/3/search/approximate-count":
+            jql = body.get("jql", "")
+            if FAIL_SNAPSHOT_FOR_OPS and "OPS" in jql:
+                self._send_err("OPS search failed", status=500)
+            else:
+                self._send({"count": 5 if "PROJ" in jql else 2})
         elif path == "/rest/api/3/issue":
             project = ((body.get("fields") or {}).get("project") or {}).get("key")
             issue_type = ((body.get("fields") or {}).get("issuetype") or {}).get("name")
@@ -816,6 +822,8 @@ def main() -> int:
             mine_jql = (_post_bodies.get("/rest/api/3/search/jql") or {}).get("jql", "")
             check("issue list --mine sends unquoted currentUser()", "currentUser()" in mine_jql, mine_jql)
             check("issue list --mine does NOT quote currentUser()", '"currentUser()"' not in mine_jql, mine_jql)
+            mine_fields = (_post_bodies.get("/rest/api/3/search/jql") or {}).get("fields")
+            check("Cloud enhanced search sends fields as an array", isinstance(mine_fields, list), str(mine_fields))
 
             print("\nissue list: all filters combined")
             r = run(["issue", "list", "PROJ",
@@ -870,20 +878,16 @@ def main() -> int:
             desc = create_body2.get("fields", {}).get("description", {})
             check("issue create sends ADF description", isinstance(desc, dict) and desc.get("type") == "doc")
 
-            print("\nissue create: KAN issue type fallback")
+            print("\nissue create: rejected issue type")
             _requests.clear()
             _post_bodies.clear()
             r = run(["issue", "create", "KAN",
                      "--summary", "Green Lantern alter ego is Hal Jordan instead of Kyle Rayner",
                      "--type", "Bug"], env=env)
-            check("issue create KAN bug exits 0", r.returncode == 0, r.stderr)
-            check("issue create KAN bug prints key", "KAN-8" in r.stdout, r.stdout)
-            check("issue create KAN bug surfaces fallback warning", "Warning:" in r.stdout and "Task" in r.stdout, r.stdout)
+            check("issue create KAN bug fails", r.returncode == 1, r.stderr)
+            check("issue create KAN bug gives a retry hint", "no issue was created" in r.stderr.lower(), r.stderr)
             kan_posts = [path for m, path in _requests if m == "POST" and path == "/rest/api/3/issue"]
-            check("issue create KAN bug retries after issue type error", len(kan_posts) >= 2, str(_requests))
-            kan_body = _post_bodies.get("/rest/api/3/issue", {})
-            kan_type = (kan_body.get("fields") or {}).get("issuetype") or {}
-            check("issue create KAN bug ultimately uses Task", kan_type.get("name") == "Task", str(kan_body))
+            check("issue create KAN bug never substitutes Task", len(kan_posts) == 1, str(_requests))
 
             print("\nissue create: assignee email resolves to accountId")
             _post_bodies.clear()
@@ -937,7 +941,7 @@ def main() -> int:
             r = run(["issue", "create", "PROJ",
                      "--summary", "Dry run test",
                      "--dry-run"], env=env)
-            check("issue create --dry-run exits 3", r.returncode == 3)
+            check("issue create --dry-run exits 0", r.returncode == 0)
             check("issue create --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             check("issue create --dry-run shows summary", "Dry run test" in r.stdout, r.stdout)
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
@@ -947,7 +951,7 @@ def main() -> int:
             r = run(["issue", "create", "PROJ",
                      "--summary", "Json dry run",
                      "--dry-run", "--json"], env=env)
-            check("issue create --dry-run --json exits 3", r.returncode == 3)
+            check("issue create --dry-run --json exits 0", r.returncode == 0)
             drj = json.loads(r.stdout)
             check("issue create --dry-run --json has dry_run=true", drj.get("dry_run") is True)
             check("issue create --dry-run --json has action", drj.get("action") == "issue_create")
@@ -977,14 +981,14 @@ def main() -> int:
 
             _requests_before = len(_requests)
             r = run(["issue", "comment", "PROJ-1", "--body", "Preview", "--dry-run"], env=env)
-            check("issue comment --dry-run exits 3", r.returncode == 3)
+            check("issue comment --dry-run exits 0", r.returncode == 0)
             check("issue comment --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
             check("issue comment --dry-run makes no HTTP request", len(new_posts) == 0)
 
             print("\nissue comment --dry-run --json")
             r = run(["issue", "comment", "PROJ-1", "--body", "Preview", "--dry-run", "--json"], env=env)
-            check("issue comment --dry-run --json exits 3", r.returncode == 3)
+            check("issue comment --dry-run --json exits 0", r.returncode == 0)
             cdj = json.loads(r.stdout)
             check("issue comment --dry-run --json has dry_run=true", cdj.get("dry_run") is True)
             check("issue comment --dry-run --json has action", "comment" in cdj.get("action", ""))
@@ -1042,14 +1046,14 @@ def main() -> int:
 
             _requests_before = len(_requests)
             r = run(["issue", "assign", "PROJ-1", "--to", "x@x.com", "--dry-run"], env=env)
-            check("issue assign --dry-run exits 3", r.returncode == 3)
+            check("issue assign --dry-run exits 0", r.returncode == 0)
             check("issue assign --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_puts = [m for m in _requests[_requests_before:] if m[0] == "PUT"]
             check("issue assign --dry-run makes no HTTP request", len(new_puts) == 0)
 
             print("\nissue assign --dry-run --json")
             r = run(["issue", "assign", "PROJ-1", "--to", "x@x.com", "--dry-run", "--json"], env=env)
-            check("issue assign --dry-run --json exits 3", r.returncode == 3)
+            check("issue assign --dry-run --json exits 0", r.returncode == 0)
             adj = json.loads(r.stdout)
             check("issue assign --dry-run --json has dry_run=true", adj.get("dry_run") is True)
             check("issue assign --dry-run --json has assignee", "assignee" in adj or "to" in adj)
@@ -1081,7 +1085,7 @@ def main() -> int:
 
             _requests_before = len(_requests)
             r = run(["issue", "transition", "PROJ-1", "--to", "Done", "--dry-run"], env=env)
-            check("issue transition --dry-run exits 3", r.returncode == 3)
+            check("issue transition --dry-run exits 0", r.returncode == 0)
             check("issue transition --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"
                          and "transitions" in m[1]]
@@ -1089,8 +1093,8 @@ def main() -> int:
 
             print("\nissue transition --dry-run --json")
             r = run(["issue", "transition", "PROJ-1", "--to", "Done", "--dry-run", "--json"], env=env)
-            check("issue transition --dry-run --json exits 3", r.returncode == 3, r.stderr)
-            if r.returncode == 3 and r.stdout.strip():
+            check("issue transition --dry-run --json exits 0", r.returncode == 0, r.stderr)
+            if r.returncode == 0 and r.stdout.strip():
                 tdj = json.loads(r.stdout)
                 check("issue transition --dry-run --json has dry_run=true", tdj.get("dry_run") is True)
                 check("issue transition --dry-run --json has transition name", "transition" in tdj or "to" in tdj)
@@ -1127,14 +1131,14 @@ def main() -> int:
 
             _requests_before = len(_requests)
             r = run(["issue", "label", "PROJ-1", "--add", "x", "--dry-run"], env=env)
-            check("issue label --dry-run exits 3", r.returncode == 3)
+            check("issue label --dry-run exits 0", r.returncode == 0)
             check("issue label --dry-run shows before/after", "Before:" in r.stdout and "After:" in r.stdout, r.stdout)
             new_puts = [m for m in _requests[_requests_before:] if m[0] == "PUT"]
             check("issue label --dry-run makes no HTTP PUT", len(new_puts) == 0)
 
             print("\nissue label --dry-run --json")
             r = run(["issue", "label", "PROJ-1", "--add", "x", "--dry-run", "--json"], env=env)
-            check("issue label --dry-run --json exits 3", r.returncode == 3)
+            check("issue label --dry-run --json exits 0", r.returncode == 0)
             ldj = json.loads(r.stdout)
             check("issue label --dry-run --json has dry_run=true", ldj.get("dry_run") is True)
 
@@ -1158,13 +1162,13 @@ def main() -> int:
 
             _put_bodies.clear()
             r = run(["issue", "edit", "PROJ-1", "--description", "New desc", "--dry-run"], env=env)
-            check("issue edit --dry-run exits 3", r.returncode == 3)
+            check("issue edit --dry-run exits 0", r.returncode == 0)
             check("issue edit --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             check("issue edit --dry-run makes no PUT", "/rest/api/3/issue/PROJ-1" not in _put_bodies)
 
             print("\nissue edit --dry-run --json")
             r = run(["issue", "edit", "PROJ-1", "--summary", "x", "--dry-run", "--json"], env=env)
-            check("issue edit --dry-run --json exits 3", r.returncode == 3)
+            check("issue edit --dry-run --json exits 0", r.returncode == 0)
             edj = json.loads(r.stdout)
             check("issue edit --dry-run --json has dry_run=true", edj.get("dry_run") is True)
 
@@ -1214,8 +1218,8 @@ def main() -> int:
             check("search --json tool field", sj.get("tool") == "search")
             check("search --json has issues", len(sj["data"]["issues"]) > 0)
             check("search --json has total", "total" in sj["data"])
-            check("search --json total falls back to count when Cloud omits total",
-                  sj["data"]["total"] == sj["data"]["count"], sj["data"])
+            check("search --json omits unavailable Cloud total",
+                  sj["data"]["total"] is None and sj["data"]["is_complete"] is True, str(sj["data"]))
             check("search --json has jql", "jql" in sj["data"])
 
             r = run(["search", "project = PROJ", "--limit", "10", "--json"], env=env)
@@ -1302,14 +1306,14 @@ def main() -> int:
 
             _requests_before = len(_requests)
             r = run(["sprint", "add", "PROJ-2", "--sprint", "1", "--dry-run"], env=env)
-            check("sprint add --dry-run exits 3", r.returncode == 3)
+            check("sprint add --dry-run exits 0", r.returncode == 0)
             check("sprint add --dry-run shows preview", "[dry-run]" in r.stdout, r.stdout)
             new_posts = [m for m in _requests[_requests_before:] if m[0] == "POST"]
             check("sprint add --dry-run makes no HTTP request", len(new_posts) == 0)
 
             print("\nsprint add --dry-run --json")
             r = run(["sprint", "add", "PROJ-1", "--sprint", "1", "--dry-run", "--json"], env=env)
-            check("sprint add --dry-run --json exits 3", r.returncode == 3)
+            check("sprint add --dry-run --json exits 0", r.returncode == 0)
             sadj = json.loads(r.stdout)
             check("sprint add --dry-run --json has dry_run=true", sadj.get("dry_run") is True)
 
@@ -1486,7 +1490,7 @@ def main() -> int:
 
             _requests.clear()
             r = run(["issue", "link", "PROJ-3", "--to", "PROJ-1", "--type", "is blocked by", "--dry-run", "--json"], env=env)
-            check("issue link dry-run exits 3", r.returncode == 3, r.stderr)
+            check("issue link dry-run exits 0", r.returncode == 0, r.stderr)
             dry_link = json.loads(r.stdout)
             check("issue link dry-run reports relation", dry_link["link_type"] == "is blocked by", r.stdout)
             check("issue link dry-run reverses outward issue", dry_link["outward_issue"] == "PROJ-1", r.stdout)
@@ -1498,7 +1502,7 @@ def main() -> int:
             print("\nissue delete")
             _requests.clear()
             r = run(["issue", "delete", "PROJ-3", "--dry-run", "--json"], env=env)
-            check("issue delete dry-run exits 3", r.returncode == 3, r.stderr)
+            check("issue delete dry-run exits 0", r.returncode == 0, r.stderr)
             delete_preview = json.loads(r.stdout)
             check("issue delete dry-run action", delete_preview["action"] == "issue_delete", r.stdout)
             check("issue delete dry-run key", delete_preview["key"] == "PROJ-3", r.stdout)

@@ -2,7 +2,7 @@
 
 > **DPT does not measure taste. It measures whether the unconscious will flinch.**
 
-Browser-injectable design quality scanner. 72 rules across 5 perception layers (chromatic field, typographic skeleton, spatial rhythm, attention architecture, coherence) fused into a single 0-100 score via synthesis.
+Browser-injectable design quality scanner. 65 rules across 5 perception layers (chromatic field, typographic skeleton, spatial rhythm, attention architecture, coherence) fused into a single 0-100 score via synthesis.
 
 Runs inside a live page via `page.evaluate()`. Returns structured JSON describing design quality from measured signals: computed styles, bounding rects, DOM structure, font APIs. No network requests, no server-side data, no subjectivity.
 
@@ -30,6 +30,8 @@ The install script:
 Options:
 ```bash
 ./install.sh --tool-only   # Just the agent-do symlink, no hook
+./install.sh --hook-only   # Refresh only the thin PostToolUse wrapper
+./install.sh --catalog-only # Refresh only legacy discovery entries
 ./install.sh --uninstall   # Remove all installed files
 ```
 
@@ -49,8 +51,8 @@ agent-do dpt score https://stripe.com  # Score a URL
 agent-do dpt violations                # Violations sorted by fix impact
 agent-do dpt report                    # Full narrative critique
 agent-do dpt scan --json > out.json    # Export structured JSON
-agent-do dpt baseline                  # Save comparison point
-agent-do dpt diff                      # Show delta after changes
+agent-do dpt baseline                  # Save session + project comparison point
+agent-do dpt diff                      # Show delta against that scoped baseline
 agent-do dpt build                     # Rebuild engine from source
 ```
 
@@ -64,7 +66,7 @@ bin/dpt-report result.json   # Narrative report from raw JSON
 
 ### Autonomous Fix Loop (via Claude Code hook)
 
-When the PostToolUse hook is installed, editing any CSS/HTML/JSX/TSX file automatically triggers a DPT score. The score feeds back into the AI agent's context:
+When the PostToolUse hook is installed, editing a CSS/HTML/JSX/TSX file triggers a DPT score only when the current browser session has a baseline for that edited project and the open page still matches the baseline. An unrelated open app produces an explicit skip instead of a misattributed score. The installed hook is a thin wrapper around this repo-owned implementation, so it cannot drift after a pull.
 
 ```
 Agent edits style.css
@@ -76,6 +78,8 @@ Agent edits style.css
 ```
 
 No explicit loop code. The hook is the loop.
+
+Scans cover the full rendered document, not only the first viewport. `oklch()` and `color()` values are converted to sRGB for measurement. Any unsupported color syntax or text over an unmeasurable background makes the score `INCOMPLETE` and reports samples in `meta.color_parse`; DPT never treats parser blindness as a perfect result.
 
 ## Architecture
 

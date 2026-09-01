@@ -3,10 +3,14 @@
 # Usage: agent-do --health [tool...]
 # Checks if tools have their dependencies installed and are ready to use.
 
-set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/bash-runtime.sh
+source "$ROOT_DIR/lib/bash-runtime.sh"
+agent_do_ensure_supported_bash "$ROOT_DIR/bin/health" "$@" || exit $?
+
+set -euo pipefail
+
 TOOLS_DIR="$ROOT_DIR/tools"
 CREDS_TOOL="$TOOLS_DIR/agent-creds"
 
@@ -48,17 +52,40 @@ resolve_tool_path() {
 
 credential_check() {
     local name="$1"
-    [[ -x "$CREDS_TOOL" ]] || return 0
+    if [[ ! -x "$CREDS_TOOL" ]]; then
+        printf 'MISS|credential checker unavailable\n'
+        return 0
+    fi
 
-    local payload
-    payload=$("$CREDS_TOOL" check --tool "$name" --json 2>/dev/null || true)
-    [[ -n "$payload" ]] || return 0
+    local payload=""
+    local check_status=0
+    if payload=$("$CREDS_TOOL" check --tool "$name" --json 2>&1); then
+        check_status=0
+    else
+        check_status=$?
+    fi
 
-    python3 - "$payload" <<'PY'
+    local parsed=""
+    if ! parsed=$(python3 - "$payload" "$check_status" <<'PY'
 import json
 import sys
 
-payload = json.loads(sys.argv[1])
+raw = sys.argv[1]
+exit_code = int(sys.argv[2])
+try:
+    payload = json.loads(raw)
+except (json.JSONDecodeError, TypeError):
+    detail = "no output" if not raw.strip() else "non-JSON output"
+    print(f"MISS|credential probe failed (exit {exit_code}; {detail})")
+    raise SystemExit(0)
+
+if exit_code not in (0, 1):
+    print(f"MISS|credential probe failed (unexpected exit {exit_code})")
+    raise SystemExit(0)
+if not isinstance(payload, dict):
+    print("MISS|credential probe returned an invalid payload")
+    raise SystemExit(0)
+
 items = payload.get("items") or []
 if not items:
     print("SKIP|")
@@ -82,6 +109,12 @@ for group in missing_one_of:
 
 print("CONF|" + "; ".join(parts))
 PY
+    ); then
+        printf 'MISS|credential response parser failed\n'
+        return 0
+    fi
+
+    printf '%s\n' "$parsed"
 }
 
 merge_credential_status() {
@@ -99,6 +132,15 @@ merge_credential_status() {
 
     if [[ "$credential_status" == "SKIP" ]]; then
         printf '%s|%s\n' "$current_status" "$current_note"
+        return 0
+    fi
+
+    if [[ "$credential_status" == "MISS" ]]; then
+        local merged_note="$credential_note"
+        if [[ -n "$current_note" && "$current_note" != "$credential_note" ]]; then
+            merged_note="$current_note; $credential_note"
+        fi
+        printf 'MISS|%s\n' "$merged_note"
         return 0
     fi
 
@@ -270,13 +312,25 @@ PY
             latex)
                 command -v pdflatex &>/dev/null && { status="OK"; } || { status="WARN"; note="pdflatex not found"; }
                 ;;
+            handbrake)
+                if command -v HandBrakeCLI &>/dev/null \
+                    || [[ -x "${AGENT_HANDBRAKE_BIN:-}" ]] \
+                    || { [[ -n "${AGENT_HANDBRAKE_BIN:-}" ]] && command -v "$AGENT_HANDBRAKE_BIN" &>/dev/null; } \
+                    || [[ -x "/Applications/HandBrakeCLI" ]]; then
+                    status="OK"
+                else
+                    status="WARN"; note="HandBrakeCLI not found — brew install handbrake or set AGENT_HANDBRAKE_BIN"
+                fi
+                ;;
             *)
                 status="OK"
                 ;;
         esac
 
         local credential_result merged
-        credential_result="$(credential_check "$name" 2>/dev/null || true)"
+        if ! credential_result="$(credential_check "$name")"; then
+            credential_result="MISS|credential checker failed internally"
+        fi
         merged="$(merge_credential_status "$status" "$note" "$credential_result")"
         status="${merged%%|*}"
         note="${merged#*|}"
@@ -300,6 +354,7 @@ PY
 main() {
     echo "agent-do health check"
     echo "===================="
+    echo "Runtime: GNU Bash $BASH_VERSION (${AGENT_DO_BASH:-$BASH})"
     echo ""
 
     local tools=("$@")
@@ -336,7 +391,9 @@ main() {
     echo ""
     echo "Summary: $ok ready, $warn warnings, $conf need config, $miss missing"
     echo ""
-    echo "Legend: ✓ OK = ready  ⚠ WARN = missing dependency  ○ CONF = needs config or credentials"
+    echo "Legend: ✓ OK = ready  ⚠ WARN = missing dependency  ○ CONF = needs config or credentials  ✗ MISS = broken prerequisite or tool"
+
+    (( miss == 0 ))
 }
 
 main "$@"

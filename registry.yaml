@@ -579,16 +579,19 @@ tools:
         flip also fires a detached second opinion)
       counsel: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts
         mechanically from git and the newest run log
-      harvest: Post-build consolidation scan; --corrections mines past sessions for corrections the
-        user typed and writes them to the machine-wide store as dated preference lessons, each
-        carrying the sentence verbatim
+      harvest: Post-build consolidation scan
       query: Search project lessons and decisions; add --global for machine-wide lessons
       patterns: View and score patterns
       review: Post-sprint lesson extraction from git history
-      promote: Promote lessons to team or global
+      promote: 'Promote lessons: --to team copies rows; --to global is gated and refuses (exit 2, nothing
+        written) unless the one row carries --rule, --why, --when kind:match (prompt|command|path|always)
+        and --seen-in a,b | --scope machine|user; machine-written rows never qualify; re-promoting
+        updates the global copy in place'
       inject: Emit agent context blob (claims rendered dated, kinded and retractable, never as law);
         fits itself to a budget derived from the quantity authority and states the magnitude of
         anything it drops, or takes the caller's own with --max-tokens;
+        --trigger prompt|command|path <value> emits only the machine-wide lessons whose `when` fires for that moment
+        (the hook path; empty when nothing matches; session start carries `always` rows and a count of the rest);
         --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the
         machine-wide preference slice and needs no .zpc store, so what the user already said about
         working follows them into any directory; --relitigate re-tries the most-exposed
@@ -614,10 +617,13 @@ tools:
       command: agent-zpc review --auto --phase 'Sprint 3'
     - intent: consolidate after swarm build
       command: agent-zpc harvest
-    - intent: learn from the corrections I have already typed
-      command: agent-zpc harvest --corrections --dry-run
     - intent: what has this user already told me about how to work
       command: agent-zpc inject --preferences
+    - intent: make a project lesson machine-wide with its rule, why and trigger
+      command: agent-zpc promote 14 --to global --rule 'Prove the premise inside the test' --why 'a faked
+        premise proves nothing' --when 'path:test_*.py' --scope user
+    - intent: which machine-wide lessons fire for this moment
+      command: agent-zpc inject --trigger prompt 'write a test for the parser'
     - intent: check memory status
       command: agent-zpc status
     - intent: search for docker lessons
@@ -3022,6 +3028,76 @@ tools:
       - org-add-member
       - oauth-app-create
     concurrency: mixed
+  coderabbit:
+    description: Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+    capabilities:
+    - review tracked local changes against a base branch, with optional committed, uncommitted, or untracked scopes
+    - replay findings from the most recent local review without an API call
+    - check auth and connectivity via doctor command
+    - support free-tier browser OAuth or API key for unlimited headless use
+    commands:
+      review: Review tracked local changes against the base branch; forwards CodeRabbit review flags like --light, --committed, --uncommitted, --include-untracked, and --dir
+      findings: Re-read results from the most recent local review (no API call)
+      doctor: Verify installation, authentication, git state, and service connectivity
+      snapshot: Auth status, cr version, and last doctor summary
+      auth login: Authenticate via browser and update local CodeRabbit auth state (free tier, 3 reviews/hour)
+      auth org: Switch active CodeRabbit organization and update local CLI state
+    examples:
+    - intent: review my changes before opening a PR
+      command: agent-do coderabbit review
+    - intent: review changes against develop branch
+      command: agent-do coderabbit review --base develop
+    - intent: review untracked local files before a PR
+      command: agent-do coderabbit review --include-untracked
+    - intent: get structured JSON review output for agent processing
+      command: agent-do coderabbit review --json
+    - intent: replay last review results without an API call
+      command: agent-do coderabbit findings
+    - intent: check coderabbit auth and connectivity
+      command: agent-do coderabbit doctor
+    - intent: coderabbit status and auth summary
+      command: agent-do coderabbit snapshot --json
+    credentials:
+      optional:
+      - CODERABBIT_API_KEY
+      notes:
+      - "Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key."
+      - "Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running."
+    routing:
+      discover_keywords:
+      - coderabbit
+      - local code review
+      - local review
+      - pre-pr review
+      - cr review
+      recommended_entrypoints:
+      - agent-do coderabbit review
+      - agent-do coderabbit doctor
+      default_command: review
+      raw_cli_equivalents:
+      - pattern: \bcr\b\s+(--agent|--base|--light|--committed|--uncommitted|--include-untracked|--dir|review)
+        replacement: agent-do coderabbit
+        example: agent-do coderabbit review --base develop
+        reason: agent-do coderabbit adds credential management and structured JSON output
+      project_signals:
+      - .coderabbit.yaml
+      - .coderabbit
+      readiness:
+        check: agent-do coderabbit doctor
+        fix: brew install coderabbit && agent-do coderabbit auth login
+        note: Free tier requires browser login saved by the CodeRabbit CLI; CODERABBIT_API_KEY is not passed through argv unless AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 is set in trusted automation
+    contracts:
+      connect:
+      - doctor
+      snapshot:
+      - snapshot
+      - findings
+      interact:
+      - review
+      save:
+      - auth login
+      - auth org
+    concurrency: mixed
   ci:
     description: Control CI/CD pipelines
     capabilities:
@@ -3117,7 +3193,10 @@ tools:
       discover_keywords:
       - github pull request
       - github pr
+      - github code review
+      - pr code review
       - pr review
+      - review my pr
       - review comments
       - unresolved threads
       - requested review
@@ -3911,6 +3990,93 @@ tools:
       interact:
       - eject
     concurrency: mixed
+  handbrake:
+    description: Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs
+    capabilities:
+    - list available HandBrake encode presets by category
+    - probe a video file's titles, duration, resolution, and audio/subtitle streams
+    - transcode one file to MP4 with a chosen preset
+    - batch-transcode every .mkv in a directory, skipping already-converted files
+    - verify transcoded .mp4 outputs (files and sizes)
+    - report HandBrake version and a preset-availability snapshot
+    - structured JSON output parsed from HandBrakeCLI --json scan mode
+    commands:
+      presets: List available encode presets
+      scan: 'Probe a file; list titles, streams, duration: scan <input>'
+      convert: 'Transcode one file to .mp4: convert <input> [output]'
+      batch: 'Transcode every .mkv in a directory: batch <indir> <outdir>'
+      verify: 'List .mp4 outputs (dir) or check one file: verify <path>'
+      version: Show HandBrake version
+      snapshot: Version + preset availability (JSON)
+    examples:
+    - intent: list handbrake presets
+      command: agent-handbrake presets
+    - intent: probe a ripped mkv's streams
+      command: agent-handbrake scan ~/rips/title_t00.mkv --json
+    - intent: convert an mkv to mp4 for plex
+      command: agent-handbrake convert ~/rips/title_t00.mkv
+    - intent: convert with a specific preset and destination
+      command: agent-handbrake convert ~/rips/title_t00.mkv ~/plex/movie.mp4 --preset "HQ 1080p30 Surround"
+    - intent: convert all ripped mkvs in a folder to mp4
+      command: agent-handbrake batch ~/rips ~/plex
+    - intent: re-encode a folder even if outputs exist
+      command: agent-handbrake batch ~/rips ~/plex --overwrite
+    - intent: verify transcoded output files
+      command: agent-handbrake verify ~/plex
+    - intent: show what the convert command would run without executing
+      command: agent-handbrake convert ~/rips/title_t00.mkv --dry-run
+    - intent: get a HandBrake version and preset snapshot
+      command: agent-handbrake snapshot --json
+    routing:
+      discover_keywords:
+      - handbrake
+      - transcode
+      - mkv to mp4
+      - convert mkv
+      - encode video
+      - plex
+      - handbrakecli
+      prompt_patterns:
+      - \bhandbrake\w*\b
+      - \b(transcode|convert|encode)\b.*\b(mkv|mp4|video)\b
+      - \bmkv\b.*\bmp4\b
+      recommended_entrypoints:
+      - agent-do handbrake scan <input>
+      - agent-do handbrake convert <input>
+      - agent-do handbrake batch <indir> <outdir>
+      default_command: presets
+      raw_cli_equivalents:
+      - pattern: \bHandBrakeCLI\b
+        replacement: agent-do handbrake
+        example: agent-do handbrake convert ~/rips/title_t00.mkv
+        reason: agent-do handbrake wraps HandBrakeCLI with parsed JSON scans, batch skip logic, and output verification
+      project_signals:
+      - transcode
+      - handbrake
+      - plex
+      - media
+      readiness:
+        check: agent-do handbrake version
+        fix: Install HandBrakeCLI (brew install handbrake) or set AGENT_HANDBRAKE_BIN
+        note: Requires the HandBrakeCLI binary (the HandBrake GUI app does not bundle it); resolved from PATH or AGENT_HANDBRAKE_BIN
+    contracts:
+      snapshot:
+      - presets
+      - scan
+      - version
+      - snapshot
+      interact:
+      - convert
+      - batch
+      verify:
+      - verify
+      attributes:
+        convert:
+        - long_running
+        batch:
+        - long_running
+        - composite
+    concurrency: mixed
   printer:
     description: Printer control
     capabilities:
@@ -3990,6 +4156,7 @@ tools:
     - manage advisory claims and a warn-only pre-commit guard over live claims and territories
     - point peers at files via drops, declare dependencies, publish artifacts with file pointers
     - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
+    - merge harness hook observations and timestamped external supervisor verdicts into shared six-state pulse telemetry without renewing target liveness, then rank live peers attention-first
     commands:
       touch: Renew current agent presence lease and report active peers
       whoami: Show current coordination identity, session, pid, and runtime
@@ -4004,6 +4171,7 @@ tools:
       status: Show current focus, needs, publishes, and interrupt counts
       interrupts: 'Show current interrupts: interrupts [--mark-seen] [--limit <n>]'
       focus: 'Manage structured focus: focus set <goal> [--path <p>] [--phase <phase>] [--note <t>] [--blocking-on <ref>] [--last-ship <t>] [--branch <name>] | show | clear'
+      pulse: 'Shared session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse record --session <harness-session-id> --status <working|needs-user|finished|failed|idle|ended> --updated-at <RFC3339> [--activity <note>|--clear-activity] | pulse show [peer|harness-session-id]'
       claims: List advisory claims
       claim: 'Claim a file/path: claim <path> [--reason <text>] [--strength soft|strong]'
       release: 'Release a claim you own: release <path>'
@@ -4036,6 +4204,10 @@ tools:
       command: agent-coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
     - intent: see whether anything should interrupt me
       command: agent-coord interrupts
+    - intent: see what a session is observably doing right now
+      command: agent-coord pulse show session-3f2a91
+    - intent: record an external supervisor's evidence-backed session verdict
+      command: agent-coord pulse record --session 019d8abc-dead-7eef-9000-aabbccddeeff --status needs-user --activity "pane is waiting for input" --updated-at 2026-09-01T03:00:00Z
     - intent: retire this session at the end of work
       command: agent-coord stop --note "lane 14 shipped"
     routing:
@@ -4073,11 +4245,13 @@ tools:
       - history
       - territory
       - guard
+      - pulse
       interact:
       - touch
       - alias
       - interrupts
       - focus
+      - pulse
       - claim soft
       - claim strong
       - release
@@ -4096,6 +4270,8 @@ tools:
         interrupts:
         - polymorphic
         guard:
+        - polymorphic
+        pulse:
         - polymorphic
         need clear:
         - destructive
@@ -4811,36 +4987,58 @@ tools:
       - store
     concurrency: mixed
   manna:
-    description: Git-backed issue tracking and context management for AI agents
+    description: Git-backed issue tracking with generated, bidirectionally linked handoff work orders
+    credentials:
+      optional:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
     capabilities:
     - track issues and dependencies
+    - declare portable typed relations between autonomous repository boards
     - manage session state
     - store context across sessions
     - query issue history
     commands:
-      init: Initialize manna repository
+      init: Initialize .manna plus the tracked .handoff workflow scaffold
+      migrate: Atomically admit a legacy board into strict paired workflow state
       status: Show current session and claimed issues
-      create: Create new issue (--type track|item|dream, --track, --source)
-      claim: Claim an issue for the current session (refuses dreams, exit 2, until converted)
+      state: Emit the full derived board model as JSON or YAML, including graph buckets, receipts, federation, drift, and coord attention
+      estate: Emit every registered board as the /api/boards model without starting or contacting the serve daemon
+      create: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
+      claim: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
       done: Mark a claimed issue as done
+      order: Move a paired item to a dense one-based handoff priority and synchronize generated presentation
+      sync: Derive numbered handoff filenames, blocker launch gates, and the README index from board state
       abandon: Release a claimed issue back to open
+      handoff: Seal and bind an intentional canonical handoff edit
+      federation: Initialize, inspect, or explicitly fork a portable Manna federation identity
+      relate: Add one typed outbound cross-board relation
+      unrelate: Remove one typed outbound cross-board relation
+      relations: List local relations and optionally resolve them through registered boards
       block: Add a blocker dependency
       unblock: Remove a blocker dependency
       list: List issues (--status, --type, --track filters)
       show: Show issue details
-      update: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
+      update: Update issue metadata; lifecycle state changes require claim, done, abandon, block, or unblock
       delete: Delete issue
       context: Get session context
       dream: File an idea spark on the nearest board or the global inbox
-      lint: Check board grammar; findings exit 1
-      reconcile: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
+      lint: Check board grammar and strict handoff linkage; findings exit 1
+      reconcile: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
+      serve: Read-only human board view on a stable local port (picked free on first run, kept in local config); every registered board indexed at /, this project at /<name>; always prints the URL
     examples:
     - intent: initialize manna
       command: agent-manna init
+    - intent: migrate a legacy manna board
+      command: agent-manna migrate
     - intent: create a new issue
       command: agent-manna create 'Fix login bug'
     - intent: list all issues
       command: agent-manna list
+    - intent: read the complete derived board state
+      command: agent-manna state --json
+    - intent: read every registered manna board
+      command: agent-manna estate --json
     - intent: show issue details
       command: agent-manna show 1
     - intent: capture an idea for later
@@ -4849,21 +5047,47 @@ tools:
       command: agent-manna update mn-abc123 --type item
     - intent: check the board for drift
       command: agent-manna reconcile --write-drift
+    - intent: move an item to the top of the handoff plan
+      command: agent-manna order mn-abc123 1
+    - intent: synchronize handoff filenames after a board change
+      command: agent-manna sync
+    - intent: show me the board
+      command: agent-manna serve --open
+    - intent: list every board on this machine
+      command: agent-manna serve --scan ~/Projects
+    - intent: initialize portable board identity
+      command: agent-manna federation init
+    - intent: link this item to a sibling board
+      command: agent-manna relate mn-a1b2c3 --kind counterpart --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
+    - intent: inspect cross-board relations
+      command: agent-manna relations --resolve --check
     contracts:
       connect:
       - init
+      - federation
       snapshot:
       - list
       - show
       - context
       - status
+      - state
+      - estate
+      - federation
+      - relations
       interact:
+      - migrate
       - create
       - update
       - delete
       - claim
       - done
+      - order
+      - sync
       - abandon
+      - handoff
+      - federation
+      - relate
+      - unrelate
       - block
       - unblock
       - dream
@@ -4871,11 +5095,45 @@ tools:
       verify:
       - lint
       - reconcile
+      - relations
       attributes:
+        federation:
+        - polymorphic
+        - composite
+        - destructive
+        migrate:
+        - destructive
+        - composite
+        order:
+        - composite
         delete:
         - destructive
+        unrelate:
+        - destructive
+        relations:
+        - polymorphic
+        sync:
+        - composite
         reconcile:
         - polymorphic
+        serve:
+        - long_running
+    routing:
+      discover_keywords:
+      - show me the board
+      - open the board
+      - board website
+      - board url
+      - what's on the board
+      - manna dashboard
+      prompt_patterns:
+      - \b(show|open|see|view|give)\b.*\b(the )?board\b
+      - \bboard (url|link|website|page)\b
+      - \bmanna (dashboard|website|page)\b
+      recommended_entrypoints:
+      - agent-do manna serve --open
+      - agent-do manna context
+      default_command: serve
     concurrency: write
   learn:
     description: Learning and pattern improvement
@@ -5760,6 +6018,97 @@ tools:
         stop:
         - own_state
     concurrency: read
+  substack:
+    description: Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session
+    capabilities:
+    - convert markdown to Substack's ProseMirror document format
+    - create and update drafts through the editor API
+    - list drafts and recent published posts
+    - publish a reviewed draft on explicit command (subscriber email only with --email)
+    - verify a draft by reading it back and comparing against the local receipt or source file
+    commands:
+      connect: 'Verify auth + save publication config: connect --publication <url-or-subdomain> [--session name]'
+      snapshot: 'Publication info + drafts + recent posts: snapshot [--json]'
+      drafts: 'List drafts: drafts [--limit N]'
+      posts: 'List recent published posts: posts [--limit N]'
+      get: 'Fetch one draft: get <id>'
+      convert: 'Markdown to ProseMirror JSON, offline: convert <file.md>'
+      draft: 'Create a DRAFT (never publishes): draft <file.md> [--title T] [--subtitle S]'
+      update: 'Replace draft body/title: update <id> <file.md>'
+      publish: 'Publish a reviewed draft: publish <id> [--email]'
+      verify: 'Read back and compare: verify <id> [--file <file.md>]'
+      receipts: 'Local draft/publish receipts: receipts [--limit N]'
+    examples:
+    - intent: post my essay to substack as a draft
+      command: agent-substack draft essay.md
+    - intent: connect to my substack publication
+      command: agent-substack connect --publication example.substack.com
+    - intent: list my substack drafts
+      command: agent-substack drafts
+    - intent: publish the reviewed substack draft
+      command: agent-substack publish 12345678
+    - intent: check the draft matches what I wrote
+      command: agent-substack verify 12345678 --file essay.md
+    routing:
+      discover_keywords:
+      - substack
+      - substack draft
+      - substack post
+      - newsletter publish
+      - essay publish
+      prompt_patterns:
+      - \bsubstack\b
+      recommended_entrypoints:
+      - agent-do substack draft <file.md>
+      - agent-do substack snapshot
+      - agent-do substack drafts
+      default_command: snapshot
+      raw_cli_equivalents:
+      - pattern: \bcurl\b.*\bsubstack\.com/api\b
+        replacement: agent-do substack
+        example: agent-do substack draft essay.md
+        reason: agent-do substack speaks the editor API with the saved browse session's auth and converts markdown to ProseMirror
+      project_signals:
+      - substack
+      - newsletter
+      readiness:
+        check: agent-do substack snapshot
+        fix: agent-do browse login https://substack.com && agent-do browse session save substack --shared && agent-do substack connect --publication <subdomain>
+        note: Requires a saved agent-browse session holding substack.com cookies plus a one-time connect
+    contracts:
+      connect:
+      - connect
+      snapshot:
+      - snapshot
+      - drafts
+      - posts
+      - get
+      - convert
+      - receipts
+      interact:
+      - draft
+      - update
+      - publish
+      verify:
+      - verify
+      save:
+      - draft
+      - update
+      - publish
+      attributes:
+        draft:
+        - composite
+        update:
+        - composite
+        publish:
+        - composite
+        - destructive
+        - sensitive
+        connect:
+        - own_state
+        receipts:
+        - own_state
+    concurrency: mixed
   supabase:
     description: Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
     capabilities:
@@ -6103,12 +6452,12 @@ tools:
     - generate prioritized fix lists with CSS selectors
     - baseline/diff for before/after comparison
     commands:
-      scan: Full scan → JSON with all 72 checks
+      scan: Full-page scan → JSON with all 65 checks
       score: Quick score + grade + dimension summary
       report: Narrative design critique report
       violations: Violations sorted by impact for AI fix loops
-      baseline: Save current scan as baseline
-      diff: Compare against baseline, show deltas
+      baseline: Save a browser-session + project baseline
+      diff: Compare against that scoped baseline, show deltas
       build: Rebuild engine from source
     examples:
     - intent: check the design quality of this page

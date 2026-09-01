@@ -42,7 +42,7 @@ function spatialRhythm(utils) {
 
   function sr01_spacingScale() {
     const allElements = utils.queryVisible('*');
-    const sample = allElements.slice(0, MAX_SAMPLE);
+    const sample = utils.sampleAcrossPage(allElements, MAX_SAMPLE);
     const spacingValues = [];
 
     for (const el of sample) {
@@ -87,19 +87,53 @@ function spatialRhythm(utils) {
     };
   }
 
-  // ─── SR-02: Touch Target Size ────────────────────────────────────
+  // ─── SR-02: Target Size ──────────────────────────────────────────
+  // WCAG 2.5.8 (AA, 2023): minimum target size is 24x24 CSS px, with an
+  // explicit exemption for targets that sit inline within a sentence or
+  // block of text — the surrounding prose disambiguates the click. The
+  // earlier 44px figure is Apple's touch-HIG number for finger-first
+  // surfaces; on desktop pages it condemned inline evidence links and
+  // 43px buttons, so 44 is reported as advisory context, never a failure.
+
+  const TARGET_FLOOR_PX = 24;       // WCAG 2.5.8 target-size minimum
+  const TOUCH_GUIDELINE_PX = 44;    // Apple HIG touch guideline (advisory)
+
+  function isInlineTextTarget(el) {
+    // Inline within text flow: the WCAG inline exemption. display:inline
+    // (not inline-block — a styled chip/button opts back into the floor)
+    // inside a prose container.
+    const display = window.getComputedStyle(el).display;
+    if (display !== 'inline') return false;
+    let parent = el.parentElement;
+    while (parent && parent !== document.body) {
+      if (['P', 'LI', 'TD', 'TH', 'FIGCAPTION', 'BLOCKQUOTE'].includes(parent.tagName)) return true;
+      if (window.getComputedStyle(parent).display !== 'inline') return false;
+      parent = parent.parentElement;
+    }
+    return false;
+  }
 
   function sr02_touchTargets() {
     const allElements = utils.queryVisible('*');
-    const interactive = allElements.filter(el => utils.isInteractive(el) && utils.isInViewport(el));
+    const interactive = allElements.filter(el => utils.isInteractive(el) && utils.isOnPage(el));
     const violations = [];
+    let undersized = 0;
+    let inlineExempt = 0;
+    let subTouchGuideline = 0;
 
     for (const el of interactive) {
       const rect = el.getBoundingClientRect();
       const w = Math.round(rect.width);
       const h = Math.round(rect.height);
 
-      if (w < 44 || h < 44) {
+      if (w < TOUCH_GUIDELINE_PX || h < TOUCH_GUIDELINE_PX) subTouchGuideline++;
+
+      if (w < TARGET_FLOOR_PX || h < TARGET_FLOOR_PX) {
+        if (isInlineTextTarget(el)) {
+          inlineExempt++;
+          continue;
+        }
+        undersized++;
         if (violations.length < MAX_VIOLATIONS) {
           violations.push({
             selector: utils.getSelector(el),
@@ -110,14 +144,12 @@ function spatialRhythm(utils) {
       }
     }
 
-    const undersized = interactive.filter(el => {
-      const r = el.getBoundingClientRect();
-      return r.width < 44 || r.height < 44;
-    }).length;
-
     return {
       total_interactive: interactive.length,
+      floor_px: TARGET_FLOOR_PX,
       undersized: undersized,
+      inline_exempt: inlineExempt,
+      sub_touch_guideline_44: subTouchGuideline,
       violations: violations,
       pass: undersized === 0
     };
@@ -188,7 +220,7 @@ function spatialRhythm(utils) {
 
   function sr04_borderRadius() {
     const allElements = utils.queryVisible('*');
-    const sample = allElements.slice(0, MAX_SAMPLE);
+    const sample = utils.sampleAcrossPage(allElements, MAX_SAMPLE);
     const radiiSet = new Set();
 
     for (const el of sample) {
@@ -218,7 +250,7 @@ function spatialRhythm(utils) {
 
   function sr05_shadowElevation() {
     const allElements = utils.queryVisible('*');
-    const sample = allElements.slice(0, MAX_SAMPLE);
+    const sample = utils.sampleAcrossPage(allElements, MAX_SAMPLE);
     const shadows = [];
 
     for (const el of sample) {
@@ -370,8 +402,8 @@ function spatialRhythm(utils) {
 
   function sr07_alignmentVectors() {
     const allElements = utils.queryVisible('*');
-    const inViewport = allElements.filter(el => utils.isInViewport(el));
-    const sample = inViewport.slice(0, MAX_SAMPLE);
+    const pageElements = allElements.filter(el => utils.isOnPage(el));
+    const sample = utils.sampleAcrossPage(pageElements, MAX_SAMPLE);
     const TOLERANCE = 2;
 
     // Collect left and right edges
@@ -422,22 +454,26 @@ function spatialRhythm(utils) {
 
   function sr08_whitespaceDensity() {
     const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    const viewportHeight = window.innerHeight;
+    const documentHeight = utils.documentHeight();
     const cellW = vw / 4;
-    const cellH = vh / 4;
+    const cellH = documentHeight / 4;
 
     // Initialize 4x4 grid of zeros (occupied pixels)
     const occupied = Array.from({ length: 4 }, () => Array(4).fill(0));
     const cellArea = cellW * cellH;
 
     const allElements = utils.queryVisible('*');
-    const inViewport = allElements.filter(el => utils.isInViewport(el));
+    const pageElements = allElements.filter(el => utils.isOnPage(el));
+    const scrollY = window.scrollY || window.pageYOffset || 0;
 
     // For each element, add its overlap with each grid cell
-    for (const el of inViewport) {
+    for (const el of pageElements) {
       const rect = el.getBoundingClientRect();
-      // Skip elements that are the full viewport (body, html, wrappers)
-      if (rect.width >= vw * 0.98 && rect.height >= vh * 0.98) continue;
+      const documentTop = rect.top + scrollY;
+      const documentBottom = rect.bottom + scrollY;
+      // Skip elements that are the full document (body, html, wrappers).
+      if (rect.width >= vw * 0.98 && rect.height >= documentHeight * 0.98) continue;
 
       for (let row = 0; row < 4; row++) {
         for (let col = 0; col < 4; col++) {
@@ -448,9 +484,9 @@ function spatialRhythm(utils) {
 
           // Compute intersection area
           const overlapLeft = Math.max(rect.left, cellLeft);
-          const overlapTop = Math.max(rect.top, cellTop);
+          const overlapTop = Math.max(documentTop, cellTop);
           const overlapRight = Math.min(rect.right, cellRight);
-          const overlapBottom = Math.min(rect.bottom, cellBottom);
+          const overlapBottom = Math.min(documentBottom, cellBottom);
 
           if (overlapRight > overlapLeft && overlapBottom > overlapTop) {
             const area = (overlapRight - overlapLeft) * (overlapBottom - overlapTop);
@@ -479,7 +515,9 @@ function spatialRhythm(utils) {
       grid: grid,
       min_density: minDensity,
       max_density: maxDensity,
-      balance_score: balanceScore
+      balance_score: balanceScore,
+      document_height: Math.round(documentHeight),
+      bands_scanned: Math.max(1, Math.ceil(documentHeight / viewportHeight))
     };
   }
 
@@ -487,28 +525,32 @@ function spatialRhythm(utils) {
 
   function sr09_bodyTextMarginAdequacy() {
     const paragraphs = utils.queryVisible('p');
-    const inViewport = paragraphs.filter(el => utils.isInViewport(el));
+    const pageParagraphs = paragraphs.filter(el => utils.isOnPage(el));
     const violations = [];
     let inadequateMargin = 0;
 
-    for (const p of inViewport) {
+    for (const p of pageParagraphs) {
       const cs = window.getComputedStyle(p);
       const fontSize = parseFloat(cs.fontSize) || 16;
-      const parent = p.parentElement;
-      if (!parent) continue;
-
-      const parentCs = window.getComputedStyle(parent);
-      const paddingLeft = parseFloat(parentCs.paddingLeft) || 0;
-      const paddingRight = parseFloat(parentCs.paddingRight) || 0;
+      const rect = p.getBoundingClientRect();
+      const textLeft = rect.left + (parseFloat(cs.borderLeftWidth) || 0) +
+        (parseFloat(cs.paddingLeft) || 0);
+      const textRight = rect.right - (parseFloat(cs.borderRightWidth) || 0) -
+        (parseFloat(cs.paddingRight) || 0);
+      // Measure the rendered text inset from the actual page edges. This
+      // naturally includes padding on any ancestor instead of accusing a
+      // paragraph merely because its direct wrapper has zero padding.
+      const leftSpace = Math.max(0, textLeft);
+      const rightSpace = Math.max(0, window.innerWidth - textRight);
 
       // Minimum adequate margin is 1em (the paragraph's own font-size)
-      if (paddingLeft < fontSize || paddingRight < fontSize) {
+      if (leftSpace < fontSize || rightSpace < fontSize) {
         inadequateMargin++;
         if (violations.length < MAX_VIOLATIONS) {
           violations.push({
             selector: utils.getSelector(p),
-            parent_padding_left: roundTo(paddingLeft, 1),
-            parent_padding_right: roundTo(paddingRight, 1),
+            effective_left_space: roundTo(leftSpace, 1),
+            effective_right_space: roundTo(rightSpace, 1),
             font_size: roundTo(fontSize, 1)
           });
         }
@@ -516,7 +558,7 @@ function spatialRhythm(utils) {
     }
 
     return {
-      paragraphs_checked: inViewport.length,
+      paragraphs_checked: pageParagraphs.length,
       inadequate_margin: inadequateMargin,
       violations: violations,
       pass: inadequateMargin === 0
@@ -527,7 +569,7 @@ function spatialRhythm(utils) {
 
   function sr10_shadowColorTemperature() {
     const allElements = utils.queryVisible('*');
-    const sample = allElements.slice(0, MAX_SAMPLE);
+    const sample = utils.sampleAcrossPage(allElements, MAX_SAMPLE);
     let shadowsFound = 0;
     let achromaticShadows = 0;
     let tintedShadows = 0;

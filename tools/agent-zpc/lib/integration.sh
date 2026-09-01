@@ -253,11 +253,13 @@ max_tokens, budget_origin = delivery.resolve(sys.argv[7], override)
 
 # Retracted claims are absent here as they are everywhere else. A withdrawn
 # preference is the one most likely to be obeyed on reflex, since nobody
-# re-reads a rule they think they already know.
-live = delivery.live_claims(global_path)
+# re-reads a rule they think they already know. Rows waiting on a trigger are
+# absent too: they arrive with their moment, not at the door.
+import triggers
+live, _waiting = triggers.split_startup(delivery.live_claims(global_path))
 
-# Dated order, not file order: promotions and mining append at different times
-# than the days they describe, and "newest first" has to mean the claim's day.
+# Dated order, not file order: promotions append at different times than the
+# days they describe, and "newest first" has to mean the claim's day.
 live.sort(key=lambda record: record["row"].get("date", ""), reverse=True)
 
 # Preferences first, then the rest of the technique claims. The cut takes from
@@ -275,6 +277,9 @@ for record in live:
 body, _counts = delivery.render_claims(
     list(reversed(preferred + technique)), bullet=True, tag_label=True
 )
+_waiting_note = triggers.startup_note(len(_waiting))
+if _waiting_note:
+    body = (body + "\n" if body else "") + _waiting_note
 
 if not body:
     if fmt == "json":
@@ -302,14 +307,55 @@ else:
 PYTHON
 }
 
+# One moment, the lessons whose trigger matches it, and nothing else. Runs
+# without a project store — the hooks fire in every directory — and says
+# nothing when nothing fires, because an empty section pasted into a prompt is
+# a claim that memory was consulted and found wanting.
+_inject_trigger() {
+    local kind="$1" value="$2"
+    local global_file="$ZPC_GLOBAL_DIR/global-lessons.jsonl"
+
+    case "$kind" in
+        prompt|command|path) ;;
+        *) die "inject --trigger takes prompt|command|path <value>; got '$kind'" ;;
+    esac
+
+    local result
+    result=$(python3 "$ZPC_LIB_DIR/triggers.py" match "$global_file" "$kind" "$value" 2>/dev/null) || result='{"fired":[],"text":""}'
+
+    # A delivery is exposure: the claim was just repeated into somebody's
+    # context. The receipt is what re-litigation and status count.
+    local fired
+    fired=$(printf '%s' "$result" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["fired"]))')
+    if [[ -n "$fired" ]]; then
+        local ts
+        ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+        printf '{"ts":"%s","kind":"%s","fired":%s,"project":"%s","session":"%s"}\n' \
+            "$ts" "$kind" \
+            "$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["fired"]))')" \
+            "$(_json_escape "$PWD")" \
+            "$(_json_escape "${CLAUDE_SESSION_ID:-${AGENT_DO_COORD_SESSION:-}}")" \
+            >> "$ZPC_GLOBAL_DIR/deliveries.jsonl" 2>/dev/null || true
+    fi
+
+    if [[ "${OUTPUT_FORMAT:-text}" == "json" ]]; then
+        printf '%s' "$result" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"additionalContext": d["text"], "fired": d["fired"], "kind": d["kind"]}))'
+    else
+        printf '%s' "$result" | python3 -c 'import json,sys; t=json.load(sys.stdin)["text"]; print(t) if t else None'
+    fi
+    return 0
+}
+
 cmd_inject() {
     local compact=false relitigate=false preferences=false max_tokens=""
+    local trigger_kind="" trigger_value=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --compact) compact=true; shift ;;
             --relitigate) relitigate=true; shift ;;
             --preferences) preferences=true; shift ;;
+            --trigger) trigger_kind="${2:-}"; trigger_value="${3:-}"; shift 3 ;;
             --max-tokens) max_tokens="${2:-}"; shift 2 ;;
             --max-tokens=*) max_tokens="${1#*=}"; shift ;;
             *) shift ;;
@@ -322,9 +368,20 @@ cmd_inject() {
     # typo must fall back to the derived budget, never silence memory.
     [[ "$max_tokens" =~ ^[1-9][0-9]*$ ]] || max_tokens=""
 
-    # The preference slice answers before a project store exists, so it runs
-    # before the check that would demand one. Everything below this point —
-    # ensure_zpc, the overdue harvest, re-litigation — is project work.
+    # The triggered slice and the preference slice answer before a project
+    # store exists, so they run before the check that would demand one.
+    # Everything below — ensure_zpc, the overdue harvest, re-litigation — is
+    # project work.
+    if [[ -n "$trigger_kind" ]]; then
+        ensure_global 2>/dev/null || true
+        if init_zpc_dirs 2>/dev/null; then
+            log_access "inject --trigger $trigger_kind"
+        else
+            _log_global_access "inject --trigger $trigger_kind"
+        fi
+        _inject_trigger "$trigger_kind" "$trigger_value"
+        return 0
+    fi
     if [[ "$preferences" == true ]]; then
         if init_zpc_dirs 2>/dev/null; then
             log_access "inject --preferences"
@@ -423,9 +480,19 @@ all_lesson_records = (
 checked = epistemics.last_checked(relit_log)
 
 lessons_text, _lesson_counts = delivery.render_claims(lessons_claims, checked=checked)
-global_text, _global_counts = delivery.render_claims(
+
+# Machine-wide rows split by their `when`: the `always` rows (and rows promoted
+# before triggers existed) open the session; the rest wait for the moment they
+# name and arrive through the hook that fires there. The count is the receipt
+# that they exist.
+import triggers
+_global_startup, _global_waiting = triggers.split_startup(
     delivery.live_claims(global_path) if readable(global_path) else []
 )
+global_text, _global_counts = delivery.render_claims(_global_startup)
+_waiting_note = triggers.startup_note(len(_global_waiting))
+if _waiting_note:
+    global_text = (global_text + "\n" if global_text else "") + _waiting_note
 
 # VALUE ORDER, which is the order a cut reads. It is not the reading order
 # below, and the difference is the whole fix.
@@ -761,7 +828,12 @@ cmd_status() {
     decision_count=$(_zpc_claim_count "$decisions_file")
     pattern_count=$(grep -c "^## " "$patterns_file" 2>/dev/null) || pattern_count=0
     team_count=$(count_lines "$team_lessons")
-    global_count=$(count_lines "$global_lessons")
+    # Live claims only: a retracted machine-wide row is on disk and not in
+    # anyone's session, and the number that matters is the second one.
+    local global_waiting=0 global_counts
+    global_counts=$(python3 "$ZPC_LIB_DIR/triggers.py" counts "$global_lessons" 2>/dev/null) || global_counts='{"live":0,"startup":0,"waiting":0}'
+    global_count=$(printf '%s' "$global_counts" | python3 -c 'import json,sys; print(json.load(sys.stdin)["live"])')
+    global_waiting=$(printf '%s' "$global_counts" | python3 -c 'import json,sys; print(json.load(sys.stdin)["waiting"])')
 
     # Format issues + consolidation gaps via python
     local health
@@ -847,6 +919,7 @@ PYTHON
         snapshot_num_field "patterns" "$pattern_count"
         snapshot_num_field "team_lessons" "$team_count"
         snapshot_num_field "global_lessons" "$global_count"
+        snapshot_num_field "global_lessons_triggered" "$global_waiting"
         snapshot_num_field "format_issues" "$format_issues"
         snapshot_num_field "consolidation_gaps" "$gaps"
         snapshot_field "last_harvest" "$last_harvest"

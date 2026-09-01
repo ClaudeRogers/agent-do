@@ -219,6 +219,28 @@ def test_recover_read_only(root: Path, env: dict[str, str]) -> None:
     require(digest_tree(git_dir) == before, "recover changed .git contents")
 
 
+def test_recover_outside_repo(root: Path, env: dict[str, str]) -> None:
+    """Verify-beat contract: a refusal carries a clear reason.
+
+    Regression for the nightly contracts audit, which probes verbs from a
+    throwaway cwd: outside any repository `recover` used to print an empty
+    but success-shaped report and exit 1 with no explanation.
+    """
+    outside = root / "not-a-repo"
+    outside.mkdir()
+    require(git(outside, "rev-parse", "--git-dir", check=False).returncode != 0, "fixture dir is unexpectedly inside a repo")
+
+    bare = agent(outside, "recover", env=env)
+    require(bare.returncode != 0, f"recover outside a repo exited 0: {bare.stdout}")
+    require("not a git repository" in (bare.stderr + bare.stdout).lower(), f"recover outside a repo gave no reason: {bare.stderr!r} {bare.stdout!r}")
+    require("Unreachable commits" not in bare.stdout, f"recover outside a repo printed a success-shaped report: {bare.stdout!r}")
+
+    structured = agent(outside, "recover", "--json", env=env)
+    require(structured.returncode != 0, f"recover --json outside a repo exited 0: {structured.stdout}")
+    payload = json_payload(structured)
+    require(payload.get("ok") is False and "not a git repository" in payload.get("error", ""), f"recover --json outside a repo lacks structured error: {payload}")
+
+
 def test_sweep(root: Path, env: dict[str, str]) -> None:
     remote = root / "remote.git"
     git(root, "init", "-q", "--bare", str(remote))
@@ -271,6 +293,7 @@ def main() -> None:
         test_worktrees(root, env)
         test_snapshots_and_conflicts(root, env)
         test_recover_read_only(root, env)
+        test_recover_outside_repo(root, env)
         test_sweep(root, env)
 
     print("git guardrail tests passed")

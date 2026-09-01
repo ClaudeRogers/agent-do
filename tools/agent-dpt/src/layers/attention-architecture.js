@@ -8,10 +8,11 @@ function attentionArchitecture(utils) {
   // ─── Shared collection: gather visible elements once ──────────────
 
   const allVisible = utils.queryVisible('*');
-  const viewportElements = allVisible.filter(el => utils.isInViewport(el));
+  const pageElements = allVisible.filter(el => utils.isOnPage(el));
+  const weightedPageElements = utils.sampleAcrossPage(pageElements, 300);
   const interactiveElements = allVisible.filter(el => utils.isInteractive(el));
   const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const scanHeight = utils.documentHeight();
 
   // ─── AA-01: Visual Weight Ranking ─────────────────────────────────
 
@@ -19,19 +20,19 @@ function attentionArchitecture(utils) {
     const rects = new Map();
     const scored = [];
 
-    // Pre-compute rects for all viewport elements
-    for (const el of viewportElements) {
+    // Pre-compute rects for all rendered page elements.
+    for (const el of weightedPageElements) {
       rects.set(el, el.getBoundingClientRect());
     }
 
-    for (const el of viewportElements) {
+    for (const el of weightedPageElements) {
       const rect = rects.get(el);
       if (rect.width < 2 || rect.height < 2) continue;
 
       const style = window.getComputedStyle(el);
 
-      // Size weight: fraction of viewport area
-      const sizeWeight = (rect.width * rect.height) / (vw * vh);
+      // Size weight: fraction of the full scanned document area.
+      const sizeWeight = (rect.width * rect.height) / (vw * scanHeight);
 
       // Contrast weight: element foreground or background vs effective bg
       const fg = utils.parseColor(style.color);
@@ -53,7 +54,7 @@ function attentionArchitecture(utils) {
 
       // Isolation weight: 1 / (1 + nearby count within 50px)
       let nearbyCount = 0;
-      for (const other of viewportElements) {
+      for (const other of weightedPageElements) {
         if (other === el) continue;
         const otherRect = rects.get(other);
         if (utils.areAdjacent(rect, otherRect, 50)) {
@@ -115,13 +116,13 @@ function attentionArchitecture(utils) {
     // <button> and [role="button"]
     const btnEls = utils.queryVisible('button, [role="button"]');
     for (const el of btnEls) {
-      if (utils.isInViewport(el)) buttons.push(el);
+      if (utils.isOnPage(el)) buttons.push(el);
     }
 
     // <a> styled as buttons: must have a visible background or border
     const links = utils.queryVisible('a');
     for (const el of links) {
-      if (!utils.isInViewport(el)) continue;
+      if (!utils.isOnPage(el)) continue;
       const style = window.getComputedStyle(el);
       const bg = utils.parseColor(style.backgroundColor);
       const border = parseFloat(style.borderWidth) || 0;
@@ -214,14 +215,14 @@ function attentionArchitecture(utils) {
   // ─── AA-03: Interactive Affordance ────────────────────────────────
 
   function aa03_interactiveAffordance() {
-    const viewportInteractive = interactiveElements.filter(el =>
-      utils.isInViewport(el)
+    const pageInteractive = interactiveElements.filter(el =>
+      utils.isOnPage(el)
     );
 
     let withAffordance = 0;
     const weakAffordance = [];
 
-    for (const el of viewportInteractive) {
+    for (const el of pageInteractive) {
       const style = window.getComputedStyle(el);
       const issues = [];
 
@@ -282,7 +283,7 @@ function attentionArchitecture(utils) {
     }
 
     return {
-      total: viewportInteractive.length,
+      total: pageInteractive.length,
       with_affordance: withAffordance,
       weak_affordance: weakAffordance,
       pass: weakAffordance.length === 0
@@ -298,7 +299,7 @@ function attentionArchitecture(utils) {
 
     // Find SVGs and small images inside interactive elements
     for (const interactive of interactiveElements) {
-      if (!utils.isInViewport(interactive)) continue;
+      if (!utils.isOnPage(interactive)) continue;
 
       const icons = interactive.querySelectorAll('svg, img');
       for (const icon of icons) {
@@ -635,8 +636,22 @@ function attentionArchitecture(utils) {
       '[tabindex]:not([tabindex="-1"])', '[role="button"]:not([aria-disabled="true"])'
     ].join(', ');
 
+    // Sticky/fixed elements (decision bars, floating actions) live at the
+    // END of the DOM but render pinned mid-viewport — their geometry is
+    // detached from document flow, so comparing it against reading order
+    // manufactures a mismatch that no keyboard user experiences.
+    function inStickyOrFixed(el) {
+      let node = el;
+      while (node && node !== document.body) {
+        const position = window.getComputedStyle(node).position;
+        if (position === 'sticky' || position === 'fixed') return true;
+        node = node.parentElement;
+      }
+      return false;
+    }
+
     const allFocusable = Array.from(document.querySelectorAll(focusableSelector))
-      .filter(el => utils.isVisible(el) && utils.isInViewport(el));
+      .filter(el => utils.isVisible(el) && utils.isOnPage(el) && !inStickyOrFixed(el));
 
     // Separate elements with explicit tabindex > 0 from natural order
     const withTabindex = [];
@@ -690,7 +705,7 @@ function attentionArchitecture(utils) {
     const fieldSelector = 'input, select, textarea';
     const skipTypes = ['hidden', 'submit', 'button'];
     const fields = utils.queryVisible(fieldSelector).filter(el => {
-      if (!utils.isInViewport(el)) return false;
+      if (!utils.isOnPage(el)) return false;
       const type = (el.getAttribute('type') || '').toLowerCase();
       return !skipTypes.includes(type);
     });
@@ -743,12 +758,12 @@ function attentionArchitecture(utils) {
 
     const btnEls = utils.queryVisible('button, [role="button"]');
     for (const el of btnEls) {
-      if (utils.isInViewport(el)) buttons.push(el);
+      if (utils.isOnPage(el)) buttons.push(el);
     }
 
     const links = utils.queryVisible('a');
     for (const el of links) {
-      if (!utils.isInViewport(el)) continue;
+      if (!utils.isOnPage(el)) continue;
       const style = window.getComputedStyle(el);
       const bg = utils.parseColor(style.backgroundColor);
       const border = parseFloat(style.borderWidth) || 0;
@@ -805,12 +820,12 @@ function attentionArchitecture(utils) {
 
     const btnEls = utils.queryVisible('button, [role="button"]');
     for (const el of btnEls) {
-      if (utils.isInViewport(el)) buttons.push(el);
+      if (utils.isOnPage(el)) buttons.push(el);
     }
 
     const links = utils.queryVisible('a');
     for (const el of links) {
-      if (!utils.isInViewport(el)) continue;
+      if (!utils.isOnPage(el)) continue;
       const style = window.getComputedStyle(el);
       const bg = utils.parseColor(style.backgroundColor);
       const border = parseFloat(style.borderWidth) || 0;

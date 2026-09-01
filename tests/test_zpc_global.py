@@ -95,10 +95,29 @@ def main() -> None:
                 tags,
             )
 
-        first = json_result(checked(source, env, "promote", "harness-seed", "--to", "global", "--json"))
-        second = json_result(checked(source, env, "promote", "harness-seed", "--to", "global", "--json"))
-        require(first["promoted"] == 2, f"expected two promoted lessons: {first}")
-        require(second["promoted"] == 0 and second["skipped"] == 2, f"promotion must deduplicate: {second}")
+        # Machine-wide promotion is gated and one row at a time: each carries
+        # its rule, its why, its trigger, and a receipt that it is really
+        # cross-project. `always` rows are the ones session start renders.
+        gate = ["--when", "always", "--scope", "machine"]
+        first = json_result(checked(
+            source, env, "promote", "1", "--to", "global", "--json",
+            "--rule", "Seed ignored env files from the parent worktree",
+            "--why", "a fresh worktree omits them and the build fails on a missing secret", *gate,
+        ))
+        require(first["promoted"] == 1, f"expected one promoted lesson: {first}")
+        second_row = json_result(checked(
+            source, env, "promote", "2", "--to", "global", "--json",
+            "--rule", "Heal the browser daemon, keep the session",
+            "--why", "the saved state is on disk; only the daemon wedged", *gate,
+        ))
+        require(second_row["promoted"] == 1, f"expected the second lesson to land: {second_row}")
+        second = json_result(checked(
+            source, env, "promote", "1", "--to", "global", "--json",
+            "--rule", "Seed ignored env files from the parent worktree",
+            "--why", "a fresh worktree omits them and the build fails on a missing secret", *gate,
+        ))
+        require(second["promoted"] == 0 and second["updated"] == 1,
+                f"re-promotion must update the existing row, never duplicate it: {second}")
 
         consumer = init_project(tmp, "consumer", env)
         checked(
@@ -130,6 +149,32 @@ def main() -> None:
         require(all(item.get("_scope") == "global" for item in query["results"]), f"global scope tags missing: {query}")
         query_text = checked(consumer, env, "query", "--global", "--tag", "harness-seed").stdout
         require(query_text.count("[global]") == 2, f"text query must label global entries: {query_text}")
+
+        # One id, two files: the lesson learned in `source` and its promoted
+        # copy. A retraction filed where the lesson was learned has to reach
+        # the machine-wide copy too, or every other project keeps reading it.
+        worktree_id = next(
+            item["id"] for item in query["results"]
+            if item["takeaway"] == "Seed ignored env files from the parent worktree."
+        )
+        withdrawn = json_result(checked(
+            source, env, "retract", worktree_id,
+            "--evidence", "the parent checkout seeds nothing; worktrees read env from the vault now",
+            "--json",
+        ))
+        require(len(withdrawn["stores"]) == 2, f"retraction must name both stores it reached: {withdrawn}")
+        for where, label in ((source, "source"), (consumer, "consumer")):
+            blob = checked(where, env, "inject").stdout
+            require(
+                "Seed ignored env files from the parent worktree." not in blob,
+                f"retracted lesson kept rendering in {label}: {blob}",
+            )
+        after = json_result(checked(consumer, env, "query", "--global", "--tag", "harness-seed", "--json"))
+        flagged = {item["id"]: item.get("_retracted", False) for item in after["results"]}
+        require(
+            flagged.get(worktree_id) is True and sum(flagged.values()) == 1,
+            f"global query must flag the retracted copy, and only it: {flagged}",
+        )
 
         tail_env = env.copy()
         tail_home = tmp / "tail-home"
