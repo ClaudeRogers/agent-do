@@ -148,7 +148,13 @@ def _err(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 def _scrub_secrets(msg: str) -> str:
-    return re.sub(r"://[^@/\s]+@", "://****@", msg)
+    def mask_uri(match: re.Match[str]) -> str:
+        authority = match.group(2)
+        if "@" not in authority:
+            return match.group(0)
+        return f"{match.group(1)}****@{authority.rsplit('@', 1)[1]}"
+
+    return re.sub(r"([a-z][a-z0-9+.-]*://)([^\s/?#]+)", mask_uri, msg, flags=re.IGNORECASE)
 
 def _parse_filter(raw: str | None) -> dict[str, Any]:
     if not raw:
