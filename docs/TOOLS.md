@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (102 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -83,7 +83,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [metrics](#metrics) | System metrics and monitoring (CPU, memory, disk, network, processes) | read | 8 |
 | [midi](#midi) | MIDI control | mixed | 3 |
 | [models](#models) | Capability-aware model roles for agent-do's internal LLM calls | mixed | 3 |
-| [mongo](#mongo) | MongoDB and CosmosDB (Mongo API) exploration, querying, and safe writes — connection profiles, schema discovery, AKS secret import | mixed | 15 |
+| [mongo](#mongo) | MongoDB/CosmosDB profiles, discovery, queries, aggregation, and safe writes | mixed | 15 |
 | [namecheap](#namecheap) | Namecheap domain and DNS management — domains, DNS records (safe upsert with exact verification), nameservers, SSL, availability | write | 13 |
 | [network](#network) | Network diagnostics | read | 4 |
 | [notion](#notion) | Notion team operating layer for pages, data sources, tasks, decisions, handoffs, comments, cache, and webhooks | mixed | 22 |
@@ -2936,7 +2936,7 @@ agent-do models resolve vision --json
 
 ### mongo
 
-MongoDB and CosmosDB (Mongo API) exploration, querying, and safe writes — connection profiles, schema discovery, AKS secret import
+MongoDB/CosmosDB profiles, discovery, queries, aggregation, and safe writes
 
 Concurrency: `mixed`
 
@@ -2979,9 +2979,9 @@ Concurrency: `mixed`
 # list mongodb connections
 agent-do mongo connections list
 # add a cosmosdb connection
-printf '%s' "$COSMOS_URI" | agent-do mongo connections add app_cosmos --stdin --provider cosmosdb --default
+printf '%s' "$COSMOS_URI" | agent-do mongo connections add app --stdin --provider cosmosdb --default
 # import cosmos connection from aks secret
-agent-do mongo connections import-from-aks --secret cosmos-connection-string --namespace app --profile app_cosmos
+agent-do mongo connections import-from-aks --secret cosmos-uri --namespace app --profile app
 # snapshot all mongo databases
 agent-do mongo snapshot
 # infer schema of events collection
@@ -3014,7 +3014,7 @@ agent-do mongo delete appdb events --where externalId=x001 --dry-run
 
 - Read-only (snapshot/verify; safe to parallelize): `connections list`, `count`, `explain`, `indexes`, `query`, `schema`, `snapshot`
 - Write (connect/interact/save): `aggregate`, `connections add`, `connections import-from-aks`, `connections remove`, `connections set-default`, `delete`, `insert`, `update`
-- destructive (irreversible data loss; confirm before auto-running): `delete`
+- destructive (irreversible data loss; confirm before auto-running): `aggregate`, `connections remove`, `delete`
 - polymorphic (beat decided by payload or flag at call time): `aggregate`
 - own_state (writes only its own cache/state; parallel-safe): `connections add`, `connections import-from-aks`, `connections remove`, `connections set-default`
 

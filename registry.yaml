@@ -4967,7 +4967,7 @@ tools:
       default_command: serve
     concurrency: write
   mongo:
-    description: MongoDB and CosmosDB (Mongo API) exploration, querying, and safe writes — connection profiles, schema discovery, AKS secret import
+    description: MongoDB/CosmosDB profiles, discovery, queries, aggregation, and safe writes
     capabilities:
     - manage named connection profiles (MongoDB and CosmosDB)
     - import connection strings from AKS Kubernetes secrets
@@ -5001,9 +5001,9 @@ tools:
     - intent: list mongodb connections
       command: agent-do mongo connections list
     - intent: add a cosmosdb connection
-      command: printf '%s' "$COSMOS_URI" | agent-do mongo connections add app_cosmos --stdin --provider cosmosdb --default
+      command: printf '%s' "$COSMOS_URI" | agent-do mongo connections add app --stdin --provider cosmosdb --default
     - intent: import cosmos connection from aks secret
-      command: agent-do mongo connections import-from-aks --secret cosmos-connection-string --namespace app --profile app_cosmos
+      command: agent-do mongo connections import-from-aks --secret cosmos-uri --namespace app --profile app
     - intent: snapshot all mongo databases
       command: agent-do mongo snapshot
     - intent: infer schema of events collection
@@ -5089,12 +5089,14 @@ tools:
         - own_state
         connections remove:
         - own_state
+        - destructive
         connections set-default:
         - own_state
         connections import-from-aks:
         - own_state
         aggregate:
         - polymorphic
+        - destructive
         delete:
         - destructive
     concurrency: mixed

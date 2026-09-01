@@ -123,6 +123,8 @@ class _Collection:
         return _Cursor(docs)
 
     def aggregate(self, pipeline):
+        if self.name == "empty":
+            return iter([])
         return iter(list(FIXTURE_DOCS))
 
     def insert_one(self, doc):
@@ -168,6 +170,8 @@ class _Database:
 class MongoClient:
     def __init__(self, uri, **kwargs):
         self.uri = uri
+        if "raise-config-error" in uri:
+            raise Exception(f"Invalid MongoDB URI: {uri}")
 
     def __getitem__(self, name):
         return _Database(name)
@@ -388,6 +392,16 @@ def main() -> int:
               "metadata.source" in field_names)
         check("schema no double-dot in any field name",
               not any(".." in f for f in field_names))
+
+        r = run(
+            [str(AGENT_DO), "mongo", "schema", "appdb", "empty", "--json"],
+            env=base_env,
+        )
+        check("empty schema --json exits 0", r.returncode == 0, r.stderr)
+        out = json.loads(r.stdout)
+        check("empty schema --json command", out["command"] == "schema")
+        check("empty schema --json has no fields", out["data"]["fields"] == [])
+        check("empty schema --json sample_size=0", out["data"]["sample_size"] == 0)
 
         # indexes --json
         r = run(
@@ -1041,6 +1055,15 @@ def main() -> int:
         r = run([str(AGENT_DO), "mongo", "connections", "add", "missing_safe_uri"], env=base_env)
         check("connections add without stdin or stored creds rejected", r.returncode != 0)
         check("connections add missing safe URI hint mentions agent-do creds", "agent-do creds store" in r.stderr)
+
+        leak_env = {
+            **base_env,
+            "MONGO_CONNECTION_APPDB": "mongodb://user:s3cr3t@raise-config-error:27017/appdb",
+        }
+        r = run([str(AGENT_DO), "mongo", "snapshot", "--connection", "appdb"], env=leak_env)
+        check("blanket exception redacts URI password", r.returncode != 0)
+        check("redacted exception hides password", "s3cr3t" not in r.stderr)
+        check("redacted exception masks userinfo", "mongodb://****@raise-config-error" in r.stderr)
 
         # import-from-aks when kubectl not installed gives clean error (not unhandled exception).
         # Inject a fake kubectl that exits 127 (command not found) to simulate missing binary

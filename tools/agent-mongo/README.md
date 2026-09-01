@@ -103,7 +103,8 @@ agent-do mongo query <db> <collection> \
 - JSON: `--where '{"status": "active", "age": {"$gt": 18}}'`
 - `key=value` shorthand: `--where status=active` (coerces `null`, `true`/`false`, integers, floats)
 
-Default limit is 20. Use `--limit 0` for unlimited.
+Default limit is 20. JSON output includes both returned `count` and `total_matching`.
+Use `--limit 0` for unlimited.
 
 ```bash
 agent-do mongo query appdb events --where status=active --limit 100
@@ -250,13 +251,13 @@ Every command accepts `--json` and returns a structured envelope:
 
 ## CosmosDB notes
 
-Set `--provider cosmosdb` when adding a profile. The `explain` command is especially useful for CosmosDB as it surfaces RU consumption in the execution plan. Connection timeouts are shortened for CosmosDB clusters (10s server selection timeout).
+Set `--provider cosmosdb` when adding a profile. The `explain` command is especially useful for CosmosDB as it surfaces RU consumption in the execution plan when the server reports it. Connection timeouts use an 8s server selection timeout.
 
 ---
 
 ## Regression test coverage
 
-Test suite: `tests/test_mongo.py` (205 assertions, all passing). Run via:
+Test suite: `tests/test_mongo.py` (217 assertions, all passing). Run via:
 
 ```bash
 python3 tests/test_mongo.py
