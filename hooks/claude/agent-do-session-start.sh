@@ -50,24 +50,46 @@ if [ -n "$AGENT_DO_DIR" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export PATH=\"$AGENT_DO_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 fi
 
-# --- Pin coord + manna identity to this Claude session ---
+# --- Pin coord + stable host identity to this Claude session ---
 # Every Bash call then derives the same coord agent identity, and the
 # SessionEnd hook can retire exactly that identity via the same session_id.
-# Manna gets the same anchor: claims made as the session_id survive pid
-# recycling, so reconcile can probe them meaningfully instead of always
-# finding a dead transient pid.
+# Manna derives its private proof from the stable host id under a machine-local
+# key, so separate shell invocations and process restarts recover one owner.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -n "$SESSION_ID" ] && [ -z "${AGENT_DO_COORD_SESSION:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
     echo "export AGENT_DO_COORD_SESSION=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
 fi
-if [ -n "$SESSION_ID" ] && [ -z "${MANNA_SESSION_ID:-}" ] && [ -n "$CLAUDE_ENV_FILE" ]; then
-    echo "export MANNA_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+# Manna ownership rides a machine-key derived identity: manna-core derives
+# the proof from CLAUDE_SESSION_ID under ~/.agent-do/manna/session-identity.key,
+# so a restarted process re-derives the same proof and keeps lifecycle
+# authority over its claims (mn-ba8db6). A random MANNA_SESSION_TOKEN died
+# with the process and wedged mid-work claims. Explicit MANNA_SESSION_ID +
+# MANNA_SESSION_TOKEN pins (scripted lanes) still take priority when present.
+if [ -n "$SESSION_ID" ] && [ -n "$CLAUDE_ENV_FILE" ] && [ -z "${MANNA_SESSION_TOKEN:-}" ]; then
+    if [ -n "${MANNA_SESSION_ID:-}" ]; then
+        # Neutralize a stale half-pinned pair; manna treats empty as unset
+        # and falls through to the derived identity.
+        echo 'export MANNA_SESSION_ID=""' >> "$CLAUDE_ENV_FILE"
+    fi
+    if [ -z "${CLAUDE_SESSION_ID:-}" ]; then
+        echo "export CLAUDE_SESSION_ID=\"$SESSION_ID\"" >> "$CLAUDE_ENV_FILE"
+    fi
 fi
 
 run_native_bootstrap_prompt() {
     local ask_prompt="$1"
     local project_root="$2"
     local response
+    # With many sessions open, an unlabeled dialog is unanswerable: the title
+    # names the repo, and the body always ends with its full path.
+    local dialog_label
+    dialog_label="$(basename "$project_root")"
+    case "$ask_prompt" in
+        *"$project_root"*) ;;
+        *) ask_prompt="$ask_prompt
+
+Project: $project_root" ;;
+    esac
 
     case "${AGENT_DO_BOOTSTRAP_AUTO_RESPONSE:-}" in
         bootstrap)
@@ -82,7 +104,7 @@ run_native_bootstrap_prompt() {
             fi
 
             response=$(osascript <<EOF 2>/dev/null || true
-display dialog "$(printf '%s' "$ask_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')" with title "agent-do Bootstrap" buttons {"Not now", "Bootstrap"} default button "Bootstrap"
+display dialog "$(printf '%s' "$ask_prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')" with title "agent-do Bootstrap — $(printf '%s' "$dialog_label" | sed 's/\\/\\\\/g; s/"/\\"/g')" buttons {"Not now", "Bootstrap"} default button "Bootstrap"
 button returned of result
 EOF
 )
@@ -143,7 +165,7 @@ DLG
 }
 
 append_bootstrap_prompt() {
-    local bootstrap_json needs_bootstrap ask_prompt project_root commands prompt_mode
+    local bootstrap_json needs_bootstrap ask_prompt project_root commands prompt_mode legacy_board legacy_notice
 
     [ -n "$AGENT_DO_DIR" ] || return 0
     [ -n "$CWD" ] || return 0
@@ -158,6 +180,11 @@ append_bootstrap_prompt() {
     ask_prompt=$(echo "$bootstrap_json" | jq -r '.ask_prompt // ""' 2>/dev/null || true)
     project_root=$(echo "$bootstrap_json" | jq -r '.project_root // ""' 2>/dev/null || true)
     commands=$(echo "$bootstrap_json" | jq -r '.commands[]?' 2>/dev/null || true)
+    legacy_board=$(echo "$bootstrap_json" | jq -r 'if .legacy_board then "true" else "false" end' 2>/dev/null || echo "false")
+    legacy_notice=""
+    if [ "$legacy_board" = "true" ]; then
+        legacy_notice="legacy board: run agent-do manna migrate"
+    fi
 
     prompt_mode="${AGENT_DO_BOOTSTRAP_PROMPT_MODE:-}"
     if [ -z "$prompt_mode" ]; then
@@ -184,6 +211,8 @@ append_bootstrap_prompt() {
 ## Bootstrap Opportunity
 
 This project has pending agent-do bootstrap work.
+
+$legacy_notice
 
 At the start of your first reply in this session, ask exactly one short yes/no question:
 \"$ask_prompt\"
@@ -386,7 +415,8 @@ append_manna_board() {
 
 $board_block
 
-Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified."
+Work the board: \`agent-do manna claim <id>\` before starting, \`agent-do manna done <id>\` when verified.
+Human view: \`agent-do manna serve\` prints this board's URL (http://127.0.0.1:<port>/<project>); hand it over whenever the board is asked for."
         fi
     fi
 

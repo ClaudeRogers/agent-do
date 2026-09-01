@@ -2,17 +2,95 @@
 
 ## Unreleased
 
-### Added
-- `agent-do datadog` adds Datadog observability coverage for monitors, logs, metrics, events, incidents, dashboards, SLOs, services, and alert-aware snapshots with dry-run previews for write commands.
-- `gh inbox` now derives waiting-on-us from maintainer role, not just review-request ceremony: it sweeps open third-party PRs across admin/maintain/push repos (REST-only), classifies each by the viewer's latest review against the head sha (`maintainer_unreviewed` / `maintainer_review_stale` / `maintainer_approved_unmerged`), counts changes-requested-at-head as waiting-on-author, reports every unswept repo and every hit `--limit` cap loudly, and keeps the old four-search view behind `--ceremony-only`. A declared portfolio (`gh portfolio add/remove/list`, exact `owner/repo` or `owner/*` patterns in `~/.agent-do/gh/portfolio.yaml`) sweeps repos whose authority is organizational rather than permission-encoded, tagging reasons `portfolio_*`; role wins on dedupe, and portfolio repos the viewer cannot read report as unswept (no access).
-- `agent-do betterstack` for Better Stack Uptime monitoring and incident management (with `contracts:` block and `--json` on every command). Wraps Uptime API v2/v3 for monitors, heartbeats, incidents, status pages, and on-call; `BETTERSTACK_API_TOKEN` via creds.
-- `agent-do cronitor` for Cronitor scheduled job and uptime monitoring (with `contracts:` block and `--json` on every command). Covers monitors, issues, telemetry pings, and account snapshot; HTTP Basic auth via `CRONITOR_API_KEY`; API version `2025-11-28`.
-- `agent-do sentry` wraps the Sentry REST API for error tracking, issue management, alerts, and releases (with `contracts:` block and `--json` on every command). Org slug and region URL auto-detect from the `sntrys_` org auth token payload with env-var overrides (`SENTRY_ORG`, `SENTRY_REGION_URL`). Commands: `projects`, `project <slug>`, `issues`, `issue <short_id>`, `resolve`, `unresolve`, `ignore`, `assign`, `alerts`, `alert <rule_id>`, `releases`, `snapshot`.
-- `agent-ci triage <run-id> [--repo owner/repo]` — deterministic failure classification for a failed GitHub Actions run, drafting a triage summary with a proposed action (dry-run to stdout; `--json` supported). Five classes: dependabot-pr (branch-parsed dependency facts), dependabot-updater (parses Dependabot's structured error table with transient/structural hints), trunk-release (push/schedule failures with no PR author in the loop), gate-authoring (expected reds on `ci/**` branches), and unknown — which reports facts and a redacted log tail at low confidence rather than guessing. Log excerpts pass a redaction layer (tokens, JWTs, key/value secrets) before leaving the process; every result carries a stable dedupe signature. No model calls; `--post` intentionally errors pending the posting layer. Offline fixture tests in `tests/test_ci_triage.py`; validated 24/24 against two weeks of real fleet failures.
-- Cursor adapter hooks (`hooks/cursor/`): translate Cursor's hook JSON (sessionStart, beforeSubmitPrompt, preToolUse) into the canonical Claude hooks and translate responses back. `install.sh --cursor` (auto-detected when `~/.cursor/` exists) copies the self-contained adapters; registration is Cursor-side only (`~/.cursor/hooks.json`) — the generated Claude wrappers are untouched, and the installer warns about the double-fire trap when hooks are also registered via `~/.claude/settings.json`.
+- New tool `agent-substack`: draft and publish Substack essays through the editor's own JSON endpoints (Substack publishes no write API). Converts a Markdown subset — headings, marks, links, lists, blockquotes, fenced code, rules, images with local-file upload — to Substack's ProseMirror document; auth rides the shared agent-browse session (`browse login https://substack.com`, `session save substack --shared`), so no second login exists anywhere. Five beats: `connect` verifies cookies and pins the publication, `snapshot`/`drafts`/`posts`/`get` read, `draft`/`update` write DRAFTS ONLY, `verify` reads the draft back and compares against the receipt or the source file, and every write appends a receipt with the editor URL. `publish` is the one outward-facing verb — destructive+sensitive in its contract, runs only on explicit command, and never emails subscribers unless `--email` is passed. Offline `convert` emits the ProseMirror JSON for inspection; tests drive the full loop against a fixture server, cookies asserted on every request. (mn-386f70)
+
+- `coord pulse record` now accepts a timestamped six-state verdict from an external supervisor under the target harness session ID. An identity-free write path merges into the hook-fed row under the same lock without minting caller bookkeeping or renewing or impersonating the target session, preserves hook-owned prompt/todo/counters, and reports duplicate writes as unchanged. This gives Holy's roster orb and Manna's attention surface one record to read. (mn-86a41b)
+- `manna estate --json` exposes every board in the machine registry through the exact `/api/boards` derivation without starting or contacting the serve daemon. Each row carries its root, slug, effective status counts, dreams, decisions, drift timestamp and count, latest update, and coord attention rollup; missing registered roots remain visible. YAML is the human default, JSON is the native-client contract. (mn-7ef12d)
+- install.sh installs the Claude wrapper for the touch ledger: the hook was registered in settings.json, listed for Codex, and covered by uninstall, but absent from the wrapper-install list, so clean installs registered a file that never existed and the stop-time quality gate silently fell back to git-status inference (found by Chris). A new test holds registration and wrapper installation coherent so the class dies.
+- agent-browse: `ws` 8.19.0 → 8.21.3, clearing two high advisories on the runtime WebSocket dependency (memory disclosure fixed 8.20.1; fragment-flood DoS fixed 8.21.0); 47/47 browse tests pass on the bump (also flagged by Chris).
+- The `agent-psql` macOS Keychain helper subprocesses no longer receive raw or hex-encoded passwords through argv or inherited password-holder variables: writes send one bounded add-or-update command to `/usr/bin/security -i -q` over stdin, and framed reads preserve terminal newlines while decoding SecurityTool's binary-password representation. Within `agent-psql`, profile-add URIs reach the private helper only over bounded stdin, with percent-encoded userinfo password bytes decoded exactly. Profile inputs fail closed for non-PostgreSQL URI forms, authorities unsupported by agent-psql's existing hostname/single-port path, and decoded `password` or `sslpassword` query keys; the same checks and size bound apply to legacy profile records. Profile mutations now share a bounded lock and publish explicit credential-requirement metadata, so concurrent updates or an orphaned credential cannot pair a password with the wrong endpoint; the `session-` namespace is reserved to prevent cross-kind credential collisions. On macOS, session and credentialed-profile records publish only after storage succeeds. Existing profile names still require removal before replacement, and the historical non-macOS masked-profile no-op remains unchanged. Remaining non-Keychain parsing subprocesses are tracked separately.
+- `creds list` on macOS no longer reports an empty store when Keychain items exist. Enumeration now parses each `dump-keychain` record (acct lives *before* svce; a `grep -A4` window after svce never saw the account) and errors if `security dump-keychain` itself fails instead of treating a failed query as "No stored secrets." Every remaining silent exit-1 in `creds list` is gone: an empty Linux store is a valid outcome again (grep's zero-match exit no longer kills the pipeline under pipefail), unknown platforms and Windows-without-powershell refuse loudly on stderr, and a mktemp failure explains itself.
+- Cockpit pages never wait on reconcile: live drift computes in a background thread per board (reconcile serializes on the board lock; measured 40s+ of convoy on a busy 242-row board), the page ships the last finished findings with the drift file's age beside them, and the stream pushes the fresh result when it lands. A board's full state on the worst measured board: 47s → 1.6s.
+- The daemon watches its own source and restarts in place when the code on disk changes; previously only a CLI touch noticed, and an untouched daemon served day-old code indefinitely (observed).
+- Column fitting measures real pixels with the header label as a floor (inline labels get a box; a stretched header span reports its column width, which ratcheted columns wider on every fit). Fixes clipped AGE cells, the sliver horizontal scrollbar, empty columns collapsing under their labels, and the ragged STATE column on sparse boards.
+- The coordination sheet paints from the fast state too, with presence included whenever the daemon's bundle is warm.
+- Cockpit columns behave on boards with long track names: track and state columns clamp with ellipsis (full text in the tooltip), leading `[TRACK]`-style markers are stripped from display, and a boundary drag between two fixed columns transfers width across that boundary so the divider you grab is the divider that moves. Long blocker lists no longer crush the digest column.
+- The cockpit resolves coord state through the coord tool script instead of the agent-do dispatcher, cutting each presence refresh from 1.5-2s (worse under load) to ~0.4s; the two serve HTTP tests that flaked under machine load pass again.
+- `manna serve` no longer assumes port 7777: the first run asks the OS for a free port and keeps it in `$AGENT_DO_HOME/manna/serve/config.json`, so printed URLs stay stable without colliding with whatever another machine already runs there; `--port` and `MANNA_SERVE_PORT` override one invocation. README screenshots retaken at full resolution and linked to their originals so a click zooms.
+- README rewritten as one essay for the human reader (the workshop, the vessel, the dharma of receipts): every institution presented with its evidence, no agent commands beyond the install, logo plus cockpit and coordination screenshots placed in the sections they depict. Chosen from fifteen candidates across three clean-room rounds.
+- `manna serve`: a `recent` chip on the board sheet renders every entry (items, dreams, done, blocked) as one flat list sorted by last activity with an age column, linkable at `#board/recent`; the inspector now shows `filed` (created) beside `touched` (updated) for every item.
+- UserPromptSubmit hooks no longer time out under load: the prompt router invokes the coord tool script directly instead of paying the dispatcher's per-call interpreter tax twice, defers the provider SDK import until an AI routing call actually happens, and the four UserPromptSubmit hook ceilings rise 5s→10s in the registration spec (lesson les-2a750a).
+- zpc-trigger telemetry carries the trigger value again (prompt/command/path) through telemetry's central policy — stable hash plus redacted 160-char excerpt — restoring nudge debuggability; ruled by Erik 2026-08-26, recorded as dec-ef3bbd.
+- DPT: remaining canon false-positives retired across four perception layers, with controlled fixtures under `tools/agent-dpt/fixtures/`. (mn-55530d)
+- Stop-time quality gates now read a per-session touch ledger (`lib/touch_ledger.py`, PostToolUse-fed) instead of inferring agent action from `git status`, so another lane's edits or human-dropped files no longer trigger false "design work without a browser" advisories; Claude and Codex hooks ship wired, Codex stop gate updated to match.
+
+## v1.5 (2026-08-25)
+
+The Agentic Work OS release. Everything since v1.4, grouped by program.
+
+### The cockpit (manna serve)
+
+- One local daemon at `127.0.0.1:7777` renders every registered board: an estate index whose counts link to what they count, and per-board sheets for inbox, board, and coordination, live over server-sent events. Loopback-only with Host and Origin checks (DNS-rebinding refused). Agents keep the command line; the page is a window, never a source. (mn-613088, mn-1e71e2)
+- Every item row carries a one-line digest written by the fast model (hash-keyed cache, byte-bounded batches, measured per-call cap, title as fallback); the inspector holds a collapsible summary under 450 characters; an ask bar answers questions from the board's own rows on the deep role and cites the item ids it used.
+- Reconcile by click: drift appears in the inbox as asks whose verbs are buttons, each click running exactly one manna verb under the daemon's own authenticated identity. Refusals print verbatim; delete asks twice; nothing edits a file directly.
+- Coordination is on the page: claimed rows carry the claimant's live pulse, a per-board sheet shows who is present, what they hold, and claim contention, and the estate index shows needs-you / working / here per board.
+- Hardening: provider exceptions never reach a client (fixed error codes only), the daemon restarts itself when its source changes on disk, and no personal names ship in the code (decision markers are a machine setting).
+
+### Work boards (manna)
+
+- One transactional spine: board identity pinned in `board.yaml`, status moved only by lifecycle verbs under a board-wide mutation lock, HMAC-authenticated write-ahead journals, and `lint` / `reconcile` / `claim` failing closed on broken pairs or shadow work orders anywhere in the repository.
+- `init` is crash-atomic and byte-stable on re-run; `migrate` converges legacy and mixed boards (multiple rounds, sealed content preserved, external projects untouched); legacy boards are detected and pointed at migration before their first failed write.
+- Ordered handoffs: `.manna/handoff-order.yaml` owns priority, filenames derive from it (past 99 items without lying), a generated README indexes the plan, and sealed content bindings refuse edits without an explicit reseal.
+- Ownership is restart-durable: Claude, Cursor, and Codex sessions re-derive the same claim proof under a machine-local key after a restart, and an orphaned claim whose work provably landed is released by evidence, not by request.
+- Dreams are visible and inert: they appear in every listing, and `claim` refuses them (exit 2, nothing written) until the owner converts one; `dream --description` carries the idea's substance.
+- Portable federation: every board carries a tracked identity that survives cloning, items can declare typed relations across repositories (counterpart, depends_on, informed_by, supersedes), a missing counterpart resolves to "unavailable," and no relation changes another board's state. Boards auto-enroll.
+
+### Memory (zpc)
+
+- Positions: a verdict is filed with its falsifier, and a flip that names no new evidence is refused; the refusal spawns a clean-context `counsel` run (a fresh model that never saw the argument) whose verdict lands beside the position.
+- Memory can change its mind: lessons carry identity, `retract` appends a correction with a receipt (nothing edited or deleted), and delivery is anti-dogma: entries arrive as dated claims a live observation outranks, with exposure-ranked re-litigation of what memory repeats most.
+- Corrections cost one keystroke (`w` too wordy, `d` deeper, `s` subtraction) and are mined into receipted preference lessons that travel to every session via `inject --preferences`; `inject --compact` fits memory into a lane prompt.
+- Machine-wide lessons earn entry (rule + why + `when` trigger, or exit 2) and fire on their trigger during the session instead of flooding session start.
+- Every read leaves a receipt in an access log, and the store walk is bounded to the project and owner (a committed symlink could previously read arbitrary files).
+
+### Numbers from an authority (harness)
+
+- A quantity is a claim about the world: `harness quantity` answers bounding numbers (token ceilings, page sizes, retry counts) from published, provenanced records, and an unknown key exits nonzero instead of guessing.
+- A command that caps its output declares where the cap came from (`bounds:` beside `contracts:`), and the build fails on a bare bounding literal the authority could have answered; a PostToolUse hook flags one at the moment it is written.
+- The fix that motivated it: zpc's delivery bound was derived from the authority instead of typed, ending a bug where 197 of 197 memory claims were silently dropped.
+
+### Coordination (coord)
+
+- Hook-fed pulse: every harness event (prompt, tool call, turn end) updates a per-session pulse (working / needs-you / failed / finished, and what it last touched) with no model call; `peers` sorts attention-first so whoever needs you sits on top.
+- Contention interrupts name the remedy (split ownership before isolating), a declared branch mismatch names worktree isolation as mandatory, and a worktree binds its memory to the checkout that outlives it.
+
+### The estate brief (brief)
+
+- New tool: joins `gh` inbox rows, manna items (trailers and title ids), live coord sessions, and last commits into ranked threads whose reasons ride with the score. Verifies that a trailer's commits actually touched the claimed work (trailer is not landed), degrades every dead source to an annotation carrying its reason, and self-calibrates its GitHub sweep budget from its last measured duration.
+
+### GitHub (gh)
+
+- `inbox` derives waiting-on-us from maintainer role, not just review-request ceremony, sweeps a declared portfolio, and reports every unswept repo loudly.
+- Stage awareness: every inbox row knows whose move it is. The sweep runs as two concurrent GraphQL documents: 30 seconds down to 3.7.
+
+### New tools
+
+- `sentry` (error tracking), `betterstack` and `cronitor` (uptime and scheduled-job monitoring), all with declared contracts and `--json` throughout.
+- `ci triage`: deterministic classification of a failed GitHub Actions run into five causes, secrets scrubbed from quoted logs, validated 24 for 24 against two weeks of real failures.
+
+### Runtimes and the installer
+
+- Cursor adapter hooks translate Cursor's hook JSON into the canonical Claude hooks and back; `install.sh --cursor` installs them atomically (a failed upgrade leaves the previous working install in place). Cursor sessions persist their conversation id, so board ownership survives a restart.
+- Codex session start embeds project memory directly instead of inviting the agent to go read it.
+- The installer registers its own hooks (an unregistered hook silently never fires), session start runs under 4 seconds, and every turn opens with a stamp of the real current time and the gap since the last one.
+- The launcher, installer, health checker, and test runner enforce GNU Bash 4.4+ (macOS ships 3.2) with a clean promotion to Homebrew Bash.
 
 ### Fixed
-- Cursor adapter install stages into a same-filesystem temp dir and only commits with `mv` after the full set is ready, so a mid-upgrade copy failure leaves a prior working install intact instead of deleting destination adapters. Overwrite of same-named files without an agent-do marker is refused (matches uninstall ownership).
+
+- dpt visual scoring made honest: a deliberately broken page scores broken, and the scorer's limits are written down beside it.
+- Interactive browser logins update the canonical saved-session name instead of forking it.
+- The zpc trigger hook never logs the raw command; auto-harvest detaches so a hook timeout cannot kill it mid-write.
+- Hook annotations defer imports so hooks load under whichever Python the harness picks.
 
 ## v1.4 (2026-07-22)
 
@@ -270,7 +348,7 @@
 - **agent-gcp**: Google Cloud Platform management (projects, APIs, secrets, service accounts, OAuth)
 - **agent-render**: Render.com service management via REST API
 - **agent-vercel**: Vercel project/deployment management via REST API
-- **agent-dpt**: Design Perception Tensor (72 rules, 0-100 visual quality score)
+- **agent-dpt**: Design Perception Tensor (65 rules, 0-100 visual quality score)
 - **agent-pdf2md**: PDF-to-Markdown converter with tabular/prose auto-detection
 - **agent-tail**: Dev command wrapper with log capture for AI agents
 - **agent-vision**: Visual perception CLI (YOLO, OCR, face detection, Vision LLM)

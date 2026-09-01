@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# agent-coderabbit - Local AI code review via CodeRabbit CLI
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "${SCRIPT_DIR}/../lib/snapshot.sh"    2>/dev/null || true
+source "${SCRIPT_DIR}/../lib/json-output.sh" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+show_help() {
+    cat << 'EOF'
+agent-coderabbit - Local AI code review via CodeRabbit CLI
+
+REVIEW
+  review [--base BRANCH] [--json]   Review tracked changes (default CodeRabbit behavior)
+  findings [--dir PATH]             Re-read results from most recent local review (no API call)
+
+DIAGNOSTICS
+  doctor                            Verify install, auth, git state, and service connectivity
+  snapshot [--json]                 Auth status, cr version, and last doctor summary
+
+AUTH
+  auth login                        Authenticate via browser (free tier, 3 reviews/hour)
+  auth org                          Switch CodeRabbit organization
+
+OPTIONS
+  --json        Structured JSON output (uses cr --agent mode for review)
+  --base BRANCH Compare against this branch instead of the default base
+  --dir PATH    Read findings for a scoped review directory
+  --light, --committed, --uncommitted, --include-untracked
+                Forwarded to CodeRabbit review when provided
+
+CREDENTIALS
+  Free tier:  agent-do coderabbit auth login   (browser OAuth saved by cr; no API key needed)
+  API key:    agent-do creds store CODERABBIT_API_KEY --stdin
+              CodeRabbit CLI 0.7.0 does not read this env var directly for
+              headless review. agent-coderabbit does not pass it through argv
+              by default; set AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 only in
+              trusted automation if you accept process-list exposure.
+
+EXAMPLES
+  agent-do coderabbit review
+  agent-do coderabbit review --base develop
+  agent-do coderabbit review --include-untracked
+  agent-do coderabbit review --light
+  agent-do coderabbit review --json
+  agent-do coderabbit findings
+  agent-do coderabbit doctor
+  agent-do coderabbit snapshot --json
+  agent-do coderabbit auth login
+EOF
+}
+
+_err() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+# Resolve cr binary (supports both 'cr' and 'coderabbit' names)
+_resolve_cr() {
+    local bin
+    bin=$(command -v cr 2>/dev/null || command -v coderabbit 2>/dev/null || true)
+    if [[ -z "$bin" ]]; then
+        _err "CodeRabbit CLI not found. Install with: brew install coderabbit"
+    fi
+    echo "$bin"
+}
+
+# Populate global _CR_AUTH_ARGS with auth args.
+# Probe result for CodeRabbit CLI 0.7.0: CODERABBIT_API_KEY is not read directly
+# by `coderabbit review --agent`; argv API-key auth is opt-in because it is
+# visible to process-list observers while cr is running.
+_CR_AUTH_ARGS=()
+_build_cr_args() {
+    _CR_AUTH_ARGS=()
+    if [[ -n "${CODERABBIT_API_KEY:-}" && "${AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY:-}" == "1" ]]; then
+        _CR_AUTH_ARGS+=(--api-key "$CODERABBIT_API_KEY")
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_review() {
+    local cr_bin
+    cr_bin=$(_resolve_cr)
+
+    local json_mode=false
+    local base_branch=""
+    local -a extra_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json)       json_mode=true; shift ;;
+            --base)
+                [[ $# -ge 2 && -n "${2:-}" && "${2:0:1}" != "-" ]] || _err "Missing value for --base"
+                base_branch="$2"; shift 2 ;;
+            --base=*)
+                base_branch="${1#--base=}"
+                [[ -n "$base_branch" ]] || _err "Missing value for --base"
+                shift ;;
+            *)            extra_args+=("$1"); shift ;;
+        esac
+    done
+
+    _build_cr_args
+    local -a cr_args=("${_CR_AUTH_ARGS[@]+"${_CR_AUTH_ARGS[@]}"}")
+
+    cr_args+=(review)
+
+    if [[ -n "$base_branch" ]]; then
+        cr_args+=(--base "$base_branch")
+    fi
+
+    if $json_mode; then
+        cr_args+=(--agent)
+    fi
+
+    cr_args+=("${extra_args[@]+"${extra_args[@]}"}")
+
+    exec "$cr_bin" "${cr_args[@]}"
+}
+
+cmd_findings() {
+    local cr_bin
+    cr_bin=$(_resolve_cr)
+
+    local -a findings_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) _err "findings --json is not supported by the current CodeRabbit CLI" ;;
+            --dir)
+                [[ $# -ge 2 && -n "${2:-}" && "${2:0:1}" != "-" ]] || _err "Missing value for --dir"
+                findings_args+=(--dir "$2"); shift 2 ;;
+            --dir=*)
+                local dir_value="${1#--dir=}"
+                [[ -n "$dir_value" ]] || _err "Missing value for --dir"
+                findings_args+=(--dir "$dir_value"); shift ;;
+            -*)     _err "Unknown findings option: $1" ;;
+            *)      _err "Unexpected findings argument: $1" ;;
+        esac
+    done
+
+    local -a cr_args=(review findings)
+    cr_args+=("${findings_args[@]+"${findings_args[@]}"}")
+
+    exec "$cr_bin" "${cr_args[@]}"
+}
+
+cmd_doctor() {
+    local cr_bin
+    cr_bin=$(_resolve_cr)
+    exec "$cr_bin" doctor
+}
+
+cmd_snapshot() {
+    local cr_bin
+    cr_bin=$(_resolve_cr)
+
+    local json_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_mode=true; shift ;;
+            *)      shift ;;
+        esac
+    done
+
+    # Get cr version
+    local cr_version
+    cr_version=$("$cr_bin" --version 2>/dev/null | head -1 || echo "unknown")
+
+    # Determine auth mode
+    local auth_mode api_key_present
+    if [[ -n "${CODERABBIT_API_KEY:-}" ]]; then
+        auth_mode="api_key"
+        api_key_present=true
+    else
+        auth_mode="browser"
+        api_key_present=false
+    fi
+
+    # Run doctor to check connectivity
+    local doctor_ok=true
+    local doctor_output
+    doctor_output=$("$cr_bin" doctor 2>&1) || doctor_ok=false
+
+    if $json_mode || type snapshot_begin &>/dev/null; then
+        if $json_mode; then
+            # Use snapshot helpers for consistent envelope
+            if type snapshot_begin &>/dev/null; then
+                snapshot_begin "agent-coderabbit"
+                snapshot_field        "cr_version"     "$cr_version"
+                snapshot_field        "auth_mode"      "$auth_mode"
+                snapshot_bool_field   "api_key_present" "$api_key_present"
+                snapshot_bool_field   "doctor_ok"       "$doctor_ok"
+                snapshot_field        "doctor_output"  "$doctor_output"
+                snapshot_end
+            else
+                # Fallback minimal JSON when snapshot.sh not sourced
+                printf '{"tool":"agent-coderabbit","cr_version":"%s","auth_mode":"%s","api_key_present":%s,"doctor_ok":%s}\n' \
+                    "$cr_version" "$auth_mode" "$api_key_present" "$doctor_ok"
+            fi
+            return
+        fi
+    fi
+
+    # Human-readable output
+    echo "agent-coderabbit snapshot"
+    echo "  cr version   : $cr_version"
+    echo "  auth mode    : $auth_mode"
+    echo "  api key      : $( $api_key_present && echo "present" || echo "not set (using browser auth)" )"
+    echo "  doctor ok    : $doctor_ok"
+    if ! $doctor_ok; then
+        echo ""
+        echo "Doctor output:"
+        echo "$doctor_output" | sed 's/^/  /'
+    fi
+}
+
+cmd_auth() {
+    local cr_bin
+    cr_bin=$(_resolve_cr)
+
+    local subcmd="${1:-}"
+    shift || true
+
+    case "$subcmd" in
+        login) exec "$cr_bin" auth login "$@" ;;
+        org)   exec "$cr_bin" auth org   "$@" ;;
+        "")    _err "Usage: agent-do coderabbit auth <login|org>" ;;
+        *)     _err "Unknown auth subcommand: $subcmd. Use login or org." ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+    help|--help|-h)    show_help ;;
+    review)            cmd_review "$@" ;;
+    findings)          cmd_findings "$@" ;;
+    doctor)            cmd_doctor "$@" ;;
+    snapshot)          cmd_snapshot "$@" ;;
+    auth)              cmd_auth "$@" ;;
+    *)
+        echo "Unknown command: $cmd" >&2
+        echo "Try: agent-do coderabbit --help" >&2
+        exit 1
+        ;;
+esac

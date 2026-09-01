@@ -139,8 +139,22 @@ def _text(value: Any, default: str = "") -> str:
     return default if value is None else str(value)
 
 
+def _incident_dropdown(value: str) -> dict[str, str]:
+    """Build the OpenAPI IncidentFieldAttributesSingleValue representation."""
+    return {"type": "dropdown", "value": value}
+
+
+def _incident_field_value(attrs: dict[str, Any], name: str) -> str:
+    field = (attrs.get("fields") or {}).get(name) or {}
+    if isinstance(field, dict) and field.get("value") is not None:
+        return _text(field["value"])
+    # Older response payloads exposed severity directly.  This fallback keeps
+    # existing incidents readable while writes always use the current schema.
+    return _text(attrs.get(name))
+
+
 def _dry_run(args: argparse.Namespace, command: str, human_msg: str, **extra: Any) -> int:
-    preview: dict[str, Any] = {"tool": "datadog", "command": command, **extra}
+    preview: dict[str, Any] = {"tool": "datadog", "command": command, "dry_run": True, **extra}
     if args.json:
         _print_json(preview)
     else:
@@ -156,11 +170,12 @@ def cmd_monitors(args: argparse.Namespace) -> int:
         params["monitor_tags"] = args.tag
     if args.name:
         params["name"] = args.name
-    if args.state:
-        params["monitor_states"] = args.state
-
     data = _request("GET", "/monitor", params=params)
     monitors = data if isinstance(data, list) else []
+    # The v1 endpoint does not accept a monitor state query parameter.  Filter
+    # the complete response locally instead of claiming that the server did it.
+    if args.state:
+        monitors = [m for m in monitors if (m.get("overall_state") or "").lower() == args.state.lower()]
 
     if args.json:
         _print_json({"monitors": monitors, "count": len(monitors)})
@@ -385,13 +400,13 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 
 def cmd_metrics_list(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {}
-    if args.prefix:
-        params["filter[prefix]"] = args.prefix
-
-    data = _request("GET", "/metrics", params=params or None, api_version="v2")
+    data = _request("GET", "/metrics", api_version="v2")
     metrics_data = data.get("data") or []
     names = [m.get("id") for m in metrics_data if m.get("id")]
+    # /api/v2/metrics has no prefix filter.  Keep the user-facing option, but
+    # make it an explicit local filter rather than sending an ignored parameter.
+    if args.prefix:
+        names = [name for name in names if name.startswith(args.prefix)]
 
     if args.json:
         _print_json({"metrics": names, "count": len(names)})
@@ -463,15 +478,17 @@ def cmd_event_post(args: argparse.Namespace) -> int:
 # ── incidents ─────────────────────────────────────────────────────────────────
 
 def cmd_incidents(args: argparse.Namespace) -> int:
-    params: dict[str, Any] = {}
-    if args.state:
-        params["filter[state]"] = args.state
-
-    data = _request("GET", "/incidents", params=params or None, api_version="v2")
+    # The endpoint defaults to ten records.  Request the documented maximum;
+    # its response metadata remains available in --json for a next-page cursor.
+    data = _request("GET", "/incidents", params={"page[size]": 100}, api_version="v2")
     incidents = data.get("data") or []
+    # Listing incidents does not accept filter[state].  Apply this supported
+    # CLI filter to the returned page, rather than sending a silent no-op.
+    if args.state:
+        incidents = [inc for inc in incidents if ((inc.get("attributes") or {}).get("state") or "").lower() == args.state]
 
     if args.json:
-        _print_json(data)
+        _print_json({**data, "data": incidents})
         return 0
 
     if not incidents:
@@ -480,8 +497,8 @@ def cmd_incidents(args: argparse.Namespace) -> int:
 
     for inc in incidents:
         attrs = inc.get("attributes") or {}
-        status = _text(attrs.get("status"))
-        severity = _text(attrs.get("severity"))
+        status = _text(attrs.get("state"))
+        severity = _incident_field_value(attrs, "severity")
         title = _text(attrs.get("title"))
         print(f"{inc.get('id', '')}  [{status:<8}] [{severity:<7}]  {title}")
     return 0
@@ -496,8 +513,8 @@ def cmd_incident_get(args: argparse.Namespace) -> int:
     attrs = inc.get("attributes") or {}
     print(f"ID:       {inc.get('id')}")
     print(f"Title:    {attrs.get('title')}")
-    print(f"Status:   {attrs.get('status')}")
-    print(f"Severity: {attrs.get('severity')}")
+    print(f"Status:   {attrs.get('state')}")
+    print(f"Severity: {_incident_field_value(attrs, 'severity')}")
     print(f"Created:  {attrs.get('created')}")
     if attrs.get("customer_impact_scope"):
         print(f"Impact:   {attrs['customer_impact_scope']}")
@@ -510,7 +527,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
         "customer_impacted": args.customer_impacted,
     }
     if args.severity:
-        attrs["severity"] = args.severity
+        attrs["fields"] = {"severity": _incident_dropdown(args.severity)}
 
     body: dict[str, Any] = {"data": {"type": "incidents", "attributes": attrs}}
 
@@ -524,7 +541,7 @@ def cmd_incident_create(args: argparse.Namespace) -> int:
         _print_json(data)
         return 0
     print(f"Created incident {inc.get('id')}: {iattrs.get('title')}")
-    print(f"Status: {iattrs.get('status')}")
+    print(f"Status: {iattrs.get('state')}")
     return 0
 
 
@@ -532,10 +549,13 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
     attrs: dict[str, Any] = {}
     if args.title:
         attrs["title"] = args.title
+    fields: dict[str, Any] = {}
     if args.status:
-        attrs["status"] = args.status
+        fields["state"] = _incident_dropdown(args.status)
     if args.severity:
-        attrs["severity"] = args.severity
+        fields["severity"] = _incident_dropdown(args.severity)
+    if fields:
+        attrs["fields"] = fields
 
     if not attrs:
         _err("At least one of --title, --status, --severity is required")
@@ -563,7 +583,9 @@ def cmd_incident_update(args: argparse.Namespace) -> int:
 
 def cmd_incident_resolve(args: argparse.Namespace) -> int:
     body: dict[str, Any] = {
-        "data": {"type": "incidents", "id": args.id, "attributes": {"status": "resolved"}}
+        "data": {"type": "incidents", "id": args.id, "attributes": {
+            "fields": {"state": _incident_dropdown("resolved")},
+        }}
     }
 
     if args.dry_run:
@@ -573,7 +595,11 @@ def cmd_incident_resolve(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(data)
         return 0
-    print(f"Resolved incident {args.id}")
+    inc = data.get("data") or {}
+    state = ((inc.get("attributes") or {}).get("state") or "").lower()
+    if state != "resolved":
+        _err(f"Datadog returned incident {args.id} without a resolved state")
+    print(f"Resolved incident {inc.get('id', args.id)}")
     return 0
 
 

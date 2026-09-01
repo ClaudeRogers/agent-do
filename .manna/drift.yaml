@@ -1,0 +1,85 @@
+generated_at: "2026-08-31T17:57:01Z"
+session: 3c15edbd-4860-45ef-877e-a4174cee04b4
+findings:
+- kind: landed_open
+  issue_id: mn-807f18
+  detail: referenced by landed commit trailer but status is open
+  evidence: c3ea41165320
+  proposed_fix: review the commits; if the work landed, claim and done mn-807f18
+- kind: landed_open
+  issue_id: mn-b8359d
+  detail: referenced by landed commit trailer but status is open
+  evidence: 4c7743aba40e
+  proposed_fix: review the commits; if the work landed, claim and done mn-b8359d
+- kind: landed_open
+  issue_id: mn-43932b
+  detail: referenced by landed commit trailer but status is open
+  evidence: 0a7e78fa21f4
+  proposed_fix: review the commits; if the work landed, claim and done mn-43932b
+- kind: landed_open
+  issue_id: mn-62acb6
+  detail: referenced by landed commit trailer but status is open
+  evidence: 1083a7fd0ea6, 8adc9aa1d6a9
+  proposed_fix: review the commits; if the work landed, claim and done mn-62acb6
+- kind: stale_dream
+  issue_id: mn-53da2c
+  detail: open dream older than 14 days
+  evidence: created_at 2026-06-12
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-ae0408
+  detail: open dream older than 14 days
+  evidence: created_at 2026-06-12
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-dc73a9
+  detail: open dream older than 14 days
+  evidence: created_at 2026-07-28
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-ed129e
+  detail: open dream older than 14 days
+  evidence: created_at 2026-07-28
+  proposed_fix: promote to an item on a track, or close it
+- kind: stale_dream
+  issue_id: mn-06a7e3
+  detail: open dream older than 14 days
+  evidence: created_at 2026-08-03
+  proposed_fix: promote to an item on a track, or close it
+- kind: doc_reference
+  issue_id: mn-a1b2c3
+  detail: referenced id does not exist on this board
+  evidence: .handoff/MOON-executive-brief-public-2026-07-15.md:45
+- kind: doc_reference
+  issue_id: mn-5dc58b
+  detail: referenced id does not exist on this board
+  evidence: .handoff/22-mn-43932b-brief-contract-v2-verb-labels-scope-state-sentence-adopted-panel.md:32
+- kind: doc_reference
+  issue_id: mn-a40d06
+  detail: referenced id does not exist on this board
+  evidence: .handoff/08-mn-a45739-companion-agent-do-dictate-the-chair-s-ears-wispr-class-streamin.md:32
+- kind: doc_reference
+  issue_id: mn-7c1e31
+  detail: referenced id does not exist on this board
+  evidence: .handoff/mn-ba8db6-strict-board-deadlock-ownership-proof-orphaned-by-process-restar.md:32
+- kind: doc_reference
+  issue_id: mn-687319
+  detail: referenced id does not exist on this board
+  evidence: .handoff/mn-cbaf37-stage-0-provenance-audit-and-stage-1-architecture-report.md:306
+- kind: doc_reference
+  issue_id: mn-27a833
+  detail: referenced id does not exist on this board
+  evidence: .handoff/mn-e40d9a-manna-research-if-how-cross-repo-board-linkage-should-exist.md:34
+- kind: doc_reference
+  issue_id: mn-27a833
+  detail: referenced id does not exist on this board
+  evidence: .zpc/memory/lessons.jsonl:21
+- kind: doc_reference
+  issue_id: mn-5dc58b
+  detail: referenced id does not exist on this board
+  evidence: .zpc/memory/positions.jsonl:3
+- kind: handoff_presentation
+  issue_id: mn-cbaf37
+  detail: handoff path is .handoff/mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md, expected .handoff/01-mn-cbaf37-research-audit-landed-stage-0-and-adjudicate-the-missing-provena.md; rename is held until its live claim releases
+  evidence: handoff_filename
+  proposed_fix: agent-do manna sync

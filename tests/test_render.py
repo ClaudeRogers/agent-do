@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -37,6 +38,8 @@ def main() -> int:
     require("Usage: agent-render logs <service> [options]" in help_result.stdout, f"unexpected render logs help: {help_result.stdout}")
     require("--since <time>" in help_result.stdout, f"expected logs help flags: {help_result.stdout}")
 
+    temp_dir = tempfile.TemporaryDirectory()
+    query_path = Path(temp_dir.name) / "render-queries.txt"
     render_script = f"""
 set -euo pipefail
 source <(awk '/^# --- Main ---/{{exit}} {{print}}' "{ROOT / 'tools/agent-render'}")
@@ -58,7 +61,7 @@ render_request_checked() {{
     return 0
   fi
   if [[ "$endpoint" == /logs\\?* ]]; then
-    printf '%s\\n' "$endpoint" > /tmp/agent-do-render-query.txt
+    printf '%s\\n' "$endpoint" >> "{query_path}"
     printf '%s\\n' '{{"hasMore":true,"nextStartTime":"2026-04-19T11:00:00Z","nextEndTime":"2026-04-19T12:00:00Z","logs":[{{"timestamp":"2026-04-19T12:30:00Z","labels":[{{"name":"type","value":"app"}},{{"name":"level","value":"info"}}],"message":"\\u001b[0;32mhello\\u001b[0m"}}]}}'
     return 0
   fi
@@ -69,13 +72,15 @@ render_request() {{
   render_request_checked "$@"
 }}
 cmd_logs my-render-service --since 60 --limit 5 --type app --level info --text error --host api.example.com --method GET --status 500 --path /billing
+cmd_logs my-render-service --limit 5
 """
 
     result = run_bash(render_script)
     require(result.returncode == 0, f"render logs command failed: {result.stderr}")
-    query_path = Path("/tmp/agent-do-render-query.txt")
     require(query_path.exists(), "expected query capture file to exist")
-    query = query_path.read_text().strip()
+    queries = query_path.read_text().splitlines()
+    require(len(queries) == 2, f"expected filtered and unfiltered queries, got: {queries}")
+    query = queries[0]
     require(query.startswith("/logs?"), f"expected /logs endpoint, got: {query}")
     require("ownerId=tea-test-owner" in query, f"missing ownerId in query: {query}")
     require("resource=srv-test" in query, f"missing resource filter in query: {query}")
@@ -88,8 +93,15 @@ cmd_logs my-render-service --since 60 --limit 5 --type app --level info --text e
     require("method=GET" in query, f"missing method filter in query: {query}")
     require("statusCode=500" in query, f"missing status code filter in query: {query}")
     require("path=%2Fbilling" in query, f"missing path filter in query: {query}")
-    require("[app/info] hello" in result.stdout, f"unexpected render log output: {result.stdout}")
-    require("More logs available." in result.stderr, f"expected pagination hint in stderr: {result.stderr}")
+    unfiltered_query = queries[1]
+    require("ownerId=tea-test-owner" in unfiltered_query, f"missing ownerId: {unfiltered_query}")
+    require("resource=srv-test" in unfiltered_query, f"missing resource: {unfiltered_query}")
+    for unexpected in ("type=", "level=", "text=", "host=", "method=", "statusCode=", "path="):
+        require(unexpected not in unfiltered_query, f"unexpected filter {unexpected}: {unfiltered_query}")
+
+    require(result.stdout.count("[app/info] hello") == 2, f"unexpected render log output: {result.stdout}")
+    require(result.stderr.count("More logs available.") == 2, f"expected pagination hints: {result.stderr}")
+    temp_dir.cleanup()
 
     print("render tests passed")
     return 0

@@ -20,6 +20,7 @@ CODEX_STOP = HOME / ".codex" / "hooks" / "stop-quality-gate.py"
 CODEX_PROMPT_ROUTER = HOME / ".codex" / "hooks" / "agent-do-prompt-router.py"
 CLAUDE_PROMPT_ROUTER = HOME / ".claude" / "hooks" / "agent-do-prompt-router.py"
 PRETOOL_HOOK = ROOT / "hooks" / "claude" / "agent-do-pretooluse-check.py"
+TOUCH_LEDGER = ROOT / "hooks" / "claude" / "agent-do-touch-ledger.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -27,11 +28,14 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def run_hook(path: Path, payload: dict, cwd: Path | None = None, home: Path | None = None) -> dict:
+def run_hook(path: Path, payload: dict, cwd: Path | None = None, home: Path | None = None,
+             env_extra: dict[str, str] | None = None) -> dict:
     env = os.environ.copy()
     if home is not None:
         env["HOME"] = str(home)
     env["AGENT_DO_REPO"] = str(ROOT)
+    if env_extra:
+        env.update(env_extra)
     proc = subprocess.run(
         ["python3", str(path)],
         cwd=str(cwd) if cwd else None,
@@ -52,17 +56,41 @@ def assert_not_blocking(payload: dict, label: str) -> None:
     require(payload.get("continue") is not False, f"{label} emitted continue:false: {payload}")
 
 
+def ledger_hook_registered() -> bool:
+    try:
+        return "agent-do-touch-ledger" in (HOME / ".codex" / "hooks.json").read_text()
+    except OSError:
+        return False
+
+
 def test_codex_stop_is_advisory() -> None:
+    """The Stop gate advises, never blocks — and it attributes UI work to the
+    agent's own edits (the touch ledger), not to worktree drift."""
     if not CODEX_STOP.exists():
         return
     with tempfile.TemporaryDirectory() as tmp:
-        repo = Path(tmp)
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
         ui_file = repo / "app" / "page.tsx"
         ui_file.parent.mkdir(parents=True)
         ui_file.write_text("export default function Page() { return <main>Hello</main>; }\n")
+        # Isolate the ledger under a temp AGENT_DO_HOME and make sure no live
+        # browser session answers, so the advisory path is deterministic.
+        extra = {"AGENT_DO_HOME": str(Path(tmp) / "home"), "AGENT_BROWSER_SESSION": "no-such-session-for-test"}
+        session = {"cwd": str(repo), "session_id": "stop-gate-advisory-test"}
 
-        payload = run_hook(CODEX_STOP, {"cwd": str(repo)}, cwd=repo)
+        if ledger_hook_registered():
+            # Worktree drift alone is not evidence: no ledger entry, no advisory.
+            drift = run_hook(CODEX_STOP, session, cwd=repo, env_extra=extra)
+            assert_not_blocking(drift, "codex stop hook (drift)")
+            require("systemMessage" not in drift, f"un-ledgered worktree drift must not raise a UI advisory: {drift}")
+
+        # The agent's own edit, recorded by the touch ledger, is evidence.
+        run_hook(TOUCH_LEDGER, {**session, "tool_name": "Write",
+                                "tool_input": {"file_path": "app/page.tsx", "content": "x"}},
+                 cwd=repo, env_extra=extra)
+        payload = run_hook(CODEX_STOP, session, cwd=repo, env_extra=extra)
         assert_not_blocking(payload, "codex stop hook")
         require(payload.get("continue") is True, f"codex stop hook should continue: {payload}")
         require("systemMessage" in payload, f"codex stop hook should emit advisory context: {payload}")

@@ -119,6 +119,76 @@ printf '%s\\n' "$(resolve_save_target_name travelbank@codex-alpha false)"
         require(lines[2] == "freshsession", f"expected new session name to remain literal: {lines}")
         require(lines[3] == "travelbank@codex-alpha", f"expected agent-scoped names to remain unchanged: {lines}")
 
+        login_helper = run_bash(
+            f"""
+source <(sed '$d' "{ROOT / 'tools/agent-browse/agent-browse'}")
+printf '%s\\n' "$(resolve_login_done_save_name travelbank false)"
+printf '%s\\n' "$(resolve_login_done_save_name travelbank true)"
+""",
+            env=fork_env,
+        )
+        require(login_helper.returncode == 0, f"login save helper failed: {login_helper.stderr}")
+        login_lines = [line.strip() for line in login_helper.stdout.splitlines() if line.strip()]
+        require(
+            login_lines[0] == "travelbank",
+            f"interactive login must update the literal name by default: {login_lines}",
+        )
+        require(
+            login_lines[1] == "travelbank@codex-alpha",
+            f"--fork must produce the agent-scoped name: {login_lines}",
+        )
+
+        warn_helper = run_bash(
+            f"""
+source <(sed '$d' "{ROOT / 'tools/agent-browse/agent-browse'}")
+warn_if_forked travelbank travelbank@codex-alpha
+warn_if_forked travelbank travelbank
+""",
+            env=fork_env,
+        )
+        require(warn_helper.returncode == 0, f"warn_if_forked failed: {warn_helper.stderr}")
+        require(
+            "--shared" in warn_helper.stderr and "travelbank@codex-alpha" in warn_helper.stderr,
+            f"forked save must warn with the fork name and the --shared escape: {warn_helper.stderr!r}",
+        )
+        require(
+            warn_helper.stderr.count("warning:") == 1,
+            f"non-forked save must stay silent: {warn_helper.stderr!r}",
+        )
+
+        fork_dir = temp_home / ".agent-browse" / "sessions" / "travelbank@codex-alpha"
+        fork_dir.mkdir(parents=True, exist_ok=True)
+        (fork_dir / "storage.json").write_text("{}")
+        os.utime(shared_dir / "storage.json", (1_000_000, 1_000_000))
+        os.utime(fork_dir / "storage.json", (2_000_000, 2_000_000))
+
+        fresher = run_bash(
+            f"""
+source <(sed '$d' "{ROOT / 'tools/agent-browse/agent-browse'}")
+warn_fresher_fork travelbank
+""",
+            env=fork_env,
+        )
+        require(fresher.returncode == 0, f"warn_fresher_fork failed: {fresher.stderr}")
+        require(
+            "travelbank@codex-alpha" in fresher.stderr,
+            f"loading a stale canonical must name the fresher fork: {fresher.stderr!r}",
+        )
+
+        os.utime(shared_dir / "storage.json", (3_000_000, 3_000_000))
+        fresh_canonical = run_bash(
+            f"""
+source <(sed '$d' "{ROOT / 'tools/agent-browse/agent-browse'}")
+warn_fresher_fork travelbank
+""",
+            env=fork_env,
+        )
+        require(fresh_canonical.returncode == 0, f"warn_fresher_fork failed: {fresh_canonical.stderr}")
+        require(
+            fresh_canonical.stderr.strip() == "",
+            f"a canonical newer than every fork must load silently: {fresh_canonical.stderr!r}",
+        )
+
     print("browse session default tests passed")
     return 0
 

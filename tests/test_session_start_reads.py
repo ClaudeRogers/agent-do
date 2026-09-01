@@ -27,6 +27,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLAUDE_HOOK = REPO / "hooks" / "claude" / "agent-do-session-start.sh"
+CURSOR_HOOK = REPO / "hooks" / "cursor" / "agent-do-session-start.py"
 
 FAILURES: list[str] = []
 
@@ -85,6 +86,7 @@ BOOTSTRAP = {
     "ask_prompt": "Bootstrap agent-do for this project?",
     "project_root": "/stub/project",
     "commands": ["agent-do zpc init", "agent-do manna init"],
+    "legacy_board": False,
 }
 
 TOUCH = {
@@ -155,7 +157,15 @@ def build_stub(root: Path, *, direct_coord: bool, interrupts: dict) -> tuple[Pat
     return bindir, fixtures, root / "stub.log"
 
 
-def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> subprocess.CompletedProcess:
+def run_hook(
+    root: Path,
+    bindir: Path,
+    fixtures: Path,
+    log: Path,
+    mode: str,
+    env_file: Path | None = None,
+    identity_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     project = root / "project"
     (project / ".manna").mkdir(parents=True, exist_ok=True)
     home = root / "home"
@@ -177,7 +187,18 @@ def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> 
             "AGENT_DO_ZPC_AUTOINIT": "0",
         }
     )
-    env.pop("CLAUDE_ENV_FILE", None)
+    for variable in (
+        "AGENT_DO_COORD_SESSION",
+        "MANNA_SESSION_ID",
+        "MANNA_SESSION_TOKEN",
+        "CLAUDE_SESSION_ID",
+    ):
+        env.pop(variable, None)
+    env.update(identity_env or {})
+    if env_file is None:
+        env.pop("CLAUDE_ENV_FILE", None)
+    else:
+        env["CLAUDE_ENV_FILE"] = str(env_file)
 
     return subprocess.run(
         ["bash", str(CLAUDE_HOOK)],
@@ -187,6 +208,352 @@ def run_hook(root: Path, bindir: Path, fixtures: Path, log: Path, mode: str) -> 
         check=False,
         env=env,
     )
+
+
+def test_session_identity_exports_are_complete_and_private() -> None:
+    print("session identity exports:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bindir, fixtures, log = build_stub(root, direct_coord=True, interrupts=INTERRUPTS_NONE)
+        env_file = root / "session.env"
+        env_file.write_text("", encoding="utf-8")
+        proc = run_hook(root, bindir, fixtures, log, "valid", env_file)
+
+        check("identity hook exits 0", proc.returncode == 0, proc.stderr)
+        exports = env_file.read_text(encoding="utf-8")
+        check(
+            "coord identity is pinned",
+            'export AGENT_DO_COORD_SESSION="stub-session"' in exports,
+            exports,
+        )
+        claude_lines = [
+            line for line in exports.splitlines() if line.startswith("export CLAUDE_SESSION_ID=")
+        ]
+        check(
+            "Manna rides the derived identity, pinned exactly once",
+            len(claude_lines) == 1 and 'export CLAUDE_SESSION_ID="stub-session"' in exports,
+            exports,
+        )
+        check(
+            "no mortal token is minted (proofs derive under the machine key)",
+            "MANNA_SESSION_TOKEN" not in exports and "MANNA_SESSION_ID" not in exports,
+            exports,
+        )
+
+        partial_file = root / "partial.env"
+        partial_file.write_text("", encoding="utf-8")
+        run_hook(
+            root,
+            bindir,
+            fixtures,
+            log,
+            "valid",
+            partial_file,
+            {"MANNA_SESSION_ID": "stale-partial-owner"},
+        )
+        partial_exports = partial_file.read_text(encoding="utf-8")
+        check(
+            "incomplete inherited identity is neutralized for derivation",
+            'export MANNA_SESSION_ID=""' in partial_exports
+            and 'export CLAUDE_SESSION_ID="stub-session"' in partial_exports
+            and "stale-partial-owner" not in partial_exports,
+            partial_exports,
+        )
+
+        complete_file = root / "complete.env"
+        complete_file.write_text("", encoding="utf-8")
+        run_hook(
+            root,
+            bindir,
+            fixtures,
+            log,
+            "valid",
+            complete_file,
+            {
+                "MANNA_SESSION_ID": "pinned-lane",
+                "MANNA_SESSION_TOKEN": "a" * 64,
+            },
+        )
+        complete_exports = complete_file.read_text(encoding="utf-8")
+        check(
+            "complete inherited identity pair is preserved untouched",
+            "MANNA_SESSION_ID" not in complete_exports
+            and "MANNA_SESSION_TOKEN" not in complete_exports
+            and "CLAUDE_SESSION_ID" not in complete_exports,
+            complete_exports,
+        )
+
+
+def test_legacy_board_migration_is_discoverable() -> None:
+    print("legacy board migration discovery:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        board = project / ".manna"
+        board.mkdir(parents=True)
+        (project / "CLAUDE.md").write_text("Use `agent-do manna` here.\n", encoding="utf-8")
+        (board / "issues.jsonl").write_text(
+            '{"id":"mn-a10001","title":"Legacy row","status":"open",'
+            '"created_at":"2026-01-01T00:00:00Z",'
+            '"updated_at":"2026-01-01T00:00:00Z","blocked_by":[]}\n',
+            encoding="utf-8",
+        )
+        (board / "sessions.jsonl").write_text("", encoding="utf-8")
+        env = dict(os.environ)
+        env["AGENT_DO_HOME"] = str(root / "agent-do-home")
+        proc = subprocess.run(
+            [
+                "bash",
+                str(REPO / "bin" / "bootstrap"),
+                "--recommend",
+                "--json",
+                "--cwd",
+                str(project),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        check("legacy bootstrap recommendation exits 0", proc.returncode == 0, proc.stderr)
+        try:
+            recommendation = json.loads(proc.stdout)
+        except Exception as exc:  # noqa: BLE001
+            check("legacy bootstrap recommendation is JSON", False, f"{exc}: {proc.stdout!r}")
+            return
+        check("legacy bootstrap recommendation is JSON", True)
+        check(
+            "bootstrap classifies legacy migration before a write",
+            recommendation.get("legacy_board") is True
+            and recommendation.get("pending_actions") == ["manna_migrate"]
+            and recommendation.get("commands") == ["agent-do manna migrate"],
+            repr(recommendation),
+        )
+        ask = recommendation.get("ask_prompt", "")
+        check(
+            "bootstrap names the one-command remedy and the project it applies to",
+            "run agent-do manna migrate" in ask
+            and "Legacy board" in ask
+            and recommendation.get("project_root", "") in ask,
+            repr(recommendation),
+        )
+
+        transactions = board / "transactions"
+        transactions.mkdir()
+        (transactions / "board-init.yaml").write_text("pending: true\n", encoding="utf-8")
+        recovery_proc = subprocess.run(
+            [
+                "bash",
+                str(REPO / "bin" / "bootstrap"),
+                "--recommend",
+                "--json",
+                "--cwd",
+                str(project),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        recovery = json.loads(recovery_proc.stdout)
+        check(
+            "pending atomic init stays on its authenticated recovery path",
+            recovery_proc.returncode == 0
+            and recovery.get("legacy_board") is False
+            and recovery.get("pending_actions") == ["manna_init"]
+            and recovery.get("commands") == ["agent-do manna init"],
+            repr(recovery),
+        )
+        (transactions / "board-init.yaml").unlink()
+
+        bindir, fixtures, log = build_stub(
+            root, direct_coord=True, interrupts=INTERRUPTS_NONE
+        )
+        (fixtures / "bootstrap.json").write_text(
+            json.dumps(recommendation), encoding="utf-8"
+        )
+        hook = run_hook(root, bindir, fixtures, log, "valid")
+        check("legacy SessionStart exits 0", hook.returncode == 0, hook.stderr)
+        context = context_of(hook)
+        check(
+            "SessionStart surfaces legacy migration before board writes",
+            "legacy board: run agent-do manna migrate" in context
+            and "agent-do manna migrate" in context,
+            context,
+        )
+
+
+def test_strict_board_missing_federation_is_discoverable() -> None:
+    print("strict board federation enrollment discovery:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        board = project / ".manna"
+        handoff = project / ".handoff"
+        board.mkdir(parents=True)
+        handoff.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+        (board / "issues.jsonl").write_text("", encoding="utf-8")
+        (board / "sessions.jsonl").write_text("", encoding="utf-8")
+        (board / "board.yaml").write_text(
+            "version: 1\nworkflow: strict\n", encoding="utf-8"
+        )
+        (board / "workflow.yaml").write_text(
+            "version: 2\nhandoff_dir: .handoff\n", encoding="utf-8"
+        )
+        (board / "handoff-order.yaml").write_text(
+            "version: 1\norder: []\n", encoding="utf-8"
+        )
+        (handoff / "README.md").write_text("# Handoffs\n", encoding="utf-8")
+        env = dict(os.environ)
+        env["AGENT_DO_HOME"] = str(root / "agent-do-home")
+
+        def recommend() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    "bash",
+                    str(REPO / "bin" / "bootstrap"),
+                    "--recommend",
+                    "--json",
+                    "--cwd",
+                    str(project),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+
+        missing = recommend()
+        missing_payload = json.loads(missing.stdout)
+        check("missing federation recommendation exits 0", missing.returncode == 0, missing.stderr)
+        check(
+            "strict board missing federation returns to canonical init",
+            missing_payload.get("pending_actions") == ["manna_init"]
+            and missing_payload.get("commands") == ["agent-do manna init"],
+            repr(missing_payload),
+        )
+
+        (board / "federation.yaml").write_text(
+            "version: 1\n"
+            "board_id: mb-11111111111111111111111111111111\n"
+            "relations: []\n",
+            encoding="utf-8",
+        )
+        enrolled = recommend()
+        enrolled_payload = json.loads(enrolled.stdout)
+        check("enrolled federation recommendation exits 0", enrolled.returncode == 0, enrolled.stderr)
+        check(
+            "enrolled strict board has no bootstrap work",
+            enrolled_payload.get("needs_bootstrap") is False
+            and enrolled_payload.get("pending_actions") == [],
+            repr(enrolled_payload),
+        )
+
+
+def test_cursor_session_identity_is_restart_durable() -> None:
+    print("Cursor session identity exports:")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        project = root / "project"
+        project.mkdir()
+
+        def run_cursor(identity_env: dict[str, str] | None = None) -> dict[str, str]:
+            env = dict(os.environ)
+            env.update(
+                {
+                    "AGENT_DO_REPO": str(REPO),
+                    "AGENT_DO_HOME": str(root / "agent-do-home"),
+                    "HOME": str(root / "home"),
+                    "AGENT_DO_BOOTSTRAP_PROMPT_MODE": "disabled",
+                    "AGENT_DO_ZPC_INJECT": "0",
+                    "AGENT_DO_ZPC_AUTOINIT": "0",
+                }
+            )
+            for variable in (
+                "AGENT_DO_COORD_SESSION",
+                "MANNA_SESSION_ID",
+                "MANNA_SESSION_TOKEN",
+                "CLAUDE_SESSION_ID",
+            ):
+                env.pop(variable, None)
+            env.update(identity_env or {})
+            proc = subprocess.run(
+                ["python3", str(CURSOR_HOOK)],
+                input=json.dumps(
+                    {
+                        "cwd": str(project),
+                        "conversation_id": "cursor-conversation-123",
+                    }
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            check("Cursor identity hook exits 0", proc.returncode == 0, proc.stderr)
+            try:
+                payload = json.loads(proc.stdout)
+                exports = payload["env"]
+            except Exception as exc:  # noqa: BLE001
+                check("Cursor identity hook emits environment", False, f"{exc}: {proc.stdout!r}")
+                return {}
+            check("Cursor identity hook emits environment", True)
+            return exports
+
+        exports = run_cursor()
+        check(
+            "Cursor coord identity is pinned",
+            exports.get("AGENT_DO_COORD_SESSION") == "cursor-conversation-123",
+            repr(exports),
+        )
+        check(
+            "Cursor Manna identity uses the conversation id for derivation",
+            exports.get("CLAUDE_SESSION_ID") == "cursor-conversation-123",
+            repr(exports),
+        )
+        check(
+            "Cursor does not mint a mortal Manna identity pair",
+            "MANNA_SESSION_ID" not in exports and "MANNA_SESSION_TOKEN" not in exports,
+            repr(exports),
+        )
+        check(
+            "Cursor restart returns the same derivation input",
+            run_cursor() == exports,
+            repr(exports),
+        )
+
+        stale_id = run_cursor({"MANNA_SESSION_ID": "stale-owner"})
+        check(
+            "Cursor neutralizes an id-only stale pin",
+            stale_id.get("MANNA_SESSION_ID") == ""
+            and stale_id.get("CLAUDE_SESSION_ID") == "cursor-conversation-123"
+            and "MANNA_SESSION_TOKEN" not in stale_id,
+            repr(stale_id),
+        )
+
+        stale_token = run_cursor({"MANNA_SESSION_TOKEN": "b" * 64})
+        check(
+            "Cursor neutralizes a token-only stale pin",
+            stale_token.get("MANNA_SESSION_TOKEN") == ""
+            and stale_token.get("CLAUDE_SESSION_ID") == "cursor-conversation-123"
+            and "MANNA_SESSION_ID" not in stale_token,
+            repr(stale_token),
+        )
+
+        complete = run_cursor(
+            {
+                "MANNA_SESSION_ID": "pinned-lane",
+                "MANNA_SESSION_TOKEN": "c" * 64,
+            }
+        )
+        check(
+            "Cursor preserves a complete explicit identity pair",
+            complete.get("MANNA_SESSION_ID") == "pinned-lane"
+            and complete.get("MANNA_SESSION_TOKEN") == "c" * 64
+            and "CLAUDE_SESSION_ID" not in complete,
+            repr(complete),
+        )
 
 
 def context_of(proc: subprocess.CompletedProcess) -> str:
@@ -306,6 +673,10 @@ def main() -> int:
     test_wellformed_reads_render_identically()
     test_interrupts_take_precedence()
     test_unreadable_answers_degrade_quietly()
+    test_legacy_board_migration_is_discoverable()
+    test_strict_board_missing_federation_is_discoverable()
+    test_session_identity_exports_are_complete_and_private()
+    test_cursor_session_identity_is_restart_durable()
 
     print()
     if FAILURES:

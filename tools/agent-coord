@@ -28,7 +28,8 @@ Commands:
   alias <name>                           Assign a friendly alias to this agent
   aliases                                List known aliases
   peers [--all] [--active-only] [--writers]
-                                         List known peers: liveness-verified status + last_seen age
+                                         List known peers: liveness-verified status + last_seen age,
+                                         attention-first (pulse needs-user/failed above working)
   stop [--note <text>]                   Retire this session cleanly (Stop-hook safe, idempotent)
   bye                                    Delete this agent's own board records
   role set <builder|auditor|researcher|overseer> [--mode read-only|writer] --territory <path> [...]
@@ -45,6 +46,13 @@ Commands:
                                          checkout is not on raises a mandatory-isolation interrupt
   focus show [peer]                      Show current focus
   focus clear                            Clear current focus
+  pulse record --from-hook               Reduce one harness hook payload (stdin JSON) into this
+                                         session's pulse row. Hook-safe: always exits 0, never prints
+  pulse record --session <id> --status <state> --updated-at <RFC3339>
+        [--activity <note>|--clear-activity]
+                                         Merge an external supervisor's explicit verdict into the
+                                         named harness session without renewing its presence lease
+  pulse show [peer]                      Show a session's shared pulse telemetry
   claims                                 List advisory claims
   claim <path> [--reason <text>]         Claim a path
   release <path>                         Release a claimed path
@@ -100,6 +108,22 @@ PRUNE_SECONDS = int(os.environ.get("AGENT_DO_COORD_PRUNE_SECONDS", str(7 * 24 * 
 
 RUNTIMES = ("claude", "codex", "human", "other")
 FOCUS_PHASES = ("building", "gating", "watching", "quiet", "blocked", "stopped")
+
+# Pulse: shared session telemetry (Warp-derived, .dev/warp-recon-2026-08-22).
+# Focus is what an agent SAYS it is doing; pulse is what its harness hooks or
+# an external supervisor OBSERVE it doing. The caps below are presentation
+# truncation for a shared board file, not capacity claims: env-overridable
+# like the windows above.
+# 80 follows Warp's TUI inline-label cap; prompts get twice that.
+PULSE_DETAIL_CHARS = int(os.environ.get("AGENT_DO_COORD_PULSE_DETAIL_CHARS", "80"))
+PULSE_PROMPT_CHARS = int(os.environ.get("AGENT_DO_COORD_PULSE_PROMPT_CHARS", str(2 * PULSE_DETAIL_CHARS)))
+
+# Attention-first ordering for live peers: who needs a human outranks who is
+# merely busy; settled states sink. A live peer with no pulse ranks as present,
+# between working and an explicit idle verdict: alive, but not fine-grained.
+PULSE_STATUSES = ("working", "needs-user", "finished", "failed", "idle", "ended")
+PULSE_RANK = {"needs-user": 0, "failed": 1, "working": 2, "idle": 4, "finished": 5, "ended": 6}
+PULSE_RANK_NO_PULSE = 3
 ROLES = ("builder", "auditor", "researcher", "overseer")
 ROLE_DEFAULT_MODES = {"builder": "writer", "auditor": "read-only", "researcher": "read-only", "overseer": "read-only"}
 
@@ -489,6 +513,103 @@ def classify_presence(record: dict[str, Any]) -> str:
     return "stale"
 
 
+def clip(value: Any, limit: int) -> str | None:
+    """Whitespace-normalized truncation with an honest marker, never a bare cut."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def reduce_pulse(existing: dict[str, Any] | None, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Fold one harness hook payload into a session's pulse state.
+
+    Returns the updated state, or None for events that carry nothing for the
+    pulse — unknown hook names are ignored so newer harnesses stay harmless.
+    """
+    event = payload.get("hook_event_name")
+    if not isinstance(event, str):
+        return None
+    state = dict(existing or {})
+
+    if event == "UserPromptSubmit":
+        state["status"] = "working"
+        prompt = clip(payload.get("prompt"), PULSE_PROMPT_CHARS)
+        if prompt:
+            state["latest_prompt"] = prompt
+        state["turns"] = int(state.get("turns", 0) or 0) + 1
+        state.pop("attention", None)
+        state.pop("activity", None)
+    elif event == "PreToolUse":
+        state["status"] = "working"
+        tool = clip(payload.get("tool_name"), PULSE_DETAIL_CHARS)
+        if tool:
+            state["activity"] = tool
+        state.pop("attention", None)
+    elif event == "PostToolUse":
+        state["status"] = "working"
+        if payload.get("tool_name") == "TodoWrite":
+            todos = (payload.get("tool_input") or {}).get("todos")
+            if isinstance(todos, list):
+                rows = [item for item in todos if isinstance(item, dict)]
+                current = next(
+                    (item.get("content") for item in rows if item.get("status") == "in_progress"),
+                    None,
+                ) or next(
+                    (item.get("content") for item in rows if item.get("status") == "pending"),
+                    None,
+                )
+                state["todo"] = {
+                    "done": sum(1 for item in rows if item.get("status") == "completed"),
+                    "total": len(rows),
+                    "current": clip(current, PULSE_DETAIL_CHARS),
+                }
+        state.pop("attention", None)
+    elif event == "Notification":
+        state["status"] = "needs-user"
+        state["attention"] = {"message": clip(payload.get("message"), PULSE_PROMPT_CHARS)}
+    elif event == "Stop":
+        state["status"] = "finished"
+        state.pop("activity", None)
+        state.pop("attention", None)
+    elif event == "StopFailure":
+        state["status"] = "failed"
+        state.pop("activity", None)
+    elif event == "SessionEnd":
+        state["status"] = "ended"
+        state.pop("activity", None)
+        state.pop("attention", None)
+    else:
+        return None
+
+    state["updated_at"] = now_iso()
+    state["event_count"] = int(state.get("event_count", 0) or 0) + 1
+    return state
+
+
+def pulse_agent_id(session_key: str) -> str:
+    """Map a full harness session id or coord session key to its pulse row."""
+    raw = session_key.strip()
+    if raw.startswith("session-"):
+        raw = raw[len("session-") :]
+    short = compact(raw)[:12]
+    if not short:
+        raise ValueError("session must contain at least one letter or number")
+    return f"session-{short}"
+
+
+def normalize_pulse_timestamp(value: str) -> str:
+    """Validate an external observation timestamp and normalize it to UTC."""
+    parsed = parse_iso(value.strip())
+    if parsed is None or parsed.tzinfo is None:
+        raise ValueError("updated-at must be an RFC 3339 timestamp with a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def format_age(value: str | None) -> str:
     seconds = age_seconds(value)
     if seconds is None:
@@ -503,7 +624,7 @@ def format_age(value: str | None) -> str:
 
 
 class CoordStore:
-    def __init__(self, cwd: Path) -> None:
+    def __init__(self, cwd: Path, *, identify: bool = True) -> None:
         paths = resolve_project_paths(cwd)
         self.cwd = cwd.resolve()
         self.project_root = Path(paths["project_root"])
@@ -512,14 +633,25 @@ class CoordStore:
 
         self.coord_root.mkdir(parents=True, exist_ok=True)
 
-        self.anchor = process_anchor()
-        ident = derive_identity(self.coord_root, self.anchor)
-        self.agent_id = str(ident["agent_id"])
-        self.identity_source = str(ident["source"])
-        self.identity_raw = ident["raw"]
-        self.session = ident.get("session")
-        self.runtime = detect_runtime(self.identity_source)
-        self.model = os.environ.get("AGENT_DO_COORD_MODEL")
+        if identify:
+            self.anchor = process_anchor()
+            ident = derive_identity(self.coord_root, self.anchor)
+            self.agent_id = str(ident["agent_id"])
+            self.identity_source = str(ident["source"])
+            self.identity_raw = ident["raw"]
+            self.session = ident.get("session")
+            self.runtime = detect_runtime(self.identity_source)
+            self.model = os.environ.get("AGENT_DO_COORD_MODEL")
+        else:
+            # External pulse writers act on an explicit target key. They need
+            # storage and the shared lock, but no caller identity or lease.
+            self.anchor = {}
+            self.agent_id = ""
+            self.identity_source = ""
+            self.identity_raw = None
+            self.session = None
+            self.runtime = "other"
+            self.model = None
 
         self.agents_path = self.coord_root / "agents.json"
         self.focus_path = self.coord_root / "focus.json"
@@ -527,6 +659,7 @@ class CoordStore:
         self.needs_path = self.coord_root / "needs.json"
         self.publishes_path = self.coord_root / "publishes.json"
         self.drops_path = self.coord_root / "drops.json"
+        self.pulse_path = self.coord_root / "pulse.json"
         self.events_path = self.coord_root / "events.jsonl"
         self.lock_path = self.coord_root / ".lock"
 
@@ -601,6 +734,14 @@ class CoordStore:
 
     def _save_drops(self, drops: list[dict[str, Any]]) -> None:
         self._write_json(self.drops_path, {"drops": drops})
+
+    def _load_pulse(self) -> dict[str, dict[str, Any]]:
+        payload = self._read_json(self.pulse_path, {"pulse": {}})
+        pulse = payload.get("pulse", {})
+        return pulse if isinstance(pulse, dict) else {}
+
+    def _save_pulse(self, pulse: dict[str, dict[str, Any]]) -> None:
+        self._write_json(self.pulse_path, {"pulse": pulse})
 
     def _load_events(self) -> list[dict[str, Any]]:
         if not self.events_path.exists():
@@ -709,6 +850,10 @@ class CoordStore:
         remaining_claims = [item for item in claims if item.get("owner") not in gone]
         if len(remaining_claims) != len(claims):
             self._save_claims(remaining_claims)
+        pulse = self._load_pulse()
+        remaining_pulse = {agent_id: record for agent_id, record in pulse.items() if agent_id not in gone}
+        if len(remaining_pulse) != len(pulse):
+            self._save_pulse(remaining_pulse)
 
     def register_self(self) -> dict[str, Any]:
         with self.locked():
@@ -839,6 +984,76 @@ class CoordStore:
             )
         return payload
 
+    def pulse_map(self) -> dict[str, dict[str, Any]]:
+        return self._load_pulse()
+
+    def pulse_for(self, token: str | None = None) -> dict[str, Any] | None:
+        pulse = self.pulse_map()
+        agent_id = self.agent_id if token is None else self._resolve_peer(token)[0]
+        if not agent_id:
+            return None
+        record = pulse.get(agent_id)
+        if record is not None or token is None or agent_id != token:
+            return record
+        try:
+            return pulse.get(pulse_agent_id(token))
+        except ValueError:
+            return None
+
+    def record_pulse(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Reduce one hook payload into this agent's pulse row.
+
+        Telemetry, not coordination: no event-journal entry — pulse fires per
+        tool call and would drown the journal that peers actually read.
+        """
+        self.register_self()
+        with self.locked():
+            pulse = self._load_pulse()
+            updated = reduce_pulse(pulse.get(self.agent_id), payload)
+            if updated is None:
+                return None
+            updated["agent_id"] = self.agent_id
+            pulse[self.agent_id] = updated
+            self._save_pulse(pulse)
+            return updated
+
+    def record_explicit_pulse(
+        self,
+        session_key: str,
+        status: str,
+        updated_at: str,
+        activity: str | None,
+        clear_activity: bool,
+    ) -> tuple[dict[str, Any], bool]:
+        """Merge a supervisor verdict without claiming the target's liveness.
+
+        All writers share the coord lock. Status and updated_at are replaced;
+        activity is replaced only when explicitly supplied or cleared. Hook-owned
+        fields such as latest_prompt, todo, turns, and event_count survive.
+        """
+        agent_id = pulse_agent_id(session_key)
+        timestamp = normalize_pulse_timestamp(updated_at)
+        with self.locked():
+            pulse = self._load_pulse()
+            existing = pulse.get(agent_id)
+            state = dict(existing or {})
+            state["agent_id"] = agent_id
+            state["status"] = status
+            state["updated_at"] = timestamp
+            if clear_activity:
+                state.pop("activity", None)
+            elif activity is not None:
+                detail = clip(activity, PULSE_DETAIL_CHARS)
+                if detail:
+                    state["activity"] = detail
+                else:
+                    state.pop("activity", None)
+            changed = state != existing
+            if changed:
+                pulse[agent_id] = state
+                self._save_pulse(pulse)
+            return state, changed
+
     def branch_mismatch(self, focus: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """A lane declaring a branch this working tree is not on must isolate.
 
@@ -878,6 +1093,7 @@ class CoordStore:
     ) -> list[dict[str, Any]]:
         self.register_self()
         focus = self.focus_map()
+        pulse_map = self.pulse_map()
         peers: list[dict[str, Any]] = []
         for agent_id, record in sorted(self._load_agents().items()):
             status = classify_presence(record)
@@ -906,18 +1122,30 @@ class CoordStore:
                 "territory": self._record_territory(record),
                 "phase": (peer_focus or {}).get("phase"),
                 "focus": peer_focus,
+                "pulse": pulse_map.get(agent_id),
             }
             if record.get("stop_note"):
                 peer["stop_note"] = record["stop_note"]
             peers.append(peer)
         status_rank = {"active": 0, "idle": 1, "stopped": 2, "dead": 3, "stale": 4}
-        peers.sort(
-            key=lambda item: (
-                status_rank.get(str(item.get("status")), 9),
+
+        def sort_key(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
+            presence = str(item.get("status"))
+            live = presence in {"active", "idle"}
+            # Attention-first among the living; the retired and the dead keep
+            # their presence order. Trust latch: only a peer with a pulse row
+            # may claim a fine-grained state — no pulse ranks as plain alive.
+            pulse_status = str((item.get("pulse") or {}).get("status") or "")
+            rank = PULSE_RANK.get(pulse_status, PULSE_RANK_NO_PULSE) if live else PULSE_RANK_NO_PULSE
+            return (
+                0 if live else 1,
+                rank,
+                status_rank.get(presence, 9),
                 0 if item.get("mode") == "writer" else 1,
                 str(item.get("agent_id")),
             )
-        )
+
+        peers.sort(key=sort_key)
         return peers
 
     def stop(self, note: str | None) -> dict[str, Any]:
@@ -959,6 +1187,9 @@ class CoordStore:
             remaining_needs = [item for item in needs if item.get("owner") != self.agent_id]
             if len(remaining_needs) != len(needs):
                 self._save_needs(remaining_needs)
+            pulse = self._load_pulse()
+            if pulse.pop(self.agent_id, None) is not None:
+                self._save_pulse(pulse)
             label = (record or {}).get("alias") or self.agent_id
             self._append_event(kind="bye", summary=f"{label} left the board")
             return record or {"agent_id": self.agent_id}
@@ -1917,6 +2148,19 @@ def parser() -> argparse.ArgumentParser:
     focus_show.add_argument("peer", nargs="?")
     focus_sub.add_parser("clear")
 
+    pulse_p = sub.add_parser("pulse")
+    pulse_sub = pulse_p.add_subparsers(dest="pulse_command")
+    pulse_record = pulse_sub.add_parser("record")
+    pulse_record.add_argument("--from-hook", action="store_true", dest="from_hook")
+    pulse_record.add_argument("--session")
+    pulse_record.add_argument("--status", choices=list(PULSE_STATUSES))
+    pulse_record.add_argument("--updated-at", dest="updated_at")
+    activity_group = pulse_record.add_mutually_exclusive_group()
+    activity_group.add_argument("--activity")
+    activity_group.add_argument("--clear-activity", action="store_true", dest="clear_activity")
+    pulse_show = pulse_sub.add_parser("show")
+    pulse_show.add_argument("peer", nargs="?")
+
     sub.add_parser("claims")
     claim_p = sub.add_parser("claim")
     claim_p.add_argument("path")
@@ -1981,6 +2225,20 @@ def format_peer(peer: dict[str, Any]) -> str:
         parts.append(f"phase:{peer.get('phase')}")
     if focus.get("goal"):
         parts.append(f'goal:"{focus.get("goal")}"')
+    pulse = peer.get("pulse") or {}
+    if pulse.get("status"):
+        parts.append(f"pulse:{pulse['status']}({format_age(pulse.get('updated_at'))})")
+        attention = (pulse.get("attention") or {}).get("message")
+        if pulse["status"] == "needs-user" and attention:
+            parts.append(f'attn:"{attention}"')
+        if pulse["status"] == "working" and pulse.get("activity"):
+            parts.append(f"act:{pulse['activity']}")
+        todo = pulse.get("todo") or {}
+        if todo.get("total"):
+            label = f' "{todo["current"]}"' if todo.get("current") else ""
+            parts.append(f"todo:{todo.get('done', 0)}/{todo['total']}{label}")
+        if not focus.get("goal") and pulse.get("latest_prompt"):
+            parts.append(f'prompt:"{pulse["latest_prompt"]}"')
     if peer.get("stop_note"):
         parts.append(f'note:"{peer.get("stop_note")}"')
     return " ".join(parts) + current
@@ -2007,6 +2265,58 @@ def main(argv: list[str]) -> int:
     if not args.command:
         print(HELP)
         return 0
+
+    if (
+        args.command == "pulse"
+        and getattr(args, "pulse_command", None) == "record"
+        and args.from_hook
+    ):
+        # Hook-safe by contract: whatever happens, exit 0 with empty stdout —
+        # a telemetry write must never break or chatter into a session's hooks.
+        try:
+            payload = json.load(sys.stdin)
+            if not isinstance(payload, dict):
+                return 0
+            session = payload.get("session_id")
+            if isinstance(session, str) and session:
+                # The payload names the session that generated the event, and it
+                # outranks any inherited pin: a hook process carrying another
+                # session's env must never write telemetry onto that row. Real
+                # hooks agree with their own pin; this guards the crossed case.
+                os.environ["AGENT_DO_COORD_SESSION"] = session
+            cwd_value = payload.get("cwd")
+            base = Path.cwd()
+            if isinstance(cwd_value, str) and cwd_value:
+                candidate = Path(cwd_value)
+                if candidate.is_dir():
+                    base = candidate
+            CoordStore(base).record_pulse(payload)
+        except Exception:
+            pass
+        return 0
+
+    if args.command == "pulse" and getattr(args, "pulse_command", None) == "record":
+        if not args.session or not args.status or not args.updated_at:
+            return error(
+                "explicit pulse record requires --session, --status, and --updated-at",
+                args.json,
+                code=2,
+            )
+        try:
+            store = CoordStore(Path.cwd(), identify=False)
+            payload, changed = store.record_explicit_pulse(
+                args.session,
+                args.status,
+                args.updated_at,
+                args.activity,
+                args.clear_activity,
+            )
+        except ValueError as exc:
+            return error(str(exc), args.json, code=2)
+        return print_payload(
+            {"success": True, "tool": "coord", "changed": changed, "pulse": payload},
+            args.json,
+        )
 
     store = CoordStore(Path.cwd())
 
@@ -2205,6 +2515,15 @@ def main(argv: list[str]) -> int:
                 return error(str(payload.get("error") or "guard install failed"), args.json)
             return print_payload({"success": True, "tool": "coord", **payload}, args.json)
         return error("guard requires check|install", args.json, code=2)
+
+    if args.command == "pulse":
+        if args.pulse_command == "show":
+            payload = store.pulse_for(args.peer)
+            if payload is None:
+                return error("Pulse not found", args.json, code=2)
+            return print_payload({"success": True, "tool": "coord", "pulse": payload}, args.json)
+        print(HELP)
+        return 0
 
     if args.command == "claims":
         claims = store.claims()

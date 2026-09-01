@@ -131,14 +131,15 @@ _EVENTS = [
 _INCIDENTS = [
     {"id": "inc-001", "type": "incidents", "attributes": {
         "title": "API latency degraded",
-        "status": "active",
-        "severity": "SEV-2",
+        "state": "active",
+        "fields": {"severity": {"type": "dropdown", "value": "SEV-2"}},
         "created": "2026-05-21T09:00:00Z",
         "customer_impact_scope": "US customers affected",
     }},
     {"id": "inc-002", "type": "incidents", "attributes": {
-        "title": "Database failover", "status": "resolved",
-        "severity": "SEV-1", "created": "2026-05-20T18:00:00Z",
+        "title": "Database failover", "state": "resolved",
+        "fields": {"severity": {"type": "dropdown", "value": "SEV-1"}},
+        "created": "2026-05-20T18:00:00Z",
     }},
 ]
 
@@ -225,6 +226,9 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
 
         # ── monitors ──────────────────────────────────────────────────────
         if method == "GET" and path == "/monitor":
+            if "monitor_states" in qs:
+                self._send_err("monitor_states is not a /monitor parameter", status=400)
+                return
             monitors = list(_MONITORS)
             name_filter = qs.get("name", [""])[0]
             state_filter = qs.get("monitor_states", [""])[0]
@@ -336,10 +340,10 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
                 self._send(series)
 
         elif method == "GET" and path == "/metrics":
-            prefix = qs.get("filter[prefix]", [""])[0]
+            if "filter[prefix]" in qs:
+                self._send_err("filter[prefix] is not a /metrics parameter", status=400)
+                return
             data = dict(_METRICS_LIST)
-            if prefix:
-                data["data"] = [m for m in data["data"] if m["id"].startswith(prefix)]
             self._send(data)
 
         # ── events ────────────────────────────────────────────────────────
@@ -369,14 +373,19 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
 
         # ── incidents ─────────────────────────────────────────────────────
         elif method == "GET" and path == "/incidents":
-            state_filter = qs.get("filter[state]", [""])[0]
+            if "filter[state]" in qs:
+                self._send_err("filter[state] is not an /incidents parameter", status=400)
+                return
+            if qs.get("page[size]", [""])[0] != "100":
+                self._send_err("Fixture requires documented page[size]=100", status=400)
+                return
             incs = list(_INCIDENTS)
             incs.append({"id": "inc-null", "type": "incidents", "attributes": {
-                "title": None, "status": None, "severity": None, "created": "2026-05-21T13:00:00Z",
+                "title": None, "state": None,
+                "fields": {"severity": {"type": "dropdown", "value": None}},
+                "created": "2026-05-21T13:00:00Z",
             }})
-            if state_filter:
-                incs = [i for i in incs if i["attributes"]["status"] == state_filter]
-            self._send({"data": incs})
+            self._send({"data": incs, "meta": {"pagination": {"next": None}}})
 
         elif method == "GET" and path == "/incidents/inc-001":
             self._send({"data": _INCIDENTS[0]})
@@ -391,8 +400,8 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
                 "type": "incidents",
                 "attributes": {
                     "title": attrs.get("title", ""),
-                    "status": "active",
-                    "severity": attrs.get("severity", "UNKNOWN"),
+                    "state": "active",
+                    "fields": attrs.get("fields") or {},
                     "customer_impacted": attrs.get("customer_impacted", False),
                     "created": "2026-05-21T12:00:00Z",
                 },
@@ -401,9 +410,16 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
 
         elif method == "PATCH" and path == "/incidents/inc-001":
             attrs = (body.get("data") or {}).get("attributes") or {}
+            if "status" in attrs or "severity" in attrs:
+                self._send_err("status and severity must be attributes.fields dropdowns", status=400)
+                return
             updated = dict(_INCIDENTS[0])
             updated["attributes"] = dict(_INCIDENTS[0]["attributes"])
-            updated["attributes"].update(attrs)
+            updated["attributes"]["fields"] = dict(_INCIDENTS[0]["attributes"]["fields"])
+            updated["attributes"].update({k: v for k, v in attrs.items() if k != "fields"})
+            updated["attributes"]["fields"].update(attrs.get("fields") or {})
+            if "state" in updated["attributes"]["fields"]:
+                updated["attributes"]["state"] = updated["attributes"]["fields"]["state"].get("value")
             self._send({"data": updated})
 
         elif method == "PATCH" and path == "/incidents/inc-999":
@@ -614,6 +630,8 @@ def main() -> int:
         check("monitor-mute --dry-run --json is valid JSON", j is not None, r.stdout)
         check("monitor-mute --dry-run --json has command field",
               isinstance(j, dict) and j.get("command") == "monitor-mute")
+        check("monitor-mute --dry-run --json is marked",
+              isinstance(j, dict) and j.get("dry_run") is True)
         check("monitor-mute --dry-run --json has monitor_id",
               isinstance(j, dict) and j.get("monitor_id") == 101)
         check("monitor-mute --dry-run --json sends no HTTP", not any("/mute" in p for _, p in _requests))
@@ -944,7 +962,7 @@ def main() -> int:
         check("incident-create --dry-run --json has attributes.title",
               isinstance(j, dict) and (j.get("attributes") or {}).get("title") == "DB latency spike")
         check("incident-create --dry-run --json has attributes.severity",
-              isinstance(j, dict) and (j.get("attributes") or {}).get("severity") == "SEV-2")
+              isinstance(j, dict) and (((j.get("attributes") or {}).get("fields") or {}).get("severity") or {}).get("value") == "SEV-2")
 
         r = run(["incident-create", "--title", "Checkout errors",
                  "--severity", "SEV-1", "--customer-impacted"], env=env)
@@ -1002,9 +1020,9 @@ def main() -> int:
 
         r = run(["incident-resolve", "inc-001"], env=env)
         check("incident-resolve live exits 0", r.returncode == 0, r.stderr)
-        check("incident-resolve sends status=resolved in body",
+        check("incident-resolve sends state=resolved dropdown in body",
               isinstance(_last_body, dict) and
-              (((_last_body.get("data") or {}).get("attributes") or {}).get("status") == "resolved"))
+              (((((_last_body.get("data") or {}).get("attributes") or {}).get("fields") or {}).get("state") or {}).get("value") == "resolved"))
 
         # ══════════════════════════════════════════════════════════════════
         # DASHBOARDS
@@ -1408,8 +1426,11 @@ def main() -> int:
         check("incident-update all three fields exits 0", r.returncode == 0, r.stderr)
         sent_attrs = ((_last_body.get("data") or {}).get("attributes") or {})
         check("incident-update body has title", sent_attrs.get("title") == "Updated title")
-        check("incident-update body has status", sent_attrs.get("status") == "stable")
-        check("incident-update body has severity", sent_attrs.get("severity") == "SEV-3")
+        fields = sent_attrs.get("fields") or {}
+        check("incident-update body has state dropdown",
+              (fields.get("state") or {}).get("value") == "stable" and (fields.get("state") or {}).get("type") == "dropdown")
+        check("incident-update body has severity dropdown",
+              (fields.get("severity") or {}).get("value") == "SEV-3" and (fields.get("severity") or {}).get("type") == "dropdown")
         check("incident-update body data.id matches arg",
               ((_last_body.get("data") or {}).get("id")) == "inc-001")
 
@@ -1497,8 +1518,8 @@ def main() -> int:
         r = run(["incident-create", "--title", "No severity incident"], env=env)
         check("incident-create without --severity exits 0", r.returncode == 0, r.stderr)
         sent_attrs = ((_last_body.get("data") or {}).get("attributes") or {})
-        check("incident-create without --severity body has no severity key",
-              "severity" not in sent_attrs)
+        check("incident-create without --severity body has no severity field",
+              "severity" not in (sent_attrs.get("fields") or {}))
 
         # incident-create without --customer-impacted (default False)
         r = run(["incident-create", "--title", "Default impacted"], env=env)
@@ -1596,8 +1617,8 @@ def main() -> int:
         # incidents: both active and resolved in list
         r = run(["--json", "incidents"], env=env)
         j = _try_json(r.stdout)
-        statuses = [(i.get("attributes") or {}).get("status") for i in (j or {}).get("data", [])]
-        check("incidents list contains both active and resolved",
+        statuses = [(i.get("attributes") or {}).get("state") for i in (j or {}).get("data", [])]
+        check("incidents list contains both active and resolved states",
               "active" in statuses and "resolved" in statuses)
 
         # ══════════════════════════════════════════════════════════════════

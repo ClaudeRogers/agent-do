@@ -43,10 +43,20 @@ except ModuleNotFoundError:
     record_hook_decision = None
     record_nudge_event = None
 
-try:
-    from ai_router import call_json_model
-except ModuleNotFoundError:
-    call_json_model = None
+def _resolve_call_json_model():
+    """Lazy import: ai_router pulls in the provider SDK (~0.9s), a cost only
+    the AI-routing path should pay — never a run that skips or gates it out.
+    The module global stays as an override point (tests stub it there)."""
+    if call_json_model is not None:
+        return call_json_model
+    try:
+        from ai_router import call_json_model as fn
+    except ModuleNotFoundError:
+        return None
+    return fn
+
+
+call_json_model = None
 
 # Intent classification (docs-retrieval, design-work, coord-discussion) is
 # routed through the AI classifier in ai_route_prompt(). Keyword-only paths
@@ -411,9 +421,6 @@ def ai_route_prompt(
     coord_state: dict,
     registry: dict,
 ) -> dict | None:
-    if call_json_model is None:
-        return None
-
     payload = {
         "prompt": prompt,
         "cwd": cwd,
@@ -491,16 +498,23 @@ Respond with JSON only:
   ]
 }}
 """
-    # Claude Code kills the whole hook at 5s and discards ALL output. Base
-    # stages (registry, coord, models config) already spend 1.5-2s, so the AI
-    # call gets only what remains of a 4.2s safety line, and is skipped
-    # entirely when too little is left. max_tokens stays small: a routing
-    # decision is a tiny JSON object, and a large cap invites generations
-    # that eat the deadline.
+    # Claude Code kills the whole hook at its registered timeout and discards
+    # ALL output. Base stages (registry, coord, models config) spend ~1.5s, so
+    # the AI call gets only what remains of a 4.2s safety line, and is skipped
+    # entirely when too little is left. The provider SDK import (~0.9s) is
+    # deferred to here so runs that never reach this point never pay it; the
+    # budget is re-read after the import because the import spends from it.
+    # max_tokens stays small: a routing decision is a tiny JSON object, and a
+    # large cap invites generations that eat the deadline.
+    if 4.2 - (time.monotonic() - HOOK_START) < 1.8:
+        return None
+    call = _resolve_call_json_model()
+    if call is None:
+        return None
     remaining = 4.2 - (time.monotonic() - HOOK_START)
     if remaining < 0.9:
         return None
-    return call_json_model(
+    return call(
         prompt_text,
         flag_name="AGENT_DO_HOOK_AI",
         system=(
@@ -705,12 +719,34 @@ def run_bounded(
         return None, ""
 
 
+def resolve_coord_invocation() -> list[str] | None:
+    """Prefer the coord tool script directly over the agent-do dispatcher.
+
+    The dispatcher spends ~1-2s per call on registry/creds/telemetry
+    interpreter spawns (worse under load) — a tax this hook cannot afford
+    twice inside its budget. coord declares no secrets, so invoking the
+    tool script is behaviorally identical and runs in ~0.4s.
+    """
+    candidates = [Path(__file__).resolve().parents[2] / "tools" / "agent-coord"]
+    breadcrumb = Path.home() / ".agent-do" / "install-path"
+    if breadcrumb.exists():
+        try:
+            candidates.append(Path(breadcrumb.read_text().strip()) / "tools" / "agent-coord")
+        except OSError:
+            pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return [sys.executable, str(candidate)]
+    agent_do = resolve_agent_do_binary()
+    return [agent_do, "coord"] if agent_do else None
+
+
 def load_coord_state(cwd: str | None) -> dict:
     state = {"active_peers": [], "peer_counts": {}, "focus_goal": "", "interrupts": []}
     if not cwd:
         return state
-    agent_do = resolve_agent_do_binary()
-    if not agent_do:
+    coord = resolve_coord_invocation()
+    if not coord:
         return state
 
     hook_env = os.environ.copy()
@@ -720,7 +756,7 @@ def load_coord_state(cwd: str | None) -> dict:
     # slow or wedged agent-do spawn must degrade to "no coord context", not
     # eat the whole hook (which discards ALL hook output).
     touch_rc, touch_out = run_bounded(
-        [agent_do, "coord", "touch", "--json"], cwd=cwd, env=hook_env, timeout=2.0
+        [*coord, "touch", "--json"], cwd=cwd, env=hook_env, timeout=2.0
     )
     if touch_rc != 0 or not touch_out.strip():
         return state
@@ -731,7 +767,7 @@ def load_coord_state(cwd: str | None) -> dict:
     state["focus_goal"] = ((touch_payload.get("focus") or {}).get("goal")) or ""
 
     interrupts_rc, interrupts_out = run_bounded(
-        [agent_do, "coord", "interrupts", "--json", "--limit", "5"],
+        [*coord, "interrupts", "--json", "--limit", "5"],
         cwd=cwd,
         env=hook_env,
         timeout=2.0,

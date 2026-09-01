@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Read-only human view of one manna board, live." />
+  <title>manna / board</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/view.js"></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#sheet">Skip to board</a>
+  <header class="topbar">
+    <nav class="crumb" aria-label="Estate"><a href="/">estate</a><span class="sep">›</span><strong id="crumb-name">board</strong></nav>
+    <div class="tabs" role="tablist" aria-label="Sheets">
+      <button class="tab" role="tab" data-sheet="inbox" type="button">inbox <span class="badge" data-badge="inbox"></span></button>
+      <button class="tab active" role="tab" data-sheet="board" type="button">board</button>
+      <button class="tab" role="tab" data-sheet="coord" type="button">coordination <span class="badge" data-badge="coord"></span></button>
+    </div>
+    <label class="grep"><span class="sr">ask or grep</span><input id="grep" type="search" placeholder="ask AI · grep · ⌘K" autocomplete="off" /></label>
+    <div class="topbar-right">
+      <span id="last-sync">waiting for state</span>
+      <span class="sep">|</span>
+      <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
+      <span class="sep">|</span>
+      <span id="view-host"></span>
+    </div>
+  </header>
+
+  <main class="cockpit">
+    <section id="sheet" class="sheet" aria-live="polite">
+      <div id="answer" class="answer" hidden></div>
+      <div class="sheet-body" id="sheet-inbox" hidden>
+        <div class="sheet-head"><span class="prompt">manna inbox</span><span class="count" id="inbox-cap"></span></div>
+        <div class="list" id="inbox-list"></div>
+      </div>
+      <div class="sheet-body" id="sheet-board">
+        <div class="chips" role="group" aria-label="Filters">
+          <button class="chip active" data-chip="live" type="button">live</button>
+          <button class="chip" data-chip="done" type="button">done</button>
+          <button class="chip" data-chip="dreams" type="button">dreams</button>
+          <button class="chip" data-chip="recent" type="button">recent</button>
+          <button class="chip" data-chip="all" type="button">all</button>
+          <span class="chip-select"><label for="track-filter" class="sr">track</label><select id="track-filter"><option value="">track ▾</option></select></span>
+          <span class="modes"><button class="mode active" data-mode="list" type="button">list</button><span class="sep">|</span><button class="mode" data-mode="timeline" type="button">timeline</button></span>
+        </div>
+        <div id="board-list"><p class="empty">building the board view…</p></div>
+      </div>
+      <div class="sheet-body" id="sheet-coord" hidden>
+        <div id="coord-list"></div>
+      </div>
+      <div class="sheet-body" id="sheet-debug" hidden>
+        <div id="debug-list"></div>
+      </div>
+    </section>
+    <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" aria-label="Resize inspector" title="drag · double-click to reset"></div>
+    <aside id="inspector" class="inspector" aria-label="Inspector"><p class="empty">select a row</p></aside>
+  </main>
+
+  <footer class="strip">
+    <span id="strip-items"></span>
+    <button class="text-button strip-debug" id="debug-button" type="button">debug ▸</button>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <noscript>This local page needs JavaScript to read the board.</noscript>
+</body>
+</html>

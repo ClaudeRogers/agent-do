@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | python3 -c "
+FILE_PATH=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -17,11 +17,40 @@ except: print('')
 
 [[ -z "$FILE_PATH" ]] && exit 0
 
-# Check if file is design-related
+# Is this edit design work? Same rules as hooks/codex/stop-quality-gate.py:
+#   - tests and tooling configs are never UI, whatever their name contains
+#   - a UI extension is UI
+#   - otherwise the basename's stem must BE a design-system name (theme,
+#     tokens, design-tokens, design-system) or start with one followed by
+#     "." or "-". Substring matching was the bug: "*global*" flagged
+#     test_global_hooks_nonblocking.py as a design file.
+#
+# Document/data trees (.handoff/, .dev/, docs/, fixtures/) are tracked
+# separately: they suppress the no-session WARNING below — "open the app"
+# is unfollowable for an archived text — but never the SCORING path. A
+# fixture page open in the live browser with a baseline is being iterated
+# on deliberately, and its edits deserve their score.
 IS_DESIGN=false
+IN_DOC_TREE=false
+BASENAME="${FILE_PATH##*/}"
+STEM="${BASENAME%.*}"
+STEM_HEAD="${STEM%%[.-]*}"
 case "$FILE_PATH" in
-    *.css|*.scss|*.less|*.html|*.jsx|*.tsx|*.vue|*.svelte) IS_DESIGN=true ;;
-    *tailwind.config*|*theme*|*styles*|*global*) IS_DESIGN=true ;;
+    */.handoff/*|*/.dev/*|*/docs/*|*/fixtures/*) IN_DOC_TREE=true ;;
+esac
+case "$BASENAME" in
+    test_*|*_test.py|*.test.*|*.spec.*|*.config.*|tailwind.*|postcss.*|vite.*|*.d.ts) ;;
+    *.css|*.scss|*.less|*.html|*.htm|*.jsx|*.tsx|*.vue|*.svelte|*.astro) IS_DESIGN=true ;;
+    *)
+        case "$STEM" in
+            theme|tokens|design-tokens|design-system) IS_DESIGN=true ;;
+            *)
+                case "$STEM_HEAD" in
+                    theme|tokens|design-tokens|design-system) IS_DESIGN=true ;;
+                esac
+                ;;
+        esac
+        ;;
 esac
 
 [[ "$IS_DESIGN" == false ]] && exit 0
@@ -52,15 +81,12 @@ print(json.dumps(output))
     exit 0
 fi
 
-# === Wait for HMR to update the browser ===
-# The edit just completed. The dev server needs time to recompile and push
-# the update via HMR websocket. Without this wait, DPT scores the stale
-# pre-edit page — the #1 source of false positives (e.g. "no primary CTA"
-# when the edit just added one).
-sleep 2
-
 # === MODE 1: Browse session active — score and report ===
-SCORE_OUTPUT="$(agent-do dpt score --current --quiet 2>/dev/null || true)"
+# The canonical score command first proves that this browser session has a
+# baseline for the edited project and that the open page still matches it. It
+# waits for HMR only after that proof, so unrelated pages are neither delayed
+# nor misattributed as feedback on this edit.
+SCORE_OUTPUT="$(agent-do dpt score --current --quiet --for-file "$FILE_PATH" 2>/dev/null || true)"
 
 if [[ -n "$SCORE_OUTPUT" ]]; then
     python3 -c "

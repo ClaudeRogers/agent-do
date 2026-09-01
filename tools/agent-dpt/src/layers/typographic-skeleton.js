@@ -32,10 +32,10 @@ function typographicSkeleton(utils) {
   }
 
   function collectVisible(selector) {
-    return utils.queryVisible(selector).filter(el => utils.isInViewport(el));
+    return utils.queryVisible(selector).filter(el => utils.isOnPage(el));
   }
 
-  // Gather body-text elements visible in viewport
+  // Gather body-text elements across the full rendered page.
   const bodyTextEls = collectVisible('p, li, td, th, span')
     .filter(el => utils.isBodyText(el) && el.textContent.trim().length > 0);
 
@@ -50,13 +50,18 @@ function typographicSkeleton(utils) {
 
 
   // ── TS-01: Body Text Minimum Size ───────────────────────────────
+  // The 16px expectation is for READING text — paragraphs and list prose.
+  // Table cells, labels, and UI spans are data typography, where 13-14px
+  // is craft-correct; they answer only to the TS-02 12px absolute floor.
+  // Counting them here inflated canon pages to dozens of false violations.
 
   function ts01() {
     let minSize = Infinity;
     let violations = 0;
     const violationSelectors = [];
+    const proseEls = bodyTextEls.filter(el => el.tagName === 'P' || el.tagName === 'LI');
 
-    for (const el of bodyTextEls) {
+    for (const el of proseEls) {
       const size = fontSize(el);
       if (size > 0 && size < minSize) minSize = size;
       if (size < 16) {
@@ -105,13 +110,42 @@ function typographicSkeleton(utils) {
   function ts03() {
     const checks = [];
     let violations = 0;
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    // A stable mixed-case sample makes the estimate specific to the rendered
+    // face without letting one paragraph's unusual letter distribution skew it.
+    const glyphSample = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789';
 
     for (const el of paragraphs) {
       const rect = el.getBoundingClientRect();
       const size = fontSize(el);
       if (size <= 0 || rect.width <= 0) continue;
 
-      const charsPerLine = Math.round(rect.width / (size * 0.48));
+      const style = window.getComputedStyle(el);
+      let averageWidth = size * 0.5;
+      const renderedText = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      let renderedTextWidth = averageWidth * renderedText.length;
+      if (context) {
+        const requestedFont = `${style.fontStyle || 'normal'} ${style.fontWeight || '400'} ${style.fontSize} ${style.fontFamily}`;
+        context.font = requestedFont;
+        // Canvas keeps its previous value when a font shorthand is invalid.
+        // Only trust the metrics when it accepted this element's size.
+        if (context.font.includes(style.fontSize)) {
+          const measured = context.measureText(glyphSample).width / glyphSample.length;
+          if (Number.isFinite(measured) && measured > 0) averageWidth = measured;
+          renderedTextWidth = context.measureText(renderedText).width;
+        }
+      }
+      const letterSpacing = parseFloat(style.letterSpacing);
+      if (Number.isFinite(letterSpacing)) {
+        averageWidth += letterSpacing;
+        renderedTextWidth += Math.max(0, renderedText.length - 1) * letterSpacing;
+      }
+      // Measure is a multiline-prose constraint. A short status line or label
+      // expressed with a <p> does not create a long readable line merely
+      // because its container is wide.
+      if (renderedTextWidth <= rect.width * 1.02) continue;
+      const charsPerLine = Math.round(rect.width / averageWidth);
       const pass = charsPerLine >= 45 && charsPerLine <= 75;
       if (!pass) violations++;
 
@@ -119,12 +153,14 @@ function typographicSkeleton(utils) {
         checks.push({
           selector: utils.getSelector(el),
           chars_per_line: charsPerLine,
+          average_character_width: Math.round(averageWidth * 100) / 100,
+          font_family: primaryFamily(el),
           pass
         });
       }
     }
 
-    return { checks, violations };
+    return { checks, violations, pass: violations === 0 };
   }
 
 
@@ -276,11 +312,14 @@ function typographicSkeleton(utils) {
 
     const ratio = bodySize > 0 ? Math.round((h1Size / bodySize) * 100) / 100 : 0;
 
+    // 2.0-3.0 is the classic sweet spot; editorial display scale runs to
+    // ~4.5 (ratified Palingenesis hero 3.72x, recognitionoracle 4.16x) and
+    // is a choice, not an error. Below 1.5 the h1 fails to outrank body.
     return {
       h1_size: Math.round(h1Size * 100) / 100,
       body_size: Math.round(bodySize * 100) / 100,
       ratio,
-      pass: ratio >= 2.0 && ratio <= 3.0
+      pass: ratio >= 2.0 && ratio <= 4.5
     };
   }
 
@@ -574,38 +613,64 @@ function typographicSkeleton(utils) {
   function ts17() {
     let fauxBold = 0;
     let fauxItalic = 0;
+    let unverifiable = 0;
     const elements = [];
+
+    function normalizeFamily(value) {
+      return String(value || '').trim().replace(/^['"]|['"]$/g, '').toLowerCase();
+    }
+
+    function styleMatches(faceStyle, requestedStyle) {
+      const face = String(faceStyle || 'normal').toLowerCase();
+      const requested = String(requestedStyle || 'normal').toLowerCase();
+      if (requested === 'normal') return face === 'normal';
+      if (requested === 'italic') return face === 'italic';
+      if (requested.startsWith('oblique')) return face.startsWith('oblique');
+      return face === requested;
+    }
 
     for (const el of allTextEls) {
       const style = window.getComputedStyle(el);
       const weight = parseInt(style.fontWeight) || 400;
-      const isItalic = style.fontStyle === 'italic';
+      const isItalic = style.fontStyle === 'italic' || style.fontStyle.startsWith('oblique');
 
       if (weight < 700 && !isItalic) continue;
 
-      const synthesis = style.fontSynthesis || '';
-      const family = style.fontFamily || '';
+      const synthesis = (style.fontSynthesis || '').toLowerCase();
+      const families = (style.fontFamily || '').split(',').map(normalizeFamily).filter(Boolean);
 
-      // Check document.fonts for a real matching FontFace
-      let hasMatchingFace = false;
+      // document.fonts enumerates authored @font-face entries, including
+      // variable faces whose weight is a range such as "200 900". System font
+      // families are not enumerated, so their status is unknown, never faux by
+      // default.
+      const familyFaces = [];
       if (document.fonts && typeof document.fonts.forEach === 'function') {
         document.fonts.forEach(face => {
-          if (!family.includes(face.family.replace(/^["']|["']$/g, ''))) return;
-          const faceWeight = parseInt(face.weight) || 400;
-          const faceStyle = face.style || 'normal';
-          if (weight >= 700 && faceWeight >= 700 && faceStyle === style.fontStyle) {
-            hasMatchingFace = true;
-          }
-          if (isItalic && faceStyle === 'italic' && faceWeight === weight) {
-            hasMatchingFace = true;
-          }
+          if (families.includes(normalizeFamily(face.family))) familyFaces.push(face);
         });
       }
 
-      const synthesisingWeight = synthesis !== 'none' && synthesis.includes('weight');
-      const synthesisingStyle = synthesis !== 'none' && synthesis.includes('style');
-      const isFauxBold = weight >= 700 && (synthesisingWeight || !hasMatchingFace);
-      const isFauxItalic = isItalic && (synthesisingStyle || !hasMatchingFace);
+      if (familyFaces.length === 0) {
+        unverifiable++;
+        continue;
+      }
+
+      const matchingWeight = familyFaces.some(face => {
+        const [minimum, maximum] = utils.fontWeightRange(face.weight);
+        return weight >= minimum && weight <= maximum && styleMatches(face.style, style.fontStyle);
+      });
+      const matchingItalic = familyFaces.some(face => {
+        const [minimum, maximum] = utils.fontWeightRange(face.weight);
+        return weight >= minimum && weight <= maximum && styleMatches(face.style, style.fontStyle);
+      });
+
+      // font-synthesis declares what the browser may synthesize. It becomes
+      // evidence only when an authored family inventory exists and proves the
+      // requested face is absent. Permission alone is not proof.
+      const allowsWeightSynthesis = synthesis === 'auto' || synthesis.split(/\s+/).includes('weight');
+      const allowsStyleSynthesis = synthesis === 'auto' || synthesis.split(/\s+/).includes('style');
+      const isFauxBold = weight >= 700 && !matchingWeight && allowsWeightSynthesis;
+      const isFauxItalic = isItalic && !matchingItalic && allowsStyleSynthesis;
 
       if (isFauxBold) fauxBold++;
       if (isFauxItalic) fauxItalic++;
@@ -622,6 +687,7 @@ function typographicSkeleton(utils) {
     return {
       faux_bold: fauxBold,
       faux_italic: fauxItalic,
+      unverifiable_elements: unverifiable,
       elements,
       pass: fauxBold === 0 && fauxItalic === 0
     };

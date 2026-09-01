@@ -110,6 +110,52 @@ resolve_save_target_name() {
     printf '%s\n' "$requested"
 }
 
+resolve_login_done_save_name() {
+    # A human-completed interactive login is the shared credential: it updates
+    # the literal name unless --fork explicitly asks for an agent-scoped copy.
+    local name="$1" fork="${2:-false}"
+    if [[ "$fork" == "true" ]]; then
+        resolve_save_target_name "$name" false
+    else
+        resolve_save_target_name "$name" true
+    fi
+}
+
+warn_if_forked() {
+    local requested="$1" resolved="$2"
+    if [[ "$resolved" != "$requested" ]]; then
+        echo "warning: saved as '$resolved' — '$requested' already exists and this daemon is agent-scoped; pass --shared to update '$requested' itself" >&2
+    fi
+}
+
+file_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+warn_fresher_fork() {
+    # Loading a canonical name while a newer agent-scoped fork exists usually
+    # means a fresh login was forked away; staleness beats name purity.
+    local name="$1"
+    [[ "$name" == *@* ]] && return 0
+    local canonical_mtime=0
+    local canonical_path
+    canonical_path="$(saved_session_path "$name")/storage.json"
+    [[ -f "$canonical_path" ]] && canonical_mtime="$(file_mtime "$canonical_path")"
+    local fork newest_fork="" newest_mtime="$canonical_mtime"
+    for fork in "$PERSISTENT_SESSIONS_DIR/$name"@*/storage.json; do
+        [[ -f "$fork" ]] || continue
+        local mtime
+        mtime="$(file_mtime "$fork")"
+        if (( mtime > newest_mtime )); then
+            newest_mtime="$mtime"
+            newest_fork="$(basename "$(dirname "$fork")")"
+        fi
+    done
+    if [[ -n "$newest_fork" ]]; then
+        echo "warning: '$newest_fork' is newer than '$name' — a fresher login may live there; load it, or promote it: session load $newest_fork && session save $name --shared" >&2
+    fi
+}
+
 # ============================================================================
 # HELP
 # ============================================================================
@@ -200,7 +246,8 @@ AUTH:
 LOGIN (manual SSO/MFA → headless handoff):
   login <url>                    Open headed browser for manual auth
   login done [--save <name>]     Transfer auth to headless, close headed window
-    --shared                     Save to the literal shared session name instead of forking
+    --shared                     (default) update the literal shared session name
+    --fork                       Save to an agent-scoped fork (<name>@<agent>) instead
   login status                   Check if login window is open
   login cancel                   Close login window without transferring
 
@@ -1222,16 +1269,19 @@ main() {
                 done)
                     shift
                     local save_name=""
-                    local shared_save=false
+                    local fork_save=false
                     while [[ $# -gt 0 ]]; do
                         case "$1" in
                             --save) save_name="$2"; shift 2 ;;
-                            --shared) shared_save=true; shift ;;
+                            --shared) fork_save=false; shift ;;
+                            --fork) fork_save=true; shift ;;
                             *) shift ;;
                         esac
                     done
                     if [[ -n "$save_name" ]]; then
-                        save_name="$(resolve_save_target_name "$save_name" "$shared_save")"
+                        local requested_save="$save_name"
+                        save_name="$(resolve_login_done_save_name "$save_name" "$fork_save")"
+                        warn_if_forked "$requested_save" "$save_name"
                         json='{"id":"'$(cmd_id)'","action":"login_done","save":"'"$save_name"'"}'
                     else
                         json='{"id":"'$(cmd_id)'","action":"login_done"}'
@@ -1280,7 +1330,9 @@ main() {
                                 ;;
                         esac
                     done
+                    local requested_name="$name"
                     name="$(resolve_save_target_name "$name" "$shared_save")"
+                    warn_if_forked "$requested_name" "$name"
                     if [[ -n "$desc" ]]; then
                         json='{"id":"'$(cmd_id)'","action":"session_save","name":"'"$name"'","description":"'"$desc"'"}'
                     else
@@ -1289,6 +1341,7 @@ main() {
                     ;;
                 load)
                     [[ $# -lt 2 ]] && { echo "Usage: agent-browse session load <name>" >&2; exit 1; }
+                    warn_fresher_fork "$2"
                     json='{"id":"'$(cmd_id)'","action":"session_load","name":"'"$2"'"}'
                     ;;
                 delete)

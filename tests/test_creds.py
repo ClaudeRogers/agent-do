@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,105 @@ def configure_fake_secret_tool(tmpdir: Path) -> dict[str, str]:
         "AGENT_DO_CREDS_PLATFORM": "linux",
         "AGENT_DO_CREDS_SERVICE": "agent-do-test",
         "FAKE_SECRET_TOOL_STORE": str(store_dir),
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+    }
+
+
+# Realistic dump-keychain genp records: acct is ~12 lines *before* svce.
+# Neighbor items exist to catch sliding-window greps (-A after svce, -B before).
+MACOS_KEYCHAIN_DUMP_FIXTURE = textwrap.dedent(
+    """\
+    keychain: "/Users/test/Library/Keychains/login.keychain-db"
+    version: 512
+    class: "genp"
+    attributes:
+        0x00000007 <blob>="other-service"
+        0x00000008 <blob>=<NULL>
+        "acct"<blob>="OTHER_SECRET"
+        "cdat"<timedate>=0x00  "Z\\000"
+        "crtr"<uint32>=<NULL>
+        "cusi"<sint32>=<NULL>
+        "desc"<blob>=<NULL>
+        "gena"<blob>=<NULL>
+        "icmt"<blob>=<NULL>
+        "invi"<sint32>=<NULL>
+        "mdat"<timedate>=0x00  "Z\\000"
+        "nega"<sint32>=<NULL>
+        "prot"<blob>=<NULL>
+        "scrp"<sint32>=<NULL>
+        "svce"<blob>="other-service"
+        "type"<uint32>=<NULL>
+    keychain: "/Users/test/Library/Keychains/login.keychain-db"
+    version: 512
+    class: "genp"
+    attributes:
+        0x00000007 <blob>="agent-do-test"
+        0x00000008 <blob>=<NULL>
+        "acct"<blob>="TEST_API_KEY"
+        "cdat"<timedate>=0x00  "Z\\000"
+        "crtr"<uint32>=<NULL>
+        "cusi"<sint32>=<NULL>
+        "desc"<blob>=<NULL>
+        "gena"<blob>=<NULL>
+        "icmt"<blob>=<NULL>
+        "invi"<sint32>=<NULL>
+        "mdat"<timedate>=0x00  "Z\\000"
+        "nega"<sint32>=<NULL>
+        "prot"<blob>=<NULL>
+        "scrp"<sint32>=<NULL>
+        "svce"<blob>="agent-do-test"
+        "type"<uint32>=<NULL>
+    keychain: "/Users/test/Library/Keychains/login.keychain-db"
+    version: 512
+    class: "genp"
+    attributes:
+        0x00000007 <blob>="unrelated"
+        0x00000008 <blob>=<NULL>
+        "acct"<blob>="NEXT_ITEM_ACCT"
+        "cdat"<timedate>=0x00  "Z\\000"
+        "crtr"<uint32>=<NULL>
+        "cusi"<sint32>=<NULL>
+        "desc"<blob>=<NULL>
+        "gena"<blob>=<NULL>
+        "icmt"<blob>=<NULL>
+        "invi"<sint32>=<NULL>
+        "mdat"<timedate>=0x00  "Z\\000"
+        "nega"<sint32>=<NULL>
+        "prot"<blob>=<NULL>
+        "scrp"<sint32>=<NULL>
+        "svce"<blob>="unrelated"
+        "type"<uint32>=<NULL>
+    """
+)
+
+
+def configure_fake_security(tmpdir: Path, dump_text: str, dump_exit: int = 0) -> dict[str, str]:
+    fake_bin = tmpdir / "bin"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    dump_path = tmpdir / "keychain.dump"
+    dump_path.write_text(dump_text, encoding="utf-8")
+
+    security = fake_bin / "security"
+    write_executable(
+        security,
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import sys
+            from pathlib import Path
+
+            if len(sys.argv) >= 2 and sys.argv[1] == "dump-keychain":
+                sys.stdout.write(Path({str(dump_path)!r}).read_text(encoding="utf-8"))
+                raise SystemExit({dump_exit})
+            print("unexpected security argv:", sys.argv, file=sys.stderr)
+            raise SystemExit(2)
+            """
+        ),
+    )
+
+    return {
+        "AGENT_DO_CREDS_PLATFORM": "macos",
+        "AGENT_DO_CREDS_SERVICE": "agent-do-test",
         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
     }
 
@@ -359,6 +459,86 @@ def main() -> int:
     health_env = run("./agent-do", "--health", "render", env=env)
     require(health_env.returncode == 0, f"health render via env failed: {health_env.stderr}")
     require("credentials from env" in health_env.stdout, f"expected env-backed health note: {health_env.stdout}")
+
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        macos_env = os.environ.copy()
+        macos_env.update(configure_fake_security(tmpdir, MACOS_KEYCHAIN_DUMP_FIXTURE))
+
+        list_macos = run("./agent-do", "creds", "list", "--json", env=macos_env)
+        require(list_macos.returncode == 0, f"macos list --json failed: {list_macos.stderr}\n{list_macos.stdout}")
+        macos_payload = json.loads(list_macos.stdout)
+        require(
+            macos_payload["keys"] == ["TEST_API_KEY"],
+            f"macos list must parse acct-before-svce without neighbor leakage: {macos_payload}",
+        )
+
+        list_macos_text = run("./agent-do", "creds", "list", env=macos_env)
+        require(list_macos_text.returncode == 0, f"macos list failed: {list_macos_text.stderr}")
+        require(
+            list_macos_text.stdout.strip() == "TEST_API_KEY",
+            f"unexpected macos list text: {list_macos_text.stdout!r}",
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        fail_env = os.environ.copy()
+        fail_env.update(configure_fake_security(tmpdir, MACOS_KEYCHAIN_DUMP_FIXTURE, dump_exit=45))
+
+        list_fail = run("./agent-do", "creds", "list", env=fail_env)
+        require(list_fail.returncode != 0, f"macos list must fail loud on dump-keychain error, got: {list_fail.stdout!r}")
+        require(
+            "No stored secrets." not in list_fail.stdout,
+            f"dump-keychain failure must not look like an empty store: {list_fail.stdout!r}",
+        )
+        require(
+            "dump-keychain exited 45" in list_fail.stderr,
+            f"expected dump-keychain failure on stderr: {list_fail.stderr!r}",
+        )
+
+    # Review 2026-08-31 (HIGH): an EMPTY linux store must be a valid outcome,
+    # not a silent exit 1 — under pipefail, grep's zero-match exit killed the
+    # pipeline before the fix.
+    with tempfile.TemporaryDirectory() as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        empty_env = os.environ.copy()
+        empty_env.update(configure_fake_secret_tool(tmpdir))  # store starts empty
+
+        list_empty = run("./agent-do", "creds", "list", env=empty_env)
+        require(
+            list_empty.returncode == 0,
+            f"empty linux store must exit 0, got {list_empty.returncode}: {list_empty.stderr!r}",
+        )
+        require(
+            "No stored secrets." in list_empty.stdout,
+            f"empty linux store must report 'No stored secrets.': {list_empty.stdout!r}",
+        )
+
+    # Review 2026-08-31 (HIGH): an unsupported platform must refuse loudly.
+    unknown_env = os.environ.copy()
+    unknown_env["AGENT_DO_CREDS_PLATFORM"] = "unknown"
+    list_unknown = run("./agent-do", "creds", "list", env=unknown_env)
+    require(list_unknown.returncode != 0, "unknown platform must fail")
+    require(
+        "unsupported platform" in list_unknown.stderr,
+        f"unknown platform must explain itself on stderr: {list_unknown.stderr!r}",
+    )
+    require(
+        "No stored secrets." not in list_unknown.stdout,
+        f"unknown-platform failure must not look like an empty store: {list_unknown.stdout!r}",
+    )
+
+    # Review 2026-08-31: windows without powershell.exe must refuse loudly.
+    # Only meaningful where powershell.exe is genuinely absent (macOS/Linux CI).
+    if shutil.which("powershell.exe") is None:
+        win_env = os.environ.copy()
+        win_env["AGENT_DO_CREDS_PLATFORM"] = "windows"
+        list_win = run("./agent-do", "creds", "list", env=win_env)
+        require(list_win.returncode != 0, "windows without powershell must fail")
+        require(
+            "powershell.exe not found" in list_win.stderr,
+            f"missing powershell must explain itself on stderr: {list_win.stderr!r}",
+        )
 
     print("credential tests passed")
     return 0

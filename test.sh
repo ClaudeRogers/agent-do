@@ -4,6 +4,10 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/bash-runtime.sh
+source "$SCRIPT_DIR/lib/bash-runtime.sh"
+agent_do_ensure_supported_bash "$SCRIPT_DIR/test.sh" "$@" || exit $?
+
 AGENT_DO="$SCRIPT_DIR/agent-do"
 TEST_HOME="$(mktemp -d)"
 PASS=0
@@ -65,6 +69,26 @@ check_error_output() {
     fi
 }
 
+find_macos_test_python() {
+    # Dependency tests use the active Python environment. The macOS integration
+    # test must instead use an interpreter that owns the platform frameworks.
+    local candidate=""
+    for candidate in \
+        "${AGENT_DO_MACOS_TEST_PYTHON:-}" \
+        "$(command -v python3 2>/dev/null || true)" \
+        /opt/homebrew/bin/python3 \
+        /usr/local/bin/python3 \
+        /usr/bin/python3
+    do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        if "$candidate" -c 'import AppKit, Foundation' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 echo "Testing agent-do..."
 echo
 
@@ -82,9 +106,13 @@ check_output "--offline routes network scan intent" "agent-network scan --port 3
 check_output "pattern matcher JSON uses iOS tool" '"tool": "ios"' "$SCRIPT_DIR/bin/pattern-matcher" --json "screenshot the iOS simulator"
 check_cmd "v1.1 routing foundation tests" python3 "$SCRIPT_DIR/tests/test_v11_routing.py"
 check_cmd "transcribe tests" python3 "$SCRIPT_DIR/tests/test_transcribe.py"
+check_cmd "handbrake tests" python3 "$SCRIPT_DIR/tests/test_handbrake.py"
+check_cmd "substack tests" python3 "$SCRIPT_DIR/tests/test_substack.py"
 check_cmd "suggest AI routing tests" python3 "$SCRIPT_DIR/tests/test_suggest_ai.py"
 check_cmd "prompt hook AI routing tests" python3 "$SCRIPT_DIR/tests/test_prompt_hook_ai.py"
 check_cmd "model resolution tests" python3 "$SCRIPT_DIR/tests/test_models.py"
+check_cmd "manna serve tests" python3 "$SCRIPT_DIR/tests/test_manna_serve.py"
+check_cmd "install spec coherence" python3 "$SCRIPT_DIR/tests/test_install_specs.py"
 check_cmd "generated discovery index tests" bash "$SCRIPT_DIR/tests/test_index_generation.sh"
 check_cmd "zpc global read-surface tests" python3 "$SCRIPT_DIR/tests/test_zpc_global.py"
 check_cmd "zpc position ledger tests" python3 "$SCRIPT_DIR/tests/test_zpc_position.py"
@@ -94,8 +122,8 @@ check_cmd "brief estate engine tests" python3 "$SCRIPT_DIR/tests/test_brief.py"
 check_cmd "zpc delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_delivery.py"
 check_cmd "zpc memory bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_memory_bounds.py"
 check_cmd "zpc re-litigation tests" python3 "$SCRIPT_DIR/tests/test_zpc_relitigate.py"
-check_cmd "zpc correction mining tests" python3 "$SCRIPT_DIR/tests/test_zpc_corrections.py"
 check_cmd "zpc preference slice tests" python3 "$SCRIPT_DIR/tests/test_zpc_preferences.py"
+check_cmd "zpc trigger gate and delivery tests" python3 "$SCRIPT_DIR/tests/test_zpc_triggers.py"
 check_cmd "zpc store-only init tests" python3 "$SCRIPT_DIR/tests/test_zpc_init_store_only.py"
 check_cmd "zpc store walk bounds tests" python3 "$SCRIPT_DIR/tests/test_zpc_store_walk.py"
 check_cmd "hook store resolution tests" python3 "$SCRIPT_DIR/tests/test_hook_store_resolution.py"
@@ -108,6 +136,7 @@ check_cmd "api template tests" python3 "$SCRIPT_DIR/tests/test_api_templates.py"
 check_cmd "supabase management tests" python3 "$SCRIPT_DIR/tests/test_supabase_management.py"
 check_cmd "credential tests" python3 "$SCRIPT_DIR/tests/test_creds.py"
 check_cmd "notion tests" python3 "$SCRIPT_DIR/tests/test_notion.py"
+check_cmd "bash runtime tests" python3 "$SCRIPT_DIR/tests/test_bash_runtime.py"
 check_cmd "dispatch tests" python3 "$SCRIPT_DIR/tests/test_dispatch.py"
 check_cmd "auth tests" python3 "$SCRIPT_DIR/tests/test_auth.py"
 check_cmd "auth interactive tests" python3 "$SCRIPT_DIR/tests/test_auth_interactive.py"
@@ -121,7 +150,13 @@ check_cmd "auth probe tests" python3 "$SCRIPT_DIR/tests/test_auth_probe.py"
 check_cmd "auth advance tests" python3 "$SCRIPT_DIR/tests/test_auth_advance.py"
 check_cmd "email tests" python3 "$SCRIPT_DIR/tests/test_email.py"
 check_cmd "sms tests" python3 "$SCRIPT_DIR/tests/test_sms.py"
-check_cmd "live runtime tests" python3 "$SCRIPT_DIR/tests/test_live.py"
+macos_test_python="$(find_macos_test_python || true)"
+if [[ -n "$macos_test_python" ]]; then
+    macos_test_bin="$(dirname "$macos_test_python")"
+    check_cmd "live runtime tests" env PATH="$macos_test_bin:$PATH" "$macos_test_python" "$SCRIPT_DIR/tests/test_live.py"
+else
+    check_cmd "live runtime tests" python3 "$SCRIPT_DIR/tests/test_live.py"
+fi
 check_cmd "appleevents tests" python3 "$SCRIPT_DIR/tests/test_appleevents.py"
 check_cmd "spec tests" python3 "$SCRIPT_DIR/tests/test_spec.py"
 check_cmd "resend tests" python3 "$SCRIPT_DIR/tests/test_resend.py"
@@ -131,6 +166,7 @@ check_cmd "vector tests" python3 "$SCRIPT_DIR/tests/test_vector.py"
 check_output "vector --help" "today" "$AGENT_DO" vector --help
 check_cmd "gh tests" python3 "$SCRIPT_DIR/tests/test_gh.py"
 check_cmd "datadog tests" python3 "$SCRIPT_DIR/tests/test_datadog.py"
+check_cmd "coderabbit tests" python3 "$SCRIPT_DIR/tests/test_coderabbit.py"
 check_cmd "ci triage tests" python3 "$SCRIPT_DIR/tests/test_ci_triage.py"
 check_cmd "git guardrail tests" python3 "$SCRIPT_DIR/tests/test_git_guardrails.py"
 check_cmd "worktree binding tests" python3 "$SCRIPT_DIR/tests/test_worktree_binding.py"
@@ -138,6 +174,11 @@ check_cmd "hardware tests" python3 "$SCRIPT_DIR/tests/test_hardware.py"
 check_cmd "meetings tests" python3 "$SCRIPT_DIR/tests/test_meetings.py"
 check_cmd "harness tests" python3 "$SCRIPT_DIR/tests/test_harness.py"
 check_cmd "quantity authority tests" python3 "$SCRIPT_DIR/tests/test_quantities.py"
+# Contract drift executes each registered tool's real help surface. Build the
+# release binary selected by the Manna wrapper first so the result cannot
+# depend on a stale or missing per-worktree artifact.
+check_cmd "manna release binary is current" cargo build --quiet --release --manifest-path "$SCRIPT_DIR/tools/agent-manna/Cargo.toml"
+check_cmd "manna estate tests" python3 "$SCRIPT_DIR/tests/test_manna_estate.py"
 check_cmd "contracts gate tests" python3 "$SCRIPT_DIR/tests/test_contracts_gate.py"
 check_cmd "contracts drift tests" python3 "$SCRIPT_DIR/tests/test_contracts_drift.py"
 check_cmd "contracts audit tests" python3 "$SCRIPT_DIR/tests/test_contracts_audit.py"
@@ -160,6 +201,8 @@ check_cmd "browser import tests" python3 "$SCRIPT_DIR/tests/test_browser_import.
 check_cmd "browse daemon isolation tests" python3 "$SCRIPT_DIR/tests/test_browse_daemon_isolation.py"
 check_cmd "browse session default tests" python3 "$SCRIPT_DIR/tests/test_browse_session_defaults.py"
 check_cmd "tool regression tests" python3 "$SCRIPT_DIR/tests/test_tool_regressions.py"
+check_cmd "dpt offline tests" python3 "$SCRIPT_DIR/tests/test_dpt.py"
+check_cmd "dpt browser integration tests" bash "$SCRIPT_DIR/tools/agent-dpt/test/integration.sh"
 check_cmd "manna unit tests" cargo test --quiet --manifest-path "$SCRIPT_DIR/tools/agent-manna/Cargo.toml"
 check_cmd "manna integration tests" bash "$SCRIPT_DIR/tools/agent-manna/test/integration.sh"
 
@@ -288,8 +331,16 @@ check_output "sentry help lists snapshot command" "snapshot" "$AGENT_DO" sentry 
 check_error_output "sentry unknown command exits with error" "Unknown command" "$AGENT_DO" sentry bogus-command-xyz
 
 check_output "bootstrap recommendation detects pending work" '"needs_bootstrap": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
-check_output "bootstrap initializes context and zpc" "Initialized: context, zpc" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap ask prompt names the project root" "$BOOTSTRAP_PROJECT" "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap --never opts the root out" "will not be asked" "$AGENT_DO" bootstrap --never --cwd "$BOOTSTRAP_PROJECT"
+check_output "opted-out root reports nothing pending" '"needs_bootstrap": false' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "opted-out root is flagged in JSON" '"opted_out": true' "$AGENT_DO" bootstrap --recommend --json --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap --allow restores the offer" "may be offered" "$AGENT_DO" bootstrap --allow --cwd "$BOOTSTRAP_PROJECT"
+check_output "bootstrap initializes context, zpc, and workflow" "Initialized: context, zpc, manna" "$AGENT_DO" bootstrap --cwd "$BOOTSTRAP_PROJECT"
 check_cmd "bootstrap created project-local .zpc" test -d "$BOOTSTRAP_PROJECT/.zpc"
+check_cmd "bootstrap created project-local .manna workflow" test -f "$BOOTSTRAP_PROJECT/.manna/workflow.yaml"
+check_cmd "bootstrap created federation identity" test -f "$BOOTSTRAP_PROJECT/.manna/federation.yaml"
+check_cmd "bootstrap created tracked handoff root" test -f "$BOOTSTRAP_PROJECT/.handoff/README.md"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

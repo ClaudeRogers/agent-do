@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (100 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -41,9 +41,10 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [clipboard](#clipboard) | Cross-app clipboard management | mixed | 4 |
 | [cloud](#cloud) | Control cloud providers (AWS, GCP, Azure) | mixed | 3 |
 | [cloudflare](#cloudflare) | Cloudflare account management — zones, analytics (GraphQL), DNS, Workers, Pages, R2, security events | mixed | 18 |
+| [coderabbit](#coderabbit) | Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR | mixed | 6 |
 | [colab](#colab) | Google Colab notebook management | mixed | 4 |
 | [context](#context) | Knowledge library — fetch, index, and serve external reference docs. Complementary to zpc (experience journal). | mixed | 27 |
-| [coord](#coord) | Project-local agent state and interrupt broker | mixed | 22 |
+| [coord](#coord) | Project-local agent state and interrupt broker | mixed | 23 |
 | [creds](#creds) | Secure credential storage and resolution for agent-do tools | mixed | 8 |
 | [cronitor](#cronitor) | Cronitor scheduled job and uptime monitoring | mixed | 11 |
 | [datadog](#datadog) | Datadog observability — monitors, logs, metrics, incidents, dashboards, and SLOs with cross-tool incident response | mixed | 23 |
@@ -61,6 +62,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 24 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
+| [handbrake](#handbrake) | Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs | mixed | 7 |
 | [hardware](#hardware) | Unified hardware device control across serial, bluetooth, USB, printers, and MIDI | mixed | 6 |
 | [harness](#harness) | Observable agent-do harness inventory, evidence, and change-manifest front door | mixed | 8 |
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
@@ -75,7 +77,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [linear](#linear) | Control Linear | mixed | 3 |
 | [logs](#logs) | Control log aggregation | read | 3 |
 | [macos](#macos) | Control native macOS desktop applications via accessibility APIs | mixed | 6 |
-| [manna](#manna) | Git-backed issue tracking and context management for AI agents | write | 16 |
+| [manna](#manna) | Git-backed issue tracking with generated, bidirectionally linked handoff work orders | write | 27 |
 | [meet](#meet) | Google Meet control | mixed | 4 |
 | [meetings](#meetings) | Unified enterprise meeting orchestration across Zoom, Google Meet, and Microsoft Teams | mixed | 14 |
 | [memory](#memory) | Persistent memory and context | mixed | 4 |
@@ -105,6 +107,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [sms](#sms) | SMS messaging | write | 8 |
 | [spec](#spec) | Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness | mixed | 5 |
 | [ssh](#ssh) | Control remote server sessions | write | 5 |
+| [substack](#substack) | Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session | mixed | 11 |
 | [supabase](#supabase) | Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db) | write | 64 |
 | [swarm](#swarm) | Multi-agent orchestration | write | 4 |
 | [tail](#tail) | Wrap dev commands, capture output to log files for AI agents | read | 11 |
@@ -1016,6 +1019,58 @@ agent-do cloudflare snapshot
 - Write (connect/interact/save): `dns-add`, `dns-del`, `dns-update`
 - destructive (irreversible data loss; confirm before auto-running): `dns-del`
 
+### coderabbit
+
+Local AI diff review via CodeRabbit CLI — review uncommitted changes, staged diffs, or branch diffs before opening a PR
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- review tracked local changes against a base branch, with optional committed, uncommitted, or untracked scopes
+- replay findings from the most recent local review without an API call
+- check auth and connectivity via doctor command
+- support free-tier browser OAuth or API key for unlimited headless use
+
+**Commands**
+
+- `review`: Review tracked local changes against the base branch; forwards CodeRabbit review flags like --light, --committed, --uncommitted, --include-untracked, and --dir
+- `findings`: Re-read results from the most recent local review (no API call)
+- `doctor`: Verify installation, authentication, git state, and service connectivity
+- `snapshot`: Auth status, cr version, and last doctor summary
+- `auth login`: Authenticate via browser and update local CodeRabbit auth state (free tier, 3 reviews/hour)
+- `auth org`: Switch active CodeRabbit organization and update local CLI state
+
+**Examples**
+
+```bash
+# review my changes before opening a PR
+agent-do coderabbit review
+# review changes against develop branch
+agent-do coderabbit review --base develop
+# review untracked local files before a PR
+agent-do coderabbit review --include-untracked
+# get structured JSON review output for agent processing
+agent-do coderabbit review --json
+# replay last review results without an API call
+agent-do coderabbit findings
+# check coderabbit auth and connectivity
+agent-do coderabbit doctor
+# coderabbit status and auth summary
+agent-do coderabbit snapshot --json
+```
+
+**Credentials**
+
+- Optional: `CODERABBIT_API_KEY`
+- Note: Free tier (3 reviews/hour): run 'agent-do coderabbit auth login' for browser OAuth. The CodeRabbit CLI saves that login locally, so later reviews work without an API key.
+- Note: Unlimited reviews: store CODERABBIT_API_KEY with 'agent-do creds store CODERABBIT_API_KEY --stdin'. CodeRabbit CLI 0.7.0 does not read this env var directly for headless review; agent-coderabbit only passes it as --api-key when AGENT_DO_CODERABBIT_ALLOW_ARGV_API_KEY=1 because argv can expose the key while cr is running.
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `findings`, `snapshot`
+- Write (connect/interact/save): `auth login`, `auth org`, `doctor`, `review`
+
 ### colab
 
 Google Colab notebook management
@@ -1156,6 +1211,7 @@ Concurrency: `mixed`
 - manage advisory claims and a warn-only pre-commit guard over live claims and territories
 - point peers at files via drops, declare dependencies, publish artifacts with file pointers
 - compute contention, notice, dependency, and novelty interrupts and expose the event journal as history
+- merge harness hook observations and timestamped external supervisor verdicts into shared six-state pulse telemetry without renewing target liveness, then rank live peers attention-first
 
 **Commands**
 
@@ -1172,6 +1228,7 @@ Concurrency: `mixed`
 - `status`: Show current focus, needs, publishes, and interrupt counts
 - `interrupts`: Show current interrupts: interrupts [--mark-seen] [--limit \<n>]
 - `focus`: Manage structured focus: focus set \<goal> [--path \<p>] [--phase \<phase>] [--note \<t>] [--blocking-on \<ref>] [--last-ship \<t>] [--branch \<name>] | show | clear
+- `pulse`: Shared session telemetry: pulse record --from-hook (stdin JSON, always exit 0) | pulse record --session \<harness-session-id> --status \<working|needs-user|finished|failed|idle|ended> --updated-at \<RFC3339> [--activity \<note>|--clear-activity] | pulse show [peer|harness-session-id]
 - `claims`: List advisory claims
 - `claim`: Claim a file/path: claim \<path> [--reason \<text>] [--strength soft|strong]
 - `release`: Release a claim you own: release \<path>
@@ -1207,6 +1264,10 @@ agent-do coord publish add dm-sdk@1.2.2 --status ready --summary "private packag
 agent-do coord drop add .dev/research-drops/report.md --for builder-a --note "ephemeris findings"
 # see whether anything should interrupt me
 agent-do coord interrupts
+# see what a session is observably doing right now
+agent-do coord pulse show session-3f2a91
+# record an external supervisor's evidence-backed session verdict
+agent-do coord pulse record --session 019d8abc-dead-7eef-9000-aabbccddeeff --status needs-user --activity "pane is waiting for input" --updated-at 2026-09-01T03:00:00Z
 # retire this session at the end of work
 agent-do coord stop --note "lane 14 shipped"
 ```
@@ -1214,9 +1275,9 @@ agent-do coord stop --note "lane 14 shipped"
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `aliases`, `claims`, `drops`, `history`, `need list`, `peers`, `publishes`, `status`, `territory`, `whoami`
-- Write (connect/interact/save): `alias`, `bye`, `claim soft`, `claim strong`, `drop`, `focus`, `guard`, `interrupts`, `need add`, `need clear`, `publish add`, `publish clear`, `release`, `role`, `stop`, `touch`
+- Write (connect/interact/save): `alias`, `bye`, `claim soft`, `claim strong`, `drop`, `focus`, `guard`, `interrupts`, `need add`, `need clear`, `publish add`, `publish clear`, `pulse`, `release`, `role`, `stop`, `touch`
 - destructive (irreversible data loss; confirm before auto-running): `bye`, `need clear`, `publish clear`
-- polymorphic (beat decided by payload or flag at call time): `guard`, `interrupts`
+- polymorphic (beat decided by payload or flag at call time): `guard`, `interrupts`, `pulse`
 - composite (one call performs several beats internally): `touch`
 
 ### creds
@@ -1351,7 +1412,7 @@ Concurrency: `mixed`
 - `monitors`: List monitors: monitors [--tag env:prod] [--name CPU] [--state Alert]
 - `monitor`: Get one monitor: monitor \<id>
 - `monitor-status`: Alert state summary: monitor-status [--tag env:prod] (exits 1 when any monitor is alerting)
-- `monitor-mute`: Mute monitor: monitor-mute \<id> [--end now-1h] [--scope host:web-01] [--message reason] [--dry-run]
+- `monitor-mute`: Mute monitor: monitor-mute \<id> [--end now+1h] [--scope host:web-01] [--message reason] [--dry-run]
 - `monitor-unmute`: Unmute monitor: monitor-unmute \<id> [--dry-run]
 - `monitor-create`: Create monitor: monitor-create --name N --type "metric alert" --query Q [--message M] [--tags t1,t2] [--priority 1-5] [--dry-run]
 - `monitor-delete`: Delete monitor: monitor-delete \<id> [--dry-run]
@@ -1388,7 +1449,7 @@ agent-do datadog incident-create --title "Checkout errors" --severity SEV-1 --cu
 # resolve a datadog incident
 agent-do datadog incident-resolve inc-001
 # mute a monitor during a deploy
-agent-do datadog monitor-mute 12345 --end now-1h --message "Deploying v2.4.0"
+agent-do datadog monitor-mute 12345 --end now+1h --message "Deploying v2.4.0"
 # get SLO error budget status
 agent-do datadog slo slo-001
 # get a combined observability snapshot
@@ -1597,12 +1658,12 @@ Concurrency: `read`
 
 **Commands**
 
-- `scan`: Full scan → JSON with all 72 checks
+- `scan`: Full-page scan → JSON with all 65 checks
 - `score`: Quick score + grade + dimension summary
 - `report`: Narrative design critique report
 - `violations`: Violations sorted by impact for AI fix loops
-- `baseline`: Save current scan as baseline
-- `diff`: Compare against baseline, show deltas
+- `baseline`: Save a browser-session + project baseline
+- `diff`: Compare against that scoped baseline, show deltas
 - `build`: Rebuild engine from source
 
 **Examples**
@@ -2056,6 +2117,62 @@ agent-do git sweep
 - Write (connect/interact/save): `branch`, `commit`, `pull`, `push`, `snap restore`, `stash`, `sweep`, `sync`, `worktree add`, `worktree remove`
 - destructive (irreversible data loss; confirm before auto-running): `snap restore`, `sweep`, `worktree remove`
 - polymorphic (beat decided by payload or flag at call time): `branch`, `sweep`
+
+### handbrake
+
+Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- list available HandBrake encode presets by category
+- probe a video file's titles, duration, resolution, and audio/subtitle streams
+- transcode one file to MP4 with a chosen preset
+- batch-transcode every .mkv in a directory, skipping already-converted files
+- verify transcoded .mp4 outputs (files and sizes)
+- report HandBrake version and a preset-availability snapshot
+- structured JSON output parsed from HandBrakeCLI --json scan mode
+
+**Commands**
+
+- `presets`: List available encode presets
+- `scan`: Probe a file; list titles, streams, duration: scan \<input>
+- `convert`: Transcode one file to .mp4: convert \<input> [output]
+- `batch`: Transcode every .mkv in a directory: batch \<indir> \<outdir>
+- `verify`: List .mp4 outputs (dir) or check one file: verify \<path>
+- `version`: Show HandBrake version
+- `snapshot`: Version + preset availability (JSON)
+
+**Examples**
+
+```bash
+# list handbrake presets
+agent-do handbrake presets
+# probe a ripped mkv's streams
+agent-do handbrake scan ~/rips/title_t00.mkv --json
+# convert an mkv to mp4 for plex
+agent-do handbrake convert ~/rips/title_t00.mkv
+# convert with a specific preset and destination
+agent-do handbrake convert ~/rips/title_t00.mkv ~/plex/movie.mp4 --preset "HQ 1080p30 Surround"
+# convert all ripped mkvs in a folder to mp4
+agent-do handbrake batch ~/rips ~/plex
+# re-encode a folder even if outputs exist
+agent-do handbrake batch ~/rips ~/plex --overwrite
+# verify transcoded output files
+agent-do handbrake verify ~/plex
+# show what the convert command would run without executing
+agent-do handbrake convert ~/rips/title_t00.mkv --dry-run
+# get a HandBrake version and preset snapshot
+agent-do handbrake snapshot --json
+```
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `presets`, `scan`, `snapshot`, `verify`, `version`
+- Write (connect/interact/save): `batch`, `convert`
+- long_running (daemon/stream/session; may never return): `batch`, `convert`
+- composite (one call performs several beats internally): `batch`
 
 ### hardware
 
@@ -2584,45 +2701,63 @@ agent-do macos tree Finder
 
 ### manna
 
-Git-backed issue tracking and context management for AI agents
+Git-backed issue tracking with generated, bidirectionally linked handoff work orders
 
 Concurrency: `write`
 
 **Capabilities**
 
 - track issues and dependencies
+- declare portable typed relations between autonomous repository boards
 - manage session state
 - store context across sessions
 - query issue history
 
 **Commands**
 
-- `init`: Initialize manna repository
+- `init`: Initialize .manna plus the tracked .handoff workflow scaffold
+- `migrate`: Atomically admit a legacy board into strict paired workflow state
 - `status`: Show current session and claimed issues
-- `create`: Create new issue (--type track|item|dream, --track, --source)
-- `claim`: Claim an issue for the current session (refuses dreams, exit 2, until converted)
+- `state`: Emit the full derived board model as JSON or YAML, including graph buckets, receipts, federation, drift, and coord attention
+- `estate`: Emit every registered board as the /api/boards model without starting or contacting the serve daemon
+- `create`: Create an issue; actionable items generate a linked .handoff work order (--type track|item|dream, --track, --source)
+- `claim`: Claim an issue for the current session (fails closed on broken handoff pairs; refuses dreams until converted)
 - `done`: Mark a claimed issue as done
+- `order`: Move a paired item to a dense one-based handoff priority and synchronize generated presentation
+- `sync`: Derive numbered handoff filenames, blocker launch gates, and the README index from board state
 - `abandon`: Release a claimed issue back to open
+- `handoff`: Seal and bind an intentional canonical handoff edit
+- `federation`: Initialize, inspect, or explicitly fork a portable Manna federation identity
+- `relate`: Add one typed outbound cross-board relation
+- `unrelate`: Remove one typed outbound cross-board relation
+- `relations`: List local relations and optionally resolve them through registered boards
 - `block`: Add a blocker dependency
 - `unblock`: Remove a blocker dependency
 - `list`: List issues (--status, --type, --track filters)
 - `show`: Show issue details
-- `update`: Update issue title, description, status, type, track, source, or prompt (--type item converts a dream into claimable work)
+- `update`: Update issue metadata; lifecycle state changes require claim, done, abandon, block, or unblock
 - `delete`: Delete issue
 - `context`: Get session context
 - `dream`: File an idea spark on the nearest board or the global inbox
-- `lint`: Check board grammar; findings exit 1
-- `reconcile`: Detect board drift (git, claims, blockers, docs); --fix applies safe repairs
+- `lint`: Check board grammar and strict handoff linkage; findings exit 1
+- `reconcile`: Detect board, handoff, and workflow-sprawl drift; --fix applies safe repairs
+- `serve`: Read-only human board view on a stable local port (picked free on first run, kept in local config); every registered board indexed at /, this project at /\<name>; always prints the URL
 
 **Examples**
 
 ```bash
 # initialize manna
 agent-do manna init
+# migrate a legacy manna board
+agent-do manna migrate
 # create a new issue
 agent-do manna create 'Fix login bug'
 # list all issues
 agent-do manna list
+# read the complete derived board state
+agent-do manna state --json
+# read every registered manna board
+agent-do manna estate --json
 # show issue details
 agent-do manna show 1
 # capture an idea for later
@@ -2631,14 +2766,34 @@ agent-do manna dream 'Unify the auth flows'
 agent-do manna update mn-abc123 --type item
 # check the board for drift
 agent-do manna reconcile --write-drift
+# move an item to the top of the handoff plan
+agent-do manna order mn-abc123 1
+# synchronize handoff filenames after a board change
+agent-do manna sync
+# show me the board
+agent-do manna serve --open
+# list every board on this machine
+agent-do manna serve --scan ~/Projects
+# initialize portable board identity
+agent-do manna federation init
+# link this item to a sibling board
+agent-do manna relate mn-a1b2c3 --kind counterpart --to manna://mb-0123456789abcdef0123456789abcdef/mn-d4e5f6
+# inspect cross-board relations
+agent-do manna relations --resolve --check
 ```
+
+**Credentials**
+
+- Optional: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `context`, `lint`, `list`, `show`, `status`
-- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `init`, `reconcile`, `unblock`, `update`
-- destructive (irreversible data loss; confirm before auto-running): `delete`
-- polymorphic (beat decided by payload or flag at call time): `reconcile`
+- Read-only (snapshot/verify; safe to parallelize): `context`, `estate`, `lint`, `list`, `relations`, `show`, `state`, `status`
+- Write (connect/interact/save): `abandon`, `block`, `claim`, `create`, `delete`, `done`, `dream`, `federation`, `handoff`, `init`, `migrate`, `order`, `reconcile`, `relate`, `sync`, `unblock`, `unrelate`, `update`
+- destructive (irreversible data loss; confirm before auto-running): `delete`, `federation`, `migrate`, `unrelate`
+- long_running (daemon/stream/session; may never return): `serve`
+- polymorphic (beat decided by payload or flag at call time): `federation`, `reconcile`, `relations`
+- composite (one call performs several beats internally): `federation`, `migrate`, `order`, `sync`
 
 ### meet
 
@@ -4030,6 +4185,58 @@ agent-do ssh exec server1 'df -h'
 - Write (connect/interact/save): `connect`, `download`, `upload`
 - passthrough (arbitrary-payload escape hatch; beat decided by the argument): `exec`
 
+### substack
+
+Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- convert markdown to Substack's ProseMirror document format
+- create and update drafts through the editor API
+- list drafts and recent published posts
+- publish a reviewed draft on explicit command (subscriber email only with --email)
+- verify a draft by reading it back and comparing against the local receipt or source file
+
+**Commands**
+
+- `connect`: Verify auth + save publication config: connect --publication \<url-or-subdomain> [--session name]
+- `snapshot`: Publication info + drafts + recent posts: snapshot [--json]
+- `drafts`: List drafts: drafts [--limit N]
+- `posts`: List recent published posts: posts [--limit N]
+- `get`: Fetch one draft: get \<id>
+- `convert`: Markdown to ProseMirror JSON, offline: convert \<file.md>
+- `draft`: Create a DRAFT (never publishes): draft \<file.md> [--title T] [--subtitle S]
+- `update`: Replace draft body/title: update \<id> \<file.md>
+- `publish`: Publish a reviewed draft: publish \<id> [--email]
+- `verify`: Read back and compare: verify \<id> [--file \<file.md>]
+- `receipts`: Local draft/publish receipts: receipts [--limit N]
+
+**Examples**
+
+```bash
+# post my essay to substack as a draft
+agent-do substack draft essay.md
+# connect to my substack publication
+agent-do substack connect --publication example.substack.com
+# list my substack drafts
+agent-do substack drafts
+# publish the reviewed substack draft
+agent-do substack publish 12345678
+# check the draft matches what I wrote
+agent-do substack verify 12345678 --file essay.md
+```
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `convert`, `drafts`, `get`, `posts`, `receipts`, `snapshot`, `verify`
+- Write (connect/interact/save): `connect`, `draft`, `publish`, `update`
+- destructive (irreversible data loss; confirm before auto-running): `publish`
+- sensitive (emits or persists secret material; guard output): `publish`
+- composite (one call performs several beats internally): `draft`, `publish`, `update`
+- own_state (writes only its own cache/state; parallel-safe): `connect`, `receipts`
+
 ### supabase
 
 Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db)
@@ -4869,12 +5076,12 @@ Concurrency: `mixed`
 - `retract`: Correct a wrong lesson or decision with named evidence (append-only tombstone; --candidate files a challenge instead, --backfill assigns derived ids)
 - `position`: Record a verdict with its falsifier; flip it only with named evidence (an evidence-free flip also fires a detached second opinion)
 - `counsel`: Clean-context second opinion on a receipts-only brief; --auto-brief assembles the receipts mechanically from git and the newest run log
-- `harvest`: Post-build consolidation scan; --corrections mines past sessions for corrections the user typed and writes them to the machine-wide store as dated preference lessons, each carrying the sentence verbatim
+- `harvest`: Post-build consolidation scan
 - `query`: Search project lessons and decisions; add --global for machine-wide lessons
 - `patterns`: View and score patterns
 - `review`: Post-sprint lesson extraction from git history
-- `promote`: Promote lessons to team or global
-- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
+- `promote`: Promote lessons: --to team copies rows; --to global is gated and refuses (exit 2, nothing written) unless the one row carries --rule, --why, --when kind:match (prompt|command|path|always) and --seen-in a,b | --scope machine|user; machine-written rows never qualify; re-promoting updates the global copy in place
+- `inject`: Emit agent context blob (claims rendered dated, kinded and retractable, never as law); fits itself to a budget derived from the quantity authority and states the magnitude of anything it drops, or takes the caller's own with --max-tokens; --trigger prompt|command|path \<value> emits only the machine-wide lessons whose `when` fires for that moment (the hook path; empty when nothing matches; session start carries `always` rows and a count of the rest); --compact carries patterns and claims alone for pasting into a subagent's prompt; --preferences emits only the machine-wide preference slice and needs no .zpc store, so what the user already said about working follows them into any directory; --relitigate re-tries the most-exposed claims against current code in a detached counsel pass (AGENT_DO_ZPC_RELITIGATE=0 disables)
 - `init`: Initialize .zpc/ in a project; --store-only creates the store alone (no .gitignore append, no agent instruction file) and keeps it out of git through .git/info/exclude, which is what an unattended caller may run in a repo it does not own
 - `status`: Memory snapshot with health check
 - `checkpoint`: Swarm phase boundary check
@@ -4897,10 +5104,12 @@ agent-do zpc review --since HEAD~20 --dry-run
 agent-do zpc review --auto --phase 'Sprint 3'
 # consolidate after swarm build
 agent-do zpc harvest
-# learn from the corrections I have already typed
-agent-do zpc harvest --corrections --dry-run
 # what has this user already told me about how to work
 agent-do zpc inject --preferences
+# make a project lesson machine-wide with its rule, why and trigger
+agent-do zpc promote 14 --to global --rule 'Prove the premise inside the test' --why 'a faked premise proves nothing' --when 'path:test_*.py' --scope user
+# which machine-wide lessons fire for this moment
+agent-do zpc inject --trigger prompt 'write a test for the parser'
 # check memory status
 agent-do zpc status
 # search for docker lessons

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Every registered manna board on this machine, live." />
+  <title>manna / boards</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/view.js"></script>
+  <script src="/static/index.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <nav class="crumb" aria-label="Estate"><strong>estate</strong></nav>
+    <div class="topbar-right estate-right" aria-live="polite">
+      <span id="last-sync">waiting for state</span>
+      <span class="sep">|</span>
+      <span id="connection-mark" class="connection-mark">○</span><span id="connection-label">connecting</span>
+      <span class="sep">|</span>
+      <span id="view-host"></span>
+    </div>
+  </header>
+  <main class="estate">
+    <section class="sheet-body">
+      <div class="sheet-head"><span class="prompt">manna serve --status</span><span class="count" id="summary-line"></span></div>
+      <div class="counts" id="totals"></div>
+      <div class="building" id="building" hidden><span class="spin"></span><span id="building-text"></span></div>
+      <div class="table-wrap"><table class="boards">
+        <thead><tr><th scope="col">board</th><th scope="col" class="num nowrap">needs you</th><th scope="col" class="num">working</th><th scope="col" class="num">here</th><th scope="col" class="num">active</th><th scope="col" class="num">ready</th><th scope="col" class="num">blocked</th><th scope="col" class="num">decision</th><th scope="col" class="num">dream</th><th scope="col" class="num">done</th><th scope="col" class="num">drift</th><th scope="col">updated</th></tr></thead>
+        <tbody id="boards-body"><tr><td colspan="12" class="empty">reading the estate…</td></tr></tbody>
+      </table></div>
+    </section>
+  </main>
+  <footer class="strip"><span class="strip-slug">[estate]</span><span id="registry-path"></span></footer>
+</body>
+</html>

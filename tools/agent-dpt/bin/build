@@ -60,6 +60,11 @@ const result = {
       height: window.innerHeight,
       devicePixelRatio: window.devicePixelRatio
     },
+    scan_coverage: {
+      document_height: Math.round(DPT_UTILS.documentHeight()),
+      bands_scanned: Math.max(1, Math.ceil(DPT_UTILS.documentHeight() / window.innerHeight)),
+      mode: "full-document"
+    },
     timestamp: new Date().toISOString(),
     element_count: document.querySelectorAll('*').length
   }
@@ -84,6 +89,13 @@ for (const [name, fn] of layers) {
   }
 }
 
+result.meta.rule_count = layers.reduce((count, [name]) => {
+  const layer = result[name];
+  if (!layer || typeof layer !== 'object') return count;
+  return count + Object.keys(layer).filter(key => !key.startsWith('_')).length;
+}, 0);
+result.meta.color_parse = DPT_UTILS.colorParseDiagnostics();
+
 // Execute synthesis across all layers
 try {
   result.synthesis = synthesis(
@@ -95,6 +107,23 @@ try {
   );
 } catch (e) {
   result.synthesis = { _error: e.message };
+}
+
+if (result.meta.color_parse.unparseable_count > 0 && result.synthesis && !result.synthesis._error) {
+  const count = result.meta.color_parse.unparseable_count;
+  const reason = `${count} CSS color value${count === 1 ? '' : 's'} could not be measured; color and contrast scoring is incomplete`;
+  result.synthesis.incomplete = true;
+  result.synthesis.overall_score = null;
+  result.synthesis.overall_grade = "INCOMPLETE";
+  result.synthesis.critical_failures = [
+    reason,
+    ...(result.synthesis.critical_failures || [])
+  ];
+  if (result.synthesis.dimensions && result.synthesis.dimensions.chromatic) {
+    result.synthesis.dimensions.chromatic.score = null;
+    result.synthesis.dimensions.chromatic.grade = "INCOMPLETE";
+    result.synthesis.dimensions.chromatic.incomplete = true;
+  }
 }
 
 result.meta.total_timing_ms = Math.round(performance.now() - __DPT_START);
