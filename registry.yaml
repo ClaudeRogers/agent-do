@@ -3345,36 +3345,76 @@ tools:
         check: agent-do jira whoami --json
         fix: agent-do jira connections add work --url https://company.atlassian.net --email me@company.com --token <token> --default
         note: Requires Jira credentials via env vars or a saved connection profile
-      command_concurrency:
-        connections list: read
-        connections add: write
-        connections remove: write
-        connections set-default: write
-        snapshot: read
-        whoami: read
-        issue view: read
-        issue list: read
-        issue create: write
-        issue link: write
-        issue delete: write
-        issue comment: write
-        issue assign: write
-        issue transition: write
-        issue label: write
-        issue edit: write
-        transitions: read
-        user find: read
-        search: read
-        board list: read
-        sprint list: read
-        sprint active: read
-        sprint add: write
     credentials:
       required:
       - JIRA_URL
       - JIRA_EMAIL
       - JIRA_API_TOKEN
       note: Credentials are stored per-profile in ~/.agent-do/jira/.creds/ (0o600) instead of environment variables when using connection profiles
+    contracts:
+      connect:
+      - connections add
+      - connections remove
+      - connections set-default
+      snapshot:
+      - connections list
+      - whoami
+      - snapshot
+      - issue view
+      - issue list
+      - transitions
+      - user find
+      - search
+      - board list
+      - sprint list
+      - sprint active
+      interact:
+      - issue create
+      - issue link
+      - issue delete
+      - issue comment
+      - issue assign
+      - issue transition
+      - issue label
+      - issue edit
+      - sprint add
+      save:
+      - issue create
+      - issue link
+      - issue delete
+      - issue comment
+      - issue assign
+      - issue transition
+      - issue label
+      - issue edit
+      - sprint add
+      attributes:
+        connections add:
+        - sensitive
+        - own_state
+        connections remove:
+        - own_state
+        connections set-default:
+        - own_state
+        issue delete:
+        - destructive
+        - composite
+        issue create:
+        - composite
+        issue link:
+        - composite
+        issue comment:
+        - composite
+        issue assign:
+        - composite
+        issue transition:
+        - composite
+        issue label:
+        - composite
+        issue edit:
+        - composite
+        sprint add:
+        - composite
     concurrency: mixed
   logs:
     description: Control log aggregation
