@@ -11,7 +11,7 @@ show_help() {
 agent-jira — Jira Cloud and Server/Data Center for agent-do
 
 CONNECTION MANAGEMENT
-  connections list                          List saved connection profiles
+  connections list [--json]                 List saved connection profiles
   connections add <name>                    Save a connection profile
     --url <jira-url>                        Base URL (e.g. https://company.atlassian.net)
     --email <email>                         Email (Cloud) or username (Server)
@@ -19,8 +19,8 @@ CONNECTION MANAGEMENT
     [--token <api-token>]                   Legacy interactive use only; visible in ps/history
     [--server]                              Flag as Server/Data Center (uses API v2)
     [--default]                             Set as default connection
-  connections remove <name>                 Remove a profile
-  connections set-default <name>            Change the default profile
+  connections remove <name> [--json]        Remove a profile
+  connections set-default <name> [--json]   Change the default profile
 
 DISCOVERY
   snapshot [--connection <name>] [--json]   All projects with issue counts
@@ -110,7 +110,6 @@ ENVIRONMENT
 EXIT CODES
   0  Success
   1  Error
-  3  Dry-run preview (no changes made)
 
 EXAMPLES
   agent-do jira connections add work \

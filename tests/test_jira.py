@@ -564,6 +564,10 @@ def main() -> int:
             check("connections add second: creds file at 0o600",
                   stat.S_IMODE((home / "jira" / ".creds" / "personal").stat().st_mode) == 0o600)
             check("connections add second does not change default", meta_file.read_text().count('"default"') >= 1)
+            r = run(["connections", "add", "jsonprofile", "--url", base_url,
+                     "--email", "json@example.com", "--token", "tok-json", "--json"], env=env)
+            check("connections add --json exits 0", r.returncode == 0, r.stderr)
+            check("connections add --json hides token", "tok-json" not in r.stdout, r.stdout)
 
             print("\nconnections list")
             r = run(["connections", "list"], env=env)
@@ -573,12 +577,19 @@ def main() -> int:
             check("connections list shows personal", "personal" in r.stdout, r.stdout)
             check("connections list shows Cloud type", "Cloud" in r.stdout, r.stdout)
             check("connections list hides token", "tok-secret" not in r.stdout, r.stdout)
+            r = run(["connections", "list", "--json"], env=env)
+            check("connections list --json exits 0", r.returncode == 0, r.stderr)
+            check("connections list --json hides token", "tok-secret" not in r.stdout, r.stdout)
+            check("connections list --json has profiles", len(json.loads(r.stdout)["profiles"]) >= 2, r.stdout)
 
             print("\nconnections set-default")
             r = run(["connections", "set-default", "personal"], env=env)
             check("set-default exits 0", r.returncode == 0, r.stderr)
             meta_after = json.loads(meta_file.read_text())
             check("set-default changes metadata", meta_after.get("default") == "personal")
+            r = run(["connections", "set-default", "work", "--json"], env=env)
+            check("set-default --json exits 0", r.returncode == 0, r.stderr)
+            check("set-default --json reports default", json.loads(r.stdout)["default"] == "work", r.stdout)
 
             r = run(["connections", "set-default", "nonexistent-profile"], env=env)
             check("set-default nonexistent exits 1", r.returncode == 1)
@@ -604,6 +615,9 @@ def main() -> int:
             check("connections remove: creds file gone", not (home / "jira" / ".creds" / "dc").exists())
             meta_after = json.loads(meta_file.read_text())
             check("connections remove: metadata updated", "dc" not in meta_after.get("profiles", {}))
+            r = run(["connections", "remove", "jsonprofile", "--json"], env=env)
+            check("connections remove --json exits 0", r.returncode == 0, r.stderr)
+            check("connections remove --json confirms removal", json.loads(r.stdout)["removed"] is True, r.stdout)
 
             r = run(["connections", "remove", "nonexistent-profile"], env=env)
             check("connections remove nonexistent exits 1", r.returncode == 1)

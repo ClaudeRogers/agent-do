@@ -447,9 +447,20 @@ def cmd_connections(argv: list[str]) -> None:
     rest = argv[1:]
 
     if sub in ("list", "ls"):
+        _reject_unknown_flags(rest, bool_flags={"--json"})
+        json_mode = "--json" in rest
         data = _load_profiles()
         profiles = data.get("profiles", {})
         default = data.get("default")
+        if json_mode:
+            _print_json({
+                "profiles": [
+                    {"name": name, "default": name == default, **profile}
+                    for name, profile in profiles.items()
+                ],
+                "default": default,
+            })
+            return
         if not profiles:
             print("No Jira connection profiles saved.")
             print("  agent-do jira connections add <name> --url <url> --email <email> --token-stdin")
@@ -471,7 +482,7 @@ def cmd_connections(argv: list[str]) -> None:
         token_from_stdin = False
         _reject_unknown_flags(
             rest[1:],
-            bool_flags={"--server", "--default", "--token-stdin"},
+            bool_flags={"--server", "--default", "--token-stdin", "--json"},
             value_flags={"--url", "--email", "--token"},
         )
         i = 1
@@ -521,10 +532,15 @@ def cmd_connections(argv: list[str]) -> None:
         _save_profiles(data)
         kind = "Server/DC" if is_server else "Cloud"
         verb = "Updated" if overwriting else "Saved"
-        print(f"{verb} profile '{name}' [{kind}]  {url}"
-              + (" (default)" if data["default"] == name else ""))
+        if "--json" in rest:
+            _print_json({"name": name, "url": url, "server": is_server,
+                         "default": data["default"] == name, "updated": overwriting})
+        else:
+            print(f"{verb} profile '{name}' [{kind}]  {url}"
+                  + (" (default)" if data["default"] == name else ""))
 
     elif sub == "remove":
+        _reject_unknown_flags(rest[1:], bool_flags={"--json"})
         name = rest[0] if rest else None
         if not name:
             _err("Usage: connections remove <name>")
@@ -536,9 +552,13 @@ def cmd_connections(argv: list[str]) -> None:
         if data.get("default") == name:
             data["default"] = next(iter(data["profiles"]), None)
         _save_profiles(data)
-        print(f"Removed profile '{name}'")
+        if "--json" in rest:
+            _print_json({"name": name, "removed": True, "default": data.get("default")})
+        else:
+            print(f"Removed profile '{name}'")
 
     elif sub == "set-default":
+        _reject_unknown_flags(rest[1:], bool_flags={"--json"})
         name = rest[0] if rest else None
         if not name:
             _err("Usage: connections set-default <name>")
@@ -547,7 +567,10 @@ def cmd_connections(argv: list[str]) -> None:
             _err(f"Profile '{name}' not found. Use 'connections list' to see saved profiles.")
         data["default"] = name
         _save_profiles(data)
-        print(f"Default connection set to '{name}'")
+        if "--json" in rest:
+            _print_json({"default": name})
+        else:
+            print(f"Default connection set to '{name}'")
 
     else:
         _err(f"Unknown connections subcommand: {sub!r}. Use: list, add, remove, set-default")
