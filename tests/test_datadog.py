@@ -379,6 +379,9 @@ class DDHandler(http.server.BaseHTTPRequestHandler):
             if qs.get("page[size]", [""])[0] != "100":
                 self._send_err("Fixture requires documented page[size]=100", status=400)
                 return
+            if qs.get("page[offset]", [""])[0] != "0":
+                self._send_err("Fixture requires page[offset]=0", status=400)
+                return
             incs = list(_INCIDENTS)
             incs.append({"id": "inc-null", "type": "incidents", "attributes": {
                 "title": None, "state": None,
@@ -913,6 +916,7 @@ def main() -> int:
         j = _try_json(r.stdout)
         check("incidents --json is valid JSON", j is not None)
         check("incidents --json has data list", isinstance(j, dict) and isinstance(j.get("data"), list))
+        check("incidents --json exposes the page boundary", isinstance(j, dict) and j.get("offset") == 0 and j.get("page_size") == 100 and "has_more" in j)
 
         r = run(["incidents", "--state", "active"], env=env)
         check("incidents --state active exits 0", r.returncode == 0, r.stderr)
@@ -1123,6 +1127,9 @@ def main() -> int:
         j2 = _try_json(r2.stdout)
         check("services --page-size 1 returns only 1 service",
               isinstance(j2, dict) and j2.get("count") == 1)
+        check("services JSON reports pagination rather than claiming count is total",
+              isinstance(j2, dict) and j2.get("page") == 1 and j2.get("page_size") == 1
+              and "total" in j2 and "has_next_page" in j2 and "truncated" in j2)
 
         # ══════════════════════════════════════════════════════════════════
         # SNAPSHOT
@@ -1167,6 +1174,7 @@ def main() -> int:
 
         r = run(["monitor", "999"], env=env)
         check("404 error → non-zero exit", r.returncode != 0)
+        check("API errors use exit 2 (distinct from alerting)", r.returncode == 2)
         check("404 error → '404' in stderr", "404" in r.stderr)
 
         r = run(["monitor", "429"], env=env)
@@ -1609,6 +1617,8 @@ def main() -> int:
         # monitors --page-size respected
         r = run(["--json", "monitors", "--page-size", "2"], env=env)
         check("monitors --page-size 2 exits 0", r.returncode == 0, r.stderr)
+        j = _try_json(r.stdout)
+        check("monitors JSON records the requested page", isinstance(j, dict) and j.get("page") == 0 and j.get("page_size") == 2)
 
         # logs: explicit query with spaces
         r = run(["logs", "error connection timeout"], env=env)
@@ -1729,10 +1739,15 @@ def main() -> int:
         check("snapshot partial failure exits 0 when no alerting monitors returned", r.returncode == 0, r.stderr)
         check("snapshot partial failure shows empty successful sections",
               "Events (1h): 0" in r.stdout and "SLOs:        0" in r.stdout)
+        r = run(["--json", "snapshot"], env=partial_env)
+        j = _try_json(r.stdout)
+        check("snapshot JSON marks a partial failure as degraded",
+              isinstance(j, dict) and j.get("degraded") is True and j.get("errors"))
 
         all_fail_env = _env(base + "/all-fail")
         r = run(["snapshot"], env=all_fail_env)
         check("snapshot all failed exits non-zero", r.returncode != 0)
+        check("snapshot all failed uses API-error exit 2", r.returncode == 2)
         check("snapshot all failed reports total failure", "Snapshot failed" in r.stderr)
 
         # ══════════════════════════════════════════════════════════════════
