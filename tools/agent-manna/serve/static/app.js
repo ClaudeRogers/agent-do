@@ -216,6 +216,14 @@ function peerRow(p) {
   </div>`;
 }
 function renderCoord(s) {
+  // peers === null means coordination has not been read yet (fast payload,
+  // cold cache): say so. Zero peers is a different, definite statement.
+  if (s.peers == null) {
+    const head = (l) => `<div class="sheet-head"><span class="prompt">coord ${esc(l)}</span><span class="count">…</span></div>`;
+    const reading = '<div class="list"><p class="empty">still reading coordination…</p></div>';
+    $("#coord-list").innerHTML = head("needs you") + reading + head("peers") + reading + head("claims") + reading + head("drops") + reading;
+    return;
+  }
   const peers = (s.peers || []).filter((p) => !app.grep || [p.agent_id, p.alias, p.goal, p.pulse?.latest_prompt].filter(Boolean).join(" ").toLowerCase().includes(app.grep.toLowerCase()));
   const needs = peers.filter((p) => p.attention === "needs-user" || p.attention === "failed");
   const here = peers.filter((p) => p.attention !== "gone" && !needs.includes(p));
@@ -247,7 +255,7 @@ function renderDebug(s) {
     ${kv("drift file", d.file?.present ? `${d.file.count} findings · written ${esc(ago(d.file.generated_at))} ago` : "no drift.yaml written yet")}
     ${kv("board", `${s.total} rows · workflow ${esc(s.board?.workflow || "unknown")}${s.board?.board_id ? ` · ${esc(s.board.board_id)}` : ""} · ${s.board?.order_count} in handoff order · issues written ${esc(ago(s.board?.issues_modified_at))} ago`)}
     ${kv("repo", s.git?.is_repo ? `${esc(s.git.branch || "(detached)")} / HEAD ${esc(s.git.head)} / ${s.git.dirty_paths} dirty` : "not a git repository")}
-    ${kv("coord", `presence ${esc(s.coord_refreshed_ago)}s old · ${(s.peers || []).length} rows`)}
+    ${kv("coord", s.peers == null ? "still reading" : `presence ${esc(s.coord_refreshed_ago)}s old · ${s.peers.length} rows`)}
     ${kv("digests", `${s.digests?.ready ?? 0} ready · ${s.digests?.missing ?? 0} missing${s.digests?.generating ? " · generating" : ""}${s.digests?.model ? ` · ${esc(s.digests.model)}` : ""}`)}
     ${kv("root", esc(s.root))}
     ${kv("markers", (s.board?.decision_markers || []).map(esc).join(" "))}
@@ -275,6 +283,7 @@ function renderInspector(s) {
   const sel = app.selected;
   if (!sel) { setInspector(el, '<p class="empty">select a row · ⌘K to ask</p>'); return; }
   if (sel.kind === "peer") {
+    if (s.peers == null) { setInspector(el, '<p class="empty">still reading coordination…</p>'); return; }
     const p = (s.peers || []).find((x) => x.agent_id === sel.id);
     if (!p) { setInspector(el, '<p class="empty">that session is no longer on the board</p>'); return; }
     const pu = p.pulse || {};
@@ -544,10 +553,14 @@ function renderStrip(s) {
   const el = $("#strip-items"); if (!el || !s) return;
   const parts = [];
   if (app.sheet === "coord") {
-    const here = (s.peers || []).filter((p) => p.attention !== "gone").length;
-    parts.push(`${here} here`, `${s.git?.dirty_paths ?? 0} dirty`);
-    const age = Number(s.coord_refreshed_ago), cadence = Number(s.coord_refresh_seconds);
-    if (Number.isFinite(age) && Number.isFinite(cadence) && age > 2 * cadence) parts.push(`<span class="warn">presence stale ${Math.round(age)}s</span>`);
+    if (s.peers == null) {
+      parts.push(`<span class="warn">still reading coordination…</span>`);
+    } else {
+      const here = (s.peers || []).filter((p) => p.attention !== "gone").length;
+      parts.push(`${here} here`, `${s.git?.dirty_paths ?? 0} dirty`);
+      const age = Number(s.coord_refreshed_ago), cadence = Number(s.coord_refresh_seconds);
+      if (Number.isFinite(age) && Number.isFinite(cadence) && age > 2 * cadence) parts.push(`<span class="warn">presence stale ${Math.round(age)}s</span>`);
+    }
   } else if (s.building) {
     parts.push(`<span class="warn">still reading: commits · coord · live drift…</span>`);
   } else {

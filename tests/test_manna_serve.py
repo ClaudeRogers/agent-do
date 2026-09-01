@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -736,6 +737,208 @@ class RegistryAndHttpTests(unittest.TestCase):
             server.stopping = True
             server.shutdown()
             server.server_close()
+
+
+class ServeRegressionTests(unittest.TestCase):
+    """The mn-c6e3ad regression set: enrichment must reach every rendered
+    bucket, a page must never wait on reconcile, unknown coordination must
+    say unknown, one presence snapshot signs and fills a state, concurrent
+    requests share one derive, and failure answers instead of disconnecting.
+    All six held green through the live regressions; these pin the fixes."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        os.environ["AGENT_DO_HOME"] = str(self.home)
+        self.root = make_board(Path(self.tmp.name) / "proj").resolve()
+        self.stub = make_stub_agent_do(Path(self.tmp.name))
+        self.original_agent_do = serve_lib.AGENT_DO
+        serve_lib.AGENT_DO = self.stub
+        self.original_cache = serve_lib.CACHE
+        self.cache = serve_lib.BoardCache()
+        serve_lib.CACHE = self.cache
+
+    def tearDown(self) -> None:
+        serve_lib.AGENT_DO = self.original_agent_do
+        serve_lib.CACHE = self.original_cache
+        os.environ.pop("AGENT_DO_HOME", None)
+        self.tmp.cleanup()
+
+    def seed_digests(self, slug: str = "proj") -> None:
+        state = board_lib.derive(self.root, None)
+        rows = [r for r in state["all"] if r.get("kind") != "track"]
+        lines = {r["id"]: f"One line about item number {i}." for i, r in enumerate(rows)}
+        digest_lib.generate(slug, rows, caller=lambda prompt: (lines, "stub-model"))
+
+    def test_digests_reach_every_rendered_bucket(self) -> None:
+        self.seed_digests()
+        _, state = self.cache.state("proj", self.root)
+        buckets = {
+            "now": state["now"],
+            "next": state["next"],
+            "decisions": state["decisions"],
+            "dreams": state["dreams"],
+            "unlayered": state["unlayered"],
+            "waves": [r for wave in state["waves"] for r in wave["items"]],
+            "tracks": [r for track in state["tracks"] for r in track["items"] if r.get("kind") != "track"],
+        }
+        for name, rows in buckets.items():
+            self.assertTrue(rows, f"{name} is empty; the fixture no longer exercises it")
+            for row in rows:
+                self.assertTrue(row.get("digest"), f"{name} row {row['id']} lost its digest")
+        # the mechanism, not just the symptom: buckets alias the same objects
+        by_id = {r["id"]: r for r in state["all"]}
+        self.assertIs(state["now"][0], by_id[state["now"][0]["id"]])
+        self.assertIs(state["waves"][0]["items"][0], by_id[state["waves"][0]["items"][0]["id"]])
+
+    def test_full_state_reads_cached_drift_and_reconciles_in_background(self) -> None:
+        derive_calls: list[dict] = []
+        original_derive = board_lib.derive
+
+        def spy_derive(root, agent_do=None, markers=board_lib.DECISION_MARKERS, live=False, **kw):
+            derive_calls.append({"live": live, "agent_do": agent_do, "coord": kw.get("coord")})
+            return original_derive(root, agent_do, markers, live=live, **kw)
+
+        gate = threading.Event()
+        drift_threads: list[str] = []
+        original_live_drift = board_lib.live_drift
+
+        def gated_drift(root, agent_do):
+            drift_threads.append(threading.current_thread().name)
+            gate.wait(timeout=30)
+            return original_live_drift(root, agent_do)
+
+        board_lib.derive = spy_derive
+        board_lib.live_drift = gated_drift
+        try:
+            sig, state = self.cache.state("proj", self.root)
+            self.assertEqual(len(derive_calls), 1)
+            self.assertFalse(derive_calls[0]["live"], "the full state must take the cached-drift path")
+            self.assertIsNone(derive_calls[0]["agent_do"], "coordination comes from the serve bundle, never a second fetch")
+            self.assertIsNotNone(derive_calls[0]["coord"], "the signing snapshot feeds the payload")
+            self.assertEqual(state["drift"]["source"], "file", "before the background reconcile lands")
+            self.assertEqual(len(drift_threads), 1)
+            self.assertTrue(drift_threads[0].startswith("drift:"), f"reconcile ran on {drift_threads[0]}, not in background")
+            stamp = self.cache.drift_stamps.get(str(self.root), 0)
+            gate.set()
+            self.cache.drift_jobs[str(self.root)][1].join(timeout=30)
+            self.assertGreater(self.cache.drift_stamps.get(str(self.root), 0), stamp)
+            sig2, state2 = self.cache.state("proj", self.root)
+            self.assertNotEqual(sig, sig2, "the landed drift re-signs the stream")
+            self.assertEqual(state2["drift"]["source"], "reconcile")
+            self.assertEqual(state2["drift"]["count"], 2)
+            self.assertEqual(state2["drift"]["file"]["count"], 1, "the written file's age stays beside the live read")
+        finally:
+            board_lib.derive = original_derive
+            board_lib.live_drift = original_live_drift
+
+    def test_fast_state_ships_unknown_coordination_never_zeros(self) -> None:
+        cold = serve_lib.fast_state("proj", self.root)
+        self.assertTrue(cold["building"])
+        self.assertIsNone(cold["peers"], "unread peers are unknown, not an empty list")
+        self.assertIsNone(cold["coord"])
+        self.assertIsNone(cold["attention"])
+        self.assertIn("digests", cold)
+        claimed = next(r for r in cold["all"] if r["id"] == "mn-cccccc")
+        self.assertEqual(claimed["claimant"]["liveness"], "unknown")
+        self.assertEqual(claimed["claimant"]["attention"], "unknown")
+        in_now = next(r for r in cold["now"] if r["id"] == "mn-cccccc")
+        self.assertEqual(in_now["claimant"]["attention"], "unknown", "the marking reaches the rendered bucket")
+        # a warm bundle folds in whole, through the same canonical core fold
+        self.cache.bundle(self.root)
+        warm = serve_lib.fast_state("proj", self.root)
+        self.assertTrue(warm["building"], "commits and live drift are still on their way")
+        self.assertEqual(len(warm["peers"]), 4)
+        self.assertEqual(warm["attention"]["needs-user"], 1)
+        self.assertTrue(warm["coord"]["claims"])
+        claimed = next(r for r in warm["all"] if r["id"] == "mn-cccccc")
+        self.assertEqual(claimed["claimant"]["attention"], "needs-user")
+        self.assertIsNotNone(warm["coord_refreshed_ago"])
+
+    def test_signature_holds_still_while_only_the_clock_moves(self) -> None:
+        coord = dict(board_lib.EMPTY_COORD)
+        young = [{"agent_id": "session-deadbeefdead", "status": "active", "age": "3s ago", "age_seconds": 3,
+                  "pulse": {"status": "working", "latest_prompt": "fix it", "updated_at": "2026-08-31T00:00:00Z", "turns": 4}}]
+        old = [{"agent_id": "session-deadbeefdead", "status": "active", "age": "9m ago", "age_seconds": 540,
+                "pulse": {"status": "working", "latest_prompt": "fix it", "updated_at": "2026-08-31T00:09:00Z", "turns": 4}}]
+        self.assertEqual(serve_lib.coord_digest(young, coord), serve_lib.coord_digest(old, coord),
+                         "unchanged peers must not re-sign as their ages tick")
+        changed = [{**young[0], "pulse": {**young[0]["pulse"], "status": "needs-user"}}]
+        self.assertNotEqual(serve_lib.coord_digest(young, coord), serve_lib.coord_digest(changed, coord),
+                            "a real attention change must re-sign")
+
+    def test_concurrent_state_requests_share_one_derive(self) -> None:
+        gate = threading.Event()
+        count: list[int] = []
+        original = board_lib.derive
+
+        def gated_derive(root, agent_do=None, markers=board_lib.DECISION_MARKERS, live=False, **kw):
+            count.append(1)
+            gate.wait(timeout=30)
+            return original(root, agent_do, markers, live=live, **kw)
+
+        board_lib.derive = gated_derive
+        try:
+            results: list[tuple] = []
+            workers = [threading.Thread(target=lambda: results.append(self.cache.state("proj", self.root))) for _ in range(5)]
+            for worker in workers:
+                worker.start()
+            gate.set()
+            for worker in workers:
+                worker.join(timeout=60)
+            self.assertEqual(len(results), 5)
+            self.assertEqual(len(count), 1, "five concurrent requests, one derive")
+            self.assertTrue(all(r[0] == results[0][0] for r in results), "every request left with the shared state")
+        finally:
+            board_lib.derive = original
+
+    def test_overlay_coordination_matches_core_fetched_coordination(self) -> None:
+        peers = board_lib.coord_peers(self.root, self.stub)
+        coord = board_lib.coord_snapshot(self.root, self.stub, peers)
+        via_overlay = board_lib.derive(self.root, None, coord={"peers": peers, "coord": coord})
+        via_core = board_lib.derive(self.root, self.stub)
+        for key in ("peers", "attention", "coord"):
+            self.assertEqual(via_overlay[key], via_core[key], key)
+        self.assertEqual([r["id"] for r in via_overlay["now"]], [r["id"] for r in via_core["now"]])
+        self.assertEqual(via_overlay["now"][0]["claimant"], via_core["now"][0]["claimant"])
+
+    def test_state_failure_answers_structured_instead_of_disconnecting(self) -> None:
+        serve_lib.register_board(self.root)
+        with (self.root / ".manna" / "issues.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write('{"id":"mn-broken"}\n')
+        server = ThreadingHTTPServer(("127.0.0.1", 0), serve_lib.Handler)
+        server.daemon_threads = True
+        server.stopping = False
+        server.started_at = "test"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            for path in ("/proj/api/state", "/proj/api/state?fast=1"):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(base + path, timeout=30)
+                self.assertEqual(caught.exception.code, 500, path)
+                payload = json.loads(caught.exception.read())
+                self.assertIn("malformed", payload["error"], path)
+        finally:
+            server.stopping = True
+            server.shutdown()
+            server.server_close()
+
+    def test_stale_binary_is_refused_with_the_rebuild_command(self) -> None:
+        scratch = Path(self.tmp.name) / "binaries"
+        scratch.mkdir()
+        binary = scratch / "manna-core"
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        source = scratch / "state.rs"
+        source.write_text("// src\n", encoding="utf-8")
+        os.utime(binary, (1000, 1000))
+        os.utime(source, (2000, 2000))
+        error = board_lib._stale_binary_error(binary, [source])
+        self.assertIsNotNone(error)
+        self.assertIn("state.rs", error)
+        self.assertIn("cargo build --release", error)
+        os.utime(binary, (3000, 3000))
+        self.assertIsNone(board_lib._stale_binary_error(binary, [source]), "a fresh binary passes")
 
 
 class CliLifecycleTests(unittest.TestCase):

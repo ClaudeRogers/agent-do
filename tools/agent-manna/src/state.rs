@@ -42,6 +42,12 @@ pub struct StateOptions {
     pub decision_markers: Vec<String>,
     pub agent_do: Option<PathBuf>,
     pub live_drift: bool,
+    /// A caller-supplied coord snapshot (JSON file holding `{"peers": [...],
+    /// "coord": {...}}`). When present, presence is read from this file instead
+    /// of being fetched, so the caller's cache signature and this payload are
+    /// built from the same observation. Attention is still ranked here: the
+    /// core stays the one authority for what a peer's state means.
+    pub coord_file: Option<PathBuf>,
 }
 
 impl Default for StateOptions {
@@ -51,6 +57,10 @@ impl Default for StateOptions {
             Ok(value) => Some(PathBuf::from(value)),
             Err(_) => Some(PathBuf::from("agent-do")),
         };
+        let coord_file = match std::env::var("MANNA_STATE_COORD_FILE") {
+            Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
+            _ => None,
+        };
         StateOptions {
             decision_markers: DEFAULT_DECISION_MARKERS
                 .iter()
@@ -58,6 +68,7 @@ impl Default for StateOptions {
                 .collect(),
             agent_do,
             live_drift: std::env::var("MANNA_STATE_LIVE_DRIFT").as_deref() != Ok("0"),
+            coord_file,
         }
     }
 }
@@ -462,6 +473,37 @@ fn collect_coord(root: &Path, agent_do: Option<&Path>, peers: &[Value]) -> Value
     })
     .collect();
     json!({"claims": claims, "contention": contention, "drops": drops, "needs": needs})
+}
+
+/// Read a caller-supplied coord snapshot. Peer rows are taken as given (they
+/// are the same slim shape `collect_peers` builds) except for `attention`,
+/// which is always re-ranked here so a caller cannot ship a stale or divergent
+/// ranking into the canonical model.
+fn coord_overlay(options: &StateOptions) -> Option<(Vec<Value>, Value)> {
+    let path = options.coord_file.as_deref()?;
+    let text = fs::read_to_string(path).ok()?;
+    let payload: Value = serde_json::from_str(&text).ok()?;
+    let peers: Vec<Value> = payload
+        .get("peers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(Value::is_object)
+        .map(|mut peer| {
+            let rank = attention_rank(&peer);
+            peer.as_object_mut()
+                .unwrap()
+                .insert("attention".to_string(), Value::String(rank.to_string()));
+            peer
+        })
+        .collect();
+    let coord = payload
+        .get("coord")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(empty_coord);
+    Some((peers, coord))
 }
 
 fn identity_hex(value: Option<&str>) -> String {
@@ -1159,6 +1201,9 @@ pub fn derive_board_state(root: &Path, options: &StateOptions) -> Result<Value, 
     let (trailers, peers, coord, drift, federation, relations) = thread::scope(|scope| {
         let trailer_job = scope.spawn(|| git_trailers(&root, is_repo));
         let presence_job = scope.spawn(|| {
+            if let Some(overlay) = coord_overlay(options) {
+                return overlay;
+            }
             let peers = collect_peers(&root, options.agent_do.as_deref());
             let coord = collect_coord(&root, options.agent_do.as_deref(), &peers);
             (peers, coord)
@@ -1274,6 +1319,7 @@ mod tests {
                     .collect(),
                 agent_do: None,
                 live_drift: false,
+                coord_file: None,
             },
         )
         .unwrap();
@@ -1334,6 +1380,43 @@ mod tests {
     }
 
     #[test]
+    fn coord_overlay_feeds_presence_and_reranks_attention() {
+        let temp = TempDir::new().unwrap();
+        let coord_path = temp.path().join("coord.json");
+        fs::write(
+            &coord_path,
+            serde_json::to_string(&json!({
+                "peers": [
+                    // active lease + idle pulse: the caller shipped a stale
+                    // "present" rank; the core must re-rank it to idle.
+                    {"agent_id": "session-deadbeefdead", "status": "active",
+                     "pulse": {"status": "idle"}, "attention": "present"},
+                ],
+                "coord": {"claims": [{"path": "tools/x", "owner": "session-deadbeefdead"}],
+                           "contention": [], "drops": [], "needs": []},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let options = StateOptions {
+            decision_markers: Vec::new(),
+            agent_do: None,
+            live_drift: false,
+            coord_file: Some(coord_path),
+        };
+        let (peers, coord) = coord_overlay(&options).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0]["attention"], "idle");
+        assert_eq!(coord["claims"][0]["path"], "tools/x");
+        // Without the file, presence falls back to fetching (none here).
+        let absent = StateOptions {
+            coord_file: Some(temp.path().join("missing.json")),
+            ..options
+        };
+        assert!(coord_overlay(&absent).is_none());
+    }
+
+    #[test]
     fn state_fails_closed_instead_of_dropping_a_malformed_row() {
         let temp = TempDir::new().unwrap();
         fs::create_dir(temp.path().join(".manna")).unwrap();
@@ -1349,6 +1432,7 @@ mod tests {
                 decision_markers: Vec::new(),
                 agent_do: None,
                 live_drift: false,
+                coord_file: None,
             },
         )
         .unwrap_err();

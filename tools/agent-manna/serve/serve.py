@@ -352,16 +352,93 @@ def _digests_enabled() -> bool:
 DIGESTS_ENABLED = _digests_enabled()
 
 
+def coord_digest(peers: list[dict[str, Any]], coord: dict[str, Any]) -> str:
+    """Content digest of a presence snapshot with the clock taken out.
+
+    age/age_seconds and pulse.updated_at move every time the snapshot is
+    read, with zero underlying events; a digest that includes them re-signs
+    unchanged peers on every refresh and turns each re-sign into a full
+    state rebuild. What remains changes only when something happened."""
+    stable_peers = []
+    for peer in peers:
+        slim = {k: v for k, v in peer.items() if k not in ("age", "age_seconds")}
+        if isinstance(slim.get("pulse"), dict):
+            slim["pulse"] = {k: v for k, v in slim["pulse"].items() if k != "updated_at"}
+        stable_peers.append(slim)
+    return hashlib.sha256(json.dumps({"p": stable_peers, "c": coord}, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
+# Buckets whose rows the page renders directly. The core serializes each as an
+# independent copy; the page decorates rows (digests, unknown-coord marking)
+# once, so every bucket must alias the same row objects as all[].
+ROW_BUCKETS = ("now", "next", "decisions", "dreams", "unlayered")
+
+
+def hydrate_buckets(state: dict[str, Any]) -> None:
+    """Re-share row objects: every rendered bucket points at the same dict as
+    all[], keyed by id, so per-row enrichment applied once reaches every
+    sheet — including waves[].items and tracks[].items."""
+    index = {row.get("id"): row for row in state.get("all") or [] if isinstance(row, dict)}
+
+    def swap(rows: list[Any]) -> list[Any]:
+        return [index.get(row.get("id"), row) if isinstance(row, dict) else row for row in rows]
+
+    for key in ROW_BUCKETS:
+        if isinstance(state.get(key), list):
+            state[key] = swap(state[key])
+    for wave in state.get("waves") or []:
+        if isinstance(wave, dict) and isinstance(wave.get("items"), list):
+            wave["items"] = swap(wave["items"])
+    for track in state.get("tracks") or []:
+        if isinstance(track, dict) and isinstance(track.get("items"), list):
+            track["items"] = swap(track["items"])
+
+
+def mark_coordination_unknown(state: dict[str, Any]) -> None:
+    """Coordination not read yet ships as explicitly unknown, never as zero:
+    null peers/coord/attention (the page says "still reading"), and a
+    claimant whose liveness nobody has observed says "unknown", not
+    "unseen" — unseen is a verdict, unknown is the absence of one."""
+    state["peers"] = None
+    state["coord"] = None
+    state["attention"] = None
+    for row in state.get("all") or []:
+        claimant = row.get("claimant") if isinstance(row, dict) else None
+        if isinstance(claimant, dict):
+            claimant["liveness"] = "unknown"
+            claimant["attention"] = "unknown"
+
+
+def attach_digests(slug: str, state: dict[str, Any], schedule_missing: bool) -> None:
+    """Cached digest lines attach to the shared rows (hydrate_buckets first);
+    missing ones may generate in the background, and the cache file's change
+    re-signs the page."""
+    report = digest_lib.apply(slug, state.get("all") or [])
+    state["digests"] = {"ready": report["ready"], "missing": report["missing"], "model": report["model"], "generating": False}
+    if schedule_missing and report["missing_rows"] and DIGESTS_ENABLED:
+        state["digests"]["generating"] = digest_lib.schedule(slug, report["missing_rows"])
+
+
 class BoardCache:
-    """Board state is keyed by durable/git signatures. Coord presence has its
-    own cadence and digest, so streams push when live attention changes even
-    if no repository file moved."""
+    """Two clocks. Board and git state is keyed by a file signature and
+    recomputed only when those files move; the drift a reconcile finds is
+    computed in the background per durable board signature and stamped into
+    the signature when it lands, so a page load never waits on it. Coord
+    presence is refreshed on a cadence and carries a content digest, so
+    streams push when live attention changes even if no repository file
+    moved — and the same snapshot that signs a state is the one folded into
+    its payload."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.gitdirs: dict[str, Path | None] = {}
         self.bundles: dict[str, dict[str, Any]] = {}
         self.states: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.drifts: dict[str, dict[str, Any]] = {}
+        self.drift_jobs: dict[str, tuple[str, threading.Thread]] = {}
+        self.drift_done: dict[str, str] = {}
+        self.drift_stamps: dict[str, int] = {}
+        self.build_locks: dict[str, threading.Lock] = {}
 
     def gitdir(self, root: Path) -> Path | None:
         key = str(root)
@@ -399,8 +476,7 @@ class BoardCache:
         else:
             peers = board_lib.coord_peers(root, AGENT_DO)
             coord = board_lib.coord_snapshot(root, AGENT_DO, peers) if peers else board_lib.EMPTY_COORD
-        digest = hashlib.sha256(json.dumps({"p": peers, "c": coord}, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        value = {"fetched_at": now, "peers": peers, "coord": coord, "digest": digest, "glance": board_lib.glance_from_peers(peers)}
+        value = {"fetched_at": now, "peers": peers, "coord": coord, "digest": coord_digest(peers, coord), "glance": board_lib.glance_from_peers(peers)}
         with self.lock:
             self.bundles[key] = value
         return value
@@ -416,38 +492,111 @@ class BoardCache:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda r: self.bundle(r, now), stale))
 
+    # -- drift clock
+
+    def schedule_drift(self, key: str, root: Path, base_sig: str) -> None:
+        """One background reconcile per board at a time, per base signature.
+
+        Live drift is `manna reconcile --json`, and reconcile serializes on
+        the board lock with every other consumer (SessionEnd hooks, other
+        pages, the daemon's own refresh): measured 41.7s of lock convoy on a
+        242-row board. A page load never waits on it — the state ships the
+        last finished drift, a background run brings it current, and the
+        drift stamp in the stream signature pushes the update when it lands.
+        """
+        with self.lock:
+            job = self.drift_jobs.get(key)
+            if job and job[0] == base_sig and job[1].is_alive():
+                return
+            if self.drift_done.get(key) == base_sig:
+                return
+
+            def run() -> None:
+                drift = board_lib.live_drift(root, AGENT_DO)
+                with self.lock:
+                    if drift is not None:
+                        self.drifts[key] = drift
+                    self.drift_done[key] = base_sig
+                    self.drift_stamps[key] = self.drift_stamps.get(key, 0) + 1
+
+            thread = threading.Thread(target=run, name=f"drift:{root.name}", daemon=True)
+            self.drift_jobs[key] = (base_sig, thread)
+            thread.start()
+
+    def overlay_drift(self, key: str, state: dict[str, Any]) -> None:
+        """The last finished background reconcile replaces the file read, in
+        the same shape the core emits for a live run; the file part stays
+        beside it so the page can still show the written drift's age."""
+        with self.lock:
+            live = self.drifts.get(key)
+        if not live:
+            return
+        file_part = state["drift"].get("file") if isinstance(state.get("drift"), dict) else None
+        state["drift"] = {
+            "present": True,
+            "generated_at": live.get("generated_at"),
+            "findings": live.get("findings") or [],
+            "count": live.get("count", 0),
+            "kinds": live.get("kinds") or {},
+            "source": "reconcile",
+            "file": file_part,
+        }
+
     # -- the page
 
-    def signature(self, root: Path, slug: str | None = None) -> str:
+    def signature(self, root: Path, slug: str | None = None, bundle: dict[str, Any] | None = None) -> str:
         """What a board stream watches: board/git files, live presence,
-        federation targets, and the optional digest cache."""
-        sig = (self.base_signature(root) + "|coord:" + self.bundle(root)["digest"]
-               + "|federation:" + federation_signature())
+        federation targets, the drift stamp (bumped when a background
+        reconcile finishes, so the page updates without having waited), and
+        the optional digest cache."""
+        bundle = bundle if bundle is not None else self.bundle(root)
+        sig = (self.base_signature(root) + "|coord:" + bundle["digest"]
+               + "|federation:" + federation_signature()
+               + "|drift:" + str(self.drift_stamps.get(str(root), 0)))
         if slug:
             sig += "|" + self.digest_signature(slug)
         return sig
 
+    def build_lock(self, slug: str) -> threading.Lock:
+        with self.lock:
+            return self.build_locks.setdefault(slug, threading.Lock())
+
     def state(self, slug: str, root: Path) -> tuple[str, dict[str, Any]]:
-        sig = self.signature(root, slug)
+        bundle = self.bundle(root)
+        sig = self.signature(root, slug, bundle)
         with self.lock:
             cached = self.states.get(slug)
             if cached and cached[0] == sig:
                 return cached
-        bundle = self.bundle(root)
-        state = board_lib.derive(root, AGENT_DO, decision_markers(), live=True)
-        state["slug"] = slug
-        state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
-        state["coord_refresh_seconds"] = COORD_REFRESH_SECONDS
-        state["act_token"] = ACT_TOKEN
-        state["actor"] = serve_identity()["session_id"]
-        # Digests: cached lines attach now; missing ones generate in the
-        # background, and the cache file's change re-signs the page.
-        report = digest_lib.apply(slug, state["all"])
-        state["digests"] = {"ready": report["ready"], "missing": report["missing"], "model": report["model"], "generating": False}
-        if report["missing_rows"] and DIGESTS_ENABLED:
-            state["digests"]["generating"] = digest_lib.schedule(slug, report["missing_rows"])
-        with self.lock:
-            self.states[slug] = (sig, state)
+        # Singleflight: the first request per signature derives; concurrent
+        # requests (initial fetch, SSE, summary, ask, handoff) wait on the
+        # same lock and leave with the state that request built.
+        with self.build_lock(slug):
+            with self.lock:
+                cached = self.states.get(slug)
+                if cached and cached[0] == sig:
+                    return cached
+            key = str(root)
+            # Cached-drift core read, with the very snapshot that signed this
+            # state folded in by the core. A full state never reconciles
+            # inline (old serve.py measured the 41.7s lock convoy; the rebase
+            # reintroduced it inline at 36-60s per page).
+            state = board_lib.derive(
+                root, None, decision_markers(), live=False,
+                coord={"peers": bundle["peers"], "coord": bundle["coord"]},
+            )
+            hydrate_buckets(state)
+            self.overlay_drift(key, state)
+            state["slug"] = slug
+            state["coord_refreshed_ago"] = round(time.monotonic() - bundle["fetched_at"], 1)
+            state["coord_refresh_seconds"] = COORD_REFRESH_SECONDS
+            state["act_token"] = ACT_TOKEN
+            state["actor"] = serve_identity()["session_id"]
+            attach_digests(slug, state, schedule_missing=True)
+            if self.gitdir(root) is not None:
+                self.schedule_drift(key, root, self.base_signature(root))
+            with self.lock:
+                self.states[slug] = (sig, state)
         return sig, state
 
     def glance(self, root: Path) -> dict[str, Any]:
@@ -544,16 +693,37 @@ def attach_resolved_relations(state: dict[str, Any], payload: dict[str, Any] | N
         federation["resolved"] = True
 
 
+# A bundle this much older than its cadence is history, not presence: the
+# fast path folds it in only while it could still describe the live room.
+FAST_BUNDLE_MAX_AGE = COORD_REFRESH_SECONDS * 3
+
+
 def fast_state(slug: str, root: Path) -> dict[str, Any]:
     """The cached-drift core model, so every sheet paints before live coord
-    and reconcile complete. `building` marks the intentional live-data gap."""
+    and reconcile complete. An already-warm coord bundle is folded in whole;
+    a cold one ships as explicitly unknown, never as zero peers. `building`
+    marks the intentional live-data gap either way."""
     with CACHE.lock:
         bundle = CACHE.bundles.get(str(root))
-    if bundle is None or time.monotonic() - bundle["fetched_at"] >= COORD_REFRESH_SECONDS * 3:
+    warm = bundle is not None and time.monotonic() - bundle["fetched_at"] < FAST_BUNDLE_MAX_AGE
+    if not warm:
         threading.Thread(target=lambda: CACHE.bundle(root), name=f"warm:{slug}", daemon=True).start()
-    state = board_lib.derive(root, None, decision_markers(), live=False)
-    digest_lib.apply(slug, state["all"])
-    state.update({"slug": slug, "act_token": ACT_TOKEN, "actor": serve_identity()["session_id"], "coord_refresh_seconds": COORD_REFRESH_SECONDS, "coord_refreshed_ago": None, "building": True})
+    state = board_lib.derive(
+        root, None, decision_markers(), live=False,
+        coord={"peers": bundle["peers"], "coord": bundle["coord"]} if warm else None,
+    )
+    hydrate_buckets(state)
+    if not warm:
+        mark_coordination_unknown(state)
+    attach_digests(slug, state, schedule_missing=False)
+    state.update({
+        "slug": slug,
+        "act_token": ACT_TOKEN,
+        "actor": serve_identity()["session_id"],
+        "coord_refresh_seconds": COORD_REFRESH_SECONDS,
+        "coord_refreshed_ago": round(time.monotonic() - bundle["fetched_at"], 1) if warm else None,
+        "building": True,
+    })
     return state
 
 
@@ -708,23 +878,30 @@ class Handler(SimpleHTTPRequestHandler):
         rest = parts[1:]
         if not rest:
             return self.send_page("board.html")
-        if rest == ["api", "state"]:
-            if urllib.parse.parse_qs(parsed.query).get("fast", ["0"])[0] == "1":
-                return self.send_json(fast_state(slug, root))
-            _, state = CACHE.state(slug, root)
-            return self.send_json(state)
-        if rest == ["api", "events"]:
-            return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
-        if rest == ["api", "summary"]:
-            return self.send_summary(slug, root, parsed.query)
-        if rest == ["api", "handoff"]:
-            return self.send_handoff(slug, root, parsed.query)
-        if rest == ["api", "ask"]:
-            question = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
-            if not DIGESTS_ENABLED:
-                return self.send_json({"answer": None, "cited": [], "error": "asking needs a model credential (AGENT_DO_SERVE_AI)"})
-            _, state = CACHE.state(slug, root)
-            return self.send_json(digest_lib.ask(state.get("all", []), question))
+        # A derive failure (stale binary, malformed board row, dead core) is
+        # an answer, not a dropped connection: the page gets a structured
+        # error payload it can show instead of a disconnect.
+        try:
+            if rest == ["api", "state"]:
+                if urllib.parse.parse_qs(parsed.query).get("fast", ["0"])[0] == "1":
+                    return self.send_json(fast_state(slug, root))
+                _, state = CACHE.state(slug, root)
+                return self.send_json(state)
+            if rest == ["api", "events"]:
+                return self.stream(lambda: CACHE.signature(root, slug), lambda: CACHE.state(slug, root)[1])
+            if rest == ["api", "summary"]:
+                return self.send_summary(slug, root, parsed.query)
+            if rest == ["api", "handoff"]:
+                return self.send_handoff(slug, root, parsed.query)
+            if rest == ["api", "ask"]:
+                question = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+                if not DIGESTS_ENABLED:
+                    return self.send_json({"answer": None, "cited": [], "error": "asking needs a model credential (AGENT_DO_SERVE_AI)"})
+                _, state = CACHE.state(slug, root)
+                return self.send_json(digest_lib.ask(state.get("all", []), question))
+        except RuntimeError as error:
+            sys.stdout.write(f"[error] {slug} {'/'.join(rest)}: {error}\n"); sys.stdout.flush()
+            return self.send_json({"error": str(error), "slug": slug}, HTTPStatus.INTERNAL_SERVER_ERROR)
         return self.send_json({"error": "unknown path"}, HTTPStatus.NOT_FOUND)
 
     def route_api(self, parts: list[str], query: str) -> None:
@@ -777,14 +954,23 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.end_headers()
         previous = None
+        reported = None
         try:
             while not getattr(self.server, "stopping", False):
-                sig = signature_fn()
-                if sig != previous:
-                    payload = json.dumps(payload_fn(), ensure_ascii=False, separators=(",", ":"))
-                    self.wfile.write(f"event: state\ndata: {payload}\n\n".encode("utf-8"))
-                    previous = sig
-                else:
+                # A derive failure must not tear the stream down: the page
+                # keeps its last state, and the next tick retries.
+                try:
+                    sig = signature_fn()
+                    if sig != previous:
+                        payload = json.dumps(payload_fn(), ensure_ascii=False, separators=(",", ":"))
+                        self.wfile.write(f"event: state\ndata: {payload}\n\n".encode("utf-8"))
+                        previous = sig
+                    else:
+                        self.wfile.write(b": hb\n\n")
+                except RuntimeError as error:
+                    if str(error) != reported:
+                        reported = str(error)
+                        sys.stdout.write(f"[stream error] {error}\n"); sys.stdout.flush()
                     self.wfile.write(b": hb\n\n")
                 self.wfile.flush()
                 time.sleep(POLL_INTERVAL_SECONDS)

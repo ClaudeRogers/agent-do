@@ -329,15 +329,15 @@ def slim_pulse(pulse: Any) -> dict[str, Any] | None:
 
 
 def attention_rank(peer: dict[str, Any]) -> str:
+    """Mirror of the Rust core's ranking (state.rs attention_rank), so the
+    estate glance and the board page count the same peer the same way."""
     liveness = peer.get("status")
     pulse = peer.get("pulse") or {}
     pstatus = pulse.get("status")
     if liveness in ("dead", "stopped", "stale"):
         return "gone"
-    if pstatus in ("needs-user", "failed", "working", "finished", "ended"):
+    if pstatus in ("needs-user", "failed", "working", "idle", "finished", "ended"):
         return pstatus
-    if liveness == "active":
-        return "present"
     if liveness == "idle":
         return "idle"
     return "present"
@@ -466,6 +466,31 @@ def strip_markers(title: str) -> str:
     return re.sub(r"^(\s*\[[^\]]*\]\s*)+", "", title).strip() or title
 
 
+def _stale_binary_error(binary: Path, sources: list[Path]) -> str | None:
+    """A binary older than the sources the daemon's health hash follows is a
+    lie waiting to be served: the daemon restarts "clean" on a source change
+    and then renders yesterday's contract. Name the rebuild instead."""
+    try:
+        built = binary.stat().st_mtime
+    except OSError:
+        return None
+    newest_path: Path | None = None
+    newest = built
+    for path in sources:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > newest:
+            newest, newest_path = mtime, path
+    if newest_path is None:
+        return None
+    return (
+        f"manna-core binary is older than {newest_path.name}; rebuild it: "
+        f"cargo build --release --manifest-path {MANNA_TOOL_DIR / 'Cargo.toml'}"
+    )
+
+
 def _state_binary() -> Path:
     override = os.environ.get("MANNA_STATE_BINARY")
     if override:
@@ -473,10 +498,25 @@ def _state_binary() -> Path:
         if path.is_file() and os.access(path, os.X_OK):
             return path
         raise RuntimeError(f"MANNA_STATE_BINARY is not executable: {path}")
-    wrapper = MANNA_TOOL_DIR / "agent-manna"
-    if wrapper.is_file() and os.access(wrapper, os.X_OK):
-        return wrapper
-    raise RuntimeError("manna state wrapper is unavailable")
+    sources = [*sorted((MANNA_TOOL_DIR / "src").glob("*.rs")), MANNA_TOOL_DIR / "Cargo.toml"]
+    for candidate in (
+        MANNA_TOOL_DIR / "target" / "release" / "manna-core",
+        MANNA_TOOL_DIR / "target" / "debug" / "manna-core",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            stale = _stale_binary_error(candidate, sources)
+            if stale:
+                raise RuntimeError(stale)
+            return candidate
+    import shutil
+
+    on_path = shutil.which("manna-core")
+    if on_path:
+        return Path(on_path)
+    raise RuntimeError(
+        "manna-core binary is unavailable; build it: "
+        f"cargo build --release --manifest-path {MANNA_TOOL_DIR / 'Cargo.toml'}"
+    )
 
 
 def derive(
@@ -484,11 +524,17 @@ def derive(
     agent_do: Path | None = None,
     markers: tuple[str, ...] = DECISION_MARKERS,
     live: bool = False,
+    coord: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     """Read the canonical core model. Legacy keyword inputs are accepted so
     callers can migrate without splitting the state contract; they are never
-    used to re-derive or overlay the core result."""
+    used to re-derive or overlay the core result.
+
+    `coord` hands the core an already-fetched presence snapshot
+    ({"peers": [...], "coord": {...}}) so one observation feeds both the
+    caller's cache signature and this payload; the core still folds it (and
+    re-ranks attention) itself."""
     command = [str(_state_binary()), "state", "--json"]
     if not live:
         command.append("--cached-drift")
@@ -496,6 +542,18 @@ def derive(
         command.extend(["--decision-marker", marker])
     env = dict(os.environ)
     env["MANNA_STATE_AGENT_DO"] = str(agent_do) if agent_do is not None else "none"
+    env.pop("MANNA_STATE_COORD_FILE", None)
+    coord_file: Path | None = None
+    if coord is not None:
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", prefix="manna-coord-", suffix=".json", delete=False
+        )
+        with handle:
+            json.dump(coord, handle)
+        coord_file = Path(handle.name)
+        env["MANNA_STATE_COORD_FILE"] = str(coord_file)
     try:
         completed = subprocess.run(
             command,
@@ -508,6 +566,12 @@ def derive(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(f"manna state failed: {error}") from error
+    finally:
+        if coord_file is not None:
+            try:
+                coord_file.unlink()
+            except OSError:
+                pass
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
