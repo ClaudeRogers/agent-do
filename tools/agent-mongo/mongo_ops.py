@@ -147,6 +147,9 @@ def _err(msg: str, code: int = 1) -> None:
     print(f"Error: {msg}", file=sys.stderr)
     sys.exit(code)
 
+def _scrub_secrets(msg: str) -> str:
+    return re.sub(r"://[^@/\s]+@", "://****@", msg)
+
 def _parse_filter(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
@@ -542,8 +545,13 @@ def cmd_schema(argv: list[str]) -> None:
     try:
         coll = client[db_name][coll_name]
         docs = list(coll.aggregate([{"$sample": {"size": sample_size}}]))
+        ref = f"{db_name}.{coll_name}"
         if not docs:
-            print(f"Collection {db_name}.{coll_name} is empty.")
+            payload = _envelope("schema", ref=ref, data={"sample_size": 0, "fields": []})
+            if json_mode:
+                _print_json(payload)
+            else:
+                print(f"Collection {ref} is empty.")
             return
 
         # Infer field types across sample
@@ -570,7 +578,6 @@ def cmd_schema(argv: list[str]) -> None:
         schema = [{"field": f, "types": sorted(t), "nullable": "NoneType" in t}
                   for f, t in sorted(fields.items())]
 
-        ref = f"{db_name}.{coll_name}"
         payload = _envelope("schema", ref=ref,
                             data={"sample_size": len(docs), "fields": schema})
         if json_mode:
@@ -671,6 +678,7 @@ def cmd_query(argv: list[str]) -> None:
     client = _connect(uri, provider)
     try:
         coll = client[db_name][coll_name]
+        total = coll.count_documents(filt)
         cursor = coll.find(filt, projection)
         if sort:
             cursor = cursor.sort(list(sort.items()))
@@ -682,13 +690,15 @@ def cmd_query(argv: list[str]) -> None:
         ref = f"{db_name}.{coll_name}"
         payload = _envelope("query", ref=ref,
                             data={"filter": filt, "count": len(docs),
+                                  "total_matching": total,
                                   "limit": limit, "skip": skip,
                                   "projection": projection, "sort": sort,
                                   "documents": docs})
         if json_mode:
             _print_json(payload)
         else:
-            print(f"{ref}  filter={json.dumps(filt)}  ({len(docs)} results)")
+            shown = f"{len(docs)} of {total}" if limit or skip else str(len(docs))
+            print(f"{ref}  filter={json.dumps(filt)}  ({shown} matching results)")
             for doc in docs:
                 print(json.dumps(doc, indent=2, default=str))
                 print()
@@ -1126,7 +1136,7 @@ def main(argv: list[str]) -> int:
     except SystemExit as exc:
         return int(exc.code) if exc.code is not None else 0
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: {_scrub_secrets(str(exc))}", file=sys.stderr)
         return 1
 
 if __name__ == "__main__":

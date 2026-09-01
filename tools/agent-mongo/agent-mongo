@@ -36,7 +36,7 @@ QUERYING
     [--where <filter>]                      JSON or key=value (e.g. externalId=x)
     [--projection <proj>]                   JSON field projection
     [--sort <sort>]                         JSON sort spec (e.g. '{"createdAt":-1}')
-    [--limit N]                             Max results (default: 20)
+    [--limit N]                             Max results (default: 20; 0 = unlimited)
     [--skip N]                              Skip N documents
     [--connection <name>]
     [--json]                                Structured envelope output
@@ -45,6 +45,8 @@ QUERYING
     [--connection <name>]
   aggregate <db> <collection>               Run an aggregation pipeline
     --pipeline <json-or-@file>              Pipeline array as JSON or @path/to/file.json
+    [--confirm]                             Required for $out / $merge pipelines
+    [--dry-run]                             Preview pipeline without running it
     [--connection <name>]
     [--json]
   explain <db> <collection>                 Show query execution plan (RU cost on CosmosDB)
