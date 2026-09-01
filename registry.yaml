@@ -3252,7 +3252,7 @@ tools:
         - own_state
     concurrency: mixed
   jira:
-    description: Jira Cloud and Server/Data Center issue management — projects, issues, sprints, JQL search, and connection profiles
+    description: Jira issues, sprints, and JQL management
     capabilities:
     - manage saved Jira connection profiles (Cloud and Server/Data Center)
     - view, create, comment on, assign, label, transition, and edit issues
