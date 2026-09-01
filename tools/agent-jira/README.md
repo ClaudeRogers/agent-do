@@ -35,13 +35,13 @@ agent-do jira connections add internal \
   --server
 
 # List saved profiles
-agent-do jira connections list
+agent-do jira connections list [--json]
 
 # Change default profile
-agent-do jira connections set-default internal
+agent-do jira connections set-default internal [--json]
 
 # Remove a profile
-agent-do jira connections remove old-profile
+agent-do jira connections remove old-profile [--json]
 ```
 
 The `--connection <name>` flag on any command selects a non-default profile.
@@ -183,7 +183,7 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 |------|-------------|
 | `--connection <name>` | Use a specific connection profile |
 | `--json` | Structured JSON output |
-| `--dry-run` | Preview write operations without making changes (exits 3) |
+| `--dry-run` | Preview write operations without making changes |
 
 ## Exit Codes
 
@@ -191,7 +191,6 @@ agent-do jira sprint add PROJ-123 --sprint 42 [--dry-run] [--json]
 |------|---------|
 | 0 | Success |
 | 1 | Error |
-| 3 | Dry-run preview (no changes made) |
 
 ## Environment
 
