@@ -191,8 +191,8 @@ agent-do strava insights --days 30 --send --provider openai
 
 For Anthropic, use `ANTHROPIC_API_KEY` and `--provider anthropic`. The
 dashboard's **AI guidance** button follows the same flow: it displays the
-payload and requires **Generate guidance** before making a provider request.
-Its **Generate guidance prompt** alternative creates a prompt you can manually
+payload and requires **Use AI API** before making a provider request. Its
+**Create chat prompt** alternative creates a prompt you can manually
 paste into an AI chat subscription instead; it never makes an API request.
 Open an activity's expanded summary and choose **AI activity guidance** for the
 same preview-and-confirmation flow for that individual workout.
