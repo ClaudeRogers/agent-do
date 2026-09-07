@@ -149,12 +149,45 @@ service; the detailed route stream itself remains in the local dashboard and
 is not sent as a route upload. If the basemap cannot load, the dashboard shows
 a local route plot instead.
 
+## Optional AI guidance
+
+AI guidance is opt-in. Start with a local preview; it computes aggregates and
+repeat-route groups on your computer and prints exactly what could be sent:
+
+```bash
+agent-do strava insights --days 30 --preview
+```
+
+The preview excludes activity names, notes, IDs, route polylines, precise
+locations, raw streams, and OAuth material. It may include an opaque local
+repeat-route group with a count of comparable efforts and aggregate pace.
+
+To generate guidance, store an API key in the operating system credential
+store, then explicitly send the previewed aggregate payload:
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | agent-do creds store OPENAI_API_KEY --stdin
+agent-do strava insights --days 30 --send --provider openai
+```
+
+For Anthropic, use `ANTHROPIC_API_KEY` and `--provider anthropic`. The
+dashboard's **AI guidance** button follows the same flow: it displays the
+payload and requires **Generate guidance** before making a provider request.
+Guidance is reflective training feedback, not medical advice or a coaching
+prescription. View prior local receipts with:
+
+```bash
+agent-do strava insights history
+agent-do strava insights show RECEIPT_ID
+```
+
 ## Where data lives
 
 | Data | Location |
 | --- | --- |
 | Client secret and refresh token | OS secure credential store |
 | Profile metadata, activity cache, and optional static dashboard | `~/.agent-do/strava/` |
+| AI insight receipts (redacted payload plus output) | `~/.agent-do/strava/insights/` |
 | Tool code and documentation | the agent-do repository |
 
 `agent-strava` never stages, commits, or pushes personal activity data. Avoid

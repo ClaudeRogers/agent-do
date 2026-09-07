@@ -106,7 +106,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [sms](#sms) | SMS messaging | write | 8 |
 | [spec](#spec) | Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness | mixed | 5 |
 | [ssh](#ssh) | Control remote server sessions | write | 5 |
-| [strava](#strava) | Personal, local-only Strava activity sync and dashboard | mixed | 8 |
+| [strava](#strava) | Personal, local-only Strava activity sync and dashboard | mixed | 9 |
 | [substack](#substack) | Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session | mixed | 11 |
 | [supabase](#supabase) | Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db) | write | 64 |
 | [swarm](#swarm) | Multi-agent orchestration | write | 4 |
@@ -4120,6 +4120,7 @@ Concurrency: `mixed`
 - serve a responsive localhost dashboard with activity summaries, Strava lifetime gear mileage, cached gear activity history, and downloadable gear workbooks
 - summarize 1-week, 1-month, 3-month, and 1-year training ranges with paginated activities and local-only charts
 - export a selected local-cache date range to CSV or a formatted Excel workbook without routes or OAuth secrets
+- preview redacted training aggregates and optionally request AI guidance with OpenAI or Anthropic
 
 **Commands**
 
@@ -4130,6 +4131,7 @@ Concurrency: `mixed`
 - `dashboard`: Generate a local HTML dashboard: dashboard [--open]
 - `export`: Export local cached activities: export \<output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]
 - `gear-export`: Export local gear and associated activities: gear-export \<output.xlsx> [--overwrite]
+- `insights`: Preview or request AI training observations: insights [history|show RECEIPT_ID] [--days N] [--activity TYPE] [--preview] [--send --provider openai|anthropic] [--model MODEL]
 - `serve`: Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]
 
 **Examples**
@@ -4147,19 +4149,22 @@ agent-do strava serve --open
 agent-do strava export activities.xlsx --days 90 --activity run,bike
 # export my Strava gear and its associated activities to Excel
 agent-do strava gear-export gear.xlsx
+# preview private AI training guidance for the last month
+agent-do strava insights --days 30 --preview
 ```
 
 **Credentials**
 
-- Optional: `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`
+- Optional: `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `status`
-- Write (connect/interact/save): `connect`, `dashboard`, `export`, `gear-export`, `init`, `serve`, `sync`
-- sensitive (emits or persists secret material; guard output): `connect`, `init`
+- Write (connect/interact/save): `connect`, `dashboard`, `export`, `gear-export`, `init`, `insights`, `serve`, `sync`
+- sensitive (emits or persists secret material; guard output): `connect`, `init`, `insights`
 - long_running (daemon/stream/session; may never return): `connect`, `serve`
-- composite (one call performs several beats internally): `connect`, `dashboard`, `init`, `serve`, `sync`
+- polymorphic (beat decided by payload or flag at call time): `insights`
+- composite (one call performs several beats internally): `connect`, `dashboard`, `init`, `insights`, `serve`, `sync`
 
 ### substack
 

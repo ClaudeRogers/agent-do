@@ -9,6 +9,7 @@ tools:
     - serve a responsive localhost dashboard with activity summaries, Strava lifetime gear mileage, cached gear activity history, and downloadable gear workbooks
     - summarize 1-week, 1-month, 3-month, and 1-year training ranges with paginated activities and local-only charts
     - export a selected local-cache date range to CSV or a formatted Excel workbook without routes or OAuth secrets
+    - preview redacted training aggregates and optionally request AI guidance with OpenAI or Anthropic
     commands:
       init: 'Create a local profile: init [--client-id ID] [--client-secret-stdin] [--redirect-uri URI]'
       connect: 'Authorize the local profile in a browser: connect [--timeout seconds]'
@@ -17,6 +18,7 @@ tools:
       dashboard: 'Generate a local HTML dashboard: dashboard [--open]'
       export: 'Export local cached activities: export <output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]'
       gear-export: 'Export local gear and associated activities: gear-export <output.xlsx> [--overwrite]'
+      insights: 'Preview or request AI training observations: insights [history|show RECEIPT_ID] [--days N] [--activity TYPE] [--preview] [--send --provider openai|anthropic] [--model MODEL]'
       serve: 'Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]'
     examples:
     - intent: set up a private Strava profile on this computer
@@ -31,6 +33,8 @@ tools:
       command: agent-do strava export activities.xlsx --days 90 --activity run,bike
     - intent: export my Strava gear and its associated activities to Excel
       command: agent-do strava gear-export gear.xlsx
+    - intent: preview private AI training guidance for the last month
+      command: agent-do strava insights --days 30 --preview
     routing:
       discover_keywords:
       - strava
@@ -47,24 +51,30 @@ tools:
       - agent-do strava serve --open
       - agent-do strava export activities.xlsx --days 90
       - agent-do strava gear-export gear.xlsx
+      - agent-do strava insights --days 30 --preview
       default_command: status
     credentials:
       optional:
       - STRAVA_CLIENT_SECRET
       - STRAVA_REFRESH_TOKEN
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
     contracts:
       connect:
       - init
       snapshot:
       - status
+      - insights
       interact:
       - connect
       - serve
+      - insights
       save:
       - sync
       - dashboard
       - export
       - gear-export
+      - insights
       attributes:
         init:
         - composite
@@ -82,6 +92,10 @@ tools:
         serve:
         - composite
         - long_running
+        insights:
+        - composite
+        - polymorphic
+        - sensitive
     concurrency: mixed
   brief:
     description: Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions,

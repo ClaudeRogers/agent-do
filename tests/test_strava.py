@@ -233,6 +233,43 @@ def test_insight_summary_reports_insufficient_and_filtered_data():
     assert result["data_quality"]["sufficient_for_observation"] is False
     assert result["comparison"]["sufficient_for_period_comparison"] is False
 
+def test_repeat_route_groups_are_redacted_and_require_matching_sport_and_path():
+    now = strava.datetime(2026, 9, 7, tzinfo=strava.timezone.utc)
+    route = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    activities = [
+        {"id": 101, "start_date": (now - strava.timedelta(days=3)).isoformat(), "sport_type": "Run", "distance": 5000, "moving_time": 1800, "map": {"summary_polyline": route}},
+        {"id": 202, "start_date": (now - strava.timedelta(days=1)).isoformat(), "sport_type": "Run", "distance": 5100, "moving_time": 1700, "map": {"summary_polyline": route}},
+        {"id": 303, "start_date": (now - strava.timedelta(days=1)).isoformat(), "sport_type": "Ride", "distance": 5000, "moving_time": 1200, "map": {"summary_polyline": route}},
+    ]
+    groups = strava.repeat_route_groups(activities)
+    assert groups[0]["activity_count"] == 2 and groups[0]["sport_type"] == "Run"
+    assert groups[0]["route_group"].startswith("route-")
+    assert "101" not in json.dumps(groups) and "202" not in json.dumps(groups)
+
+def test_insight_receipt_keeps_redacted_summary_locally():
+    with tempfile.TemporaryDirectory() as home:
+        original_home, original_insights = strava.HOME, strava.INSIGHTS
+        try:
+            strava.HOME = Path(home) / "strava"; strava.INSIGHTS = strava.HOME / "insights"
+            receipt = strava.save_insight_receipt("openai", "test-model", {"summary": {"activity_count": 3}}, "A careful observation.")
+            history = strava.insight_receipts()
+            assert history[0]["receipt_id"] == receipt["receipt_id"] and history[0]["input_summary"] == {"summary": {"activity_count": 3}}
+        finally:
+            strava.HOME, strava.INSIGHTS = original_home, original_insights
+
+def test_insights_cli_defaults_to_a_redacted_preview_without_a_provider_call():
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "activities": [
+            {"id": 8, "name": "private home", "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "map": {"summary_polyline": "secret"}},
+            {"id": 9, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1750},
+            {"id": 10, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1700},
+        ]}))
+        result = run("insights", "--days", "30", "--preview", env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0 and '"schema_version": 1' in result.stdout
+        assert "private home" not in result.stdout and "secret" not in result.stdout and '"id"' not in result.stdout
+
 def test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history():
     now = strava.datetime.now(strava.timezone.utc).isoformat()
     cache = {"gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [
@@ -391,5 +428,5 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_insight_summary_is_deterministic_and_contains_only_aggregates(); test_insight_summary_reports_insufficient_and_filtered_data()
+    test_insight_summary_is_deterministic_and_contains_only_aggregates(); test_insight_summary_reports_insufficient_and_filtered_data(); test_repeat_route_groups_are_redacted_and_require_matching_sport_and_path(); test_insight_receipt_keeps_redacted_summary_locally(); test_insights_cli_defaults_to_a_redacted_preview_without_a_provider_call()
     test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_export_rows_estimates_calories_from_strava_kilojoules(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")

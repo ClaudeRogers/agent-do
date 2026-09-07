@@ -6,7 +6,7 @@ writes a token to the profile or activity cache.
 """
 from __future__ import annotations
 
-import argparse, csv, json, os, secrets, subprocess, sys, tempfile, urllib.parse, urllib.request, webbrowser
+import argparse, csv, hashlib, json, math, os, secrets, subprocess, sys, tempfile, urllib.parse, urllib.request, webbrowser
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -14,11 +14,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do")) / "strava"
 PROFILE, CACHE, DASHBOARD = HOME / "profile.json", HOME / "activities.json", HOME / "dashboard.html"
+INSIGHTS = HOME / "insights"
 AUTH_URL, TOKEN_URL, API = "https://www.strava.com/oauth/authorize", "https://www.strava.com/oauth/token", "https://www.strava.com/api/v3"
 INSIGHT_SCHEMA_VERSION = 1
 
 def write_json(path, value):
-    HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
     tmp.chmod(0o600); tmp.replace(path)
@@ -249,7 +250,7 @@ def build_insight_summary(activities, days, activity_filter=None, now=None):
         monday = (stamp - timedelta(days=stamp.weekday())).date().isoformat()
         weeks.setdefault(monday, []).append(activity)
     comparable_pace = [activity for activity in selected if is_running(activity) and activity.get("distance", 0) and activity.get("moving_time", 0)]
-    return {
+    result = {
         "schema_version": INSIGHT_SCHEMA_VERSION,
         "range": {"days": days, "start": cutoff.date().isoformat(), "end": now.date().isoformat(), "activity_filter": activity_filter},
         "summary": insight_metric_summary(selected),
@@ -265,9 +266,133 @@ def build_insight_summary(activities, days, activity_filter=None, now=None):
             "sufficient_for_observation": len(selected) >= 3,
             "has_heart_rate_data": any(activity.get("average_heartrate") is not None for activity in selected),
             "route_comparison_available": False,
-            "notes": ["Route comparisons are not included until local repeat-route grouping is available."] if selected else ["No activities match this selected range and filter."],
+            "notes": ["No activities match this selected range and filter."] if not selected else [],
         },
     }
+    groups = repeat_route_groups(selected)
+    result["repeat_routes"] = groups
+    result["data_quality"]["route_comparison_available"] = bool(groups)
+    if not groups and selected:
+        result["data_quality"]["notes"].append("No comparable repeat routes were found in this selection.")
+    return result
+
+def decode_polyline(encoded):
+    """Decode a Google encoded polyline without retaining or emitting coordinates."""
+    points, index, latitude, longitude = [], 0, 0, 0
+    while index < len(encoded):
+        values = []
+        for _ in range(2):
+            shift, value = 0, 0
+            while True:
+                byte = ord(encoded[index]) - 63; index += 1
+                value |= (byte & 0x1f) << shift; shift += 5
+                if byte < 0x20: break
+            values.append(~(value >> 1) if value & 1 else value >> 1)
+        latitude += values[0]; longitude += values[1]
+        points.append((latitude / 1e5, longitude / 1e5))
+    return points
+
+def route_signature(activity):
+    """Return a coarse local-only route signature, or None for unavailable paths."""
+    encoded = (activity.get("map") or {}).get("summary_polyline")
+    if not encoded: return None
+    try: points = decode_polyline(encoded)
+    except (IndexError, TypeError): return None
+    if len(points) < 2: return None
+    # 0.001 degrees (~111m) tolerates normal GPS jitter without exposing a route.
+    cells = frozenset((round(latitude, 3), round(longitude, 3)) for latitude, longitude in points)
+    return {"cells": cells, "start": points[0], "end": points[-1]}
+
+def route_distance(a, b):
+    latitude = math.radians(b[0] - a[0]); longitude = math.radians(b[1] - a[1])
+    base = math.sin(latitude / 2) ** 2 + math.cos(math.radians(a[0])) * math.cos(math.radians(b[0])) * math.sin(longitude / 2) ** 2
+    return 6371000 * 2 * math.atan2(math.sqrt(base), math.sqrt(1 - base))
+
+def routes_match(first, second):
+    if activity_kind(first).lower() != activity_kind(second).lower(): return False
+    first_distance, second_distance = first.get("distance", 0) or 0, second.get("distance", 0) or 0
+    if not first_distance or not second_distance or min(first_distance, second_distance) / max(first_distance, second_distance) < 0.8: return False
+    one, two = route_signature(first), route_signature(second)
+    if not one or not two: return False
+    union = one["cells"] | two["cells"]
+    overlap = len(one["cells"] & two["cells"]) / len(union) if union else 0
+    same_direction = route_distance(one["start"], two["start"]) + route_distance(one["end"], two["end"]) <= route_distance(one["start"], two["end"]) + route_distance(one["end"], two["start"])
+    return overlap >= 0.6 and same_direction
+
+def repeat_route_groups(activities):
+    """Find comparable local routes and return redacted aggregate observations only."""
+    candidates = [activity for activity in activities if route_signature(activity)]
+    groups = []
+    for activity in candidates:
+        for group in groups:
+            if any(routes_match(activity, member) for member in group):
+                group.append(activity); break
+        else: groups.append([activity])
+    result = []
+    for group in groups:
+        if len(group) < 2: continue
+        metrics = insight_metric_summary(group)
+        seed = min(group, key=started)
+        fingerprint = ";".join(f"{latitude:.3f},{longitude:.3f}" for latitude, longitude in sorted(route_signature(seed)["cells"]))
+        token = hashlib.sha256(f"{activity_kind(seed)}|{fingerprint}".encode()).hexdigest()[:10]
+        result.append({"route_group": f"route-{token}", "sport_type": activity_kind(group[0]), "activity_count": len(group), "distance_km": metrics["distance_km"], "running_pace_seconds_per_km": metrics["running_pace_seconds_per_km"], "cycling_average_speed_mps": metrics["cycling_average_speed_mps"]})
+    return sorted(result, key=lambda item: (-item["activity_count"], item["route_group"]))
+
+def insight_prompt(summary):
+    return """You are a cautious training-reflection assistant. Use only the supplied aggregate data. Give concise, evidence-qualified observations about consistency, recent load, pace/speed, and repeat-route performance. Do not diagnose, prescribe treatment, claim fitness changes without comparable evidence, or invent missing context. Explicitly say when data is insufficient. End with one or two questions the athlete could consider.\n\nTraining summary:\n""" + json.dumps(summary, sort_keys=True)
+
+def provider_key(provider):
+    name = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY" if provider == "anthropic" else None
+    if not name: raise SystemExit("Provider must be openai or anthropic.")
+    try: return secret(name)
+    except SystemExit as exc: raise SystemExit(f"Missing {name}. Store it with: agent-do creds store {name} --stdin") from exc
+
+def provider_request(provider, model, prompt):
+    key = provider_key(provider)
+    if provider == "openai":
+        url, payload, headers = "https://api.openai.com/v1/responses", {"model": model or "gpt-5-mini", "input": prompt}, {"Authorization": f"Bearer {key}"}
+    else:
+        url, payload, headers = "https://api.anthropic.com/v1/messages", {"model": model or "claude-sonnet-4-5", "max_tokens": 900, "messages": [{"role": "user", "content": prompt}]}, {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response: reply = json.load(response)
+    except Exception as exc: raise SystemExit(f"{provider.title()} insight request failed: {exc}") from exc
+    if provider == "openai":
+        text = reply.get("output_text") or "".join(part.get("text", "") for item in reply.get("output", []) for part in item.get("content", []) if part.get("type") == "output_text")
+    else:
+        text = "".join(part.get("text", "") for part in reply.get("content", []) if part.get("type") == "text")
+    if not text.strip(): raise SystemExit(f"{provider.title()} returned no insight text.")
+    return text.strip()
+
+def save_insight_receipt(provider, model, summary, output):
+    receipt_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+    receipt = {"receipt_id": receipt_id, "schema_version": INSIGHT_SCHEMA_VERSION, "created_at": datetime.now(timezone.utc).isoformat(), "provider": provider, "model": model, "input_summary": summary, "output": output, "disclaimer": "Reflective training observations only; not medical advice or a coaching prescription."}
+    write_json(INSIGHTS / f"{receipt_id}.json", receipt)
+    return receipt
+
+def insight_receipts():
+    if not INSIGHTS.exists(): return []
+    return sorted((json.loads(path.read_text()) for path in INSIGHTS.glob("*.json")), key=lambda item: item["created_at"], reverse=True)
+
+def insight(args):
+    if args.insights_action == "history":
+        print(json.dumps([{key: receipt[key] for key in ("receipt_id", "created_at", "provider", "model")} for receipt in insight_receipts()], indent=2)); return
+    if args.insights_action == "show":
+        if not args.receipt_id: raise SystemExit("Usage: agent-do strava insights show RECEIPT_ID")
+        path = INSIGHTS / f"{args.receipt_id}.json"
+        if not path.exists(): raise SystemExit(f"No local insight receipt: {args.receipt_id}")
+        print(path.read_text(), end=""); return
+    if args.days < 1: raise SystemExit("--days must be at least 1")
+    cache = read_json(CACHE, "activity cache; run: agent-do strava sync")
+    summary = build_insight_summary(cache["activities"], args.days, args.activity)
+    if args.preview or not args.send:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        if not args.send: print("\nPreview only. Re-run with --send --provider openai|anthropic to make an external AI request.", file=sys.stderr)
+        if not args.send: return
+    if not args.provider: raise SystemExit("--send requires --provider openai or --provider anthropic")
+    output = provider_request(args.provider, args.model, insight_prompt(summary))
+    receipt = save_insight_receipt(args.provider, args.model or ("gpt-5-mini" if args.provider == "openai" else "claude-sonnet-4-5"), summary, output)
+    print(json.dumps({"receipt_id": receipt["receipt_id"], "output": output, "disclaimer": receipt["disclaimer"]}, indent=2))
 
 def export_rows(activities, units):
     """Return a shareable, normalized activity table without route or token data."""
@@ -586,6 +711,8 @@ GEAR_MODAL_UI_SCRIPT = """<style>.gear-activities li>b{margin-right:.35rem}</sty
 DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", GEAR_MODAL_UI_SCRIPT + "</html>")
 GEAR_EXPORT_UI_SCRIPT = """<script>if(location.pathname==='/gear')document.addEventListener('DOMContentLoaded',()=>{const button=document.createElement('button');button.type='button';button.id='export-gear';button.textContent='Export Gear';button.onclick=()=>window.location.assign('/api/gear-export');document.querySelector('header .controls').append(button)})</script>"""
 DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", GEAR_EXPORT_UI_SCRIPT + "</html>")
+AI_GUIDANCE_UI_SCRIPT = """<script>(()=>{if(location.pathname==='/gear')return;document.addEventListener('DOMContentLoaded',()=>{const button=document.createElement('button'),dialog=document.createElement('dialog'),body=document.createElement('div');button.type='button';button.id='ai-guidance';button.textContent='AI guidance';body.className='detail';dialog.append(body);document.body.append(dialog);button.onclick=async()=>{const response=await fetch('/api/insights/preview?'+new URLSearchParams({days,type:activityType})),data=await response.json();if(data.error)return alert(data.error);body.innerHTML='<h2>AI guidance preview</h2><p>Only this aggregate summary will leave your device. Routes, activity names, notes, and raw streams are excluded.</p><pre></pre><p><button id=generate-guidance>Generate guidance</button> <button id=close-guidance>Cancel</button></p>';body.querySelector('pre').textContent=JSON.stringify(data,null,2);body.querySelector('#close-guidance').onclick=()=>dialog.close();body.querySelector('#generate-guidance').onclick=async()=>{const provider=prompt('Provider: openai or anthropic','openai');if(!provider)return;const result=await fetch('/api/insights/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days,type:activityType,provider})});const insight=await result.json();if(insight.error)return alert(insight.error);body.innerHTML='<h2>AI guidance</h2><pre></pre><small></small><p><button id=close-guidance>Close</button></p>';body.querySelector('pre').textContent=insight.output;body.querySelector('small').textContent=insight.disclaimer;body.querySelector('#close-guidance').onclick=()=>dialog.close()};dialog.showModal()};document.querySelector('header .controls').append(button)})})()</script>"""
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", AI_GUIDANCE_UI_SCRIPT + "</html>")
 
 class LocalDashboard(BaseHTTPRequestHandler):
     def reply(self, status, payload, content_type="application/json; charset=utf-8"):
@@ -597,6 +724,13 @@ class LocalDashboard(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ("/", "/gear"): return self.reply(200, DYNAMIC_DASHBOARD, "text/html; charset=utf-8")
+        if parsed.path == "/api/insights/preview":
+            try:
+                query = urllib.parse.parse_qs(parsed.query); days = int(query.get("days", [30])[0]); activity_type = query.get("type", [None])[0]
+                if not 1 <= days <= 3660: raise ValueError("Insight preview requires a valid date range")
+                data = read_json(CACHE, "activity cache; run Sync now after connecting")
+                return self.reply(200, build_insight_summary(data["activities"], days, activity_type))
+            except (ValueError, SystemExit) as exc: return self.reply(400, {"error": str(exc)})
         if parsed.path == "/api/export":
             try:
                 query = urllib.parse.parse_qs(parsed.query)
@@ -642,6 +776,19 @@ class LocalDashboard(BaseHTTPRequestHandler):
             return self.reply(200, result)
         except (ValueError, SystemExit) as exc: return self.reply(400, {"error": str(exc)})
     def do_POST(self):
+        if self.path == "/api/insights/generate":
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                if size > 4096: raise ValueError("Insight request is too large")
+                body = json.loads(self.rfile.read(size) or b"{}")
+                days, provider, activity_type = int(body.get("days", 30)), body.get("provider"), body.get("type")
+                if not 1 <= days <= 3660 or provider not in ("openai", "anthropic"): raise ValueError("A valid date range and provider are required")
+                data = read_json(CACHE, "activity cache; run Sync now after connecting")
+                summary = build_insight_summary(data["activities"], days, activity_type)
+                output = provider_request(provider, body.get("model"), insight_prompt(summary))
+                receipt = save_insight_receipt(provider, body.get("model") or ("gpt-5-mini" if provider == "openai" else "claude-sonnet-4-5"), summary, output)
+                return self.reply(200, {"receipt_id": receipt["receipt_id"], "output": output, "disclaimer": receipt["disclaimer"]})
+            except (ValueError, json.JSONDecodeError, SystemExit) as exc: return self.reply(400, {"error": str(exc)})
         if self.path == "/api/preferences":
             try:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -708,9 +855,10 @@ def main():
     p = sub.add_parser("dashboard", help="Generate the local HTML dashboard"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("export", help="Export local cached activities to CSV or Excel"); p.add_argument("output", help="New .csv or .xlsx file path"); p.add_argument("--format", choices=("csv", "xlsx")); p.add_argument("--days", type=int, default=90); filters = p.add_mutually_exclusive_group(); filters.add_argument("--activity", action="append", help="Activity groups, comma-delimited or bracketed (for example run,bike or [run,bike])"); filters.add_argument("--type", help="Exact Strava sport type (legacy single-filter form)"); p.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
     p = sub.add_parser("gear-export", help="Export local gear and associated activities to Excel"); p.add_argument("output", help="New .xlsx file path"); p.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
+    p = sub.add_parser("insights", help="Preview or request opt-in AI training observations from local aggregates"); p.add_argument("insights_action", nargs="?", choices=("history", "show")); p.add_argument("receipt_id", nargs="?"); p.add_argument("--days", type=int, default=30); p.add_argument("--activity", help="Exact Strava sport type"); p.add_argument("--preview", action="store_true", help="Print the redacted local payload without sending it"); p.add_argument("--send", action="store_true", help="Send the reviewed aggregate payload to the selected provider"); p.add_argument("--provider", choices=("openai", "anthropic")); p.add_argument("--model")
     p = sub.add_parser("serve", help="Sync once, then serve the responsive local dashboard"); p.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost")); p.add_argument("--port", type=int, default=8765); p.add_argument("--days", type=int, default=90); p.add_argument("--no-sync", action="store_true", help="Serve the existing cache without syncing"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("status", help="Show local profile status"); p.add_argument("--json", action="store_true", help="Print structured status")
     args = parser.parse_args()
     if getattr(args, "client_secret_stdin", False): args.client_secret = sys.stdin.read().strip()
-    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "export": export, "gear-export": gear_export, "serve": serve, "status": status}[args.command](args)
+    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "export": export, "gear-export": gear_export, "insights": insight, "serve": serve, "status": status}[args.command](args)
 if __name__ == "__main__": main()
