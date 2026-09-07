@@ -160,6 +160,42 @@ def test_summary_pace_uses_only_run_and_walk_activities():
     assert bike["pace_metric"] == "speed" and bike["weekly"][0]["average_speed_mps"] == 5.56
     assert strava.summarize(activities, days=7, activity_type="Swim")["pace_metric"] is None
 
+def test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history():
+    now = strava.datetime.now(strava.timezone.utc).isoformat()
+    cache = {"gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [
+        {"id": 1, "start_date": now, "distance": 5000, "gear": {"id": "g1", "name": "Road shoes"}},
+        {"id": 2, "start_date": now, "distance": 3000, "gear": {"id": "g1", "name": "Road shoes"}},
+    ]}
+    gear = strava.gear_summary(cache)
+    assert gear == [{"id": "g1", "name": "Road shoes", "brand_name": None, "model_name": None, "primary": False, "distance_m": 80467, "activity_count": 2, "last_used_at": now}]
+    assert [activity["id"] for activity in strava.activities_for_gear(cache, "g1")] == [1, 2]
+    assert strava.gear_id({"gear_id": "g1"}) == "g1"
+
+def test_gear_api_returns_lifetime_distance_and_associated_cached_activities():
+    with tempfile.TemporaryDirectory() as home:
+        original = strava.HOME, strava.PROFILE, strava.CACHE
+        server = None
+        try:
+            strava.HOME = Path(home) / "strava"; strava.HOME.mkdir()
+            strava.PROFILE, strava.CACHE = strava.HOME / "profile.json", strava.HOME / "activities.json"
+            strava.PROFILE.write_text(json.dumps({"units": "imperial"}))
+            now = strava.datetime.now(strava.timezone.utc).isoformat()
+            strava.CACHE.write_text(json.dumps({"synced_at": now, "gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [{"id": 42, "start_date": now, "distance": 5000, "gear": {"id": "g1", "name": "Road shoes"}}]}))
+            server = strava.HTTPServer(("127.0.0.1", 0), strava.LocalDashboard)
+            worker = threading.Thread(target=server.handle_request); worker.start()
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/gear", timeout=5) as response:
+                data = json.load(response)
+            worker.join(timeout=5)
+            assert data["units"] == "imperial" and data["gear"][0]["distance_m"] == 80467
+            worker = threading.Thread(target=server.handle_request); worker.start()
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/gear/g1/activities", timeout=5) as response:
+                data = json.load(response)
+            worker.join(timeout=5)
+            assert [activity["id"] for activity in data["activities"]] == [42]
+        finally:
+            if server: server.server_close()
+            strava.HOME, strava.PROFILE, strava.CACHE = original
+
 def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert strava.DYNAMIC_DASHBOARD_PATH.name == "agent-strava-dashboard.html"
     assert strava.DYNAMIC_DASHBOARD_PATH.parent == ROOT / "docs"
@@ -233,6 +269,10 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "hour'+(hours===1?'':'s')" in strava.DYNAMIC_DASHBOARD
     assert "activity-dialog" in strava.DYNAMIC_DASHBOARD
     assert "/api/activity/" in strava.DYNAMIC_DASHBOARD
+    assert "'/gear'" in strava.DYNAMIC_DASHBOARD
+    assert "/api/gear" in strava.DYNAMIC_DASHBOARD
+    assert "Gear activity history" in strava.DYNAMIC_DASHBOARD
+    assert "#export-xlsx,#export-csv" in strava.DYNAMIC_DASHBOARD
     assert "dialog.dataset.backdropClose" in strava.DYNAMIC_DASHBOARD
     assert "dialog.getBoundingClientRect()" in strava.DYNAMIC_DASHBOARD
     assert "document.addEventListener('pointerdown'" in strava.DYNAMIC_DASHBOARD
@@ -255,4 +295,4 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
+    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")

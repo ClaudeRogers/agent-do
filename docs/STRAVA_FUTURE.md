@@ -29,7 +29,8 @@ and hoverable full-value cells, local-time-zone timestamps, and on-demand
 activity summaries with available elevation and heart-rate streams. Detail
 charts use smoothed paths, value tooltips, and a zero lower bound for
 non-negative metrics. It does not persist those detailed responses after the
-browser request completes.
+browser request completes. The Gear page shows Strava's lifetime distance for
+each synced equipment item and opens its locally cached activity history.
 
 ## Product principles
 
@@ -52,7 +53,8 @@ The next dynamic-interface additions could include:
 - a custom date range;
 - weekly/monthly consistency and training-load summaries;
 - user-owned goals and progress; and
-- a visible "last synced" state alongside the existing explicit sync action.
+- a visible "last synced" state alongside the existing explicit sync action; and
+- gear-specific CSV and Excel exports.
 
 Use plain JavaScript first. Introduce React or another UI framework only when
 interactive state, views, and component complexity justify the dependency.
@@ -93,16 +95,6 @@ The command should:
 Potential prompts include: "What changed over the past four weeks?", "Which
 training habits are most consistent?", and "What questions should I consider
 before setting next month's goal?"
-
-### 4. Shoe mileage
-
-Add a dashboard view that attributes running and walking distance to each
-Strava gear item, so a person can see the accumulated mileage for every pair
-of shoes. Use the activity's gear association when Strava provides it, show
-unassigned distance separately rather than guessing, and keep any user-set
-retirement threshold as local profile data. The view should show the shoe
-name, total distance in the selected unit, last-used date, and progress toward
-the optional threshold; it must not change gear assignments in Strava.
 
 ## Decisions to make before implementation
 
