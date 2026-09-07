@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HOME = Path(os.environ.get("AGENT_DO_HOME", Path.home() / ".agent-do")) / "strava"
 PROFILE, CACHE, DASHBOARD = HOME / "profile.json", HOME / "activities.json", HOME / "dashboard.html"
 AUTH_URL, TOKEN_URL, API = "https://www.strava.com/oauth/authorize", "https://www.strava.com/oauth/token", "https://www.strava.com/api/v3"
+INSIGHT_SCHEMA_VERSION = 1
 
 def write_json(path, value):
     HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -202,6 +203,70 @@ def summarize(activities, days=7, activity_type=None):
         "pace_metric": pace_metric,
         "pace_seconds_per_km": round(pace_seconds / pace_distance_km) if pace_distance_km else None,
         "average_speed_mps": round(pace_distance_km * 1000 / pace_seconds, 2) if pace_seconds else None,
+    }
+
+def insight_metric_summary(activities):
+    """Return only aggregate, provider-safe metrics for a set of activities."""
+    distance_m = sum(activity.get("distance", 0) or 0 for activity in activities)
+    moving_seconds = sum(activity.get("moving_time", 0) or 0 for activity in activities)
+    elevation_m = sum(activity.get("total_elevation_gain", 0) or 0 for activity in activities)
+    pace_activities = [activity for activity in activities if is_running(activity) and activity.get("distance", 0) and activity.get("moving_time", 0)]
+    pace_distance_m = sum(activity["distance"] for activity in pace_activities)
+    pace_seconds = sum(activity["moving_time"] for activity in pace_activities)
+    bike_activities = [activity for activity in activities if is_biking(activity) and activity.get("distance", 0) and activity.get("moving_time", 0)]
+    bike_distance_m = sum(activity["distance"] for activity in bike_activities)
+    bike_seconds = sum(activity["moving_time"] for activity in bike_activities)
+    heart_rates = [activity["average_heartrate"] for activity in activities if activity.get("average_heartrate") is not None]
+    return {
+        "activity_count": len(activities),
+        "distance_km": round(distance_m / 1000, 2),
+        "moving_minutes": round(moving_seconds / 60),
+        "elevation_m": round(elevation_m),
+        "running_pace_seconds_per_km": round(pace_seconds / (pace_distance_m / 1000)) if pace_distance_m else None,
+        "cycling_average_speed_mps": round(bike_distance_m / bike_seconds, 2) if bike_seconds else None,
+        "average_heartrate_bpm": round(sum(heart_rates) / len(heart_rates)) if heart_rates else None,
+    }
+
+def build_insight_summary(activities, days, activity_filter=None, now=None):
+    """Build a deterministic, redacted local analysis contract for future insights.
+
+    This intentionally returns aggregates only. Names, notes, IDs, timestamps,
+    map polylines, location, streams, and OAuth material must never enter the
+    provider-facing summary.
+    """
+    if days < 1: raise ValueError("days must be at least 1")
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+    selected = [activity for activity in activities if started(activity) >= cutoff and (not activity_filter or activity_kind(activity) == activity_filter)]
+    midpoint = cutoff + timedelta(days=days / 2)
+    baseline = [activity for activity in selected if started(activity) < midpoint]
+    recent = [activity for activity in selected if started(activity) >= midpoint]
+    sport_counts, weeks = {}, {}
+    for activity in selected:
+        kind = activity_kind(activity)
+        sport_counts[kind] = sport_counts.get(kind, 0) + 1
+        stamp = started(activity)
+        monday = (stamp - timedelta(days=stamp.weekday())).date().isoformat()
+        weeks.setdefault(monday, []).append(activity)
+    comparable_pace = [activity for activity in selected if is_running(activity) and activity.get("distance", 0) and activity.get("moving_time", 0)]
+    return {
+        "schema_version": INSIGHT_SCHEMA_VERSION,
+        "range": {"days": days, "start": cutoff.date().isoformat(), "end": now.date().isoformat(), "activity_filter": activity_filter},
+        "summary": insight_metric_summary(selected),
+        "sports": [{"sport_type": kind, "activity_count": count} for kind, count in sorted(sport_counts.items())],
+        "weekly": [{"week": week, **insight_metric_summary(bucket)} for week, bucket in sorted(weeks.items())],
+        "comparison": {
+            "baseline": insight_metric_summary(baseline),
+            "recent": insight_metric_summary(recent),
+            "comparable_pace_activity_count": len(comparable_pace),
+            "sufficient_for_period_comparison": len(baseline) >= 2 and len(recent) >= 2,
+        },
+        "data_quality": {
+            "sufficient_for_observation": len(selected) >= 3,
+            "has_heart_rate_data": any(activity.get("average_heartrate") is not None for activity in selected),
+            "route_comparison_available": False,
+            "notes": ["Route comparisons are not included until local repeat-route grouping is available."] if selected else ["No activities match this selected range and filter."],
+        },
     }
 
 def export_rows(activities, units):

@@ -204,6 +204,35 @@ def test_summary_pace_uses_only_run_and_walk_activities():
     assert bike["pace_metric"] == "speed" and bike["weekly"][0]["average_speed_mps"] == 5.56
     assert strava.summarize(activities, days=7, activity_type="Swim")["pace_metric"] is None
 
+def test_insight_summary_is_deterministic_and_contains_only_aggregates():
+    now = strava.datetime(2026, 9, 7, 12, tzinfo=strava.timezone.utc)
+    activities = [
+        {"id": 1, "name": "Home address run", "description": "private note", "start_date": (now - strava.timedelta(days=25)).isoformat(), "sport_type": "Run", "distance": 5000, "moving_time": 1800, "total_elevation_gain": 70, "average_heartrate": 145, "map": {"summary_polyline": "secret-route"}},
+        {"id": 2, "start_date": (now - strava.timedelta(days=20)).isoformat(), "sport_type": "Run", "distance": 6000, "moving_time": 2100, "total_elevation_gain": 80, "average_heartrate": 148},
+        {"id": 3, "start_date": (now - strava.timedelta(days=10)).isoformat(), "sport_type": "Run", "distance": 5000, "moving_time": 1700, "total_elevation_gain": 70, "average_heartrate": 142},
+        {"id": 4, "start_date": (now - strava.timedelta(days=2)).isoformat(), "sport_type": "Ride", "distance": 12000, "moving_time": 2400, "total_elevation_gain": 120},
+    ]
+    result = strava.build_insight_summary(activities, 30, now=now)
+    rendered = json.dumps(result)
+    assert result["schema_version"] == 1
+    assert result["range"] == {"days": 30, "start": "2026-08-08", "end": "2026-09-07", "activity_filter": None}
+    assert result["summary"] == {"activity_count": 4, "distance_km": 28.0, "moving_minutes": 133, "elevation_m": 340, "running_pace_seconds_per_km": 350, "cycling_average_speed_mps": 5.0, "average_heartrate_bpm": 145}
+    assert result["comparison"]["sufficient_for_period_comparison"] is True
+    assert result["data_quality"]["sufficient_for_observation"] is True
+    assert "Home address" not in rendered and "private note" not in rendered and "secret-route" not in rendered and '"id"' not in rendered
+
+def test_insight_summary_reports_insufficient_and_filtered_data():
+    now = strava.datetime(2026, 9, 7, tzinfo=strava.timezone.utc)
+    activities = [
+        {"start_date": (now - strava.timedelta(days=2)).isoformat(), "sport_type": "Run", "distance": 5000, "moving_time": 1800},
+        {"start_date": (now - strava.timedelta(days=1)).isoformat(), "sport_type": "Ride", "distance": 10000, "moving_time": 1800},
+    ]
+    result = strava.build_insight_summary(activities, 7, activity_filter="Run", now=now)
+    assert result["summary"]["activity_count"] == 1
+    assert result["sports"] == [{"sport_type": "Run", "activity_count": 1}]
+    assert result["data_quality"]["sufficient_for_observation"] is False
+    assert result["comparison"]["sufficient_for_period_comparison"] is False
+
 def test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history():
     now = strava.datetime.now(strava.timezone.utc).isoformat()
     cache = {"gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [
@@ -362,4 +391,5 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
+    test_insight_summary_is_deterministic_and_contains_only_aggregates(); test_insight_summary_reports_insufficient_and_filtered_data()
     test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_export_rows_estimates_calories_from_strava_kilojoules(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
