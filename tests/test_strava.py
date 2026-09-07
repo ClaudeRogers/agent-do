@@ -122,12 +122,13 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "align-items:flex-start" in strava.DYNAMIC_DASHBOARD
     assert "localRoute" in strava.DYNAMIC_DASHBOARD
     assert "Route map" in strava.DYNAMIC_DASHBOARD
-    assert "function routeProjection" in strava.DYNAMIC_DASHBOARD
-    assert "route-tiles" in strava.DYNAMIC_DASHBOARD
-    assert "tile.openstreetmap.org" in strava.DYNAMIC_DASHBOARD
-    assert "route-start" in strava.DYNAMIC_DASHBOARD
+    assert "maplibre-gl@5" in strava.DYNAMIC_DASHBOARD
+    assert "tiles.openfreemap.org/styles/bright" in strava.DYNAMIC_DASHBOARD
+    assert "activity-route-casing" in strava.DYNAMIC_DASHBOARD
+    assert "activityMap.fitBounds" in strava.DYNAMIC_DASHBOARD
+    assert "routeFallback" in strava.DYNAMIC_DASHBOARD
     assert "leaflet@1.9.4" not in strava.DYNAMIC_DASHBOARD
-    assert "Road tiles © OpenStreetMap contributors" in strava.DYNAMIC_DASHBOARD
+    assert "Interactive map © OpenFreeMap" in strava.DYNAMIC_DASHBOARD
     assert "CARTO" not in strava.DYNAMIC_DASHBOARD
     assert "Splits" in strava.DYNAMIC_DASHBOARD
     assert "Best efforts" in strava.DYNAMIC_DASHBOARD

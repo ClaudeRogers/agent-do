@@ -115,10 +115,12 @@ summary; click outside the summary or select **Close** to dismiss it.
 That request fetches the selected activity's richer detail, route coordinates,
 available analysis streams, splits, laps, efforts, segments, and zones on
 demand; it is not bulk-saved into the activity cache. The route is overlaid on
-an interactive OpenStreetMap road map, with start and finish markers. Loading
-that map requests the relevant road tiles from OpenStreetMap, which reveals
-the map area needed to display the route; the detailed route stream itself remains in the local
-dashboard and is not sent as a route upload.
+an interactive MapLibre road map, with start and finish markers. The default
+vector basemap is served by OpenFreeMap and uses OpenMapTiles/OpenStreetMap
+data. Loading it reveals the map area needed to display the route to that map
+service; the detailed route stream itself remains in the local dashboard and
+is not sent as a route upload. If the basemap cannot load, the dashboard shows
+a local route plot instead.
 
 ## Where data lives
 
