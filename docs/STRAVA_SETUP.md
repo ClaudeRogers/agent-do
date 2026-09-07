@@ -158,6 +158,14 @@ repeat-route groups on your computer and prints exactly what could be sent:
 agent-do strava insights --days 30 --preview
 ```
 
+For one cached workout, use its Strava activity ID. The preview contains that
+workout's redacted metrics plus same-sport or repeat-route comparison context:
+
+```bash
+agent-do strava activity-insight 12345 --preview
+agent-do strava activity-insight 12345 --send --provider anthropic
+```
+
 The preview excludes activity names, notes, IDs, route polylines, precise
 locations, raw streams, and OAuth material. It may include an opaque local
 repeat-route group with a count of comparable efforts and aggregate pace.
@@ -173,6 +181,8 @@ agent-do strava insights --days 30 --send --provider openai
 For Anthropic, use `ANTHROPIC_API_KEY` and `--provider anthropic`. The
 dashboard's **AI guidance** button follows the same flow: it displays the
 payload and requires **Generate guidance** before making a provider request.
+Open an activity's expanded summary and choose **AI activity guidance** for the
+same preview-and-confirmation flow for that individual workout.
 Guidance is reflective training feedback, not medical advice or a coaching
 prescription. View prior local receipts with:
 

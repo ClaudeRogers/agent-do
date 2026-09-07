@@ -10,6 +10,7 @@ tools:
     - summarize 1-week, 1-month, 3-month, and 1-year training ranges with paginated activities and local-only charts
     - export a selected local-cache date range to CSV or a formatted Excel workbook without routes or OAuth secrets
     - preview redacted training aggregates and optionally request AI guidance with OpenAI or Anthropic
+    - preview redacted metrics and comparable local context for one activity before optional AI guidance
     commands:
       init: 'Create a local profile: init [--client-id ID] [--client-secret-stdin] [--redirect-uri URI]'
       connect: 'Authorize the local profile in a browser: connect [--timeout seconds]'
@@ -19,6 +20,7 @@ tools:
       export: 'Export local cached activities: export <output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]'
       gear-export: 'Export local gear and associated activities: gear-export <output.xlsx> [--overwrite]'
       insights: 'Preview or request AI training observations: insights [history|show RECEIPT_ID] [--days N] [--activity TYPE] [--preview] [--send --provider openai|anthropic] [--model MODEL]'
+      activity-insight: 'Preview or request AI guidance for one cached activity: activity-insight <ACTIVITY_ID> [--preview] [--send --provider openai|anthropic] [--model MODEL]'
       serve: 'Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]'
     examples:
     - intent: set up a private Strava profile on this computer
@@ -35,6 +37,8 @@ tools:
       command: agent-do strava gear-export gear.xlsx
     - intent: preview private AI training guidance for the last month
       command: agent-do strava insights --days 30 --preview
+    - intent: preview private AI guidance for a single Strava activity
+      command: agent-do strava activity-insight 12345 --preview
     routing:
       discover_keywords:
       - strava
@@ -52,6 +56,7 @@ tools:
       - agent-do strava export activities.xlsx --days 90
       - agent-do strava gear-export gear.xlsx
       - agent-do strava insights --days 30 --preview
+      - agent-do strava activity-insight 12345 --preview
       default_command: status
     credentials:
       optional:
@@ -65,16 +70,19 @@ tools:
       snapshot:
       - status
       - insights
+      - activity-insight
       interact:
       - connect
       - serve
       - insights
+      - activity-insight
       save:
       - sync
       - dashboard
       - export
       - gear-export
       - insights
+      - activity-insight
       attributes:
         init:
         - composite
@@ -93,6 +101,10 @@ tools:
         - composite
         - long_running
         insights:
+        - composite
+        - polymorphic
+        - sensitive
+        activity-insight:
         - composite
         - polymorphic
         - sensitive
