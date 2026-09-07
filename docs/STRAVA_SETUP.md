@@ -104,10 +104,14 @@ types that do not have a meaningful pace or speed measurement.
 
 For ranges longer than one week, the dashboard charts distance and moving time
 by week. Labels are thinned automatically for longer ranges so they remain
-readable. The one-week view has no charts because its distance and moving-time
-totals are already in the header. Recent activities are paginated ten at a
-time. Drag a recent-activity table header edge to resize that column for the
-current browser session. Click a recent activity to open its expanded summary.
+readable. Detail-chart axes never fall below zero for non-negative metrics,
+and their tooltips show the underlying value. The one-week view has no charts
+because its distance and moving-time totals are already in the header. Recent
+activities are paginated ten at a time. Drag a recent-activity table header
+edge to resize that column for the current browser session; hover any cell to
+see its complete value. Times are shown in the time zone of the computer
+viewing the local dashboard. Click a recent activity to open its expanded
+summary; click outside the summary or select **Close** to dismiss it.
 That request fetches the selected activity's richer detail, route coordinates,
 available analysis streams, splits, laps, efforts, segments, and zones on
 demand; it is not bulk-saved into the activity cache. The route is overlaid on

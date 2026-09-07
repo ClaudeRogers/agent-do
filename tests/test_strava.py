@@ -72,6 +72,8 @@ def test_summary_pace_uses_only_run_and_walk_activities():
     assert strava.summarize(activities, days=7, activity_type="Swim")["pace_metric"] is None
 
 def test_responsive_dashboard_uses_manual_sync_without_polling():
+    assert strava.DYNAMIC_DASHBOARD_PATH.name == "agent-strava-dashboard.html"
+    assert strava.DYNAMIC_DASHBOARD_PATH.parent == ROOT / "docs"
     assert "/api/sync" in strava.DYNAMIC_DASHBOARD
     assert "/api/preferences" in strava.DYNAMIC_DASHBOARD
     assert "activity-type" in strava.DYNAMIC_DASHBOARD
@@ -138,7 +140,20 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "hour'+(hours===1?'':'s')" in strava.DYNAMIC_DASHBOARD
     assert "activity-dialog" in strava.DYNAMIC_DASHBOARD
     assert "/api/activity/" in strava.DYNAMIC_DASHBOARD
+    assert "dialog.dataset.backdropClose" in strava.DYNAMIC_DASHBOARD
+    assert "dialog.getBoundingClientRect()" in strava.DYNAMIC_DASHBOARD
+    assert "document.addEventListener('pointerdown'" in strava.DYNAMIC_DASHBOARD
     assert "stream-axis" in strava.DYNAMIC_DASHBOARD
+    assert "line.setAttribute('stroke-linecap','round')" in strava.DYNAMIC_DASHBOARD
+    assert "const smoothed=values.map" in strava.DYNAMIC_DASHBOARD
+    assert "cell.title=cell.textContent" in strava.DYNAMIC_DASHBOARD
+    assert "white-space:nowrap" in strava.DYNAMIC_DASHBOARD
+    assert "font-size:clamp(1.55rem,2.5vw,2.1rem)" in strava.DYNAMIC_DASHBOARD
+    assert "Number(value).toLocaleString" in strava.DYNAMIC_DASHBOARD
+    assert "number(Math.round(m*3.28084))+' ft'" in strava.DYNAMIC_DASHBOARD
+    assert "resolvedOptions().timeZone" in strava.DYNAMIC_DASHBOARD
+    assert "new Date(a.start_date).toLocaleString" in strava.DYNAMIC_DASHBOARD
+    assert "low=Math.max(0,minimum-padding)" in strava.DYNAMIC_DASHBOARD
     assert "filter(([,value])=>present(value))" in strava.DYNAMIC_DASHBOARD
     result = run("serve", "--help")
     assert result.returncode == 0 and "--no-sync" in result.stdout

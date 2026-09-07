@@ -25,9 +25,11 @@ The current dashboard has 1-week, 1-month, 3-month, and 1-year selectors;
 header summaries for distance, moving time, elevation, activity count, and
 pace or speed; paginated recent activities; and weekly distance and moving-time
 charts for ranges longer than one week. It also supports table-column resizing
-and on-demand activity summaries with available elevation and heart-rate
-streams. It does not persist those detailed responses after the browser request
-completes.
+and hoverable full-value cells, local-time-zone timestamps, and on-demand
+activity summaries with available elevation and heart-rate streams. Detail
+charts use smoothed paths, value tooltips, and a zero lower bound for
+non-negative metrics. It does not persist those detailed responses after the
+browser request completes.
 
 ## Product principles
 
