@@ -329,6 +329,39 @@ DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace(
     r''';function updateOneWeekSummary(data){const card=$('week-pace-card'),charts=$('weekly-charts'),paceChart=$('pace-card'),oneWeek=data.days===7,isSpeed=data.pace_metric==='speed',value=isSpeed?data.average_speed_mps:data.pace_seconds_per_km,period=data.days===7?'this week':data.days===30?'this month':data.days===90?'3 months':'this year';charts.hidden=oneWeek;charts.style.display=oneWeek?'none':'';charts.setAttribute('aria-hidden',String(oneWeek));paceChart.hidden=true;card.hidden=!data.pace_metric||!value;if(card.hidden)return;$('week-pace-label').textContent=(isSpeed?'Average speed ':'Average pace ')+period;$('week-pace').textContent=isSpeed?(metric?(value*3.6).toFixed(1)+' km/h':(value*2.23694).toFixed(1)+' mph'):paceDisplay(metric?value:value*1.609344)}</script>''',
 )
 
+# Route coordinates still arrive from Strava only when a person opens one
+# activity.  This renderer turns those coordinates into an interactive map.
+# OpenStreetMap's standard tiles provide the road context.  The tiny map renderer lives
+# in the dashboard itself so the activity view does not depend on a mapping
+# library being downloaded from a CDN.
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace(
+    "</script>",
+    r'''</script><style>.route-map{height:360px;position:relative;border-radius:10px;overflow:hidden;background:var(--panel)}.route-map .route-tiles,.route-map svg{position:absolute;inset:0;width:100%;height:100%}.route-map img{position:absolute;width:256px;height:256px;max-width:none}.route-map svg{pointer-events:none}.route-map polyline{stroke:#b8f23d;stroke-width:5;fill:none;stroke-linecap:round;stroke-linejoin:round}.route-map circle{stroke:#111827;stroke-width:2}.route-map .route-start{fill:#b8f23d}.route-map .route-finish{fill:#f8fafc}</style><script>function routeProjection(point,zoom){const size=256*Math.pow(2,zoom),latitude=Math.max(-85.05112878,Math.min(85.05112878,point[0]))*Math.PI/180;return[(point[1]+180)/360*size,(1-Math.log(Math.tan(latitude)+1/Math.cos(latitude))/Math.PI)/2*size]}function localRoute(stream){if(!stream||!Array.isArray(stream.data))return null;const route=stream.data.filter(point=>Array.isArray(point)&&point.length===2&&Number.isFinite(point[0])&&Number.isFinite(point[1]));if(route.length<2)return null;const box=el('div',undefined,'stream'),mapElement=el('div',undefined,'route-map'),width=800,height=360,padding=48;box.append(el('h3','Route map'),mapElement);let zoom=1,projected=[];for(let candidate=18;candidate>=1;candidate--){const trial=route.map(point=>routeProjection(point,candidate)),xs=trial.map(point=>point[0]),ys=trial.map(point=>point[1]);if(Math.max(...xs)-Math.min(...xs)<=width-padding*2&&Math.max(...ys)-Math.min(...ys)<=height-padding*2){zoom=candidate;projected=trial;break}}if(!projected.length)projected=route.map(point=>routeProjection(point,zoom));const xs=projected.map(point=>point[0]),ys=projected.map(point=>point[1]),originX=(Math.max(...xs)+Math.min(...xs))/2-width/2,originY=(Math.max(...ys)+Math.min(...ys))/2-height/2,tiles=el('div',undefined,'route-tiles'),world=Math.pow(2,zoom),firstX=Math.floor(originX/256),lastX=Math.floor((originX+width)/256),firstY=Math.max(0,Math.floor(originY/256)),lastY=Math.min(world-1,Math.floor((originY+height)/256));for(let tileY=firstY;tileY<=lastY;tileY++)for(let tileX=firstX;tileX<=lastX;tileX++){const image=document.createElement('img'),x=(tileX%world+world)%world;image.alt='';image.src='https://'+String.fromCharCode(97+(x+tileY)%4)+'.basemaps.cartocdn.com/rastertiles/voyager/'+zoom+'/'+x+'/'+tileY+'.png';image.style.left=tileX*256-originX+'px';image.style.top=tileY*256-originY+'px';tiles.append(image)}const svg=document.createElementNS('http://www.w3.org/2000/svg','svg'),line=document.createElementNS('http://www.w3.org/2000/svg','polyline'),marker=(point,className)=>{const circle=document.createElementNS('http://www.w3.org/2000/svg','circle');circle.setAttribute('cx',point[0]-originX);circle.setAttribute('cy',point[1]-originY);circle.setAttribute('r','6');circle.setAttribute('class',className);return circle};svg.setAttribute('viewBox','0 0 '+width+' '+height);line.setAttribute('points',projected.map(point=>(point[0]-originX)+','+(point[1]-originY)).join(' '));svg.append(line,marker(projected[0],'route-start'),marker(projected[projected.length-1],'route-finish'));mapElement.append(tiles,svg);box.append(el('small','Road tiles are loaded from CARTO; viewing the map shares the route area with its tile service.'));return box}</script>''',
+)
+
+# Chart tooltips need to escape the plotting area.  Table cells opt into the
+# browser's accessible native tooltip only when their text is actually clipped.
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace(
+    ".bar-chart{overflow:hidden}",
+    ".bar-chart{overflow:visible}",
+).replace(
+    "tooltip.style.left=box.left-parent.left+box.width/2+'px';tooltip.style.top=Math.max(28,box.top-parent.top)+'px';tooltip.hidden=false",
+    "tooltip.style.left=box.left-parent.left+box.width/2+'px';tooltip.style.top=Math.max(28,box.top-parent.top)+'px';tooltip.hidden=false;const half=tooltip.offsetWidth/2+6;tooltip.style.left=Math.max(half,Math.min(parent.width-half,box.left-parent.left+box.width/2))+'px'",
+).replace(
+    "return row}));const pager=$(\'activity-pagination\');",
+    "return row}));refreshTruncatedCellTooltips();const pager=$(\'activity-pagination\');",
+).replace(
+    "</html>",
+    r'''<script>const observedActivityCells=new WeakSet,refreshTruncatedCellTooltips=()=>document.querySelectorAll('#activities td').forEach(cell=>{const clipped=cell.scrollWidth>cell.clientWidth;cell.title=clipped?cell.textContent:'';if(!observedActivityCells.has(cell)){new ResizeObserver(()=>{cell.title=cell.scrollWidth>cell.clientWidth?cell.textContent:''}).observe(cell);observedActivityCells.add(cell)}});window.addEventListener('resize',refreshTruncatedCellTooltips)</script></html>''',
+)
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace(
+    "https://'+String.fromCharCode(97+(x+tileY)%4)+'.basemaps.cartocdn.com/rastertiles/voyager/'+zoom+'/'+x+'/'+tileY+'.png'",
+    "https://tile.openstreetmap.org/'+zoom+'/'+x+'/'+tileY+'.png'",
+).replace(
+    "Road tiles are loaded from CARTO; viewing the map shares the route area with its tile service.",
+    "Road tiles © OpenStreetMap contributors; viewing the map shares the route area with its tile service.",
+)
+
 class LocalDashboard(BaseHTTPRequestHandler):
     def reply(self, status, payload, content_type="application/json; charset=utf-8"):
         body = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
