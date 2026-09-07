@@ -121,6 +121,16 @@ Potential prompts include: "What changed over the past four weeks?", "Which
 training habits are most consistent?", and "What questions should I consider
 before setting next month's goal?"
 
+### 6. Shoe mileage
+
+Add a dashboard view that attributes running and walking distance to each
+Strava gear item, so a person can see the accumulated mileage for every pair
+of shoes. Use the activity's gear association when Strava provides it, show
+unassigned distance separately rather than guessing, and keep any user-set
+retirement threshold as local profile data. The view should show the shoe
+name, total distance in the selected unit, last-used date, and progress toward
+the optional threshold; it must not change gear assignments in Strava.
+
 ## Decisions to make before implementation
 
 1. Whether goals are simple local values or a richer editable plan format.
@@ -129,3 +139,5 @@ before setting next month's goal?"
 4. Which AI providers to support, and whether local-only models are a priority.
 5. Whether webhook support is worth the public callback and operational burden
    for a personal, bring-your-own Strava app.
+6. Whether shoe mileage should use Strava's lifetime gear distance, the local
+   activity cache, or both when their totals differ.

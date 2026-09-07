@@ -126,6 +126,7 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "route-start" in strava.DYNAMIC_DASHBOARD
     assert "leaflet@1.9.4" not in strava.DYNAMIC_DASHBOARD
     assert "Road tiles © OpenStreetMap contributors" in strava.DYNAMIC_DASHBOARD
+    assert "CARTO" not in strava.DYNAMIC_DASHBOARD
     assert "Splits" in strava.DYNAMIC_DASHBOARD
     assert "Best efforts" in strava.DYNAMIC_DASHBOARD
     assert "velocity_smooth" in strava.DYNAMIC_DASHBOARD
