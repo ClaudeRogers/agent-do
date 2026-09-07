@@ -79,6 +79,9 @@ from the local cache only. CSV has one normalized activity table; Excel adds
 Summary, Activities, Weekly, Monthly, and Data dictionary sheets. Exports omit
 activity names, route geometry, notes, photos, and OAuth secrets. Use
 `--days`, `--type`, and (only when deliberately replacing a file) `--overwrite`.
+For several activity groups in the CLI, use `--activity run,bike` or
+`--activity '[run,bike]'`; `run` includes running variants and `bike` includes
+ride and bike variants.
 The dashboard also exposes Export Excel and Export CSV buttons; each downloads
 the range and activity type currently selected in the dashboard.
 Durations use `hours:minutes:seconds`, paces use `minutes:seconds` per selected

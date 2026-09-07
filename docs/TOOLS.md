@@ -4128,7 +4128,7 @@ Concurrency: `mixed`
 - `status`: Show local profile and cache status: status [--json]
 - `sync`: Refresh credentials and sync activities: sync [--days N]
 - `dashboard`: Generate a local HTML dashboard: dashboard [--open]
-- `export`: Export local cached activities: export \<output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--type SPORT] [--overwrite]
+- `export`: Export local cached activities: export \<output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]
 - `serve`: Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]
 
 **Examples**
@@ -4143,7 +4143,7 @@ agent-do strava sync --days 90
 # show my private training dashboard
 agent-do strava serve --open
 # export my last 90 days of local Strava activity data to Excel
-agent-do strava export activities.xlsx --days 90
+agent-do strava export activities.xlsx --days 90 --activity run,bike
 ```
 
 **Credentials**

@@ -101,6 +101,12 @@ selected date range and activity type. The dashboard builds the download from
 the local cache without contacting Strava, and it omits route geometry, names,
 notes, photos, and OAuth secrets.
 
+For a command-line export containing multiple activity groups, use:
+
+```bash
+agent-do strava export run-and-bike.xlsx --days 90 --activity run,bike
+```
+
 Choose one of four ranges: **1 week**, **1 month** (the default), **3 months**,
 or **1 year**. The header summarizes distance, moving time, elevation,
 activity count, and average pace for runs and walks. With a cycling-only

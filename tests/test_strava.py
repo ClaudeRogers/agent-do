@@ -52,6 +52,23 @@ def test_export_csv_uses_local_cache_and_omits_sensitive_route_fields():
         duplicate = run("export", str(output), env={**os.environ, "AGENT_DO_HOME": home})
         assert duplicate.returncode != 0 and "--overwrite" in duplicate.stderr
 
+def test_export_activity_filter_accepts_comma_and_bracketed_groups():
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        (data / "profile.json").write_text(json.dumps({"units": "metric"}))
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        activities = [
+            {"id": 1, "start_date": now, "sport_type": "TrailRun", "distance": 5000, "moving_time": 1800},
+            {"id": 2, "start_date": now, "sport_type": "Ride", "distance": 20000, "moving_time": 3600},
+            {"id": 3, "start_date": now, "sport_type": "WeightTraining", "moving_time": 1200},
+        ]
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "activities": activities}))
+        output = Path(home) / "run-bike.csv"
+        result = run("export", str(output), "--activity", "[run,bike]", env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0 and json.loads(result.stdout)["activities"] == 2
+        content = output.read_text()
+        assert "TrailRun" in content and "Ride" in content and "WeightTraining" not in content
+
 def test_export_xlsx_has_readable_summary_and_activity_sheets():
     if importlib.util.find_spec("openpyxl") is None:
         return
@@ -238,4 +255,4 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
+    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")

@@ -15,7 +15,7 @@ tools:
       status: 'Show local profile and cache status: status [--json]'
       sync: 'Refresh credentials and sync activities: sync [--days N]'
       dashboard: 'Generate a local HTML dashboard: dashboard [--open]'
-      export: 'Export local cached activities: export <output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--type SPORT] [--overwrite]'
+      export: 'Export local cached activities: export <output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]'
       serve: 'Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]'
     examples:
     - intent: set up a private Strava profile on this computer
@@ -27,7 +27,7 @@ tools:
     - intent: show my private training dashboard
       command: agent-do strava serve --open
     - intent: export my last 90 days of local Strava activity data to Excel
-      command: agent-do strava export activities.xlsx --days 90
+      command: agent-do strava export activities.xlsx --days 90 --activity run,bike
     routing:
       discover_keywords:
       - strava
