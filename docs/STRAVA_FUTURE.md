@@ -76,27 +76,78 @@ Evolve `sync` from its initial time-window fetch into an incremental process:
 The dashboard must remain usable from the last successful cache when Strava is
 offline or authorization expires.
 
-### 3. Optional AI training observations
+### 3. V2 plan: private AI guidance and repeat-route trends
 
-Add an opt-in `agent-do strava insights` command that sends a deliberately
-small, selected aggregate dataset to an AI provider and returns observations,
-not medical or coaching prescriptions.
+V2 adds an opt-in `agent-do strava insights` experience in both the CLI and
+local dashboard. It should turn a selected period (for example, 1 week, 1
+month, 3 months, or a custom range) into useful training observations while
+keeping route geometry and other sensitive raw data on the user's device.
+Insights are reflective training prompts, not medical advice or authoritative
+coaching prescriptions.
 
-The command should:
+Build it in these independently shippable segments:
 
-- show the selected date range and exact summary payload before sending it;
-- default to aggregate metrics and omit route polylines, precise locations,
-  activity titles, and raw notes;
-- support a chosen provider/model only when that provider's credential is
-  configured locally;
-- save an attributed local insight receipt containing model, timestamp, input
-  summary, and output; and
-- clearly frame results as reflective prompts (for example, consistency,
-  load changes, or recovery patterns), not health advice.
+1. **Define the local insight contract.** Add a versioned, deterministic
+   summary builder for a date range and activity filter: weekly volume,
+   frequency, moving time, elevation, pace or speed, and optional heart-rate
+   and power trends. Define minimum-data and comparability rules up front, so
+   the result says when there is insufficient evidence rather than guessing.
+   Add fixtures and unit tests for empty, sparse, mixed-sport, and improving
+   datasets.
 
-Potential prompts include: "What changed over the past four weeks?", "Which
-training habits are most consistent?", and "What questions should I consider
-before setting next month's goal?"
+2. **Derive private repeat-route groups.** Decode each activity's local
+   summary polyline and create a stable local route-group identifier from
+   sport type, direction, distance, and path-overlap thresholds. Store only
+   the derived group and comparison metrics needed for insight history; retain
+   exact polylines only in the existing local activity cache. Require enough
+   matching activities before reporting a trend, and compare like-for-like
+   distance/elevation profiles. Use Strava segment efforts as an optional
+   second signal when available, not as a requirement.
+
+3. **Expose local analysis before any AI call.** Add
+   `agent-do strava insights --days N --activity TYPE --preview` to print the
+   selected time range, aggregate metrics, repeat-route findings, and the
+   exact redacted payload. The default payload must omit activity names,
+   notes, photos, raw streams, precise locations, route polylines, and OAuth
+   material. The user explicitly chooses whether to continue after preview.
+
+4. **Add provider adapters and credential handling.** Support a configured
+   OpenAI API or Anthropic API provider behind a small provider interface;
+   store API keys in OS secure storage and never in profile JSON, receipts, or
+   command output. Send only the reviewed payload and a fixed prompt that asks
+   for evidence-qualified observations about consistency, load, pace/speed,
+   recovery questions, and comparable repeat-route performance. Treat API
+   failures, limits, and unavailable credentials as clear local errors.
+
+5. **Persist transparent local receipts.** Save a permission-safe receipt
+   containing the schema version, provider/model, timestamp, selected filters,
+   redacted input summary, output, and any uncertainty/disclaimer markers.
+   Provide `insights history` and `insights show` commands without requiring a
+   new provider call. Never persist the provider API key or raw route geometry
+   in a receipt.
+
+6. **Add the dashboard flow.** Put an **AI guidance** action beside the
+   existing range and activity selectors. Show the local preview and privacy
+   notice first, require an explicit **Generate guidance** confirmation, then
+   render the returned observation with its evidence and receipt timestamp.
+   Keep the server localhost-only and make prior local receipts viewable from
+   the UI.
+
+7. **Harden and document the feature.** Cover provider calls with mocked
+   transport tests; cover route grouping against GPS jitter, reversed routes,
+   partial overlaps, and mixed activity types; update registry contracts,
+   command help, `docs/TOOLS.md`, and `STRAVA_SETUP.md`. Validate that preview
+   and receipt output contain no prohibited raw fields, and manually verify
+   both the CLI and dashboard consent paths.
+
+Example observations the feature may produce, when the data supports them:
+
+- "You completed this local route group five times; median moving pace improved
+  from 9:42/mi to 9:18/mi on comparable efforts."
+- "Your weekly running time has been more consistent over the last month, but
+  the recent volume increase is large enough to make recovery worth watching."
+- "There is not enough comparable route or heart-rate data to support a claim
+  about speed or fitness change."
 
 ## Decisions to make before implementation
 
