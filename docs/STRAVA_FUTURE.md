@@ -32,6 +32,8 @@ non-negative metrics. It does not persist those detailed responses after the
 browser request completes. The Gear page shows Strava's lifetime distance for
 each synced equipment item, opens its locally cached activity history, and can
 export a workbook with a gear summary followed by one activity sheet per item.
+Workbook durations use MM:SS below an hour and HH:MM:SS otherwise; calories use
+Strava's value when available and otherwise a kilojoule-derived estimate.
 
 ## Product principles
 

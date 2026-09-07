@@ -107,6 +107,10 @@ selected date range and activity type. The dashboard builds the download from
 the local cache without contacting Strava, and it omits route geometry, names,
 notes, photos, and OAuth secrets.
 
+Excel exports display durations as **MM:SS** below one hour and **HH:MM:SS** at
+one hour or above. They use Strava's calorie value when present; otherwise, a
+calorie estimate is derived from Strava's recorded kilojoules.
+
 For a command-line export containing multiple activity groups, use:
 
 ```bash

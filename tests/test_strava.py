@@ -87,8 +87,8 @@ def test_export_xlsx_has_readable_summary_and_activity_sheets():
         assert workbook["Weekly"]["B1"].value == "Distance (mi)"
         assert workbook["Monthly"]["E1"].value == "Elevation gain (ft)"
         assert workbook["Activities"]["D1"].value == "Moving time"
-        assert workbook["Activities"]["D2"].number_format == "[h]:mm:ss"
-        assert workbook["Summary"]["B9"].number_format == "[h]:mm:ss"
+        assert workbook["Activities"]["D2"].value == "01:00:00"
+        assert workbook["Summary"]["B9"].value == "01:00:00"
         assert workbook["Activities"].max_row == 2
 
 def test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear():
@@ -100,7 +100,7 @@ def test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear():
         (data / "profile.json").write_text(json.dumps({"units": "imperial"}))
         now = strava.datetime.now(strava.timezone.utc).isoformat()
         activities = [
-            {"id": 1, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "gear_id": "g1"},
+            {"id": 1, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "kilojoules": 418.4, "gear_id": "g1"},
             {"id": 2, "start_date": now, "sport_type": "Run", "distance": 3000, "moving_time": 1200, "gear_id": "g2"},
         ]
         gear = [
@@ -120,6 +120,16 @@ def test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear():
         assert workbook["Gear"]["D3"].value == 1
         assert workbook["Road shoes"]["A1"].value == "Date"
         assert workbook["Road shoes"].max_row == 2
+        headers = [cell.value for cell in workbook["Road shoes"][1]]
+        assert workbook["Road shoes"].cell(2, headers.index("Moving time") + 1).value == "30:00"
+        assert workbook["Road shoes"].cell(2, headers.index("Average pace (min:sec/mi)") + 1).value == "09:39"
+        assert workbook["Road shoes"].cell(2, headers.index("Calories") + 1).value == 100
+
+def test_export_rows_estimates_calories_from_strava_kilojoules():
+    rows = strava.export_rows([{"id": 1, "start_date": "2026-09-07T00:00:00+00:00", "sport_type": "Run", "distance": 5000, "moving_time": 1800, "kilojoules": 418.4}], "imperial")
+    assert rows[0]["Calories"] == 100
+    assert strava.format_export_duration(3599) == "59:59"
+    assert strava.format_export_duration(3600) == "01:00:00"
 
 def test_dashboard_export_uses_selected_local_cache_without_retaining_a_file():
     with tempfile.TemporaryDirectory() as home:
@@ -348,4 +358,4 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
+    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_export_rows_estimates_calories_from_strava_kilojoules(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")

@@ -215,6 +215,9 @@ def export_rows(activities, units):
         distance_km = activity.get("distance", 0) / 1000
         moving_seconds = activity.get("moving_time", 0)
         kind = activity_kind(activity)
+        calories = activity.get("calories")
+        if calories is None and activity.get("kilojoules") is not None:
+            calories = round(activity["kilojoules"] / 4.184)
         row = {
             "Date": started(activity).date().isoformat(),
             "Sport": kind,
@@ -224,7 +227,7 @@ def export_rows(activities, units):
             f"Elevation gain ({elevation_unit})": round(activity.get("total_elevation_gain", 0) * elevation_factor),
             "Average heart rate (bpm)": activity.get("average_heartrate"),
             "Max heart rate (bpm)": activity.get("max_heartrate"),
-            "Calories": activity.get("calories"),
+            "Calories": calories,
             "Activity ID": activity.get("id"),
         }
         if is_running(activity):
@@ -285,7 +288,21 @@ def format_duration(seconds):
 def format_pace(seconds):
     if seconds is None: return ""
     seconds = round(seconds)
-    return f"{seconds // 60}:{seconds % 60:02d}"
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+def format_export_duration(seconds):
+    """Format a duration consistently for a human-readable Excel export."""
+    seconds = round(seconds or 0)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
+
+def spreadsheet_value(header, value):
+    if header in ("Moving time", "Elapsed time"):
+        return format_export_duration(value)
+    if "pace" in header.lower() and value is not None:
+        return format_pace(value)
+    return value
 
 def csv_rows(rows):
     formatted = []
@@ -332,7 +349,7 @@ def export_xlsx(path, cache, activities, units, rows, days, activity_type):
         headers = list(dict.fromkeys(key for row in table_rows for key in row))
         if headers: sheet.append(headers)
         for row in table_rows:
-            sheet.append([row.get(header) / 86400 if header in ("Moving time", "Elapsed time") or "pace" in header.lower() and row.get(header) is not None else row.get(header) for header in headers])
+            sheet.append([spreadsheet_value(header, row.get(header)) for header in headers])
         return sheet
 
     activity_sheet = add_table("Activities", rows)
@@ -350,9 +367,11 @@ def export_xlsx(path, cache, activities, units, rows, days, activity_type):
         {"Field": "Activity ID", "Definition": "Strava activity identifier; excludes names, routes, notes, photos, and OAuth secrets."},
         {"Field": "Distance / elevation", "Definition": f"Values use the selected {units} display units unless the column states metres or kilometres."},
         {"Field": "Date", "Definition": "Activity start date in UTC."},
+        {"Field": "Moving / elapsed time", "Definition": "Displayed as MM:SS below one hour or HH:MM:SS at one hour and above."},
+        {"Field": "Calories", "Definition": "Strava calories when available; otherwise an estimated kcal value converted from Strava kilojoules."},
         {"Field": "Export scope", "Definition": "Only activities in the selected local-cache date range and activity type."},
     ])
-    summary["B9"] = summary["B9"].value / 86400
+    summary["B9"] = format_export_duration(summary["B9"].value)
     for sheet in workbook.worksheets:
         sheet.freeze_panes = "A2" if sheet.max_row > 1 else None
         for cell in sheet[1]:
@@ -362,18 +381,13 @@ def export_xlsx(path, cache, activities, units, rows, days, activity_type):
             header = str(sheet.cell(1, column).value or "").lower()
             for row in range(2, sheet.max_row + 1):
                 cell = sheet.cell(row, column)
-                if header in ("moving time", "elapsed time"):
-                    cell.number_format = "[h]:mm:ss"
-                elif "pace" in header:
-                    cell.number_format = "m:ss"
-                elif isinstance(cell.value, (int, float)):
+                if isinstance(cell.value, (int, float)):
                     cell.number_format = "#,##0.00" if any(word in header for word in ("distance", "speed")) else "#,##0"
             width = max((len(str(sheet.cell(row, column).value or "")) for row in range(1, sheet.max_row + 1)), default=10)
             sheet.column_dimensions[get_column_letter(column)].width = min(max(width + 2, 12), 48)
     for row in range(2, summary.max_row + 1):
         label, value = str(summary.cell(row, 1).value or "").lower(), summary.cell(row, 2)
-        if label == "moving time": value.number_format = "[h]:mm:ss"
-        elif isinstance(value.value, (int, float)): value.number_format = "#,##0.00" if "distance" in label else "#,##0"
+        if isinstance(value.value, (int, float)): value.number_format = "#,##0.00" if "distance" in label else "#,##0"
     workbook.save(path)
 
 def gear_sheet_name(name, used):
@@ -414,7 +428,7 @@ def export_gear_xlsx(path, cache, units):
             headers = ["Date", "Sport", f"Distance ({distance_unit})", "Moving time"]
         sheet.append(headers)
         for row in rows:
-            sheet.append([row.get(header) / 86400 if header in ("Moving time", "Elapsed time") else row.get(header) for header in headers])
+            sheet.append([spreadsheet_value(header, row.get(header)) for header in headers])
 
     for sheet in workbook.worksheets:
         sheet.freeze_panes = "A2"
@@ -425,11 +439,7 @@ def export_gear_xlsx(path, cache, units):
             header = str(sheet.cell(1, column).value or "").lower()
             for row in range(2, sheet.max_row + 1):
                 cell = sheet.cell(row, column)
-                if header in ("moving time", "elapsed time"):
-                    cell.number_format = "[h]:mm:ss"
-                elif "pace" in header:
-                    cell.number_format = "m:ss"
-                elif isinstance(cell.value, (int, float)):
+                if isinstance(cell.value, (int, float)):
                     cell.number_format = "#,##0.00" if "distance" in header else "#,##0"
             width = max((len(str(sheet.cell(row, column).value or "")) for row in range(1, sheet.max_row + 1)), default=10)
             sheet.column_dimensions[get_column_letter(column)].width = min(max(width + 2, 12), 48)
