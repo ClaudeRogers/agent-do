@@ -72,31 +72,7 @@ Evolve `sync` from its initial time-window fetch into an incremental process:
 The dashboard must remain usable from the last successful cache when Strava is
 offline or authorization expires.
 
-### 3. Readable spreadsheet export
-
-`agent-do strava export <path.csv|path.xlsx>` now exports a selected range
-from the local cache only. CSV has one normalized activity table; Excel adds
-Summary, Activities, Weekly, Monthly, and Data dictionary sheets. Exports omit
-activity names, route geometry, notes, photos, and OAuth secrets. Use
-`--days`, `--type`, and (only when deliberately replacing a file) `--overwrite`.
-For several activity groups in the CLI, use `--activity run,bike` or
-`--activity '[run,bike]'`; `run` includes running variants and `bike` includes
-ride and bike variants.
-The dashboard also exposes Export Excel and Export CSV buttons; each downloads
-the range and activity type currently selected in the dashboard.
-Durations use `hours:minutes:seconds`, paces use `minutes:seconds` per selected
-distance unit, and numeric cells use thousands separators.
-
-Possible future refinements:
-
-- goal progress and more configurable aggregate columns;
-- an option to omit identifiers entirely for sharing; and
-- charts that remain useful across spreadsheet applications.
-
-Export is a local, explicit action. Files should be written only to a path the
-user specifies and must not include OAuth tokens or privacy-zone geometry.
-
-### 4. Richer activity detail
+### 3. Richer activity detail
 
 Recent-activity rows are selectable and fetch a basic detail summary on demand
 instead of bulk-downloading sensitive data for every activity. Next additions
@@ -109,7 +85,7 @@ only what is needed for the selected detail view. Photo availability must be
 based on the fields Strava actually returns for that activity, rather than
 assuming all uploaded images are accessible through the API.
 
-### 5. Optional AI training observations
+### 4. Optional AI training observations
 
 Add an opt-in `agent-do strava insights` command that sends a deliberately
 small, selected aggregate dataset to an AI provider and returns observations,
@@ -131,7 +107,7 @@ Potential prompts include: "What changed over the past four weeks?", "Which
 training habits are most consistent?", and "What questions should I consider
 before setting next month's goal?"
 
-### 6. Shoe mileage
+### 5. Shoe mileage
 
 Add a dashboard view that attributes running and walking distance to each
 Strava gear item, so a person can see the accumulated mileage for every pair
@@ -145,9 +121,8 @@ the optional threshold; it must not change gear assignments in Strava.
 
 1. Whether goals are simple local values or a richer editable plan format.
 2. Whether the local UI needs a durable server process or starts only on demand.
-3. Which spreadsheet library and formats to support first.
-4. Which AI providers to support, and whether local-only models are a priority.
-5. Whether webhook support is worth the public callback and operational burden
+3. Which AI providers to support, and whether local-only models are a priority.
+4. Whether webhook support is worth the public callback and operational burden
    for a personal, bring-your-own Strava app.
-6. Whether shoe mileage should use Strava's lifetime gear distance, the local
+5. Whether shoe mileage should use Strava's lifetime gear distance, the local
    activity cache, or both when their totals differ.
