@@ -6,7 +6,7 @@ tools:
     - store Strava client and refresh secrets in the operating system's secure credential store
     - guide an athlete through a localhost OAuth connection with activity:read access
     - refresh access tokens and sync recent activities without sending data to any shared agent-do service
-    - serve a responsive localhost dashboard that refreshes from the local activity cache without regenerating its HTML
+    - serve a responsive localhost dashboard with activity summaries, Strava lifetime gear mileage, cached gear activity history, and downloadable gear workbooks
     - summarize 1-week, 1-month, 3-month, and 1-year training ranges with paginated activities and local-only charts
     - export a selected local-cache date range to CSV or a formatted Excel workbook without routes or OAuth secrets
     commands:
@@ -16,6 +16,7 @@ tools:
       sync: 'Refresh credentials and sync activities: sync [--days N]'
       dashboard: 'Generate a local HTML dashboard: dashboard [--open]'
       export: 'Export local cached activities: export <output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]'
+      gear-export: 'Export local gear and associated activities: gear-export <output.xlsx> [--overwrite]'
       serve: 'Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]'
     examples:
     - intent: set up a private Strava profile on this computer
@@ -28,6 +29,8 @@ tools:
       command: agent-do strava serve --open
     - intent: export my last 90 days of local Strava activity data to Excel
       command: agent-do strava export activities.xlsx --days 90 --activity run,bike
+    - intent: export my Strava gear and its associated activities to Excel
+      command: agent-do strava gear-export gear.xlsx
     routing:
       discover_keywords:
       - strava
@@ -43,6 +46,7 @@ tools:
       - agent-do strava sync
       - agent-do strava serve --open
       - agent-do strava export activities.xlsx --days 90
+      - agent-do strava gear-export gear.xlsx
       default_command: status
     credentials:
       optional:
@@ -60,6 +64,7 @@ tools:
       - sync
       - dashboard
       - export
+      - gear-export
       attributes:
         init:
         - composite
@@ -73,6 +78,7 @@ tools:
         dashboard:
         - composite
         export: []
+        gear-export: []
         serve:
         - composite
         - long_running

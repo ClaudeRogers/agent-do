@@ -30,7 +30,8 @@ activity summaries with available elevation and heart-rate streams. Detail
 charts use smoothed paths, value tooltips, and a zero lower bound for
 non-negative metrics. It does not persist those detailed responses after the
 browser request completes. The Gear page shows Strava's lifetime distance for
-each synced equipment item and opens its locally cached activity history.
+each synced equipment item, opens its locally cached activity history, and can
+export a workbook with a gear summary followed by one activity sheet per item.
 
 ## Product principles
 
@@ -53,8 +54,7 @@ The next dynamic-interface additions could include:
 - a custom date range;
 - weekly/monthly consistency and training-load summaries;
 - user-owned goals and progress; and
-- a visible "last synced" state alongside the existing explicit sync action; and
-- gear-specific CSV and Excel exports.
+- a visible "last synced" state alongside the existing explicit sync action.
 
 Use plain JavaScript first. Introduce React or another UI framework only when
 interactive state, views, and component complexity justify the dependency.

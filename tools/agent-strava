@@ -307,7 +307,7 @@ def export_xlsx(path, cache, activities, units, rows, days, activity_type):
         from openpyxl.styles import Font, PatternFill
         from openpyxl.utils import get_column_letter
     except ImportError as exc:
-        raise SystemExit("Excel export requires openpyxl. Install it with: python3 -m pip install openpyxl") from exc
+        raise SystemExit("Excel export requires openpyxl. Run ./install.sh from the agent-do checkout, or install it with: python3 -m pip install 'openpyxl>=3.1.0'") from exc
 
     workbook = Workbook(); summary = workbook.active; summary.title = "Summary"
     totals = summarize(activities, days=3660)
@@ -376,6 +376,66 @@ def export_xlsx(path, cache, activities, units, rows, days, activity_type):
         elif isinstance(value.value, (int, float)): value.number_format = "#,##0.00" if "distance" in label else "#,##0"
     workbook.save(path)
 
+def gear_sheet_name(name, used):
+    """Return a unique Excel-safe worksheet name for a local gear item."""
+    stem = "".join(" " if character in "[]:*?/\\" else character for character in name).strip() or "Unnamed gear"
+    stem = stem[:31]
+    candidate, suffix = stem, 2
+    while candidate.lower() in used:
+        ending = f" ({suffix})"
+        candidate = stem[:31 - len(ending)] + ending
+        suffix += 1
+    used.add(candidate.lower())
+    return candidate
+
+def export_gear_xlsx(path, cache, units):
+    """Write a local gear workbook: summary first, then one activity sheet per item."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:
+        raise SystemExit("Excel export requires openpyxl. Run ./install.sh from the agent-do checkout, or install it with: python3 -m pip install 'openpyxl>=3.1.0'") from exc
+
+    items = gear_summary(cache)
+    distance_factor, distance_unit = (1, "km") if units == "metric" else (0.621371, "mi")
+    workbook = Workbook(); summary = workbook.active; summary.title = "Gear"
+    summary.append(["Gear", f"Total distance ({distance_unit})", "Last used", "Activities"])
+    for item in items:
+        last_used = started({"start_date": item["last_used_at"]}).date().isoformat() if item["last_used_at"] else None
+        summary.append([item["name"], round((item["distance_m"] or 0) / 1000 * distance_factor, 2), last_used, item["activity_count"]])
+
+    used_names = {"gear"}
+    for item in items:
+        sheet = workbook.create_sheet(gear_sheet_name(item["name"], used_names))
+        rows = export_rows(activities_for_gear(cache, item["id"]), units)
+        headers = list(dict.fromkeys(key for row in rows for key in row))
+        if not headers:
+            headers = ["Date", "Sport", f"Distance ({distance_unit})", "Moving time"]
+        sheet.append(headers)
+        for row in rows:
+            sheet.append([row.get(header) / 86400 if header in ("Moving time", "Elapsed time") else row.get(header) for header in headers])
+
+    for sheet in workbook.worksheets:
+        sheet.freeze_panes = "A2"
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+        for column in range(1, sheet.max_column + 1):
+            header = str(sheet.cell(1, column).value or "").lower()
+            for row in range(2, sheet.max_row + 1):
+                cell = sheet.cell(row, column)
+                if header in ("moving time", "elapsed time"):
+                    cell.number_format = "[h]:mm:ss"
+                elif "pace" in header:
+                    cell.number_format = "m:ss"
+                elif isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00" if "distance" in header else "#,##0"
+            width = max((len(str(sheet.cell(row, column).value or "")) for row in range(1, sheet.max_row + 1)), default=10)
+            sheet.column_dimensions[get_column_letter(column)].width = min(max(width + 2, 12), 48)
+    workbook.save(path)
+    return len(items), sum(item["activity_count"] for item in items)
+
 def export_download(fmt, days, activity_type):
     """Build a filtered export for a browser download without retaining a copy."""
     args = argparse.Namespace(days=days, type=activity_type, activity=None)
@@ -405,6 +465,25 @@ def export(args):
     else: export_xlsx(path, cache, activities, units, rows, args.days, ", ".join(activity_filters(args)) or None)
     print(json.dumps({"exported": str(path), "format": fmt, "activities": len(activities), "days": args.days, "activity": activity_filters(args), "units": units}))
 
+def gear_export_download():
+    """Build a gear workbook for browser download without retaining a copy."""
+    cache = read_json(CACHE, "activity cache; run: agent-do strava sync")
+    profile = json.loads(PROFILE.read_text()) if PROFILE.exists() else {}
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "strava-gear.xlsx"
+        count, activities = export_gear_xlsx(path, cache, profile.get("units") or "imperial")
+        return path.read_bytes(), count, activities
+
+def gear_export(args):
+    path = Path(args.output).expanduser()
+    if path.suffix.lower() != ".xlsx":
+        raise SystemExit("Gear export output must end in .xlsx.")
+    require_new_output(path, args.overwrite)
+    cache = read_json(CACHE, "activity cache; run: agent-do strava sync")
+    profile = json.loads(PROFILE.read_text()) if PROFILE.exists() else {}
+    count, activities = export_gear_xlsx(path, cache, profile.get("units") or "imperial")
+    print(json.dumps({"exported": str(path), "format": "xlsx", "gear": count, "activities": activities, "units": profile.get("units") or "imperial"}))
+
 def detail_for_activity(activity_id):
     cached = read_json(CACHE, "activity cache; run Sync now after connecting")["activities"]
     if not any(str(activity.get("id")) == str(activity_id) for activity in cached):
@@ -430,6 +509,8 @@ DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", "<style>[hidden]{displa
 DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", "<script>if(location.pathname==='/gear')document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('#export-xlsx,#export-csv').forEach(button=>button.remove()))</script></html>")
 GEAR_MODAL_UI_SCRIPT = """<style>.gear-activities li>b{margin-right:.35rem}</style><script>document.addEventListener('pointerdown',event=>{for(const dialog of document.querySelectorAll('dialog:not(#activity-dialog)')){if(!dialog.open)continue;const bounds=dialog.getBoundingClientRect(),outside=event.clientX<bounds.left||event.clientX>bounds.right||event.clientY<bounds.top||event.clientY>bounds.bottom;if(outside){event.preventDefault();dialog.close()}}},true)</script>"""
 DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", GEAR_MODAL_UI_SCRIPT + "</html>")
+GEAR_EXPORT_UI_SCRIPT = """<script>if(location.pathname==='/gear')document.addEventListener('DOMContentLoaded',()=>{const button=document.createElement('button');button.type='button';button.id='export-gear';button.textContent='Export Gear';button.onclick=()=>window.location.assign('/api/gear-export');document.querySelector('header .controls').append(button)})</script>"""
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", GEAR_EXPORT_UI_SCRIPT + "</html>")
 
 class LocalDashboard(BaseHTTPRequestHandler):
     def reply(self, status, payload, content_type="application/json; charset=utf-8"):
@@ -450,6 +531,11 @@ class LocalDashboard(BaseHTTPRequestHandler):
                 content, count = export_download(fmt, days, activity_type)
                 return self.download(f"strava-{days}-days-{count}-activities.{fmt}", content, "text/csv; charset=utf-8" if fmt == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             except (ValueError, SystemExit) as exc: return self.reply(400, {"error": str(exc)})
+        if parsed.path == "/api/gear-export":
+            try:
+                content, count, activities = gear_export_download()
+                return self.download(f"strava-gear-{count}-items-{activities}-activities.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except SystemExit as exc: return self.reply(400, {"error": str(exc)})
         if parsed.path.startswith("/api/activity/"):
             activity_id = parsed.path.removeprefix("/api/activity/")
             if not activity_id.isdigit(): return self.reply(400, {"error": "Activity ID must be numeric"})
@@ -546,9 +632,10 @@ def main():
     p = sub.add_parser("sync", help="Refresh and sync activity data"); p.add_argument("--days", type=int, default=90)
     p = sub.add_parser("dashboard", help="Generate the local HTML dashboard"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("export", help="Export local cached activities to CSV or Excel"); p.add_argument("output", help="New .csv or .xlsx file path"); p.add_argument("--format", choices=("csv", "xlsx")); p.add_argument("--days", type=int, default=90); filters = p.add_mutually_exclusive_group(); filters.add_argument("--activity", action="append", help="Activity groups, comma-delimited or bracketed (for example run,bike or [run,bike])"); filters.add_argument("--type", help="Exact Strava sport type (legacy single-filter form)"); p.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
+    p = sub.add_parser("gear-export", help="Export local gear and associated activities to Excel"); p.add_argument("output", help="New .xlsx file path"); p.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
     p = sub.add_parser("serve", help="Sync once, then serve the responsive local dashboard"); p.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost")); p.add_argument("--port", type=int, default=8765); p.add_argument("--days", type=int, default=90); p.add_argument("--no-sync", action="store_true", help="Serve the existing cache without syncing"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("status", help="Show local profile status"); p.add_argument("--json", action="store_true", help="Print structured status")
     args = parser.parse_args()
     if getattr(args, "client_secret_stdin", False): args.client_secret = sys.stdin.read().strip()
-    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "export": export, "serve": serve, "status": status}[args.command](args)
+    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "export": export, "gear-export": gear_export, "serve": serve, "status": status}[args.command](args)
 if __name__ == "__main__": main()

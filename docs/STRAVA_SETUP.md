@@ -92,6 +92,12 @@ The dashboard displays imperial units (miles and feet) by default. Use the
 **Units: Imperial** button to switch to metric; this saves the selected unit in
 your local Strava profile configuration and does not alter the activity cache.
 
+The **Gear** page shows each assigned item’s lifetime distance as reported by
+Strava. Select a gear card to see the matching activities in the local cache.
+Use **Export Gear** to download an Excel workbook: its first sheet summarizes
+gear name, lifetime distance, last-used date, and cached activity count; every
+following sheet lists one gear item’s cached activities.
+
 Use the **Activity** selector to view totals and recent sessions for an
 individual Strava activity type—such as Ride, Run, Walk, Swim, or TrailRun.
 The available choices come from your own synced activities.
@@ -105,6 +111,12 @@ For a command-line export containing multiple activity groups, use:
 
 ```bash
 agent-do strava export run-and-bike.xlsx --days 90 --activity run,bike
+```
+
+Export all locally cached gear and its associated activities with:
+
+```bash
+agent-do strava gear-export gear.xlsx
 ```
 
 Choose one of four ranges: **1 week**, **1 month** (the default), **3 months**,
@@ -152,6 +164,9 @@ local cache inside that directory.
   exactly `localhost`, then run `agent-do strava connect` again.
 - **Startup sync is skipped**: run `agent-do strava status --json`; if the
   refresh token was revoked, reconnect with `agent-do strava connect`.
+- **“Excel export requires openpyxl”**: rerun `./install.sh` from the
+  agent-do checkout. If you are using a separate Python runtime, install the
+  declared dependency with `python3 -m pip install 'openpyxl>=3.1.0'`.
 - **Use a different callback port**: pass `--redirect-uri
   http://localhost:PORT/callback` to `agent-do strava init`, and configure the
   same callback domain in Strava.

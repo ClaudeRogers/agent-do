@@ -91,6 +91,36 @@ def test_export_xlsx_has_readable_summary_and_activity_sheets():
         assert workbook["Summary"]["B9"].number_format == "[h]:mm:ss"
         assert workbook["Activities"].max_row == 2
 
+def test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear():
+    if importlib.util.find_spec("openpyxl") is None:
+        return
+    from openpyxl import load_workbook
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        (data / "profile.json").write_text(json.dumps({"units": "imperial"}))
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        activities = [
+            {"id": 1, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "gear_id": "g1"},
+            {"id": 2, "start_date": now, "sport_type": "Run", "distance": 3000, "moving_time": 1200, "gear_id": "g2"},
+        ]
+        gear = [
+            {"id": "g1", "name": "Road shoes", "distance": 80467},
+            {"id": "g2", "name": "Trail shoes", "distance": 32187},
+        ]
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "gear": gear, "activities": activities}))
+        output = Path(home) / "gear.xlsx"
+        result = run("gear-export", str(output), env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == {"exported": str(output), "format": "xlsx", "gear": 2, "activities": 2, "units": "imperial"}
+        workbook = load_workbook(output)
+        assert workbook.sheetnames == ["Gear", "Road shoes", "Trail shoes"]
+        assert [cell.value for cell in workbook["Gear"][1]] == ["Gear", "Total distance (mi)", "Last used", "Activities"]
+        assert workbook["Gear"]["A2"].value == "Road shoes"
+        assert workbook["Gear"]["B2"].value == 50.0
+        assert workbook["Gear"]["D3"].value == 1
+        assert workbook["Road shoes"]["A1"].value == "Date"
+        assert workbook["Road shoes"].max_row == 2
+
 def test_dashboard_export_uses_selected_local_cache_without_retaining_a_file():
     with tempfile.TemporaryDirectory() as home:
         original = strava.HOME, strava.PROFILE, strava.CACHE
@@ -196,6 +226,27 @@ def test_gear_api_returns_lifetime_distance_and_associated_cached_activities():
             if server: server.server_close()
             strava.HOME, strava.PROFILE, strava.CACHE = original
 
+def test_gear_export_endpoint_downloads_an_excel_workbook():
+    with tempfile.TemporaryDirectory() as home:
+        original = strava.HOME, strava.PROFILE, strava.CACHE
+        server = None
+        try:
+            strava.HOME = Path(home) / "strava"; strava.HOME.mkdir()
+            strava.PROFILE, strava.CACHE = strava.HOME / "profile.json", strava.HOME / "activities.json"
+            strava.PROFILE.write_text(json.dumps({"units": "imperial"}))
+            now = strava.datetime.now(strava.timezone.utc).isoformat()
+            strava.CACHE.write_text(json.dumps({"synced_at": now, "gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [{"id": 42, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "gear_id": "g1"}]}))
+            server = strava.HTTPServer(("127.0.0.1", 0), strava.LocalDashboard)
+            worker = threading.Thread(target=server.handle_request); worker.start()
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/gear-export", timeout=5) as response:
+                content = response.read()
+                assert response.status == 200 and "attachment" in response.headers["Content-Disposition"]
+            worker.join(timeout=5)
+            assert content.startswith(b"PK")
+        finally:
+            if server: server.server_close()
+            strava.HOME, strava.PROFILE, strava.CACHE = original
+
 def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert strava.DYNAMIC_DASHBOARD_PATH.name == "agent-strava-dashboard.html"
     assert strava.DYNAMIC_DASHBOARD_PATH.parent == ROOT / "docs"
@@ -273,6 +324,8 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "/api/gear" in strava.DYNAMIC_DASHBOARD
     assert "Gear activity history" in strava.DYNAMIC_DASHBOARD
     assert "#export-xlsx,#export-csv" in strava.DYNAMIC_DASHBOARD
+    assert "gear-export" in strava.DYNAMIC_DASHBOARD
+    assert "Export Gear" in strava.DYNAMIC_DASHBOARD
     assert "dialog.dataset.backdropClose" in strava.DYNAMIC_DASHBOARD
     assert "dialog.getBoundingClientRect()" in strava.DYNAMIC_DASHBOARD
     assert "document.addEventListener('pointerdown'" in strava.DYNAMIC_DASHBOARD
@@ -295,4 +348,4 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
+    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
