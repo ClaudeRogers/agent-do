@@ -6,7 +6,7 @@ writes a token to the profile or activity cache.
 """
 from __future__ import annotations
 
-import argparse, json, os, secrets, subprocess, sys, urllib.parse, urllib.request, webbrowser
+import argparse, csv, json, os, secrets, subprocess, sys, tempfile, urllib.parse, urllib.request, webbrowser
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -153,6 +153,190 @@ def summarize(activities, days=7, activity_type=None):
         "average_speed_mps": round(pace_distance_km * 1000 / pace_seconds, 2) if pace_seconds else None,
     }
 
+def export_rows(activities, units):
+    """Return a shareable, normalized activity table without route or token data."""
+    metric = units == "metric"
+    distance_factor = 1 if metric else 0.621371
+    elevation_factor = 1 if metric else 3.28084
+    distance_unit, elevation_unit = ("km", "m") if metric else ("mi", "ft")
+    rows = []
+    for activity in sorted(activities, key=started, reverse=True):
+        distance_km = activity.get("distance", 0) / 1000
+        moving_seconds = activity.get("moving_time", 0)
+        kind = activity_kind(activity)
+        row = {
+            "Date": started(activity).date().isoformat(),
+            "Sport": kind,
+            f"Distance ({distance_unit})": round(distance_km * distance_factor, 2),
+            "Moving time": moving_seconds,
+            "Elapsed time": activity.get("elapsed_time", 0),
+            f"Elevation gain ({elevation_unit})": round(activity.get("total_elevation_gain", 0) * elevation_factor),
+            "Average heart rate (bpm)": activity.get("average_heartrate"),
+            "Max heart rate (bpm)": activity.get("max_heartrate"),
+            "Calories": activity.get("calories"),
+            "Activity ID": activity.get("id"),
+        }
+        if is_running(activity):
+            row[f"Average pace (min:sec/{distance_unit})"] = round(moving_seconds / (distance_km * distance_factor)) if distance_km else None
+        elif is_biking(activity):
+            row[f"Average speed ({distance_unit}/h)"] = round(distance_km * distance_factor / (moving_seconds / 3600), 2) if moving_seconds else None
+        rows.append(row)
+    return rows
+
+def monthly_rollup(activities, units):
+    metric = units == "metric"
+    distance_factor, distance_unit = (1, "km") if metric else (0.621371, "mi")
+    elevation_factor, elevation_unit = (1, "m") if metric else (3.28084, "ft")
+    months = {}
+    for activity in activities:
+        month = started(activity).strftime("%Y-%m")
+        bucket = months.setdefault(month, {"Month": month, "Activities": 0, f"Distance ({distance_unit})": 0, "Moving time": 0, f"Elevation gain ({elevation_unit})": 0})
+        bucket["Activities"] += 1
+        bucket[f"Distance ({distance_unit})"] += activity.get("distance", 0) / 1000 * distance_factor
+        bucket["Moving time"] += activity.get("moving_time", 0)
+        bucket[f"Elevation gain ({elevation_unit})"] += activity.get("total_elevation_gain", 0) * elevation_factor
+    return [{key: round(value, 2) if isinstance(value, float) else value for key, value in value.items()} for _, value in sorted(months.items())]
+
+def selected_activities(args):
+    cache = read_json(CACHE, "activity cache; run: agent-do strava sync")
+    profile = json.loads(PROFILE.read_text()) if PROFILE.exists() else {}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    activities = [a for a in cache["activities"] if started(a) >= cutoff and (not args.type or activity_kind(a) == args.type)]
+    return cache, activities, profile.get("units") or "imperial"
+
+def require_new_output(path, overwrite):
+    if path.exists() and not overwrite:
+        raise SystemExit(f"Refusing to overwrite {path}. Re-run with --overwrite to replace it.")
+    if not path.parent.exists():
+        raise SystemExit(f"Output directory does not exist: {path.parent}")
+
+def format_duration(seconds):
+    seconds = round(seconds or 0)
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+def format_pace(seconds):
+    if seconds is None: return ""
+    seconds = round(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+def csv_rows(rows):
+    formatted = []
+    for row in rows:
+        formatted.append({key: format_pace(value) if "pace" in key.lower() else format_duration(value) if key in ("Moving time", "Elapsed time") else f"{value:,}" if isinstance(value, (int, float)) else value for key, value in row.items()})
+    return formatted
+
+def export_csv(path, rows):
+    headers = list(dict.fromkeys(key for row in rows for key in row))
+    if not headers:
+        headers = ["Date", "Sport", "Distance (mi)", "Moving time"]
+    with path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader(); writer.writerows(csv_rows(rows))
+
+def export_xlsx(path, cache, activities, units, rows, days, activity_type):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:
+        raise SystemExit("Excel export requires openpyxl. Install it with: python3 -m pip install openpyxl") from exc
+
+    workbook = Workbook(); summary = workbook.active; summary.title = "Summary"
+    totals = summarize(activities, days=3660)
+    distance_factor, elevation_factor = (1, 1) if units == "metric" else (0.621371, 3.28084)
+    distance_unit, elevation_unit = ("km", "m") if units == "metric" else ("mi", "ft")
+    summary_rows = [
+        ("Exported at (UTC)", datetime.now(timezone.utc).isoformat()),
+        ("Cache last synced", cache.get("synced_at", "Unknown")),
+        ("Date range", f"Last {days} days"),
+        ("Activity type", activity_type or "All activities"),
+        ("Units", units),
+        ("Activities", totals["activity_count"]),
+        (f"Distance ({distance_unit})", round(totals["distance_km"] * distance_factor, 1)),
+        ("Moving time", totals["moving_minutes"] * 60),
+        (f"Elevation gain ({elevation_unit})", round(totals["elevation_m"] * elevation_factor)),
+    ]
+    summary.append(["Metric", "Value"])
+    for row in summary_rows: summary.append(row)
+
+    def add_table(name, table_rows):
+        sheet = workbook.create_sheet(name)
+        headers = list(dict.fromkeys(key for row in table_rows for key in row))
+        if headers: sheet.append(headers)
+        for row in table_rows:
+            sheet.append([row.get(header) / 86400 if header in ("Moving time", "Elapsed time") or "pace" in header.lower() and row.get(header) is not None else row.get(header) for header in headers])
+        return sheet
+
+    activity_sheet = add_table("Activities", rows)
+    weekly = summarize(activities, days=3660)["weekly"]
+    weekly_rows = [{
+        "Week starting": item["week"],
+        f"Distance ({distance_unit})": round(item["distance_km"] * distance_factor, 2),
+        "Moving time": item["moving_minutes"] * 60,
+        f"Average pace (min:sec/{distance_unit})": round(item["pace_seconds_per_km"] / distance_factor) if item["pace_seconds_per_km"] else None,
+        f"Average speed ({distance_unit}/h)": round(item["average_speed_mps"] * 3.6 * distance_factor, 2) if item["average_speed_mps"] else None,
+    } for item in weekly]
+    weekly_sheet = add_table("Weekly", weekly_rows)
+    monthly_sheet = add_table("Monthly", monthly_rollup(activities, units))
+    dictionary = add_table("Data dictionary", [
+        {"Field": "Activity ID", "Definition": "Strava activity identifier; excludes names, routes, notes, photos, and OAuth secrets."},
+        {"Field": "Distance / elevation", "Definition": f"Values use the selected {units} display units unless the column states metres or kilometres."},
+        {"Field": "Date", "Definition": "Activity start date in UTC."},
+        {"Field": "Export scope", "Definition": "Only activities in the selected local-cache date range and activity type."},
+    ])
+    summary["B9"] = summary["B9"].value / 86400
+    for sheet in workbook.worksheets:
+        sheet.freeze_panes = "A2" if sheet.max_row > 1 else None
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+        for column in range(1, sheet.max_column + 1):
+            header = str(sheet.cell(1, column).value or "").lower()
+            for row in range(2, sheet.max_row + 1):
+                cell = sheet.cell(row, column)
+                if header in ("moving time", "elapsed time"):
+                    cell.number_format = "[h]:mm:ss"
+                elif "pace" in header:
+                    cell.number_format = "m:ss"
+                elif isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00" if any(word in header for word in ("distance", "speed")) else "#,##0"
+            width = max((len(str(sheet.cell(row, column).value or "")) for row in range(1, sheet.max_row + 1)), default=10)
+            sheet.column_dimensions[get_column_letter(column)].width = min(max(width + 2, 12), 48)
+    for row in range(2, summary.max_row + 1):
+        label, value = str(summary.cell(row, 1).value or "").lower(), summary.cell(row, 2)
+        if label == "moving time": value.number_format = "[h]:mm:ss"
+        elif isinstance(value.value, (int, float)): value.number_format = "#,##0.00" if "distance" in label else "#,##0"
+    workbook.save(path)
+
+def export_download(fmt, days, activity_type):
+    """Build a filtered export for a browser download without retaining a copy."""
+    args = argparse.Namespace(days=days, type=activity_type)
+    cache, activities, units = selected_activities(args)
+    rows = export_rows(activities, units)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"strava-export.{fmt}"
+        if fmt == "csv": export_csv(path, rows)
+        else: export_xlsx(path, cache, activities, units, rows, days, activity_type)
+        return path.read_bytes(), len(activities)
+
+def export(args):
+    if args.days < 1:
+        raise SystemExit("--days must be at least 1")
+    path = Path(args.output).expanduser()
+    fmt = args.format or path.suffix.lower().removeprefix(".")
+    if fmt not in ("csv", "xlsx"):
+        raise SystemExit("Output path must end in .csv or .xlsx, or specify --format csv|xlsx.")
+    if path.suffix and path.suffix.lower() != f".{fmt}":
+        raise SystemExit(f"Output extension {path.suffix} does not match --format {fmt}.")
+    if not path.suffix:
+        path = path.with_suffix(f".{fmt}")
+    require_new_output(path, args.overwrite)
+    cache, activities, units = selected_activities(args)
+    rows = export_rows(activities, units)
+    if fmt == "csv": export_csv(path, rows)
+    else: export_xlsx(path, cache, activities, units, rows, args.days, args.type)
+    print(json.dumps({"exported": str(path), "format": fmt, "activities": len(activities), "days": args.days, "type": args.type, "units": units}))
+
 def detail_for_activity(activity_id):
     cached = read_json(CACHE, "activity cache; run Sync now after connecting")["activities"]
     if not any(str(activity.get("id")) == str(activity_id) for activity in cached):
@@ -172,15 +356,28 @@ def detail_for_activity(activity_id):
 # focused on API and cache behavior. Edit the dashboard in this source file.
 DYNAMIC_DASHBOARD_PATH = ROOT / "docs" / "agent-strava-dashboard.html"
 DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD_PATH.read_text(encoding="utf-8")
+EXPORT_UI_SCRIPT = """<script>(()=>{const controls=document.querySelector('header .controls'),download=format=>{const query=new URLSearchParams({format,days,type:activityType});window.location.assign('/api/export?'+query)};for(const [format,label] of [['xlsx','Export Excel'],['csv','Export CSV']]){const button=document.createElement('button');button.id='export-'+format;button.type='button';button.textContent=label;button.onclick=()=>download(format);controls.append(button)}})()</script>"""
+DYNAMIC_DASHBOARD = DYNAMIC_DASHBOARD.replace("</html>", EXPORT_UI_SCRIPT + "</html>")
 
 class LocalDashboard(BaseHTTPRequestHandler):
     def reply(self, status, payload, content_type="application/json; charset=utf-8"):
         body = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
         self.send_response(status); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
     def log_message(self, *unused): pass
+    def download(self, filename, content, content_type):
+        self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(content))); self.send_header("Content-Disposition", f'attachment; filename="{filename}"'); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(content)
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/": return self.reply(200, DYNAMIC_DASHBOARD, "text/html; charset=utf-8")
+        if parsed.path == "/api/export":
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                days, fmt = int(query.get("days", [30])[0]), query.get("format", ["xlsx"])[0]
+                activity_type = query.get("type", [None])[0]
+                if not 1 <= days <= 3660 or fmt not in ("csv", "xlsx"): raise ValueError("Export requires a valid date range and csv or xlsx format")
+                content, count = export_download(fmt, days, activity_type)
+                return self.download(f"strava-{days}-days-{count}-activities.{fmt}", content, "text/csv; charset=utf-8" if fmt == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except (ValueError, SystemExit) as exc: return self.reply(400, {"error": str(exc)})
         if parsed.path.startswith("/api/activity/"):
             activity_id = parsed.path.removeprefix("/api/activity/")
             if not activity_id.isdigit(): return self.reply(400, {"error": "Activity ID must be numeric"})
@@ -262,9 +459,10 @@ def main():
     p = sub.add_parser("connect", help="Authorize the local Strava profile"); p.add_argument("--timeout", type=int, default=300)
     p = sub.add_parser("sync", help="Refresh and sync activity data"); p.add_argument("--days", type=int, default=90)
     p = sub.add_parser("dashboard", help="Generate the local HTML dashboard"); p.add_argument("--open", action="store_true")
+    p = sub.add_parser("export", help="Export local cached activities to CSV or Excel"); p.add_argument("output", help="New .csv or .xlsx file path"); p.add_argument("--format", choices=("csv", "xlsx")); p.add_argument("--days", type=int, default=90); p.add_argument("--type", help="Exact Strava sport type"); p.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
     p = sub.add_parser("serve", help="Sync once, then serve the responsive local dashboard"); p.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost")); p.add_argument("--port", type=int, default=8765); p.add_argument("--days", type=int, default=90); p.add_argument("--no-sync", action="store_true", help="Serve the existing cache without syncing"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("status", help="Show local profile status"); p.add_argument("--json", action="store_true", help="Print structured status")
     args = parser.parse_args()
     if getattr(args, "client_secret_stdin", False): args.client_secret = sys.stdin.read().strip()
-    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "serve": serve, "status": status}[args.command](args)
+    {"init": init, "connect": connect, "sync": sync, "dashboard": dashboard, "export": export, "serve": serve, "status": status}[args.command](args)
 if __name__ == "__main__": main()

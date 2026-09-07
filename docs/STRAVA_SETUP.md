@@ -96,6 +96,11 @@ Use the **Activity** selector to view totals and recent sessions for an
 individual Strava activity type—such as Ride, Run, Walk, Swim, or TrailRun.
 The available choices come from your own synced activities.
 
+Use **Export Excel** or **Export CSV** to download exactly the currently
+selected date range and activity type. The dashboard builds the download from
+the local cache without contacting Strava, and it omits route geometry, names,
+notes, photos, and OAuth secrets.
+
 Choose one of four ranges: **1 week**, **1 month** (the default), **3 months**,
 or **1 year**. The header summarizes distance, moving time, elevation,
 activity count, and average pace for runs and walks. With a cycling-only

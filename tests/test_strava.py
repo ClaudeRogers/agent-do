@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import importlib.machinery, json, os, subprocess, tempfile
+import importlib.machinery, importlib.util, json, os, subprocess, tempfile, threading
 from pathlib import Path
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "agent-strava"
@@ -35,6 +36,77 @@ def test_dashboard_uses_local_cache_only():
         assert result.returncode == 0
         page = Path(result.stdout.strip())
         assert page.exists() and "Your training" in page.read_text()
+
+def test_export_csv_uses_local_cache_and_omits_sensitive_route_fields():
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        (data / "profile.json").write_text(json.dumps({"units": "metric"}))
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "activities": [{"id": 42, "name": "Home address run", "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800, "map": {"summary_polyline": "secret-route"}}]}))
+        output = Path(home) / "activities.csv"
+        result = run("export", str(output), env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0 and json.loads(result.stdout)["activities"] == 1
+        content = output.read_text()
+        assert "Distance (km)" in content and "Moving time" in content and "0:30:00" in content
+        assert "secret-route" not in content and "Home address" not in content
+        duplicate = run("export", str(output), env={**os.environ, "AGENT_DO_HOME": home})
+        assert duplicate.returncode != 0 and "--overwrite" in duplicate.stderr
+
+def test_export_xlsx_has_readable_summary_and_activity_sheets():
+    if importlib.util.find_spec("openpyxl") is None:
+        return
+    from openpyxl import load_workbook
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        (data / "profile.json").write_text(json.dumps({"units": "imperial"}))
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "activities": [{"id": 42, "start_date": now, "sport_type": "Ride", "distance": 16093, "moving_time": 3600}]}))
+        output = Path(home) / "activities.xlsx"
+        result = run("export", str(output), env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0
+        workbook = load_workbook(output)
+        assert workbook.sheetnames == ["Summary", "Activities", "Weekly", "Monthly", "Data dictionary"]
+        assert workbook["Summary"]["A8"].value == "Distance (mi)"
+        assert workbook["Weekly"]["B1"].value == "Distance (mi)"
+        assert workbook["Monthly"]["E1"].value == "Elevation gain (ft)"
+        assert workbook["Activities"]["D1"].value == "Moving time"
+        assert workbook["Activities"]["D2"].number_format == "[h]:mm:ss"
+        assert workbook["Summary"]["B9"].number_format == "[h]:mm:ss"
+        assert workbook["Activities"].max_row == 2
+
+def test_dashboard_export_uses_selected_local_cache_without_retaining_a_file():
+    with tempfile.TemporaryDirectory() as home:
+        original = strava.HOME, strava.PROFILE, strava.CACHE
+        try:
+            strava.HOME = Path(home) / "strava"; strava.HOME.mkdir()
+            strava.PROFILE, strava.CACHE = strava.HOME / "profile.json", strava.HOME / "activities.json"
+            strava.PROFILE.write_text(json.dumps({"units": "imperial"}))
+            now = strava.datetime.now(strava.timezone.utc).isoformat()
+            strava.CACHE.write_text(json.dumps({"synced_at": now, "activities": [{"id": 42, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800}]}))
+            content, count = strava.export_download("csv", 30, "Run")
+            assert count == 1 and b"0:30:00" in content and b"summary_polyline" not in content
+        finally:
+            strava.HOME, strava.PROFILE, strava.CACHE = original
+
+def test_dashboard_export_endpoint_downloads_the_selected_csv():
+    with tempfile.TemporaryDirectory() as home:
+        original = strava.HOME, strava.PROFILE, strava.CACHE
+        server = None
+        try:
+            strava.HOME = Path(home) / "strava"; strava.HOME.mkdir()
+            strava.PROFILE, strava.CACHE = strava.HOME / "profile.json", strava.HOME / "activities.json"
+            strava.PROFILE.write_text(json.dumps({"units": "metric"}))
+            now = strava.datetime.now(strava.timezone.utc).isoformat()
+            strava.CACHE.write_text(json.dumps({"synced_at": now, "activities": [{"id": 42, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800}]}))
+            server = strava.HTTPServer(("127.0.0.1", 0), strava.LocalDashboard)
+            worker = threading.Thread(target=server.handle_request); worker.start()
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/export?format=csv&days=30&type=Run", timeout=5) as response:
+                assert response.status == 200 and "attachment" in response.headers["Content-Disposition"]
+                assert b"0:30:00" in response.read()
+            worker.join(timeout=5)
+        finally:
+            if server: server.server_close()
+            strava.HOME, strava.PROFILE, strava.CACHE = original
 
 def test_summary_calculates_selected_range():
     now = strava.datetime.now(strava.timezone.utc)
@@ -75,6 +147,9 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert strava.DYNAMIC_DASHBOARD_PATH.name == "agent-strava-dashboard.html"
     assert strava.DYNAMIC_DASHBOARD_PATH.parent == ROOT / "docs"
     assert "/api/sync" in strava.DYNAMIC_DASHBOARD
+    assert "/api/export" in strava.DYNAMIC_DASHBOARD
+    assert "Export Excel" in strava.DYNAMIC_DASHBOARD
+    assert "Export CSV" in strava.DYNAMIC_DASHBOARD
     assert "/api/preferences" in strava.DYNAMIC_DASHBOARD
     assert "activity-type" in strava.DYNAMIC_DASHBOARD
     assert "activity_types" in strava.DYNAMIC_DASHBOARD
@@ -163,4 +238,4 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
+    test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")

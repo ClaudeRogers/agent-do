@@ -106,7 +106,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [sms](#sms) | SMS messaging | write | 8 |
 | [spec](#spec) | Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness | mixed | 5 |
 | [ssh](#ssh) | Control remote server sessions | write | 5 |
-| [strava](#strava) | Personal, local-only Strava activity sync and dashboard | mixed | 6 |
+| [strava](#strava) | Personal, local-only Strava activity sync and dashboard | mixed | 7 |
 | [substack](#substack) | Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session | mixed | 11 |
 | [supabase](#supabase) | Supabase project lifecycle + management + data access (full Management API, REST API, SQL, and agent-db) | write | 64 |
 | [swarm](#swarm) | Multi-agent orchestration | write | 4 |
@@ -4119,6 +4119,7 @@ Concurrency: `mixed`
 - refresh access tokens and sync recent activities without sending data to any shared agent-do service
 - serve a responsive localhost dashboard that refreshes from the local activity cache without regenerating its HTML
 - summarize 1-week, 1-month, 3-month, and 1-year training ranges with paginated activities and local-only charts
+- export a selected local-cache date range to CSV or a formatted Excel workbook without routes or OAuth secrets
 
 **Commands**
 
@@ -4127,6 +4128,7 @@ Concurrency: `mixed`
 - `status`: Show local profile and cache status: status [--json]
 - `sync`: Refresh credentials and sync activities: sync [--days N]
 - `dashboard`: Generate a local HTML dashboard: dashboard [--open]
+- `export`: Export local cached activities: export \<output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--type SPORT] [--overwrite]
 - `serve`: Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]
 
 **Examples**
@@ -4140,6 +4142,8 @@ agent-do strava connect
 agent-do strava sync --days 90
 # show my private training dashboard
 agent-do strava serve --open
+# export my last 90 days of local Strava activity data to Excel
+agent-do strava export activities.xlsx --days 90
 ```
 
 **Credentials**
@@ -4149,7 +4153,7 @@ agent-do strava serve --open
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `status`
-- Write (connect/interact/save): `connect`, `dashboard`, `init`, `serve`, `sync`
+- Write (connect/interact/save): `connect`, `dashboard`, `export`, `init`, `serve`, `sync`
 - sensitive (emits or persists secret material; guard output): `connect`, `init`
 - long_running (daemon/stream/session; may never return): `connect`, `serve`
 - composite (one call performs several beats internally): `connect`, `dashboard`, `init`, `serve`, `sync`

@@ -74,16 +74,21 @@ offline or authorization expires.
 
 ### 3. Readable spreadsheet export
 
-Add `agent-do strava export` to create a user-selected `.xlsx` or `.csv` file
-from local cache data. The workbook should be friendly to people, not merely a
-raw API dump:
+`agent-do strava export <path.csv|path.xlsx>` now exports a selected range
+from the local cache only. CSV has one normalized activity table; Excel adds
+Summary, Activities, Weekly, Monthly, and Data dictionary sheets. Exports omit
+activity names, route geometry, notes, photos, and OAuth secrets. Use
+`--days`, `--type`, and (only when deliberately replacing a file) `--overwrite`.
+The dashboard also exposes Export Excel and Export CSV buttons; each downloads
+the range and activity type currently selected in the dashboard.
+Durations use `hours:minutes:seconds`, paces use `minutes:seconds` per selected
+distance unit, and numeric cells use thousands separators.
 
-- **Summary**: selected date range, totals, averages, goal progress, and last
-  sync receipt;
-- **Activities**: one normalized row per activity, with dates, sport, distance,
-  moving/elapsed time, elevation, pace/speed, and privacy-safe identifiers;
-- **Weekly** and **Monthly**: rollups suitable for charts or sharing; and
-- **Data dictionary**: units, field definitions, and the export date.
+Possible future refinements:
+
+- goal progress and more configurable aggregate columns;
+- an option to omit identifiers entirely for sharing; and
+- charts that remain useful across spreadsheet applications.
 
 Export is a local, explicit action. Files should be written only to a path the
 user specifies and must not include OAuth tokens or privacy-zone geometry.
