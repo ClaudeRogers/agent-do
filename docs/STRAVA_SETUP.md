@@ -158,6 +158,14 @@ repeat-route groups on your computer and prints exactly what could be sent:
 agent-do strava insights --days 30 --preview
 ```
 
+If you have an AI chat subscription but no API key, create a paste-ready
+prompt instead. This stays local until you manually paste it into your chosen
+AI chat:
+
+```bash
+agent-do strava insights --days 30 --prompt
+```
+
 For one cached workout, use its Strava activity ID. The preview contains that
 workout's redacted metrics plus same-sport or repeat-route comparison context:
 
@@ -165,6 +173,9 @@ workout's redacted metrics plus same-sport or repeat-route comparison context:
 agent-do strava activity-insight 12345 --preview
 agent-do strava activity-insight 12345 --send --provider anthropic
 ```
+
+Use `--prompt` with `activity-insight` to create a paste-ready individual
+workout prompt without an API key.
 
 The preview excludes activity names, notes, IDs, route polylines, precise
 locations, raw streams, and OAuth material. It may include an opaque local
@@ -181,6 +192,8 @@ agent-do strava insights --days 30 --send --provider openai
 For Anthropic, use `ANTHROPIC_API_KEY` and `--provider anthropic`. The
 dashboard's **AI guidance** button follows the same flow: it displays the
 payload and requires **Generate guidance** before making a provider request.
+Its **Generate guidance prompt** alternative creates a prompt you can manually
+paste into an AI chat subscription instead; it never makes an API request.
 Open an activity's expanded summary and choose **AI activity guidance** for the
 same preview-and-confirmation flow for that individual workout.
 Guidance is reflective training feedback, not medical advice or a coaching

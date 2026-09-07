@@ -4132,8 +4132,8 @@ Concurrency: `mixed`
 - `dashboard`: Generate a local HTML dashboard: dashboard [--open]
 - `export`: Export local cached activities: export \<output.csv|output.xlsx> [--format csv|xlsx] [--days N] [--activity run,bike|[run,bike]] [--overwrite]
 - `gear-export`: Export local gear and associated activities: gear-export \<output.xlsx> [--overwrite]
-- `insights`: Preview or request AI training observations: insights [history|show RECEIPT_ID] [--days N] [--activity TYPE] [--preview] [--send --provider openai|anthropic] [--model MODEL]
-- `activity-insight`: Preview or request AI guidance for one cached activity: activity-insight \<ACTIVITY_ID> [--preview] [--send --provider openai|anthropic] [--model MODEL]
+- `insights`: Preview, print a paste-ready prompt, or request AI training observations: insights [history|show RECEIPT_ID] [--days N] [--activity TYPE] [--preview|--prompt] [--send --provider openai|anthropic] [--model MODEL]
+- `activity-insight`: Preview, print a paste-ready prompt, or request AI guidance for one cached activity: activity-insight \<ACTIVITY_ID> [--preview|--prompt] [--send --provider openai|anthropic] [--model MODEL]
 - `serve`: Sync once, then serve the responsive local dashboard: serve [--days N] [--no-sync] [--host 127.0.0.1|localhost] [--port 8765] [--open]
 
 **Examples**
@@ -4153,6 +4153,8 @@ agent-do strava export activities.xlsx --days 90 --activity run,bike
 agent-do strava gear-export gear.xlsx
 # preview private AI training guidance for the last month
 agent-do strava insights --days 30 --preview
+# create a prompt to paste into an AI chat subscription
+agent-do strava insights --days 30 --prompt
 # preview private AI guidance for a single Strava activity
 agent-do strava activity-insight 12345 --preview
 ```

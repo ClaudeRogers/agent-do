@@ -294,6 +294,15 @@ def test_activity_insight_cli_previews_one_cached_activity_without_sending():
         assert result.returncode == 0 and '"comparison_scope": "same_sport"' in result.stdout
         assert "private" not in result.stdout and '"id"' not in result.stdout
 
+def test_guidance_prompt_cli_needs_no_provider_key_and_excludes_private_fields():
+    with tempfile.TemporaryDirectory() as home:
+        data = Path(home) / "strava"; data.mkdir()
+        now = strava.datetime.now(strava.timezone.utc).isoformat()
+        (data / "activities.json").write_text(json.dumps({"synced_at": now, "activities": [{"id": 71, "name": "private", "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800}]}))
+        result = run("insights", "--days", "30", "--prompt", env={**os.environ, "AGENT_DO_HOME": home})
+        assert result.returncode == 0 and "cautious training-reflection assistant" in result.stdout
+        assert "private" not in result.stdout and '"id"' not in result.stdout
+
 def test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history():
     now = strava.datetime.now(strava.timezone.utc).isoformat()
     cache = {"gear": [{"id": "g1", "name": "Road shoes", "distance": 80467}], "activities": [
@@ -432,6 +441,9 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "Export Gear" in strava.DYNAMIC_DASHBOARD
     assert "AI guidance" in strava.DYNAMIC_DASHBOARD
     assert "AI activity guidance" in strava.DYNAMIC_DASHBOARD
+    assert "Generate guidance prompt" in strava.DYNAMIC_DASHBOARD
+    assert "If you do not have an API key" in strava.DYNAMIC_DASHBOARD
+    assert "/api/insights/prompt" in strava.DYNAMIC_DASHBOARD
     assert "/api/activity/'+encodeURIComponent(activityId)+'/insights/preview" in strava.DYNAMIC_DASHBOARD
     assert "dialog.dataset.backdropClose" in strava.DYNAMIC_DASHBOARD
     assert "dialog.getBoundingClientRect()" in strava.DYNAMIC_DASHBOARD
@@ -455,5 +467,5 @@ def test_connect_requests_private_activity_scope():
     assert "activity:read,activity:read_all" in strava.connect.__code__.co_consts
 
 if __name__ == "__main__":
-    test_insight_summary_is_deterministic_and_contains_only_aggregates(); test_insight_summary_reports_insufficient_and_filtered_data(); test_repeat_route_groups_are_redacted_and_require_matching_sport_and_path(); test_insight_receipt_keeps_redacted_summary_locally(); test_insights_cli_defaults_to_a_redacted_preview_without_a_provider_call(); test_activity_insight_is_redacted_and_uses_repeat_route_context(); test_activity_insight_cli_previews_one_cached_activity_without_sending()
+    test_insight_summary_is_deterministic_and_contains_only_aggregates(); test_insight_summary_reports_insufficient_and_filtered_data(); test_repeat_route_groups_are_redacted_and_require_matching_sport_and_path(); test_insight_receipt_keeps_redacted_summary_locally(); test_insights_cli_defaults_to_a_redacted_preview_without_a_provider_call(); test_activity_insight_is_redacted_and_uses_repeat_route_context(); test_activity_insight_cli_previews_one_cached_activity_without_sending(); test_guidance_prompt_cli_needs_no_provider_key_and_excludes_private_fields()
     test_status_without_profile(); test_status_json_without_profile_is_machine_readable(); test_profile_units_are_local_configuration(); test_dashboard_uses_local_cache_only(); test_export_csv_uses_local_cache_and_omits_sensitive_route_fields(); test_export_activity_filter_accepts_comma_and_bracketed_groups(); test_export_xlsx_has_readable_summary_and_activity_sheets(); test_gear_export_xlsx_has_summary_then_one_activity_sheet_per_gear(); test_export_rows_estimates_calories_from_strava_kilojoules(); test_dashboard_export_uses_selected_local_cache_without_retaining_a_file(); test_dashboard_export_endpoint_downloads_the_selected_csv(); test_summary_calculates_selected_range(); test_summary_filters_by_specific_strava_sport_type(); test_summary_pace_uses_only_run_and_walk_activities(); test_gear_summary_uses_strava_lifetime_distance_and_cached_activity_history(); test_gear_api_returns_lifetime_distance_and_associated_cached_activities(); test_gear_export_endpoint_downloads_an_excel_workbook(); test_responsive_dashboard_uses_manual_sync_without_polling(); test_connect_requests_private_activity_scope(); print("ok")
