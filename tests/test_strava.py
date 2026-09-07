@@ -443,7 +443,8 @@ def test_responsive_dashboard_uses_manual_sync_without_polling():
     assert "AI activity guidance" in strava.DYNAMIC_DASHBOARD
     assert "Create chat prompt" in strava.DYNAMIC_DASHBOARD
     assert "Use AI API" in strava.DYNAMIC_DASHBOARD
-    assert "marginRight='.6rem'" in strava.DYNAMIC_DASHBOARD
+    assert ".guidance-actions{display:flex" in strava.DYNAMIC_DASHBOARD
+    assert "gap:.6rem" in strava.DYNAMIC_DASHBOARD
     assert "If you do not have an API key" in strava.DYNAMIC_DASHBOARD
     assert "/api/insights/prompt" in strava.DYNAMIC_DASHBOARD
     assert "/api/activity/'+encodeURIComponent(activityId)+'/insights/preview" in strava.DYNAMIC_DASHBOARD
