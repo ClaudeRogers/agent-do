@@ -72,20 +72,7 @@ Evolve `sync` from its initial time-window fetch into an incremental process:
 The dashboard must remain usable from the last successful cache when Strava is
 offline or authorization expires.
 
-### 3. Richer activity detail
-
-Recent-activity rows are selectable and fetch a basic detail summary on demand
-instead of bulk-downloading sensitive data for every activity. Next additions
-can include splits/laps and a route preview when the returned data permits it.
-
-For activities with the corresponding streams, add aligned charts for
-elevation, heart rate, pace/speed, distance, and time. Treat map coordinates,
-heart-rate streams, descriptions, and media as sensitive local data; retain
-only what is needed for the selected detail view. Photo availability must be
-based on the fields Strava actually returns for that activity, rather than
-assuming all uploaded images are accessible through the API.
-
-### 4. Optional AI training observations
+### 3. Optional AI training observations
 
 Add an opt-in `agent-do strava insights` command that sends a deliberately
 small, selected aggregate dataset to an AI provider and returns observations,
@@ -107,7 +94,7 @@ Potential prompts include: "What changed over the past four weeks?", "Which
 training habits are most consistent?", and "What questions should I consider
 before setting next month's goal?"
 
-### 5. Shoe mileage
+### 4. Shoe mileage
 
 Add a dashboard view that attributes running and walking distance to each
 Strava gear item, so a person can see the accumulated mileage for every pair
