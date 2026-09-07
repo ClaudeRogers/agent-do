@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.machinery, importlib.util, json, os, subprocess, tempfile, threading
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,9 +158,12 @@ def test_dashboard_export_endpoint_downloads_the_selected_csv():
             strava.CACHE.write_text(json.dumps({"synced_at": now, "activities": [{"id": 42, "start_date": now, "sport_type": "Run", "distance": 5000, "moving_time": 1800}]}))
             server = strava.HTTPServer(("127.0.0.1", 0), strava.LocalDashboard)
             worker = threading.Thread(target=server.handle_request); worker.start()
-            with urlopen(f"http://127.0.0.1:{server.server_port}/api/export?format=csv&days=30&type=Run", timeout=5) as response:
-                assert response.status == 200 and "attachment" in response.headers["Content-Disposition"]
-                assert b"0:30:00" in response.read()
+            try:
+                with urlopen(f"http://127.0.0.1:{server.server_port}/api/export?format=csv&days=30&type=Run", timeout=5) as response:
+                    assert response.status == 200 and "attachment" in response.headers["Content-Disposition"]
+                    assert b"0:30:00" in response.read()
+            except HTTPError as exc:
+                raise AssertionError(f"CSV export endpoint returned {exc.code}: {exc.read().decode()}") from exc
             worker.join(timeout=5)
         finally:
             if server: server.server_close()
