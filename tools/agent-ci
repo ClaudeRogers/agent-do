@@ -128,7 +128,7 @@ cmd_details() {
         emit_json_error "Unable to create temporary storage for deployment evidence"
         return 1
     }
-    if ! gh api "repos/$repo/deployments?sha=$head_sha&per_page=100" >"$deployment_file" 2>/dev/null; then
+    if ! gh api --paginate --slurp "repos/$repo/deployments?sha=$head_sha&per_page=100" >"$deployment_file" 2>/dev/null; then
         rm -f "$deployment_file"
         deployment_file=""
         deployment_error="GitHub deployment records unavailable for this repository or credential"
@@ -151,7 +151,7 @@ print("Workflow:  {}".format(run.get("workflowName", "unknown")))
 print("Commit:    {}".format(run.get("headSha", "unknown")))
 print("Result:    {} ({})".format(run.get("conclusion") or "pending", run.get("status", "unknown")))
 print("Started:   {}".format(run.get("startedAt") or "not started"))
-print("Completed: {}".format(run.get("updatedAt") or "not completed"))
+print("Updated:   {}".format(run.get("updatedAt") or "not updated"))
 print("URL:       {}".format(run.get("url", "unknown")))
 for job in run.get("jobs") or []:
     print("- {}: {}".format(job.get("name", "unknown"), job.get("conclusion") or job.get("status", "unknown")))
@@ -341,19 +341,37 @@ cmd_logs() {
 
     local log_flag="--log"
     [[ "$failed_only" -eq 1 ]] && log_flag="--log-failed"
-    local out
-    out=$(gh run view "$run_id" "$log_flag" --repo "$repo" 2>&1) || {
-        emit_json_error "$out"
-        return 1
-    }
     local trace_args=(bounded-log "$run_id")
     [[ "$failed_only" -eq 1 ]] && trace_args+=(--failed-only)
     trace_args+=(--tail "$tail" --max-bytes "$max_bytes")
-    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
-        printf '%s' "$out" | python3 "$REPO_ROOT/lib/ci_trace.py" "${trace_args[@]}"
-        return $?
+    local trace_file error_file error_message
+    trace_file=$(mktemp) || { emit_json_error "Unable to create temporary log excerpt storage"; return 1; }
+    error_file=$(mktemp) || { rm -f "$trace_file"; emit_json_error "Unable to create temporary log error storage"; return 1; }
+    # Stream the CLI output into a bounded ring in ci_trace.py.  Do not capture
+    # a workflow's complete log in a shell variable before enforcing its cap.
+    set +e
+    gh run view "$run_id" "$log_flag" --repo "$repo" 2>"$error_file" \
+        | python3 "$REPO_ROOT/lib/ci_trace.py" bounded-log-stream "$run_id" "${trace_args[@]:2}" >"$trace_file"
+    local gh_rc=${PIPESTATUS[0]} trace_rc=${PIPESTATUS[1]}
+    set -e
+    if [[ "$trace_rc" -ne 0 ]]; then
+        cat "$trace_file"
+        rm -f "$trace_file" "$error_file"
+        return "$trace_rc"
     fi
-    printf '%s' "$out" | python3 "$REPO_ROOT/lib/ci_trace.py" "${trace_args[@]}" | python3 -c '
+    if [[ "$gh_rc" -ne 0 ]]; then
+        error_message=$(<"$error_file")
+        rm -f "$trace_file" "$error_file"
+        emit_json_error "${error_message:-Unable to read workflow logs}"
+        return 1
+    fi
+    rm -f "$error_file"
+    if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+        cat "$trace_file"
+        rm -f "$trace_file"
+        return 0
+    fi
+    python3 -c '
 import json, sys
 result = json.load(sys.stdin)
 if not result.get("success"):
@@ -361,7 +379,10 @@ if not result.get("success"):
 print(result["log"])
 if result["truncated"]["any"]:
     print("\n[Excerpt truncated: line or byte limit reached]", file=sys.stderr)
-'
+' <"$trace_file"
+    local rc=$?
+    rm -f "$trace_file"
+    return $rc
 }
 
 cmd_cancel() {

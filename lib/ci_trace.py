@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import sys
+from typing import BinaryIO
 from typing import Any
 
 
@@ -70,7 +71,7 @@ def normalize_run(raw: dict[str, Any], repository: str, deployments: list[dict[s
         "timestamps": {
             "created_at": raw.get("createdAt"),
             "started_at": raw.get("startedAt"),
-            "completed_at": raw.get("updatedAt"),
+            "updated_at": raw.get("updatedAt"),
         },
     }
     jobs = []
@@ -118,7 +119,8 @@ def normalize_run(raw: dict[str, Any], repository: str, deployments: list[dict[s
             "deployment_evidence": deployment_evidence}
 
 
-def bounded_log(raw: str, run_id: str, failed_only: bool, tail: int, max_bytes: int) -> dict[str, Any]:
+def bounded_log(raw: str, run_id: str, failed_only: bool, tail: int, max_bytes: int,
+                *, total_lines: int | None = None, source_truncated: bool = False) -> dict[str, Any]:
     """Redact and bound a log tail, preserving enough metadata for safe use."""
     if tail < 1 or tail > MAX_LOG_LINES:
         raise ValueError(f"--tail must be between 1 and {MAX_LOG_LINES}")
@@ -127,10 +129,10 @@ def bounded_log(raw: str, run_id: str, failed_only: bool, tail: int, max_bytes: 
 
     lines = raw.splitlines()
     selected = lines[-tail:]
-    truncated_lines = len(lines) > len(selected)
+    truncated_lines = (total_lines > tail if total_lines is not None else len(lines) > len(selected))
     excerpt = redact("\n".join(selected))
     encoded = excerpt.encode("utf-8")
-    truncated_bytes = len(encoded) > max_bytes
+    truncated_bytes = source_truncated or len(encoded) > max_bytes
     if truncated_bytes:
         # Preserve valid UTF-8 and retain the newest portion of a tail.
         excerpt = encoded[-max_bytes:].decode("utf-8", errors="ignore")
@@ -154,6 +156,37 @@ def bounded_log(raw: str, run_id: str, failed_only: bool, tail: int, max_bytes: 
     }
 
 
+def bounded_log_stream(stream: BinaryIO, run_id: str, failed_only: bool, tail: int,
+                       max_bytes: int) -> dict[str, Any]:
+    """Build an excerpt while retaining at most the requested byte cap in memory.
+
+    ``gh run view --log`` has no server-side byte limit.  Reading it through
+    this bounded ring keeps the incident client from materializing an entire
+    workflow log before it can redact and return its small excerpt.
+    """
+    if tail < 1 or tail > MAX_LOG_LINES:
+        raise ValueError(f"--tail must be between 1 and {MAX_LOG_LINES}")
+    if max_bytes < 1 or max_bytes > MAX_LOG_BYTES:
+        raise ValueError(f"--max-bytes must be between 1 and {MAX_LOG_BYTES}")
+
+    retained = bytearray()
+    total_bytes = 0
+    newline_count = 0
+    ends_in_newline = False
+    while chunk := stream.read(65_536):
+        total_bytes += len(chunk)
+        newline_count += chunk.count(b"\n")
+        ends_in_newline = chunk.endswith(b"\n")
+        retained.extend(chunk)
+        if len(retained) > max_bytes:
+            del retained[:-max_bytes]
+
+    total_lines = newline_count + int(total_bytes > 0 and not ends_in_newline)
+    raw = retained.decode("utf-8", errors="ignore")
+    return bounded_log(raw, run_id, failed_only, tail, max_bytes,
+                       total_lines=total_lines, source_truncated=total_bytes > len(retained))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -166,6 +199,11 @@ def main() -> int:
     logs.add_argument("--failed-only", action="store_true")
     logs.add_argument("--tail", type=int, default=DEFAULT_LOG_LINES)
     logs.add_argument("--max-bytes", type=int, default=DEFAULT_LOG_BYTES)
+    stream_logs = subcommands.add_parser("bounded-log-stream")
+    stream_logs.add_argument("run_id")
+    stream_logs.add_argument("--failed-only", action="store_true")
+    stream_logs.add_argument("--tail", type=int, default=DEFAULT_LOG_LINES)
+    stream_logs.add_argument("--max-bytes", type=int, default=DEFAULT_LOG_BYTES)
     args = parser.parse_args()
 
     try:
@@ -175,11 +213,15 @@ def main() -> int:
             if args.deployments_file:
                 with open(args.deployments_file, encoding="utf-8") as deployment_file:
                     deployments = json.load(deployment_file)
+                if isinstance(deployments, list) and all(isinstance(page, list) for page in deployments):
+                    deployments = [deployment for page in deployments for deployment in page]
                 if not isinstance(deployments, list):
                     raise ValueError("GitHub deployments response was not a JSON list")
             result = normalize_run(raw, args.repository, deployments, args.deployment_error)
-        else:
+        elif args.command == "bounded-log":
             result = bounded_log(sys.stdin.read(), args.run_id, args.failed_only, args.tail, args.max_bytes)
+        else:
+            result = bounded_log_stream(sys.stdin.buffer, args.run_id, args.failed_only, args.tail, args.max_bytes)
     except (ValueError, json.JSONDecodeError) as error:
         print(json.dumps({"success": False, "error": str(error), "code": 2}))
         return 2

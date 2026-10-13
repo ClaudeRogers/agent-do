@@ -104,7 +104,8 @@ def main() -> int:
         require(body["run"]["head_sha"] == "abc123def456", f"head SHA missing: {body}")
         require(body["run"]["workflow"] == {"name": "deploy-production.yml", "id": 91},
                 f"workflow not normalized: {body}")
-        require(body["run"]["timestamps"]["started_at"] == "2026-10-12T20:01:00Z",
+        require(body["run"]["timestamps"]["started_at"] == "2026-10-12T20:01:00Z"
+                and body["run"]["timestamps"]["updated_at"] == "2026-10-12T20:03:00Z",
                 f"run timestamps missing: {body}")
         require(body["jobs"][0]["steps"][0]["conclusion"] == "success",
                 f"job/step facts missing: {body}")
