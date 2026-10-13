@@ -13,10 +13,13 @@ import re
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import quote, urlencode
 
 MAX_LOG_LINES = 1000
 MAX_LOG_BYTES = 262144
 MAX_EVENTS = 100
+MAX_EVENT_SOURCES = 100
+MAX_EVENTS_PER_SOURCE = 101
 TOKEN_PATTERNS = [
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"(?i)\b(authorization)([=:]\s*(?:(?:bearer|basic)\s+)?)\S+"),
@@ -52,6 +55,17 @@ def json_get(context: str, namespace: str, resource: str, name: str | None = Non
         raise K8sError(f"kubectl returned invalid JSON for {resource}") from None
     if not isinstance(value, dict):
         raise K8sError(f"kubectl returned an unsupported JSON shape for {resource}")
+    return value
+
+
+def json_raw(context: str, path: str) -> dict[str, Any]:
+    """Read one bounded Kubernetes API page without listing a whole namespace."""
+    try:
+        value = json.loads(kubectl("--context", context, "get", "--raw", path))
+    except json.JSONDecodeError:
+        raise K8sError("kubectl returned invalid JSON for events") from None
+    if not isinstance(value, dict):
+        raise K8sError("kubectl returned an unsupported JSON shape for events")
     return value
 
 
@@ -144,18 +158,24 @@ def events(args: argparse.Namespace) -> dict[str, Any]:
     dep = json_get(args.context, args.namespace, "deployment", args.deployment)
     dep_uid = (dep.get("metadata") or {}).get("uid")
     rs_data = json_get(args.context, args.namespace, "replicasets")
-    rs_uids = {(item.get("metadata") or {}).get("uid") for item in rs_data.get("items") or [] if any(owner.get("uid") == dep_uid for owner in ((item.get("metadata") or {}).get("ownerReferences") or []))}
+    rs_uids = {(item.get("metadata") or {}).get("uid") for item in rs_data.get("items") or [] if isinstance((item.get("metadata") or {}).get("uid"), str) and any(owner.get("uid") == dep_uid for owner in ((item.get("metadata") or {}).get("ownerReferences") or []))}
     pod_data = json_get(args.context, args.namespace, "pods")
-    pod_uids = {(item.get("metadata") or {}).get("uid") for item in pod_data.get("items") or [] if any(owner.get("uid") in rs_uids for owner in ((item.get("metadata") or {}).get("ownerReferences") or []))}
-    data = json_get(args.context, args.namespace, "events")
+    pod_uids = {(item.get("metadata") or {}).get("uid") for item in pod_data.get("items") or [] if isinstance((item.get("metadata") or {}).get("uid"), str) and any(owner.get("uid") in rs_uids for owner in ((item.get("metadata") or {}).get("ownerReferences") or []))}
     selected = []
-    for event in data.get("items") or []:
-        involved = event.get("involvedObject") or {}
-        if involved.get("uid") in {dep_uid, *rs_uids, *pod_uids}:
+    source_uids = [uid for uid in [dep_uid, *sorted(rs_uids), *sorted(pod_uids)] if isinstance(uid, str)]
+    source_truncated = len(source_uids) > MAX_EVENT_SOURCES
+    for uid in source_uids[:MAX_EVENT_SOURCES]:
+        query = urlencode({"fieldSelector": f"involvedObject.uid={uid}", "limit": MAX_EVENTS_PER_SOURCE})
+        path = f"/api/v1/namespaces/{quote(args.namespace, safe='')}/events?{query}"
+        data = json_raw(args.context, path)
+        source_truncated = source_truncated or bool((data.get("metadata") or {}).get("continue"))
+        for event in data.get("items") or []:
+            involved = event.get("involvedObject") or {}
             selected.append({"type": event.get("type"), "reason": event.get("reason"), "message": redact(str(event.get("message") or "")) or None, "count": event.get("count"), "first_timestamp": event.get("firstTimestamp"), "last_timestamp": event.get("lastTimestamp") or event.get("eventTime") or (event.get("metadata") or {}).get("creationTimestamp"), "object": {"kind": involved.get("kind"), "name": involved.get("name"), "uid": involved.get("uid")}})
     selected.sort(key=lambda event: event.get("last_timestamp") or "", reverse=True)
     return {"success": True, "provider": "kubernetes", "context": args.context, "namespace": args.namespace, "deployment": args.deployment,
-            "events": selected[:MAX_EVENTS], "truncated": len(selected) > MAX_EVENTS, "limit": MAX_EVENTS}
+            "events": selected[:MAX_EVENTS], "truncated": source_truncated or len(selected) > MAX_EVENTS, "limit": MAX_EVENTS,
+            "source_limits": {"objects": MAX_EVENT_SOURCES, "events_per_object": MAX_EVENTS_PER_SOURCE}}
 
 
 def logs(args: argparse.Namespace) -> dict[str, Any]:
@@ -165,13 +185,15 @@ def logs(args: argparse.Namespace) -> dict[str, Any]:
         raise K8sError(f"--tail must be between 1 and {MAX_LOG_LINES}")
     if not 1 <= args.max_bytes <= MAX_LOG_BYTES:
         raise K8sError(f"--max-bytes must be between 1 and {MAX_LOG_BYTES}")
-    command = ["--context", args.context, "--namespace", args.namespace, "logs", args.pod, "--container", args.container, f"--since={args.since}", f"--tail={args.tail}"]
+    command = ["--context", args.context, "--namespace", args.namespace, "logs", args.pod, "--container", args.container, f"--since={args.since}", f"--tail={args.tail}", f"--limit-bytes={args.max_bytes}"]
     if args.previous:
         command.append("--previous")
     raw = kubectl(*command)
     text = redact(raw)
     encoded = text.encode()
-    truncated_bytes = len(encoded) > args.max_bytes
+    # kubectl does not tell us whether an exactly-full response was naturally
+    # that size or cut by --limit-bytes, so report that boundary conservatively.
+    truncated_bytes = len(encoded) >= args.max_bytes
     if truncated_bytes:
         text = encoded[-args.max_bytes:].decode(errors="ignore")
     return {"success": True, "provider": "kubernetes", "context": args.context, "namespace": args.namespace, "pod": args.pod, "container": args.container, "previous": args.previous, "log": text,

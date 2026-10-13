@@ -24,6 +24,10 @@ if "logs" in args:
     print("started token=top-secret\nfinished")
     raise SystemExit(0)
 
+if "--raw" in args:
+    output({"metadata": {}, "items": [{"type": "Warning", "reason": "BackOff", "message": "secret=top-secret", "count": 5,
+                       "lastTimestamp": "2026-10-12T00:00:00Z", "involvedObject": {"uid": "pod-1", "kind": "Pod", "name": "payments-abc-x"}}]})
+
 resource = args[args.index("get") + 1]
 if resource == "deployment":
     output({"metadata": {"name": "payments", "uid": "dep-1", "generation": 8,
