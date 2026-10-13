@@ -36,7 +36,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [burp](#burp) | Burp Suite automation | mixed | 4 |
 | [cad](#cad) | CAD file operations | mixed | 4 |
 | [calendar](#calendar) | Control calendar | mixed | 3 |
-| [ci](#ci) | Control CI/CD pipelines and inspect GitHub Actions deployment evidence | write | 5 |
+| [ci](#ci) | Control CI/CD pipelines and inspect GitHub Actions deployment evidence | write | 6 |
 | [clerk](#clerk) | Clerk authentication platform — users, organizations, sessions, OAuth apps, enterprise SSO, JWT templates, roles | mixed | 14 |
 | [clipboard](#clipboard) | Cross-app clipboard management | mixed | 4 |
 | [cloud](#cloud) | Control cloud providers (AWS, GCP, Azure) | mixed | 3 |
@@ -809,6 +809,7 @@ Concurrency: `write`
 
 - `trigger`: Trigger build
 - `status`: View status
+- `runs`: List recent workflow runs for an explicit repository
 - `details`: Show normalized workflow-run and job facts for tracing
 - `logs`: View bounded, redacted build-log excerpts
 - `triage`: Classify a failed run and draft a triage summary (dry-run)
@@ -826,7 +827,7 @@ agent-do ci details 48201933 --repo owner/repo --json
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `details`, `logs`, `status`, `triage`
+- Read-only (snapshot/verify; safe to parallelize): `details`, `logs`, `runs`, `status`, `triage`
 - Write (connect/interact/save): `trigger`
 
 ### clerk

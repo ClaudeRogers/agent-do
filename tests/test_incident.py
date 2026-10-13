@@ -31,5 +31,10 @@ def test_config_rejects_spacelift(tmp_path:Path):
  try: tracker.load_config(tmp_path)
  except tracker.IncidentError: return
  raise AssertionError("accepted unsupported source")
+def test_config_rejects_alias(tmp_path:Path):
+ root=tmp_path/".agent-do-incident"; root.mkdir(); (root/"config.yaml").write_text("version: 1\nservices: &x {}\n")
+ try: tracker.load_config(tmp_path)
+ except tracker.IncidentError: return
+ raise AssertionError("accepted YAML alias")
 if __name__=="__main__":
- test_trace_calls_only_allowlist_and_writes_packet(); test_config_rejects_spacelift(Path(tempfile.mkdtemp())); print("incident tests passed")
+ test_trace_calls_only_allowlist_and_writes_packet(); test_config_rejects_spacelift(Path(tempfile.mkdtemp())); test_config_rejects_alias(Path(tempfile.mkdtemp())); print("incident tests passed")

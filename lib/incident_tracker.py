@@ -25,7 +25,14 @@ def root(start: Path) -> Path:
 def load_config(start: Path) -> tuple[Path,dict[str,Any]]:
     p=root(start)/"config.yaml"
     if not p.is_file(): raise IncidentError("incident configuration not found; run `agent-do incident init`")
-    try: raw=yaml.safe_load(p.read_text())
+    text=p.read_text()
+    try:
+        events=list(yaml.parse(text))
+        if any(isinstance(event,yaml.events.AliasEvent) or getattr(event,"anchor",None) for event in events):
+            raise IncidentError("config must not use YAML aliases or anchors")
+        if any(getattr(event,"tag",None) not in (None,"!", "tag:yaml.org,2002:str", "tag:yaml.org,2002:int", "tag:yaml.org,2002:null") for event in events):
+            raise IncidentError("config must use plain YAML values")
+        raw=yaml.safe_load(text)
     except yaml.YAMLError as e: raise IncidentError(f"invalid config: {e}") from None
     if not isinstance(raw,dict) or set(raw)-{"version","services"} or raw.get("version") != 1 or not isinstance(raw.get("services"),dict): raise IncidentError("config must contain only version: 1 and services")
     for name, service in raw["services"].items():
