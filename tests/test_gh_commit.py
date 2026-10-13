@@ -79,7 +79,18 @@ def test_exact_associations() -> None:
     require(result["issues"]["items"][0]["number"] == 7, f"issue missing: {result}")
     calls = api.call_args_list
     require("commits/" + "a" * 40 in calls[0].args[0][-1], f"commit endpoint wrong: {calls}")
-    require(calls[1].args[0][-1].endswith("/pulls"), f"associated PR endpoint wrong: {calls}")
+    require(calls[1].args[0][-1].endswith("/pulls?per_page=100")
+            and "--paginate" in calls[1].args[0] and "--slurp" in calls[1].args[0],
+            f"associated PR endpoint is not fully paginated: {calls}")
+
+
+def test_associated_pr_pages_are_flattened() -> None:
+    other = {**PR, "number": 43}
+    with patch.object(gh, "gh_json", side_effect=[COMMIT, [[PR], [other]]]), \
+            patch.object(gh, "run_graphql", return_value=ISSUE_DATA):
+        result = gh.commit_correlation("o/r", "a" * 40)
+    require(result["pull_requests"]["count"] == 2,
+            f"paginated associated PRs were lost: {result}")
 
 
 def test_no_associated_pr_is_available_empty_evidence() -> None:
