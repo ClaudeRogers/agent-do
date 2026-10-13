@@ -125,4 +125,4 @@ A team that runs ten agents without something like this pays for the same job tw
 
 Give the mind a vessel whose every act keeps a receipt, and build every institution as if no habit survives the shift, because here none does; the handoff, never the recollection, is the continuity.
 
-The full system map is in [ARCHITECTURE.md](ARCHITECTURE.md); hook wiring is in [docs/INTEGRATION.md](docs/INTEGRATION.md); the tool catalog is generated into [docs/TOOLS.md](docs/TOOLS.md). MIT license.
+The full system map is in [ARCHITECTURE.md](ARCHITECTURE.md); hook wiring is in [docs/INTEGRATION.md](docs/INTEGRATION.md); the tool catalog is generated into [docs/TOOLS.md](docs/TOOLS.md); deployed-commit-to-PR correlation is explained in [docs/GH_COMMIT_CORRELATION.md](docs/GH_COMMIT_CORRELATION.md). MIT license.

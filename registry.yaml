@@ -3128,6 +3128,7 @@ tools:
     - discover accessible GitHub repositories
     - list actionable pull requests across repos
     - inspect pull request details, diffs, checks, and unresolved review threads
+    - correlate a deployed commit with GitHub-declared pull requests and closing issues
     - classify changed files by review-risk tier (critical/elevated/standard)
     - audit PR review risks and generate fix-oriented engineering review replies
     - surface the built-in review doctrine on every review
@@ -3141,6 +3142,7 @@ tools:
       awaiting: Show open PRs likely awaiting your review by broad review heuristics
       prs: Search pull requests
       pr: Show PR details
+      commit: Correlate a commit with GitHub-declared pull requests and closing issues
       diff: Show PR diff
       threads: Show unresolved PR review threads
       checks: Show PR checks
@@ -3171,6 +3173,8 @@ tools:
       command: agent-gh audit ovachiever/agent-do#3 --reply --probe-deploys
     - intent: review pull request 3 in agent-do
       command: agent-gh review ovachiever/agent-do#3 --summary
+    - intent: find the pull request and linked issues for a deployed commit
+      command: agent-gh commit abc123def --repo owner/repo --json
     - intent: show unresolved GitHub review comments
       command: agent-gh threads ovachiever/agent-do#3
     - intent: approve this GitHub PR
@@ -3223,6 +3227,7 @@ tools:
       - awaiting
       - prs
       - pr
+      - commit
       - diff
       - threads
       - checks

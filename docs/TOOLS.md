@@ -58,7 +58,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [excel](#excel) | AI-first Excel CLI for workbook automation | mixed | 11 |
 | [figma](#figma) | Control Figma | read | 3 |
 | [gcp](#gcp) | Google Cloud Platform management — REST API for projects, APIs, secrets, service accounts + Console automation for OAuth credentials | mixed | 19 |
-| [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 24 |
+| [gh](#gh) | GitHub repository, pull request, review, and merge work-state across accessible repos | mixed | 25 |
 | [ghidra](#ghidra) | Ghidra reverse engineering automation | read | 4 |
 | [git](#git) | Guarded local Git operations for staged commits, worktrees, snapshots, conflicts, and recovery | mixed | 19 |
 | [handbrake](#handbrake) | Convert ripped video (MKV) to Plex-ready MP4 via HandBrakeCLI — probe a file's titles and streams, list encode presets, transcode single files or whole directories with skip/overwrite handling, and verify .mp4 outputs | mixed | 7 |
@@ -1877,6 +1877,7 @@ Concurrency: `mixed`
 - discover accessible GitHub repositories
 - list actionable pull requests across repos
 - inspect pull request details, diffs, checks, and unresolved review threads
+- correlate a deployed commit with GitHub-declared pull requests and closing issues
 - classify changed files by review-risk tier (critical/elevated/standard)
 - audit PR review risks and generate fix-oriented engineering review replies
 - surface the built-in review doctrine on every review
@@ -1892,6 +1893,7 @@ Concurrency: `mixed`
 - `awaiting`: Show open PRs likely awaiting your review by broad review heuristics
 - `prs`: Search pull requests
 - `pr`: Show PR details
+- `commit`: Correlate a commit with GitHub-declared pull requests and closing issues
 - `diff`: Show PR diff
 - `threads`: Show unresolved PR review threads
 - `checks`: Show PR checks
@@ -1925,6 +1927,8 @@ agent-do gh prs --state open
 agent-do gh audit ovachiever/agent-do#3 --reply --probe-deploys
 # review pull request 3 in agent-do
 agent-do gh review ovachiever/agent-do#3 --summary
+# find the pull request and linked issues for a deployed commit
+agent-do gh commit abc123def --repo owner/repo --json
 # show unresolved GitHub review comments
 agent-do gh threads ovachiever/agent-do#3
 # approve this GitHub PR
@@ -1939,7 +1943,7 @@ agent-do gh edit ovachiever/agent-do#5 --add-reviewer @me --add-label review-nee
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `diff`, `doctrine`, `inbox`, `portfolio list`, `pr`, `prs`, `repos`, `review`, `threads`, `whoami`
+- Read-only (snapshot/verify; safe to parallelize): `audit`, `awaiting`, `checks`, `commit`, `diff`, `doctrine`, `inbox`, `portfolio list`, `pr`, `prs`, `repos`, `review`, `threads`, `whoami`
 - Write (connect/interact/save): `approve`, `checkout`, `close`, `comment`, `draft`, `edit`, `merge`, `portfolio add`, `portfolio remove`, `ready`, `reopen`, `request-changes`, `update-branch`
 - own_state (writes only its own cache/state; parallel-safe): `portfolio add`, `portfolio remove`
 
