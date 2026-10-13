@@ -23,6 +23,8 @@ USER_CACHE = STATE_DIR / "user.json"
 PORTFOLIO_FILE = STATE_DIR / "portfolio.yaml"
 
 PORTFOLIO_PATTERN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*)/(?:\*|[A-Za-z0-9._-]+)")
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 PR_VIEW_FIELDS = ",".join(
     [
@@ -200,6 +202,83 @@ def pr_gh_args(ref: PrRef) -> list[str]:
     if ref.repo:
         args.extend(["--repo", ref.repo])
     return args
+
+
+def parse_repository(value: str) -> tuple[str, str]:
+    if not REPOSITORY_RE.fullmatch(value or ""):
+        raise GhError("Repository must be owner/repo")
+    return tuple(value.split("/", 1))  # type: ignore[return-value]
+
+
+def normalize_commit(payload: dict[str, Any]) -> dict[str, Any]:
+    commit = payload.get("commit") or {}
+    author = commit.get("author") or {}
+    committer = commit.get("committer") or {}
+    return {"sha": payload.get("sha"), "url": payload.get("html_url"),
+            "message": commit.get("message"), "authored_at": author.get("date"),
+            "committed_at": committer.get("date"),
+            "author": (payload.get("author") or {}).get("login"),
+            "committer": (payload.get("committer") or {}).get("login")}
+
+
+def normalize_associated_pr(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"number": payload.get("number"), "url": payload.get("html_url"),
+            "title": payload.get("title"), "state": payload.get("state"),
+            "merged_at": payload.get("merged_at"),
+            "merge_commit_sha": payload.get("merge_commit_sha"),
+            "head_sha": (payload.get("head") or {}).get("sha"),
+            "base_ref": (payload.get("base") or {}).get("ref")}
+
+
+def closing_issues_for_pr(repo: str, number: int) -> dict[str, Any]:
+    owner, name = parse_repository(repo)
+    query = """query { repository(owner: %s, name: %s) { pullRequest(number: %d) {
+      closingIssuesReferences(first: 100) { totalCount nodes {
+        number title url state closedAt repository { nameWithOwner } } } } } }""" % (
+        json.dumps(owner), json.dumps(name), number)
+    try:
+        payload = run_graphql(query)
+        connection = (((payload.get("repository") or {}).get("pullRequest") or {})
+                      .get("closingIssuesReferences") or {})
+        nodes = connection.get("nodes") or []
+        return {"status": "available", "issues": [
+            {"number": issue.get("number"), "title": issue.get("title"),
+             "url": issue.get("url"), "state": issue.get("state"),
+             "closed_at": issue.get("closedAt"),
+             "repository": (issue.get("repository") or {}).get("nameWithOwner"),
+             "pull_request": number}
+            for issue in nodes if isinstance(issue, dict)],
+            "truncated": (connection.get("totalCount") or 0) > len(nodes)}
+    except GhError:
+        return {"status": "degraded", "issues": [], "truncated": False,
+                "reason": "GitHub closing-issue references were unavailable for this pull request"}
+
+
+def commit_correlation(repo: str, sha: str) -> dict[str, Any]:
+    if not COMMIT_SHA_RE.fullmatch(sha or ""):
+        raise GhError("Commit SHA must contain 7 to 64 hexadecimal characters")
+    parse_repository(repo)
+    accept = "Accept: application/vnd.github+json"
+    commit = gh_json(["api", "-H", accept, f"repos/{repo}/commits/{sha}"])
+    if not isinstance(commit, dict):
+        raise GhError("GitHub commit response was not an object")
+    associations = gh_json(["api", "--paginate", "--slurp", "-H", accept,
+                            f"repos/{repo}/commits/{sha}/pulls?per_page=100"])
+    if not isinstance(associations, list):
+        raise GhError("GitHub associated-pull-request response was not a list")
+    prs = [normalize_associated_pr(pr) for pr in flatten_pages(associations)]
+    issue_results = [closing_issues_for_pr(repo, pr["number"]) for pr in prs
+                     if isinstance(pr.get("number"), int)]
+    issues = [issue for result in issue_results for issue in result["issues"]]
+    degraded = [result for result in issue_results if result["status"] == "degraded"]
+    return {"success": True, "provider": "github", "repository": repo,
+            "commit": normalize_commit(commit),
+            "pull_requests": {"status": "available", "items": prs, "count": len(prs)},
+            "issues": {"status": "degraded" if degraded else "available", "items": issues,
+                       "count": len(issues),
+                       "truncated": any(result["truncated"] for result in issue_results),
+                       **({"reason": "One or more associated pull requests did not expose closing-issue references"}
+                          if degraded else {})}}
 
 
 def current_user(*, refresh: bool = False) -> dict[str, Any]:
@@ -1964,6 +2043,24 @@ def cmd_pr(args: argparse.Namespace) -> None:
         output(detail, json_mode=False)
 
 
+def cmd_commit(args: argparse.Namespace) -> None:
+    payload = commit_correlation(args.repo, args.sha)
+    if args.json:
+        print_json(payload)
+        return
+    commit = payload["commit"]
+    print(f"Commit: {commit.get('sha')}")
+    print(f"URL: {commit.get('url')}")
+    print(f"Committed: {commit.get('committed_at') or 'unknown'}")
+    print(f"Pull requests: {payload['pull_requests']['count']}")
+    for pr in payload["pull_requests"]["items"]:
+        print(f"- #{pr.get('number')}: {pr.get('title')} ({pr.get('merged_at') or 'not merged'}) {pr.get('url')}")
+    if payload["issues"]["status"] == "degraded":
+        print("Linked issues: unavailable (GitHub did not expose closing-issue references)")
+    else:
+        print(f"Linked issues: {payload['issues']['count']}")
+
+
 def cmd_diff(args: argparse.Namespace) -> None:
     ref = parse_pr_ref(args.pr)
     print(run_gh(["pr", "diff", *pr_gh_args(ref)]), end="")
@@ -2302,6 +2399,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--json", action="store_true")
     pr.set_defaults(func=cmd_pr)
 
+    commit = sub.add_parser("commit", help="Correlate a commit with GitHub-declared pull requests and issues")
+    commit.add_argument("sha", help="Commit SHA (7 to 64 hexadecimal characters)")
+    commit.add_argument("--repo", required=True, help="Target repository as owner/repo")
+    commit.add_argument("--json", action="store_true")
+    commit.set_defaults(func=cmd_commit)
+
     diff = sub.add_parser("diff", help="Show PR diff")
     diff.add_argument("pr")
     diff.set_defaults(func=cmd_diff)
@@ -2481,6 +2584,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
         return 0
     except GhError as exc:
+        if getattr(args, "json", False):
+            print_json({"success": False, "error": str(exc), "code": 1})
+            return 1
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
