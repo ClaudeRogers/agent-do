@@ -14,7 +14,7 @@ Render already has commands for services, deploy history, events, and logs. An i
 
 ## Bounds and privacy
 
-The command asks Render for at most ten deployments, one hundred events, and one hundred logs. It additionally limits the normalized log collection to 256 KiB at most; `--max-log-bytes` may lower that cap. The JSON says when Render has more log entries and when the local byte limit removed entries.
+The command requests one extra deployment and event so it can report whether its returned limits of ten deployments and one hundred events omitted older records. It requests at most one hundred logs, rejects an upstream log response over 1 MiB, and limits normalized logs to 256 KiB at most; `--max-log-bytes` may lower that cap. The JSON says when any provider limit or the local byte limit removed evidence.
 
 Common credential-shaped values in event details, log messages, and service configuration are replaced with `[REDACTED]`. This is a safety net rather than a promise that application logs contain no sensitive information. Operators should still limit access to incident evidence and avoid logging credentials.
 

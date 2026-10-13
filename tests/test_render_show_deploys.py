@@ -34,7 +34,9 @@ def require(condition: bool, message: str) -> None:
 def run(cmd: str, render_json: str = "0") -> subprocess.CompletedProcess[str]:
     script = f"""
 set -uo pipefail
-source <(awk '/^# --- Main ---/{{exit}} {{print}}' "{ROOT / 'tools/agent-render'}")
+# Materialize the function-only source before sourcing it. Process substitution
+# races with `source` on some bash versions and can yield an empty function set.
+source /dev/stdin <<< "$(awk '/^# --- Main ---/{{exit}} {{print}}' "{ROOT / 'tools/agent-render'}")"
 resolve_service() {{ echo "srv-test"; }}
 render_request() {{
   case "$2" in

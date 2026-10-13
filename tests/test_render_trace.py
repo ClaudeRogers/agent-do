@@ -10,8 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = json.dumps({"id": "srv-trace", "ownerId": "tea-1", "name": "api", "type": "web_service", "repo": "https://github.com/acme/api", "branch": "main", "rootDir": "apps/api", "autoDeploy": "yes", "autoDeployTrigger": "commit", "serviceDetails": {"url": "https://api.onrender.com"}})
-DEPLOYS = json.dumps([{ "deploy": {"id": "dep-1", "status": "live", "commit": {"id": "a" * 40}, "createdAt": "2026-10-12T00:00:00Z"}}])
-EVENTS = json.dumps([{ "event": {"timestamp": "2026-10-12T00:01:00Z", "type": "deploy_ended", "details": {"reason": "token=secret-value"}}}])
+DEPLOYS = json.dumps([{ "deploy": {"id": f"dep-{index}", "status": "live", "commit": {"id": "a" * 40}, "createdAt": "2026-10-12T00:00:00Z"}} for index in range(11)])
+EVENTS = json.dumps([{ "event": {"timestamp": "2026-10-12T00:01:00Z", "type": "deploy_ended", "details": {"reason": "token=secret-value"}}} for _ in range(101)])
 LOGS = json.dumps({"logs": [{"timestamp": "2026-10-12T00:02:00Z", "message": "password=hunter2", "labels": [{"name": "level", "value": "error"}]}], "hasMore": True})
 
 
@@ -24,8 +24,8 @@ a = sys.argv[1:]
 out = pathlib.Path(a[a.index("-o") + 1])
 url = next(value for value in a if value.startswith("https://api.render.com/"))
 if url.endswith("/services/srv-trace"): body = {SERVICE!r}
-elif "/deploys?limit=10" in url: body = {DEPLOYS!r}
-elif "/events?limit=100" in url: body = {EVENTS!r}
+elif "/deploys?limit=11" in url: body = {DEPLOYS!r}
+elif "/events?limit=101" in url: body = {EVENTS!r}
 elif "/logs?" in url: body = {LOGS!r}
 else: raise SystemExit("unexpected URL: " + url)
 out.write_text(body)
@@ -43,13 +43,17 @@ def main() -> int:
     assert payload["success"] is True
     assert payload["service"]["id"] == "srv-trace"
     assert payload["deploys"][0]["commit_sha"] == "a" * 40
+    assert len(payload["deploys"]) == 10
+    assert len(payload["events"]) == 100
+    assert payload["truncated"]["deploys_more_available"] is True
+    assert payload["truncated"]["events_more_available"] is True
     assert payload["truncated"]["logs_more_available"] is True
     rendered = json.dumps(payload)
     assert "secret-value" not in rendered and "hunter2" not in rendered
     assert "[REDACTED]" in rendered
     bad = run("srv-trace", "--since", "forever")
     assert bad.returncode == 2
-    assert "--since" in bad.stderr
+    assert json.loads(bad.stdout)["error"].startswith("--since")
     print("render trace tests passed")
     return 0
 

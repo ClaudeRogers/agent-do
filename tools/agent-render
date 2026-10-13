@@ -206,6 +206,36 @@ render_request_checked() {
     return 1
 }
 
+# Trace collection keeps provider responses out of argv and shell variables.
+# Callers own the output file and may pass it straight to a normalizer.
+render_request_checked_file() {
+    local method="$1"
+    local endpoint="$2"
+    local output_file="$3"
+    local data="${4:-}"
+    local max_file_bytes="${5:-}"
+    local token="${RENDER_API_KEY:-}"
+
+    if [[ -z "$token" ]]; then
+        echo "Error: RENDER_API_KEY not set" >&2
+        return 1
+    fi
+
+    local args=(-sS --max-time 30 --connect-timeout 10 -o "$output_file" -w "%{http_code}" -X "$method" "${RENDER_API}${endpoint}" \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json")
+    [[ -n "$data" ]] && args+=(-d "$data")
+    [[ -n "$max_file_bytes" ]] && args+=(--max-filesize "$max_file_bytes")
+    local status
+    status=$(curl "${args[@]}")
+    if [[ "$status" =~ ^2 ]]; then
+        return 0
+    fi
+    echo "Error: Render API ${method} ${endpoint} returned HTTP ${status}" >&2
+    return 1
+}
+
 resolve_service() {
     local name_or_id="$1"
 
@@ -504,28 +534,33 @@ for item in items:
 
 cmd_trace() {
     local name_or_id="" since="30m" max_bytes="65536"
+    trace_error() {
+        python3 -c 'import json, sys; print(json.dumps({"success": False, "provider": "render", "error": sys.argv[1], "code": int(sys.argv[2])}))' "$1" "${2:-1}"
+    }
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --since) since="${2:-}"; shift 2 ;;
             --max-log-bytes) max_bytes="${2:-}"; shift 2 ;;
             --json) shift ;;
-            --*) echo "Error: Unknown trace option: $1" >&2; return 2 ;;
-            *) [[ -z "$name_or_id" ]] || { echo "Error: Unexpected argument: $1" >&2; return 2; }; name_or_id="$1"; shift ;;
+            --*) trace_error "Unknown trace option: $1" 2; return 2 ;;
+            *) [[ -z "$name_or_id" ]] || { trace_error "Unexpected argument: $1" 2; return 2; }; name_or_id="$1"; shift ;;
         esac
     done
-    [[ -n "$name_or_id" ]] || { echo "Usage: agent-render trace <service> [--since 30m] [--max-log-bytes 65536] --json" >&2; return 2; }
-    [[ "$since" =~ ^[1-9][0-9]*[mhd]$ ]] || { echo "Error: --since must be a positive duration such as 30m or 2h" >&2; return 2; }
-    [[ "$max_bytes" =~ ^[1-9][0-9]*$ && "$max_bytes" -le 262144 ]] || { echo "Error: --max-log-bytes must be between 1 and 262144" >&2; return 2; }
-    local sid service deploys events owner_id logs start_time tool_root
-    sid=$(resolve_service "$name_or_id") || return 1
-    if ! service=$(render_request_checked GET "/services/$sid" 2>&1); then printf '{"success":false,"provider":"render","error":%s,"code":1}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$service")"; return 1; fi
-    owner_id=$(printf '%s' "$service" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ownerId", ""))')
-    [[ -n "$owner_id" ]] || { echo '{"success":false,"provider":"render","error":"Render service did not include ownerId","code":1}'; return 1; }
-    if ! deploys=$(render_request_checked GET "/services/$sid/deploys?limit=10" 2>&1) || ! events=$(render_request_checked GET "/services/$sid/events?limit=100" 2>&1); then echo '{"success":false,"provider":"render","error":"Render deployment evidence could not be read","code":1}'; return 1; fi
-    start_time=$(normalize_log_time "$since") || { echo '{"success":false,"provider":"render","error":"invalid --since value","code":2}'; return 2; }
-    if ! logs=$(render_request_checked GET "/logs?ownerId=$owner_id&resource=$sid&limit=100&direction=backward&startTime=$start_time" 2>&1); then echo '{"success":false,"provider":"render","error":"Render logs could not be read","code":1}'; return 1; fi
+    [[ -n "$name_or_id" ]] || { trace_error "Usage: agent-render trace <service> [--since 30m] [--max-log-bytes 65536] --json" 2; return 2; }
+    [[ "$since" =~ ^[1-9][0-9]*[mhd]$ ]] || { trace_error "--since must be a positive duration such as 30m or 2h" 2; return 2; }
+    [[ "$max_bytes" =~ ^[1-9][0-9]*$ && "$max_bytes" -le 262144 ]] || { trace_error "--max-log-bytes must be between 1 and 262144" 2; return 2; }
+    local sid owner_id start_time tool_root trace_dir error_message
+    trace_dir=$(mktemp -d) || { trace_error "Unable to create temporary trace storage"; return 1; }
+    trap 'rm -rf "$trace_dir"' RETURN
+    if ! sid=$(resolve_service "$name_or_id" 2>&1); then trace_error "$sid"; return 1; fi
+    if ! render_request_checked_file GET "/services/$sid" "$trace_dir/service" 2>"$trace_dir/error"; then error_message=$(<"$trace_dir/error"); trace_error "${error_message:-Render service could not be read}"; return 1; fi
+    if ! owner_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("ownerId", ""))' "$trace_dir/service" 2>"$trace_dir/error"); then error_message=$(<"$trace_dir/error"); trace_error "${error_message:-Render service response was invalid}"; return 1; fi
+    [[ -n "$owner_id" ]] || { trace_error "Render service did not include ownerId"; return 1; }
+    if ! render_request_checked_file GET "/services/$sid/deploys?limit=11" "$trace_dir/deploys" 2>"$trace_dir/error" || ! render_request_checked_file GET "/services/$sid/events?limit=101" "$trace_dir/events" 2>"$trace_dir/error"; then error_message=$(<"$trace_dir/error"); trace_error "${error_message:-Render deployment evidence could not be read}"; return 1; fi
+    if ! start_time=$(normalize_log_time "$since" 2>"$trace_dir/error"); then error_message=$(<"$trace_dir/error"); trace_error "${error_message:-invalid --since value}" 2; return 2; fi
+    if ! render_request_checked_file GET "/logs?ownerId=$owner_id&resource=$sid&limit=100&direction=backward&startTime=$start_time" "$trace_dir/logs" "" 1048576 2>"$trace_dir/error"; then error_message=$(<"$trace_dir/error"); trace_error "${error_message:-Render logs could not be read}"; return 1; fi
     tool_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    python3 "$tool_root/lib/render_trace.py" --service "$service" --deploys "$deploys" --events "$events" --logs "$logs" --since "$since" --max-bytes "$max_bytes"
+    python3 "$tool_root/lib/render_trace.py" --service-file "$trace_dir/service" --deploys-file "$trace_dir/deploys" --events-file "$trace_dir/events" --logs-file "$trace_dir/logs" --since "$since" --max-bytes "$max_bytes"
 }
 
 cmd_logs() {

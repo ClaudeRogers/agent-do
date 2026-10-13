@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from typing import Any
 
 TOKEN = re.compile(r"(?i)\b(token|secret|password|api[_-]?key|authorization)([=:]\s*)\S+")
+MAX_LOG_RESPONSE_BYTES = 1_048_576
 
 
 def redact(value: Any) -> Any:
@@ -22,34 +24,43 @@ def redact(value: Any) -> Any:
     return value
 
 
-def load(raw: str, name: str) -> Any:
+def load_file(path: str, name: str, *, max_bytes: int | None = None) -> Any:
+    if max_bytes is not None and os.path.getsize(path) > max_bytes:
+        raise ValueError(f"Render {name} response exceeded the {max_bytes}-byte safety limit")
     try:
-        return json.loads(raw)
+        with open(path, encoding="utf-8") as source:
+            return json.load(source)
     except json.JSONDecodeError as error:
         raise ValueError(f"Render returned invalid JSON for {name}") from error
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--service", required=True)
-    parser.add_argument("--deploys", required=True)
-    parser.add_argument("--events", required=True)
-    parser.add_argument("--logs", required=True)
+    parser.add_argument("--service-file", required=True)
+    parser.add_argument("--deploys-file", required=True)
+    parser.add_argument("--events-file", required=True)
+    parser.add_argument("--logs-file", required=True)
     parser.add_argument("--since", required=True)
     parser.add_argument("--max-bytes", type=int, required=True)
     args = parser.parse_args()
     try:
-        service, deploys, events, log_payload = (load(args.service, "service"), load(args.deploys, "deploys"),
-                                                  load(args.events, "events"), load(args.logs, "logs"))
+        service, deploys, events, log_payload = (
+            load_file(args.service_file, "service"),
+            load_file(args.deploys_file, "deploys"),
+            load_file(args.events_file, "events"),
+            load_file(args.logs_file, "logs", max_bytes=MAX_LOG_RESPONSE_BYTES),
+        )
         normalized_deploys = []
-        for item in deploys if isinstance(deploys, list) else []:
+        deploy_items = deploys if isinstance(deploys, list) else []
+        for item in deploy_items[:10]:
             deploy = item.get("deploy", item) if isinstance(item, dict) else {}
             commit = deploy.get("commit") or {}
             normalized_deploys.append({"id": deploy.get("id"), "status": deploy.get("status"),
                                        "commit_sha": commit.get("id"), "created_at": deploy.get("createdAt"),
                                        "finished_at": deploy.get("finishedAt"), "trigger": deploy.get("trigger")})
         normalized_events = []
-        for item in events if isinstance(events, list) else []:
+        event_items = events if isinstance(events, list) else []
+        for item in event_items[:100]:
             event = item.get("event", item) if isinstance(item, dict) else {}
             normalized_events.append({"timestamp": event.get("timestamp"), "type": event.get("type"),
                                       "reason": redact((event.get("details") or {}).get("reason")),
@@ -73,7 +84,9 @@ def main() -> int:
                               "build_filter": redact(service.get("buildFilter") or {})},
                   "deploys": normalized_deploys, "events": normalized_events,
                   "logs": logs, "limits": {"deploys": 10, "events": 100, "logs": 100, "max_log_bytes": args.max_bytes},
-                  "truncated": {"logs_more_available": bool(log_payload.get("hasMore")) if isinstance(log_payload, dict) else False,
+                  "truncated": {"deploys_more_available": len(deploy_items) > 10,
+                                "events_more_available": len(event_items) > 100,
+                                "logs_more_available": bool(log_payload.get("hasMore")) if isinstance(log_payload, dict) else False,
                                 "log_bytes": truncated_bytes}, "redaction": {"applied": True}}
         print(json.dumps(result, indent=2))
         return 0
