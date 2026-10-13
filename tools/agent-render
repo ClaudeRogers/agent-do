@@ -17,6 +17,7 @@ WORKSPACE
 SERVICES (web, worker, static, private, cron)
   services / ls                 List all services
   show <svc> [--json]           Detailed service info (incl. rootDir, buildFilter, autoDeployTrigger)
+  trace <svc> [opts]            Read-only, bounded incident evidence as JSON
   create <type> <name> [opts]   Create a new service (`create --help` for opts)
   update <svc> [opts]           Update service settings
   delete <svc> --yes            Delete a service (destructive)
@@ -135,6 +136,7 @@ Examples:
     --event deploy_ended --event deploy_started
   agent-render blueprint validate render.yaml
   agent-render audit --limit 50
+  agent-render trace my-api --since 30m --max-log-bytes 65536
 EOF
 }
 
@@ -498,6 +500,32 @@ for item in items:
     did = d.get('id', '')
     print(f'{did}  {status}  commit:{commit}  {created}')
 "
+}
+
+cmd_trace() {
+    local name_or_id="" since="30m" max_bytes="65536"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --since) since="${2:-}"; shift 2 ;;
+            --max-log-bytes) max_bytes="${2:-}"; shift 2 ;;
+            --json) shift ;;
+            --*) echo "Error: Unknown trace option: $1" >&2; return 2 ;;
+            *) [[ -z "$name_or_id" ]] || { echo "Error: Unexpected argument: $1" >&2; return 2; }; name_or_id="$1"; shift ;;
+        esac
+    done
+    [[ -n "$name_or_id" ]] || { echo "Usage: agent-render trace <service> [--since 30m] [--max-log-bytes 65536] --json" >&2; return 2; }
+    [[ "$since" =~ ^[1-9][0-9]*[mhd]$ ]] || { echo "Error: --since must be a positive duration such as 30m or 2h" >&2; return 2; }
+    [[ "$max_bytes" =~ ^[1-9][0-9]*$ && "$max_bytes" -le 262144 ]] || { echo "Error: --max-log-bytes must be between 1 and 262144" >&2; return 2; }
+    local sid service deploys events owner_id logs start_time tool_root
+    sid=$(resolve_service "$name_or_id") || return 1
+    if ! service=$(render_request_checked GET "/services/$sid" 2>&1); then printf '{"success":false,"provider":"render","error":%s,"code":1}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$service")"; return 1; fi
+    owner_id=$(printf '%s' "$service" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ownerId", ""))')
+    [[ -n "$owner_id" ]] || { echo '{"success":false,"provider":"render","error":"Render service did not include ownerId","code":1}'; return 1; }
+    if ! deploys=$(render_request_checked GET "/services/$sid/deploys?limit=10" 2>&1) || ! events=$(render_request_checked GET "/services/$sid/events?limit=100" 2>&1); then echo '{"success":false,"provider":"render","error":"Render deployment evidence could not be read","code":1}'; return 1; fi
+    start_time=$(normalize_log_time "$since") || { echo '{"success":false,"provider":"render","error":"invalid --since value","code":2}'; return 2; }
+    if ! logs=$(render_request_checked GET "/logs?ownerId=$owner_id&resource=$sid&limit=100&direction=backward&startTime=$start_time" 2>&1); then echo '{"success":false,"provider":"render","error":"Render logs could not be read","code":1}'; return 1; fi
+    tool_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    python3 "$tool_root/lib/render_trace.py" --service "$service" --deploys "$deploys" --events "$events" --logs "$logs" --since "$since" --max-bytes "$max_bytes"
 }
 
 cmd_logs() {
@@ -3200,6 +3228,7 @@ case "${1:-help}" in
     # --- services ---
     services|ls|list) cmd_services ;;
     show|get) shift; cmd_show "$@" ;;
+    trace) shift; cmd_trace "$@" ;;
     create) shift; cmd_create "$@" ;;
     update|patch) shift; cmd_update "$@" ;;
     delete|destroy|rm) shift; cmd_delete "$@" ;;
