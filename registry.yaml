@@ -1454,6 +1454,33 @@ tools:
         restore:
         - destructive
     concurrency: mixed
+  incident:
+    description: Read-only, local incident evidence packets from configured GitHub, Kubernetes, and Render sources
+    capabilities:
+    - initialize a project-local incident configuration
+    - validate configured evidence sources
+    - collect and atomically publish a bounded evidence packet
+    commands:
+      init: Initialize project-local incident configuration
+      validate: Validate incident configuration
+      trace: Collect a read-only evidence packet
+      show: Show a published evidence packet
+    contracts:
+      connect:
+      - init
+      snapshot:
+      - trace
+      - show
+      verify:
+      - validate
+      save:
+      - trace
+      attributes:
+        init:
+        - own_state
+        trace:
+        - composite
+    concurrency: mixed
   k8s:
     description: Control Kubernetes clusters
     capabilities:

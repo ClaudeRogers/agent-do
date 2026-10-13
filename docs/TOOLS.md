@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (102 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -67,6 +67,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [homekit](#homekit) | HomeKit/smart home control | mixed | 3 |
 | [ide](#ide) | Control VS Code/Cursor editor | read | 5 |
 | [image](#image) | Image processing | mixed | 3 |
+| [incident](#incident) | Read-only, local incident evidence packets from configured GitHub, Kubernetes, and Render sources | mixed | 4 |
 | [ios](#ios) | Control iOS Simulator | mixed | 10 |
 | [jupyter](#jupyter) | Control Jupyter notebooks | mixed | 4 |
 | [k8s](#k8s) | Control Kubernetes clusters | write | 5 |
@@ -2293,6 +2294,32 @@ agent-do image resize input.png --size 800x600
 **Safety (from contracts)**
 
 - Write (connect/interact/save): `convert`, `crop`, `resize`
+
+### incident
+
+Read-only, local incident evidence packets from configured GitHub, Kubernetes, and Render sources
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- initialize a project-local incident configuration
+- validate configured evidence sources
+- collect and atomically publish a bounded evidence packet
+
+**Commands**
+
+- `init`: Initialize project-local incident configuration
+- `validate`: Validate incident configuration
+- `trace`: Collect a read-only evidence packet
+- `show`: Show a published evidence packet
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `show`, `validate`
+- Write (connect/interact/save): `init`, `trace`
+- composite (one call performs several beats internally): `trace`
+- own_state (writes only its own cache/state; parallel-safe): `init`
 
 ### ios
 
