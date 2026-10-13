@@ -6543,6 +6543,61 @@ tools:
         ping: [composite]
     concurrency: mixed
 
+  spacelift:
+    description: Read-only inspection of Spacelift stacks, Terraform/OpenTofu runs, policies, and recorded drift
+    capabilities:
+    - inspect stack Git integration, state, labels, and Terraform/OpenTofu metadata
+    - inspect runs, commit and pull-request metadata, policy outcomes, and failure state
+    - report the latest recorded drift-detection run without triggering detection
+    - verify authenticated read access without exposing credentials
+    commands:
+      doctor: Verify credential availability and bounded authenticated read access
+      stacks: List readable stacks with an explicit bounded result set
+      stack: Show one stack by ID or slug
+      runs: List runs for one stack (--stack, --limit, --cursor)
+      run: Show one run and its normalized execution outcome
+      drift: Report the latest known drift-detection run (--stack)
+    examples:
+    - intent: verify Spacelift read access
+      command: agent-do spacelift doctor
+    - intent: list production infrastructure stacks
+      command: agent-do spacelift stacks --limit 50 --json
+    - intent: inspect recent deployment runs
+      command: agent-do spacelift runs --stack payments-production --json
+    - intent: inspect a specific infrastructure run
+      command: agent-do spacelift run <run-id> --json
+    credentials:
+      one_of:
+      - - SPACELIFT_API_TOKEN
+      - - SPACELIFT_API_KEY_ID
+        - SPACELIFT_API_KEY_SECRET
+    routing:
+      discover_keywords:
+      - spacelift
+      - terraform run
+      - opentofu run
+      - infrastructure drift
+      prompt_patterns:
+      - '\\bspacelift\\b'
+      - '\\b(terraform|opentofu)\\b.*\\b(run|drift|policy|stack)\\b'
+      readiness:
+        check: agent-do spacelift doctor
+        fix: 'agent-do creds store SPACELIFT_API_TOKEN --stdin, or store SPACELIFT_API_KEY_ID and SPACELIFT_API_KEY_SECRET'
+        note: 'Also set SPACELIFT_API_ENDPOINT to your account URL. A supplied JWT is preferred; otherwise a machine API key is exchanged in memory for a short-lived JWT. Infrastructure requests use bounded, read-only GraphQL queries only.'
+    contracts:
+      snapshot:
+      - doctor
+      - stacks
+      - stack
+      - runs
+      - run
+      - drift
+      attributes:
+        stacks: [long_running]
+        runs: [long_running]
+        run: [long_running]
+        drift: [long_running]
+    concurrency: read
   sentry:
     description: Sentry error tracking, issue management, alerts, and releases
     capabilities:

@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (102 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -104,6 +104,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [sheets](#sheets) | Control Google Sheets | mixed | 3 |
 | [slack](#slack) | Control Slack | mixed | 5 |
 | [sms](#sms) | SMS messaging | write | 8 |
+| [spacelift](#spacelift) | Read-only inspection of Spacelift stacks, Terraform/OpenTofu runs, policies, and recorded drift | read | 6 |
 | [spec](#spec) | Repo-local specifications and change artifacts for intended behavior, change deltas, and archive readiness | mixed | 5 |
 | [ssh](#ssh) | Control remote server sessions | write | 5 |
 | [substack](#substack) | Draft and publish Substack essays through the editor API — markdown to ProseMirror drafts, auth rides a saved agent-browse session | mixed | 11 |
@@ -4025,6 +4026,51 @@ agent-do sms code --from WidgetHub --contains verification
 - Write (connect/interact/save): `send`
 - sensitive (emits or persists secret material; guard output): `code`, `link`
 - composite (one call performs several beats internally): `code`, `link`
+
+### spacelift
+
+Read-only inspection of Spacelift stacks, Terraform/OpenTofu runs, policies, and recorded drift
+
+Concurrency: `read`
+
+**Capabilities**
+
+- inspect stack Git integration, state, labels, and Terraform/OpenTofu metadata
+- inspect runs, commit and pull-request metadata, policy outcomes, and failure state
+- report the latest recorded drift-detection run without triggering detection
+- verify authenticated read access without exposing credentials
+
+**Commands**
+
+- `doctor`: Verify credential availability and bounded authenticated read access
+- `stacks`: List readable stacks with an explicit bounded result set
+- `stack`: Show one stack by ID or slug
+- `runs`: List runs for one stack (--stack, --limit, --cursor)
+- `run`: Show one run and its normalized execution outcome
+- `drift`: Report the latest known drift-detection run (--stack)
+
+**Examples**
+
+```bash
+# verify Spacelift read access
+agent-do spacelift doctor
+# list production infrastructure stacks
+agent-do spacelift stacks --limit 50 --json
+# inspect recent deployment runs
+agent-do spacelift runs --stack payments-production --json
+# inspect a specific infrastructure run
+agent-do spacelift run <run-id> --json
+```
+
+**Credentials**
+
+- One of: `SPACELIFT_API_TOKEN`
+- One of: `SPACELIFT_API_KEY_ID` | `SPACELIFT_API_KEY_SECRET`
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `doctor`, `drift`, `run`, `runs`, `stack`, `stacks`
+- long_running (daemon/stream/session; may never return): `drift`, `run`, `runs`, `stacks`
 
 ### spec
 

@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Read-only Spacelift GraphQL provider.
+
+Infrastructure inspection uses only GraphQL queries. Authentication can use a
+pre-minted JWT or exchange a Spacelift machine API key for a short-lived JWT.
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+CONNECT_TIMEOUT = 10
+TOTAL_TIMEOUT = 30
+MAX_LIMIT = 100
+
+
+class ProviderError(Exception):
+    pass
+
+
+def redact(value):
+    """Ensure provider errors cannot leak configured credentials."""
+    result = str(value)
+    for name in ("SPACELIFT_API_TOKEN", "SPACELIFT_API_KEY_ID", "SPACELIFT_API_KEY_SECRET"):
+        secret = os.environ.get(name, "")
+        if secret:
+            result = result.replace(secret, "[REDACTED]")
+    return result
+
+
+def endpoint():
+    value = os.environ.get("SPACELIFT_API_ENDPOINT", "").rstrip("/")
+    if not value:
+        raise ProviderError("missing SPACELIFT_API_ENDPOINT (for example https://account.app.spacelift.io)")
+    if not value.startswith("https://") and not value.startswith("http://"):
+        raise ProviderError("SPACELIFT_API_ENDPOINT must be an http(s) URL")
+    return value + "/graphql" if not value.endswith("/graphql") else value
+
+
+def token():
+    value = os.environ.get("SPACELIFT_API_TOKEN", "")
+    if value:
+        return value
+    key_id = os.environ.get("SPACELIFT_API_KEY_ID", "")
+    key_secret = os.environ.get("SPACELIFT_API_KEY_SECRET", "")
+    if key_id and key_secret:
+        return exchange_api_key(key_id, key_secret)
+    if key_id or key_secret:
+        raise ProviderError("incomplete Spacelift API key; provide both SPACELIFT_API_KEY_ID and SPACELIFT_API_KEY_SECRET")
+    raise ProviderError("missing Spacelift credential; store SPACELIFT_API_TOKEN or SPACELIFT_API_KEY_ID and SPACELIFT_API_KEY_SECRET with agent-do creds")
+
+
+def post_graphql(payload, authorization=None):
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if authorization:
+        headers["Authorization"] = "Bearer " + authorization
+    request = urllib.request.Request(endpoint(), data=json.dumps(payload).encode(), method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=TOTAL_TIMEOUT) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise ProviderError("Spacelift rejected the credential or it lacks permission for this read")
+        raise ProviderError("Spacelift API returned HTTP %s" % exc.code)
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise ProviderError("Spacelift API request timed out or could not connect: %s" % redact(exc))
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProviderError("Spacelift API returned malformed JSON")
+    if not isinstance(payload, dict):
+        raise ProviderError("Spacelift API returned an invalid response")
+    if payload.get("errors"):
+        message = "; ".join(str(e.get("message", "GraphQL error")) for e in payload["errors"] if isinstance(e, dict))
+        raise ProviderError(redact(message or "Spacelift GraphQL request failed"))
+    if not isinstance(payload.get("data"), dict):
+        raise ProviderError("Spacelift API response omitted data")
+    return payload["data"]
+
+
+def exchange_api_key(key_id, key_secret):
+    """Use Spacelift's documented apiKeyUser exchange; never print/cache the JWT."""
+    data = post_graphql({"query": "mutation GetSpaceliftToken($id: ID!, $secret: String!) { apiKeyUser(id: $id, secret: $secret) { jwt } }", "variables": {"id": key_id, "secret": key_secret}})
+    jwt = ((data.get("apiKeyUser") or {}).get("jwt"))
+    if not isinstance(jwt, str) or not jwt:
+        raise ProviderError("Spacelift API key exchange returned no JWT")
+    return jwt
+
+
+def gql(query, variables=None):
+    return post_graphql({"query": query, "variables": variables or {}}, token())
+
+
+def scalar_fields(type_name):
+    """Discover current scalar fields so schema evolution fails closed, not guessed."""
+    data = gql("query($name:String!){__type(name:$name){fields{name type{kind name ofType{kind name}}}}}", {"name": type_name})
+    typ = data.get("__type") or {}
+    fields = typ.get("fields") or []
+    return {f["name"] for f in fields if isinstance(f, dict) and (f.get("type", {}).get("kind") in ("SCALAR", "ENUM") or f.get("type", {}).get("ofType", {}).get("kind") in ("SCALAR", "ENUM"))}
+
+
+def select(available, candidates):
+    return [name for name in candidates if name in available]
+
+
+STACK_CANDIDATES = ["id", "name", "slug", "repository", "branch", "labels", "state", "createdAt", "updatedAt", "terraformVersion", "terraformWorkflowTool", "administrative", "autodeploy"]
+RUN_CANDIDATES = ["id", "state", "type", "createdAt", "updatedAt", "finishedAt", "commitSha", "commit", "branch", "message", "driftDetection", "drifted", "hasDrift", "triggeredBy", "failureReason"]
+
+
+def normalize_stack(item):
+    return {"id": item.get("id"), "name": item.get("name"), "slug": item.get("slug"), "repository": item.get("repository"),
+            "branch": item.get("branch"), "labels": item.get("labels") or [], "state": item.get("state"),
+            "terraform": {k: item.get(k) for k in ("terraformVersion", "terraformWorkflowTool") if k in item},
+            "last_run": item.get("lastRun")}
+
+
+def normalize_run(item):
+    state = item.get("state")
+    policy = item.get("policyOutcome") or item.get("policy")
+    failure = item.get("failureMessage") or item.get("failureReason") or item.get("message")
+    return {"id": item.get("id"), "type": item.get("type"), "status": state, "commit_sha": item.get("commitSha") or item.get("commit"),
+            "branch": item.get("branch"), "pull_request": item.get("pullRequest") or item.get("pr"),
+            "started_at": item.get("createdAt") or item.get("startedAt"), "ended_at": item.get("finishedAt") or item.get("updatedAt"),
+            "policy": policy, "drift_detection": item.get("driftDetection"), "failure": failure,
+            "drift_detected": item.get("drifted", item.get("hasDrift")),
+            "terraform_apply_failed": bool(failure and "policy" not in str(failure).lower()),
+            "policy_failed": bool(policy and str(policy).upper() in ("FAIL", "FAILED", "DENY", "DENIED"))}
+
+
+def root_query(field, args, selected, variables):
+    arg_text = "(" + ", ".join(args) + ")" if args else ""
+    return gql("query(" + ", ".join(variables["defs"]) + "){ " + field + arg_text + " { " + " ".join(selected) + " } }", variables["values"])
+
+
+def stack_list(args):
+    fields = select(scalar_fields("Stack"), STACK_CANDIDATES)
+    data = gql("{ stacks { " + " ".join(fields) + " } }")
+    rows = data.get("stacks") or []
+    if not isinstance(rows, list): raise ProviderError("Spacelift returned an unsupported stacks shape")
+    limit = args.limit or MAX_LIMIT
+    shown, truncated = rows[:limit], len(rows) > limit
+    return {"stacks": [normalize_stack(x) for x in shown], "pagination": {"limit": limit, "returned": len(shown), "truncated": truncated, "next_cursor": None, "note": "Spacelift stack pagination is unavailable in this schema" if truncated else None}}
+
+
+def stack_detail(identifier):
+    # Stack IDs and slugs are accepted by the documented stack lookup field in current schemas.
+    fields = select(scalar_fields("Stack"), STACK_CANDIDATES)
+    data = gql("query($id:ID!){ stack(id:$id) { " + " ".join(fields) + " } }", {"id": identifier})
+    item = data.get("stack")
+    if not item: raise ProviderError("Spacelift stack was not found or is not readable")
+    return {"stack": normalize_stack(item)}
+
+
+def runs(args):
+    # `stackRuns` is the read query exposed by current Spacelift schemas. The exact
+    # fields are discovered first; a schema mismatch is reported instead of guessed.
+    if args.cursor:
+        raise ProviderError("this Spacelift schema does not expose a verified cursor for stackRuns; omit --cursor (results are explicitly bounded)")
+    fields = select(scalar_fields("Run"), RUN_CANDIDATES)
+    data = gql("query($stack:ID!){ stackRuns(stack:$stack) { " + " ".join(fields) + " } }", {"stack": args.stack})
+    rows = data.get("stackRuns") or []
+    if not isinstance(rows, list): raise ProviderError("Spacelift returned an unsupported runs shape")
+    limit = args.limit or 25
+    shown, truncated = rows[:limit], len(rows) > limit
+    return {"runs": [normalize_run(x) for x in shown], "pagination": {"limit": limit, "cursor": args.cursor, "returned": len(shown), "truncated": truncated, "next_cursor": None}}
+
+
+def run_detail(run_id):
+    fields = select(scalar_fields("Run"), RUN_CANDIDATES)
+    data = gql("query($id:ID!){ run(id:$id) { " + " ".join(fields) + " } }", {"id": run_id})
+    item = data.get("run")
+    if not item: raise ProviderError("Spacelift run was not found or is not readable")
+    return {"run": normalize_run(item), "resources": item.get("resources") or [], "policy_checks": item.get("policyChecks") or []}
+
+
+def drift(args):
+    # Read runs only; this does not schedule or perform detection.
+    result = runs(argparse.Namespace(stack=args.stack, limit=MAX_LIMIT, cursor=None))
+    drift_runs = [r for r in result["runs"] if r.get("drift_detection") is True]
+    latest = drift_runs[0] if drift_runs else None
+    return {"stack": args.stack, "state": "unknown" if latest is None or latest.get("drift_detected") is None else ("present" if latest["drift_detected"] else "absent"),
+            "latest_detection_run": latest, "checked_now": False,
+            "note": "This reports the latest recorded drift-detection run; no detection was triggered."}
+
+
+def main():
+    # Global output flags are accepted before or after a command, matching the
+    # rest of agent-do's provider CLIs.
+    json_mode = "--json" in sys.argv[1:]
+    argv = [arg for arg in sys.argv[1:] if arg != "--json"]
+    parser = argparse.ArgumentParser(description="Read-only Spacelift stack and run inspection")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("doctor")
+    p = sub.add_parser("stacks"); p.add_argument("--limit", type=int, default=MAX_LIMIT)
+    p = sub.add_parser("stack"); p.add_argument("stack")
+    p = sub.add_parser("runs"); p.add_argument("--stack", required=True); p.add_argument("--limit", type=int, default=25); p.add_argument("--cursor")
+    p = sub.add_parser("run"); p.add_argument("run")
+    p = sub.add_parser("drift"); p.add_argument("--stack", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "doctor":
+            gql("{ __typename }")
+            result = {"ok": True, "credential": "available", "api": "authenticated", "read_only": True}
+        elif args.command == "stacks": result = stack_list(args)
+        elif args.command == "stack": result = stack_detail(args.stack)
+        elif args.command == "runs": result = runs(args)
+        elif args.command == "run": result = run_detail(args.run)
+        else: result = drift(args)
+        if json_mode: print(json.dumps(result, sort_keys=True))
+        else: print(json.dumps(result, indent=2, sort_keys=True))
+    except ProviderError as exc:
+        result = {"ok": False, "error": redact(exc)}
+        if json_mode: print(json.dumps(result, sort_keys=True))
+        else: print("Error: " + result["error"], file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
