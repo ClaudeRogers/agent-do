@@ -3376,6 +3376,15 @@ tools:
       - JIRA_API_TOKEN
       note: Credentials are stored per-profile in ~/.agent-do/jira/.creds/ (0o600) instead of environment variables when using connection profiles
     concurrency: mixed
+    contracts:
+      connect: [connections add, connections remove, connections set-default]
+      snapshot: [connections list, whoami, snapshot, issue view, issue list, transitions, user find, search, board list, sprint list, sprint active]
+      interact: [issue create, issue link, issue delete, issue comment, issue assign, issue transition, issue label, issue edit, sprint add]
+      attributes:
+        issue delete: [destructive]
+        connections add: [sensitive, own_state]
+        connections remove: [own_state]
+        connections set-default: [own_state]
   logs:
     description: Control log aggregation
     capabilities:

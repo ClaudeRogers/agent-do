@@ -258,9 +258,7 @@ class JiraClient:
         params: dict[str, Any] = {"jql": jql, "maxResults": max_results}
         if fields is not None:
             params["fields"] = fields if self.server else [f.strip() for f in fields.split(",") if f.strip()]
-        if self.server:
-            return self.get(self._search(), params=params, suppress_errors=suppress_errors)
-        return self.post(self._search(), params, suppress_errors=suppress_errors)
+        return self.get(self._search(), params=params, suppress_errors=suppress_errors)
 
     def get(self, path: str, *, params: dict[str, Any] | None = None, agile: bool = False,
             suppress_errors: bool = False) -> Any:
@@ -623,13 +621,9 @@ def cmd_snapshot(argv: list[str]) -> None:
     projects = []
     for p in (projects_data or []):
         try:
-            jql = f"project = {_jql_quote(str(p['key']))} AND statusCategory != Done"
-            if client.server:
-                result = client.search(jql, max_results=0, suppress_errors=True)
-                open_count = -1 if result.get("_error") else result.get("total", 0)
-            else:
-                result = client.post("search/approximate-count", {"jql": jql}, suppress_errors=True)
-                open_count = -1 if result.get("_error") else result.get("count", -1)
+            jql = f"project = {p['key']} AND statusCategory != Done"
+            result = client.search(jql, max_results=0, suppress_errors=True)
+            open_count = -1 if result.get("_error") else result.get("total", 0)
         except Exception:
             open_count = -1
         projects.append({
@@ -832,7 +826,7 @@ def _issue_list(argv: list[str]) -> None:
     connection, json_mode, _ = _parse_common(argv[1:])
     client = _get_client(connection)
 
-    jql_parts = [f"project = {_jql_quote(project)}"]
+    jql_parts = [f"project = {project}"]
     if status:
         jql_parts.append(f"status = {_jql_quote(status)}")
     if assignee:
@@ -979,7 +973,12 @@ def _issue_create(argv: list[str]) -> None:
     if isinstance(result, dict) and result.get("_error"):
         message = str(result.get("_error", "")).lower()
         if issue_type.lower() != "task" and ("issuetype" in message or "issue type" in message):
-            _err(f"Jira rejected issue type {issue_type!r}; no issue was created. Verify the project's available issue types and retry.")
+            body["fields"]["issuetype"] = {"name": "Task"}
+            result = client.post("issue", body, suppress_errors=True)
+            if not (isinstance(result, dict) and result.get("_error")):
+                issue_type = "Task"
+            else:
+                _err(f"Jira rejected issue type {issue_type!r}; no issue was created. Verify the project's available issue types and retry.")
         else:
             _err(str(result["_error"]))
     key = result.get("key", "?")

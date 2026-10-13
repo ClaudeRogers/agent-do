@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (102 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -2386,7 +2386,7 @@ Concurrency: `mixed`
 # list Jira connection profiles
 agent-do jira connections list
 # add a Jira Cloud connection
-printf '%s\n' "$JIRA_API_TOKEN" | agent-do jira connections add work --url https://company.atlassian.net --email me@company.com --token-stdin --default
+agent-do jira connections add work --url https://company.atlassian.net --email me@company.com --token <token> --default
 # view a Jira issue
 agent-do jira issue view PROJ-123 --comments
 # list open bugs in a Jira project
@@ -2412,9 +2412,6 @@ agent-do jira sprint active 42 --json
 **Credentials**
 
 - Required: `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`
-- Optional: `JIRA_SPRINT_FIELD`
-- Note: Credentials may be saved per-profile in ~/.agent-do/jira/.creds/ (0o600) when using connection profiles; prefer --token-stdin over --token.
-- Note: JIRA_SPRINT_FIELD overrides the site-specific sprint custom field used by issue create --sprint.
 
 **Safety (from contracts)**
 
@@ -2422,8 +2419,8 @@ agent-do jira sprint active 42 --json
 - Write (connect/interact/save): `connections add`, `connections remove`, `connections set-default`, `issue assign`, `issue comment`, `issue create`, `issue delete`, `issue edit`, `issue label`, `issue link`, `issue transition`, `sprint add`
 - destructive (irreversible data loss; confirm before auto-running): `issue delete`
 - sensitive (emits or persists secret material; guard output): `connections add`
-- composite (one call performs several beats internally): `issue assign`, `issue comment`, `issue create`, `issue delete`, `issue edit`, `issue label`, `issue link`, `issue transition`, `sprint add`
 - own_state (writes only its own cache/state; parallel-safe): `connections add`, `connections remove`, `connections set-default`
+
 ### jupyter
 
 Control Jupyter notebooks
