@@ -449,7 +449,8 @@ class Adapter:
                 processed = re.search(r"(?m)^Total processed: (\d+)\s*$", raw)
                 # Native scan swallows some failures; require fresh info-level
                 # logging in addition to CLI completion and no ERR/FTL records.
-                if "Scan complete." not in raw or not processed or not re.search(r"\[INF\]", logs):
+                scan_evidence = re.search(r"\[INF\].*GetAllLibraryItems: Total count (\d+)", logs)
+                if "Scan complete." not in raw or not processed or not scan_evidence or int(scan_evidence[1]) != int(processed[1]):
                     raise Error("sync_unverifiable")
                 with tempfile.TemporaryDirectory(dir=self.area(profile)) as scratch:
                     export = Path(scratch) / "library.json"

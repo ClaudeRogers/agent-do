@@ -89,7 +89,8 @@ archives. `accounts` reports cached readiness with its last check time, never a
 claim that a live authentication request has just succeeded.
 
 `sync` is the explicit network refresh. A scan must produce CLI completion,
-fresh default-format native info logs, and no error/fatal records. This guards
+fresh default-format native library-count logs matching the processed count,
+and no error/fatal records. This guards
 against the pinned engine swallowing some account failures and returning zero.
 Custom logging that cannot provide this evidence fails as `sync_unverifiable`.
 Failed or partial scans preserve the last good cache; snapshot/reconcile report
@@ -136,7 +137,8 @@ limits. Plugin state writes are atomic. A crash after promotion but before the
 receipt can be repaired with `verify <id> --save-receipt`; files are retained.
 
 `snapshot` and `reconcile` use local cache, operation records, and file hashes;
-they never invoke native account commands or contact Audible. Reconcile reports
+they never invoke native account commands or contact Audible. Hashing a large
+library can take time. Reconcile reports
 missing, in-progress/interrupted, failed, completed-unverified, and unverifiable
 archives. Changed files invalidate prior receipts. A busy state lock returns
 `operation_in_progress` instead of starting a second native operation.
