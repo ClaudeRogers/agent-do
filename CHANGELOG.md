@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Security scans can opt in to `--scanner-diagnostics DIR` to save raw scanner stderr privately in uniquely named mode-0600 files. Default reports retain only diagnostic metadata. Remaining stderr is explicitly unclassified, rather than assumed warn-level; laptop warning classification remains under investigation pending the actual message.
+
 - Security scans use OSV-Scanner's native `--verbosity=warn` to suppress info logs before evaluating diagnostic stderr. Genuine remaining diagnostics still mark coverage incomplete, including messages without warning keywords. Added Maven `--settings` alias for `--maven-settings`; private repository authorization still uses normal Maven settings and environment.
 
 - Security report browsing now supports `report --list` and explicit `--latest-complete` selection. Default latest selection flags incomplete assessments with recovery commands rather than silently substituting older findings. Maven failure guidance points to existing `--maven-settings` support; setup and filter documentation clarify scanner installation, fix availability and unscored exit behavior.

@@ -226,18 +226,39 @@ filtering, not assessment completeness.
 The scanner's `advisory_data_freshness` field records that upstream publication
 time is unknown on every scan; that field alone does not trigger a warning.
 The scanner runs with `--verbosity=warn`, using OSV's native log-level filtering
-to suppress informational output, including info messages containing words like
-"error". Nonblank stderr remaining at that verbosity marks coverage warning/
-incomplete, even if it contains no warning keywords. Genuine diagnostics are
-not treated as a complete assessment. Warning coverage includes a reason,
-diagnostic-line count and stderr hash; raw diagnostics are not preserved.
+to suppress its informational output, including info messages containing words
+like "error". Other libraries may still write to stderr. Remaining output has
+**unclassified severity and coverage impact**; it is not automatically known to
+be warn-level or higher. It conservatively keeps coverage incomplete. Warning
+coverage includes a reason, line count and stderr hash.
 The report records `scanner.verbosity`. This behavior follows OSV-Scanner's
 [verbosity option](https://github.com/google/osv-scanner/blob/v2.7.0/docs/usage.md#set-verbosity-level)
 and [JSON-mode logging](https://github.com/google/osv-scanner/blob/v2.7.0/internal/cmdlogger/handler.go).
 
-Earlier saved reports keep their original assessment status. After updating the
-plugin, rerun the scan to generate a fresh report; an info-only run can then be
-selected by `report --latest-complete` when inventory coverage is complete.
+Earlier saved reports keep their original assessment status. If a new scan still
+exits incomplete, inspect the actual diagnostic rather than treating every
+warning as benign. Opt in to local capture:
+
+```bash
+agent-do security scan --path ~/workspace/map-managed-bff --resolve maven \
+  --include-unscored --scanner-diagnostics ~/private-security-diagnostics --json
+```
+
+Raw scanner stderr is saved only when `--scanner-diagnostics DIR` is supplied.
+Files have mode 0600, with unique names so subsequent scans cannot overwrite
+earlier logs. A newly created destination directory has mode 0700. The plain
+output prints its path; JSON records it under `scanner.diagnostics.stderr_file`
+(under each repository record for batch scans). This captures the scan invocation,
+including nonzero failures, not the version probe or Maven/Gradle build logs.
+The JSON report never embeds the raw contents. Files may contain private paths,
+URLs or credentials, so inspect locally and share only redacted relevant lines.
+Capture does not change assessment status or silently accept unknown warnings.
+
+OSV's [exit handling](https://github.com/google/osv-scanner/blob/v2.7.0/cmd/osv-scanner/internal/cmd/run.go)
+can return 1 for findings before checking its logged-error flag. A valid result
+document and exit 1 therefore do not by themselves prove all lookups succeeded.
+The remaining warning reported in laptop testing is still under investigation;
+`--latest-complete` will not select that run while its coverage remains unclassified.
 
 ## Network, cache, and data disclosure
 

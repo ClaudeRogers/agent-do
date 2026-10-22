@@ -61,6 +61,24 @@ def safe_relative(name):
     return path
 
 
+def capture_diagnostics(args, report, stderr):
+    """Raw scanner output is stored only at the caller's explicit request."""
+    if not getattr(args, 'scanner_diagnostics', None):
+        return
+    directory = Path(args.scanner_diagnostics).expanduser().resolve()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, filename = tempfile.mkstemp(prefix='osv-stderr-', suffix='.log', dir=directory)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(stderr)
+    except BaseException:
+        os.unlink(filename)
+        raise
+    report['scanner']['diagnostics'] = {'stderr_file': filename,
+        'stderr_sha256': hashlib.sha256(stderr).hexdigest(), 'bytes': len(stderr),
+        'sensitive': True}
+
+
 def acquire(args, report, stage):
     files, digest = [], hashlib.sha256()
     if args.repo:
@@ -238,6 +256,8 @@ def scan(args, report):
         # message keywords cannot reliably reconstruct the original log level.
         argv = [executable, "scan", "source", "--recursive", "--format=json", "--all-packages", "--verbosity=warn", "--config=" + str(config), str(stage)]
         result = run(argv, args, cwd=directory)
+        report['scanner']['verbosity'] = 'warn'
+        capture_diagnostics(args, report, result.stderr)
         if result.returncode not in {0, 1}:
             report["coverage"].append({"source": "OSV-Scanner", "status": "error", "exit_code": result.returncode, "reason": "Scanner failed; run doctor and inspect scanner directly"})
             return
@@ -257,13 +277,14 @@ def scan(args, report):
         report["findings"] += rows
         report["packages"] = packages
         warnings = bool(result.stderr.strip())
-        report['scanner']['verbosity'] = 'warn'
         scanner_coverage = {"source": "OSV-Scanner", "status": "warning" if warnings else "ok", "packages_examined": len(packages),
                                    "advisory_data_freshness": "online lookup; upstream database publication time unavailable",
                                    "warnings": warnings, "data_disclosure": "Package identities and versions are sent to OSV by the scanner"}
         if warnings:
-            scanner_coverage['reason'] = 'Scanner emitted diagnostics with --verbosity=warn (informational logs suppressed). Remaining diagnostics may affect coverage; raw text is omitted because it may contain private data.'
+            scanner_coverage['reason'] = 'Scanner stderr remains after requesting --verbosity=warn; its severity and coverage impact are unclassified. Use --scanner-diagnostics DIR to capture the actual message privately; review before sharing. Diagnostics do not by themselves prove a failed scan or stale data.'
             scanner_coverage['diagnostic_detection'] = 'nonempty_stderr_at_warn_verbosity'
+            scanner_coverage['diagnostic_severity'] = 'unknown'
+            scanner_coverage['coverage_impact'] = 'unclassified'
             scanner_coverage['diagnostic_lines'] = sum(bool(line.strip()) for line in result.stderr.splitlines())
             scanner_coverage['stderr_sha256'] = hashlib.sha256(result.stderr).hexdigest()
         report["coverage"].append(scanner_coverage)

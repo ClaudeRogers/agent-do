@@ -3780,6 +3780,7 @@ Concurrency: `mixed`
 - explicitly opt in to local Maven/Gradle build resolution with exact selected versions, scopes, and dependency paths
 - filter by CVSS, severity, advisory dates, package, published fixes, and CISA known exploitation
 - save unfiltered attributable reports with explicit coverage gaps and refilter them later
+- explicitly opt in to private scanner stderr capture for diagnosing unclassified coverage warnings
 - attach separately scoped Dependabot alert evidence through gh alerts when available
 
 **Commands**

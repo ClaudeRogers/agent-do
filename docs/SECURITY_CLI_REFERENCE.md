@@ -126,6 +126,7 @@ match one captured source event, rather than mixing dates from different sources
 | `--repos-file PATH` | Local UTF-8 text or JSON repository list. Scans every unique repo/requested-ref pair sequentially; failures do not stop later repos. Mutually exclusive with path/repo. | `agent-do security scan --repos-file ~/team-repos.txt --cvss-min 7 --include-unscored --json` |
 | `--ref REF` | Branch, tag or commit. Requires repo or repos-file. Default: each repo's default branch. For a list, supplies a shared default; JSON per-entry refs override it. | `agent-do security scan --repo my-team/backend --ref release/1.x --json` |
 | `--scanner EXECUTABLE` | Trusted OSV-Scanner v2 command/path. Default: `osv-scanner` on PATH. Also available on doctor. | `agent-do security scan --path . --scanner /usr/local/bin/osv-scanner --json` |
+| `--scanner-diagnostics DIR` | **Opt-in**, scan only. Save raw scanner invocation stderr in a unique mode-0600 file under DIR (new directory mode 0700). No raw diagnostics saved by default. Can contain credentials/private paths; inspect locally before sharing. Does not change coverage status or capture Maven/Gradle logs. Each batch repository gets a separate file. | `agent-do security scan --path . --resolve maven --scanner-diagnostics ~/private-security-diagnostics --json` |
 | `--scan-timeout SECONDS` | Finite positive number. Default **300** on scan; timeout per scanner, GitHub or build subprocess invocation, including probes. Not a whole-batch deadline. Also on doctor, with a different default below. | `agent-do security scan --repos-file ~/team-repos.txt --scan-timeout 600 --json` |
 | `--dependabot` | Attach separately scoped GitHub default-branch alerts. Requires repo or repos-file and the `gh alerts` provider from PR #51 or its successor. Unavailable/disabled alerts make coverage incomplete; alerts are not merged as commit-equivalent findings. | `agent-do security scan --repo my-team/backend --dependabot --json` |
 
@@ -274,10 +275,13 @@ if dependency resolution succeeded and findings were returned.
 
 The unknown upstream publication time field is informational and does not itself
 cause exit 1. The scanner runs at `--verbosity=warn`, suppressing info logs through
-OSV's native log-level filtering. Nonblank stderr remaining at that verbosity
-still makes coverage incomplete. Warning coverage records the detection reason,
-diagnostic-line count and stderr hash, not raw diagnostics. Old reports retain
-their status; rerun scans after updating to generate new complete evidence.
+OSV's native log-level filtering. Remaining stderr may come from other libraries;
+its severity and coverage impact are **unclassified**, not proven warn-level.
+It conservatively keeps coverage incomplete. Warning coverage records a reason,
+line count and hash. Use explicit `--scanner-diagnostics DIR` to capture the actual
+message locally; the report records its path/hash, not contents. Existing reports
+retain their original assessment. This does not automatically fix every
+`--latest-complete` failure: some diagnostics may indicate real coverage gaps.
 
 A zero-findings result with incomplete coverage does not establish that a repo
 is unaffected. Filtering findings does not change an incomplete status. Batch

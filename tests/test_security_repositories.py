@@ -173,6 +173,14 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual([x['status'] for x in report['repository_summaries']], ['incomplete', 'incomplete'])
 
+    def test_opt_in_diagnostics_remain_separate_for_each_repository(self):
+        directory = self.root / 'diagnostics'
+        code, report = self.cli('--scanner-diagnostics', str(directory))
+        self.assertEqual(code, 0)
+        paths = [entry['scanner']['diagnostics']['stderr_file'] for entry in report['repositories']]
+        self.assertEqual(len(set(paths)), 2)
+        self.assertTrue(all(Path(path).is_file() for path in paths))
+
     def test_kev_enrichment_runs_once_across_repos_and_failure_affects_all(self):
         client = fixtures.FakeClient([({'vulnerabilities': [{'cveID': 'CVE-2026-10001'}]}, {})])
         code, report = self.cli('--known-exploited', client=client)

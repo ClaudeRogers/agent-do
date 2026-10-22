@@ -332,6 +332,49 @@ raise SystemExit(EXIT_CODE)
         self.assertTrue(any(item['status'] == 'warning' for item in report['coverage']))
         self.assertEqual(report['summary']['total'], 1)
 
+    def test_diagnostic_capture_is_opt_in_private_and_does_not_overwrite_prior_logs(self):
+        target = self.root / 'diagnostic-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner()
+        scanner.write_text(scanner.read_text().replace('import json, sys', "import json, sys\nprint('PRIVATE_SCANNER_MESSAGE', file=sys.stderr)"))
+        directory = self.root / 'private diagnostics'
+        for index in range(2):
+            code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner),
+                '--scanner-diagnostics', str(directory), '--json')
+            self.assertEqual(code, 1)
+            metadata = report['scanner']['diagnostics']
+            captured = Path(metadata['stderr_file'])
+            self.assertEqual(captured.read_text(), 'PRIVATE_SCANNER_MESSAGE\n')
+            self.assertEqual(captured.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(metadata['sensitive'])
+            self.assertNotIn('PRIVATE_SCANNER_MESSAGE', json.dumps(report))
+            self.assertEqual(len(list(directory.glob('*.log'))), index + 1)
+            self.assertTrue(any(item.get('coverage_impact') == 'unclassified' for item in report['coverage']))
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        _, default = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+        self.assertNotIn('diagnostics', default['scanner'])
+        self.assertEqual(len(list(directory.glob('*.log'))), 2)
+
+    def test_diagnostic_capture_preserves_nonzero_scanner_error_stderr(self):
+        target = self.root / 'failed-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner(exit_code=128)
+        scanner.write_text(scanner.read_text().replace('import json, sys', "import json, sys\nprint('PRIVATE_FAILURE_DETAILS', file=sys.stderr)"))
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner),
+            '--scanner-diagnostics', str(self.root / 'diagnostics'), '--json')
+        self.assertEqual(code, 1)
+        self.assertEqual(Path(report['scanner']['diagnostics']['stderr_file']).read_text(), 'PRIVATE_FAILURE_DETAILS\n')
+        self.assertNotIn('PRIVATE_FAILURE_DETAILS', json.dumps(report))
+
+    def test_diagnostic_destination_cannot_be_an_existing_file(self):
+        destination = self.root / 'do-not-overwrite.log'
+        destination.write_text('existing')
+        code, report = self.cli('scan', '--path', '.', '--scanner-diagnostics', str(destination), '--json')
+        self.assertEqual(code, 2)
+        self.assertEqual(destination.read_text(), 'existing')
+
     def test_invalid_cli_inputs_are_json_and_make_no_reports(self):
         for argv in (("find", "--cvss-min", "nan"), ("find", "--severity", "hihg"),
                      ("find", "--published-after", "yesterday"), ("find", "--package", "litellm"),

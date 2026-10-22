@@ -99,6 +99,7 @@ def parser():
     target.add_argument('--repos-file', help='local text/JSON list of GitHub repositories; scan all sequentially in one report')
     s.add_argument("--ref", help="branch, tag, or commit; defaults to repository default branch")
     s.add_argument("--scanner", default="osv-scanner", help="trusted OSV-Scanner v2 executable")
+    s.add_argument('--scanner-diagnostics', metavar='DIR', help='opt in to saving raw scanner stderr as a private, uniquely named file in DIR; may contain credentials/private paths')
     s.add_argument("--scan-timeout", type=positive, default=300, help="timeout per scanner/GitHub subprocess, seconds")
     s.add_argument("--dependabot", action="store_true", help="attach separately scoped default-branch alerts through gh alerts (PR #51)")
     s.add_argument('--resolve', choices=['maven', 'gradle'], help='opt in to executing local build code to resolve exact JVM dependencies (requires --path)')
@@ -155,6 +156,10 @@ def validate(args):
             if value and not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
                 raise ValueError("Vendor/product must be one CPE component; use --query for free text")
     if args.command == "scan":
+        if args.scanner_diagnostics:
+            destination = Path(args.scanner_diagnostics).expanduser()
+            if destination.exists() and not destination.is_dir():
+                raise ValueError('--scanner-diagnostics must name a directory')
         if args.resolve and not args.path:
             raise ValueError('--resolve executes build code and requires a trusted local --path checkout; clone GitHub projects first')
         if not args.resolve and (args.maven or args.gradle or args.maven_profile or args.maven_settings or args.gradle_configuration or args.build_property):
@@ -240,9 +245,15 @@ def output(payload, json_mode):
         print(f"  Target: {target['target']} — {target['status']}; {target['shown']}/{target['total']} findings shown across {target['queries']} queries")
     for repository in payload.get('repository_summaries', []):
         print(f"  Repository: {repository['repository']} ({repository['requested_ref'] or 'default branch'}) — {repository['status']}; {repository['shown']}/{repository['total']} findings shown; commit {repository['commit'] or 'unavailable'}")
+    for repository in payload.get('repositories', []):
+        diagnostics = repository.get('scanner', {}).get('diagnostics')
+        if diagnostics:
+            print('  Private scanner diagnostics (' + repository['target']['repository'] + '): ' + diagnostics['stderr_file'])
     if payload.get('resolution'):
         resolution = payload['resolution']
         print(f"  Resolution: {resolution['tool']} — {resolution['status']}; {len(resolution.get('occurrences', []))} dependency occurrences")
+    if payload.get('scanner', {}).get('diagnostics'):
+        print('  Private scanner diagnostics: ' + payload['scanner']['diagnostics']['stderr_file'])
     for row in payload["findings"]:
         package = row.get("package") or {}
         label = package.get("name", "") + ("@" + package["version"] if package.get("version") else "")
