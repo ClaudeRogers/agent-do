@@ -230,6 +230,47 @@ class CollectorTests(unittest.TestCase):
         self.assertNotIn('SYFT_OUTPUT', environment)
         self.assertEqual(environment['TRIVY_PASSWORD'], 'private')
 
+    def test_private_yaml_config_exists_during_run_and_is_cleaned_on_every_exit(self):
+        for outcome in ('success', 'failure', 'timeout'):
+            observed = []
+            command = ['fixture', 'scan', 'dir:/fixture']
+            def helper(argv, args, **kwargs):
+                config = Path(argv[argv.index('--config') + 1])
+                observed.append(config)
+                self.assertEqual(config.suffix, '.yaml')
+                self.assertEqual(config.read_text(), '{}\n')
+                self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(config.parent, Path(kwargs['cwd']))
+                self.assertEqual(argv[3:], command[1:])
+                if outcome == 'timeout':
+                    raise ValueError('fixture: unavailable or timed out')
+                return subprocess.CompletedProcess([], 1 if outcome == 'failure' else 0, b'{}', b'')
+            with self.subTest(outcome=outcome), patch('security.collect.run', side_effect=helper):
+                if outcome == 'success':
+                    self.assertEqual(execute(command, self.args(), empty_config=True), ({}, False))
+                else:
+                    with self.assertRaises(ValueError):
+                        execute(command, self.args(), empty_config=True)
+            self.assertEqual(command, ['fixture', 'scan', 'dir:/fixture'])
+            self.assertEqual(len(observed), 1)
+            self.assertFalse(observed[0].exists())
+            self.assertFalse(observed[0].parent.exists())
+
+    def test_extension_sensitive_helper_runs_through_runtime_without_wrapper(self):
+        helper = self.root / 'syft-extension-check'
+        helper.write_text('#!' + sys.executable + '\n'
+                          'import json,sys\nfrom pathlib import Path\n'
+                          'config=Path(sys.argv[sys.argv.index("--config")+1])\n'
+                          'if config.suffix != ".yaml" or json.loads(config.read_text()) != {}: sys.exit(64)\n'
+                          'print(' + repr(json.dumps(sbom())) + ')\n')
+        helper.chmod(0o755)
+        with patch('security.sources.Client.get') as get:
+            code, report = self.cli('runtime', '--rootfs', str(self.root), '--syft', str(helper), '--inventory-only')
+        self.assertEqual(code, 0)
+        self.assertEqual(report['coverage'][0]['status'], 'ok')
+        self.assertEqual(report['artifact_inventory'][0]['syft_version'], 'fixture-syft')
+        get.assert_not_called()
+
     def test_invalid_runtime_inputs_fail_before_helpers(self):
         for argv in (['--image', 'https://user:password@example.com/image'], ['--kube-context', 'fixture'], ['--namespace', 'default'], ['--selector', 'app=bff'], ['--rootfs', '/does-not-exist']):
             with patch('security.collect.execute') as helper:

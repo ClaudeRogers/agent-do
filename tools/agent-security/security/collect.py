@@ -28,7 +28,7 @@ def image_ref(value, immutable=False):
     return value
 
 
-def execute(argv, args):
+def execute(argv, args, *, empty_config=False):
     # An empty working directory avoids checkout-local helper configuration and
     # ignore files. Commands are argument arrays, never shell fragments.
     # Prevent ambient scanner filters, output-file settings, remote servers and
@@ -41,6 +41,15 @@ def execute(argv, args):
     if environment.get('TRIVY_CACHE_DIR'):
         environment['TRIVY_CACHE_DIR'] = str(Path(environment['TRIVY_CACHE_DIR']).expanduser().resolve())
     with tempfile.TemporaryDirectory(prefix='agent-security-collect-') as directory:
+        if empty_config:
+            # Syft/Viper detects the format from the extension; /dev/null is
+            # not a valid config path on current Syft releases. Keep this file
+            # private and alive for the subprocess, then remove it on all exits.
+            config = Path(directory) / 'empty.yaml'
+            with config.open('x', encoding='utf-8') as stream:
+                config.chmod(0o600)
+                stream.write('{}\n')
+            argv = [argv[0], '--config', str(config), *argv[1:]]
         result = run(argv, SimpleNamespace(scan_timeout=args.collect_timeout, max_bytes=args.max_bytes), cwd=directory, environment=environment)
     if result.returncode:
         raise ValueError(Path(argv[0]).name + ' collection failed; check tool version, registry/RBAC access and credentials. Raw output is not persisted.')
@@ -122,8 +131,8 @@ def artifact(args, report, *, image=None, rootfs=None, deployment=None):
     try:
         if rootfs and not Path(label).is_dir():
             raise ValueError('Selected rootfs directory is missing or inaccessible')
-        sbom, diagnostics = execute([args.syft, 'scan', 'registry:' + image if image else 'dir:' + label, '--config', '/dev/null',
-                                     '--output', 'syft-json', '--quiet'], args)
+        sbom, diagnostics = execute([args.syft, 'scan', 'registry:' + image if image else 'dir:' + label,
+                                     '--output', 'syft-json', '--quiet'], args, empty_config=True)
         if not isinstance(sbom, dict) or not isinstance(sbom.get('artifacts'), list) or not isinstance(sbom.get('source'), dict):
             raise ValueError('Unsupported Syft JSON inventory schema')
         if image:
@@ -147,12 +156,12 @@ def artifact(args, report, *, image=None, rootfs=None, deployment=None):
         if args.inventory_only:
             report.setdefault('artifact_inventory', []).append(inventory)
             return
-        argv = [args.trivy, 'image' if image else 'rootfs', '--config', '/dev/null', '--quiet', '--scanners', 'vuln',
+        argv = [args.trivy, 'image' if image else 'rootfs', '--quiet', '--scanners', 'vuln',
                 '--format', 'json', '--list-all-pkgs', '--exit-code', '0', '--ignorefile', '/dev/null',
                 '--ignore-unfixed=false', '--severity', 'UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL']
         if image:
             argv += ['--image-src', 'remote']
-        body, warnings = execute(argv + [image or label], args)
+        body, warnings = execute(argv + [image or label], args, empty_config=True)
         if not isinstance(body, dict) or body.get('SchemaVersion') != 2 or not isinstance(body.get('Results', []), list):
             raise ValueError('Unsupported Trivy JSON report schema')
         metadata = body.get('Metadata', {})
@@ -162,7 +171,7 @@ def artifact(args, report, *, image=None, rootfs=None, deployment=None):
         inventory['os'] = {key: os[key] for key in ('Family', 'Name', 'EOSL') if key in os}
         inventory['trivy_version'] = body.get('Trivy', {}).get('Version')
         # Version JSON carries database receipt independently of finding count.
-        tool, version_warning = execute([args.trivy, 'version', '--format', 'json'], args)
+        tool, version_warning = execute([args.trivy, 'version', '--format', 'json'], args, empty_config=True)
         db = tool.get('VulnerabilityDB', {})
         inventory['vulnerability_database'] = {key: db[key] for key in ('Version', 'UpdatedAt', 'NextUpdate', 'DownloadedAt') if key in db}
         at = timestamp(db.get('UpdatedAt')) if db.get('UpdatedAt') else None

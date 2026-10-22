@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Runtime collectors now pass Syft/Trivy a private temporary YAML configuration instead of `/dev/null`, which Syft 1.55.0 cannot parse as a config filename. Config files are removed on success, failure and timeout. The v12 live Temurin download, JVM rootfs inventory and monitor lifecycle succeeded; positive Kubernetes and complete remote-image Trivy acceptance remain deferred.
+
 - Milestone 4 completion adds the official Adoptium Temurin VDR adapter, explicit Syft/Trivy image and mounted-rootfs assessment, and read-only Kubernetes pod-image collection. Collector targets join portfolios behind per-run `--allow-collectors`. Reports retain pinned image identity, vendor/backport evidence and acquisition failures without raw image configuration or pod secrets. Runtime matcher revision 3 isolates unrelated unsupported CPE predicates; four v11 Java candidates have regression fixtures. See `docs/RUNTIME_COLLECTION.md` and the expanded host acceptance checklist. Live collector acceptance remains separate from offline fixture tests.
 
 - Runtime matcher revision 2 understands pre-Java-5 `1.x.y_N` bounds, separate CPE update criteria and leading zeroes. Public CVE-2012-1723/1531 regression fixtures now exclude modern Java while preserving affected historical versions. Runtime monitor comparison baselines include the matcher revision so earlier evidence remains unverified when matching rules change; source monitor baselines are unaffected.

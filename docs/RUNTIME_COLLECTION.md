@@ -80,6 +80,10 @@ normal registry/Kubernetes credentials; the plugin does not save those credentia
 Checkout/user helper config files and ambient Syft/Trivy filter/output settings are
 suppressed so they cannot silently hide findings or redirect output. Registry auth
 variables and Trivy cache selection are retained.
+Syft and Trivy receive a private temporary `empty.yaml` containing `{}`. Its YAML
+extension supports Syft 1.55.0/Viper format detection; `/dev/null` is not used as
+a configuration file. The file is removed after success, failure or timeout. No
+wrapper script is required. Trivy's empty ignore file remains separate.
 No Docker daemon or execution of image binaries is used.
 
 ## Image and mounted filesystem assessment
