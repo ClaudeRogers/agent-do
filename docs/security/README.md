@@ -1,4 +1,4 @@
-# Vulnerability discovery and source scanning
+# Security plugin
 
 `agent-do security` finds published advisories, scans dependency inventories and
 saves attributable evidence. Use the [CLI reference](SECURITY_CLI_REFERENCE.md)
@@ -179,7 +179,7 @@ Temurin's narrowly scoped public asset download is described in the collector gu
 
 ## Validation
 
-Use the [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md) for focused host checks:
+Run these checks from the repository root:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_security*.py'

@@ -4,7 +4,7 @@
 **new**, **ongoing**, **resolved**, and **unverified** issues. It exports recurring
 jobs but installs no scheduler. Notifications are opt-in. See the
 [CLI reference](SECURITY_CLI_REFERENCE.md#monitor-portfolio-configuration-runs-and-digests)
-for parameters and the [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md) for tests.
+for parameters and examples.
 
 ## Start with your repository list
 
@@ -32,7 +32,7 @@ Configured resolution requires `--allow-builds` on each run and schedule export.
 Without it, no build runs, that target is incomplete and earlier issues remain
 unverified; other targets continue. Trusted wrappers/extensions can execute code,
 contact repositories and write caches/files. GitHub targets use file snapshots,
-not remote Maven/Gradle execution. See [setup](SECURITY_SCANNING.md) and
+not remote Maven/Gradle execution. See [setup](README.md) and
 [JVM resolution](JVM_DEPENDENCY_RESOLUTION.md) for prerequisites.
 
 ## Create a mixed portfolio from the CLI
@@ -190,6 +190,6 @@ an incomplete assessment, not a resolved issue. See [collector setup and limits]
 
 ## Validation and remaining scope
 
-The [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md#accepted-scope-and-deferred-validation)
-records tested and deferred paths. Monitoring never automatically updates or deploys
+See [runtime validation status](RUNTIME_COLLECTION.md#validation-status) for tested
+and deferred collector paths. Monitoring never automatically updates or deploys
 repositories. Remediation is [planned separately](PLANNED_UPGRADES.md).

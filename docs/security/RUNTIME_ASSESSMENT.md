@@ -4,7 +4,7 @@
 scans. A POM's `java.version=17` is a declaration, not proof of production's JDK
 patch. Nothing updates or deploys your project. See [collector setup](RUNTIME_COLLECTION.md),
 [all parameters](SECURITY_CLI_REFERENCE.md#runtime-explicit-evidence-and-applicability)
-and [accepted/deferred scope](SECURITY_MILESTONE_3_4_TESTING.md#accepted-scope-and-deferred-validation).
+and [accepted/deferred scope](RUNTIME_COLLECTION.md#validation-status).
 
 ## Test a local Java project
 
@@ -182,5 +182,6 @@ for scheduling, execution guards and notifications.
 
 ## Validation
 
-Use `python3 tests/test_security_runtime.py` for offline matcher/evidence regressions
-and the [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md) for focused live checks.
+Run `python3 tests/test_security_runtime.py` from the repository root for offline
+matcher/evidence regressions. See [collector validation status](RUNTIME_COLLECTION.md#validation-status)
+for live integration limits.

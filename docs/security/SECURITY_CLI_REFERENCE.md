@@ -1,7 +1,7 @@
 # Security command and parameter reference
 
 This reference covers every option currently accepted by `agent-do security`.
-Use the [scanning guide](SECURITY_SCANNING.md) for installation and how to read
+Use the [scanning guide](README.md) for installation and how to read
 coverage. Commands below assume agent-do is installed; run `./agent-do` instead
 from its checkout if needed. Replace example repository names and `/path/to/...`
 paths with your own. Example version overrides illustrate syntax, not a

@@ -196,3 +196,12 @@ Use `--allow-collectors` on monitor run/schedule rather than repeating selection
 | `--allow-collectors` | Monitor run/schedule execution opt-in | `monitor run --config ~/image-security.json --allow-collectors --json` |
 
 Prefix examples in this table with `agent-do security`.
+
+## Validation status
+
+Live checks verified authenticated Temurin VDR downloads and digest verification,
+rootfs JVM identity with Syft 1.55.0, registry image digest collection, and monitor
+new/ongoing/unverified retention. Positive live Kubernetes collection and a complete
+remote Trivy image assessment remain **deferred** because the test cluster and
+registry transport were unavailable. Offline fixtures cover these paths; they do
+not establish live integration success.
