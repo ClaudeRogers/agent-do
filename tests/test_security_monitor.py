@@ -24,7 +24,7 @@ from security.sources import SourceError
 class MonitorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.env = patch.dict(os.environ, {'AGENT_DO_HOME': str(self.root / 'state')})
         self.env.start()
         self.config = self.root / 'portfolio.json'
@@ -342,6 +342,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(result['shown_counts']['ongoing'], 0)
         code, _ = self.cli('report', '--known-exploited')
         self.assertEqual(code, 2)
+
+    def test_symlinked_local_target_uses_the_same_canonical_scope(self):
+        alias = self.root / 'root-alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        value = json.loads(self.config.read_text())
+        value['targets'] = [{'path': str(alias)}]
+        self.config.write_text(json.dumps(value))
+        self.rows[str(self.root)] = [advisory()]
+        code, first = self.cli()
+        self.assertEqual(code, 0)
+        self.assertEqual(first['counts']['new'], 1)
+        value['targets'] = [{'path': str(self.root)}]
+        self.config.write_text(json.dumps(value))
+        code, second = self.cli()
+        self.assertEqual(code, 0)
+        self.assertEqual(second['counts']['ongoing'], 1)
+        self.assertEqual(second['counts']['unverified'], 0)
 
     def test_changed_settings_content_is_not_a_compatible_baseline(self):
         settings = self.root / 'settings.xml'; settings.write_text('<settings>FIRST_PRIVATE_VALUE</settings>')

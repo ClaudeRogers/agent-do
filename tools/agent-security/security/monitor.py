@@ -42,7 +42,7 @@ def load_config(filename, max_bytes):
     if not isinstance(value, dict) or set(value) - {'schema_version', 'monitor_id', 'interval_hours', 'targets'}:
         raise ValueError('Invalid monitor configuration fields')
     if value.get('schema_version') != 1 or not re.fullmatch(r'[a-f0-9]{32}', str(value.get('monitor_id', ''))):
-        raise ValueError('Unsupported monitor configuration; create it with monitor init')
+        raise ValueError('Unsupported monitor configuration: schema_version must be 1 and monitor_id must be 32 lowercase hexadecimal characters. Create with monitor init, then preserve those fields when editing targets; mixed source/runtime targets are supported.')
     interval = value.get('interval_hours')
     if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
         raise ValueError('interval_hours must be a positive whole number of hours')
@@ -110,16 +110,19 @@ def initialize(args):
         raise ValueError('--interval-hours must be at least 1')
     if args.resolve and not args.path:
         raise ValueError('Monitor build resolution requires local --path')
-    if getattr(args, 'runtime_inventory', None):
-        load_inventory(args.runtime_inventory, args.max_bytes)
-        targets = [{'runtime_inventory': str(Path(args.runtime_inventory).expanduser().resolve())}]
-    elif args.repos_file:
+    targets = []
+    if args.repos_file:
         entries = load_repositories(args.repos_file, args.max_bytes)['repositories']
-        targets = [{'repo': entry['repository'], 'ref': entry['requested_ref']} for entry in entries]
-    else:
-        targets = [{'path': str(Path(args.path).expanduser().resolve())}]
+        targets.extend({'repo': entry['repository'], 'ref': entry['requested_ref']} for entry in entries)
+    elif args.path:
+        targets.append({'path': str(Path(args.path).expanduser().resolve())})
         if args.resolve:
             targets[0]['resolve'] = args.resolve
+    if getattr(args, 'runtime_inventory', None):
+        load_inventory(args.runtime_inventory, args.max_bytes)
+        targets.append({'runtime_inventory': str(Path(args.runtime_inventory).expanduser().resolve())})
+    if not targets:
+        raise ValueError('Monitor initialization requires a source target or runtime inventory')
     value = {'schema_version': 1, 'monitor_id': uuid.uuid4().hex, 'interval_hours': args.interval_hours, 'targets': targets}
     path = Path(args.config).expanduser().resolve()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -389,4 +392,5 @@ def schedule(args, root):
     return {'schema_version': 1, 'command': 'monitor schedule', 'status': 'ok', 'cron': cron,
             'interval_hours': config['interval_hours'], 'installed': False,
             'notes': ['Review and install this line with crontab -e on the scan host. Hourly checks run only when due.',
-                      'Uses existing host gh/build credentials. No scheduler or notification is installed automatically.']}
+                      'Uses existing host gh/build credentials. No scheduler or notification is installed automatically.',
+                      'PATH, Python and checkout paths are specific to this host/session. Regenerate on the scheduling host/account; do not copy a laptop PATH unchanged into CI.']}

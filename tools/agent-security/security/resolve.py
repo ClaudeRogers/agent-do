@@ -160,6 +160,7 @@ def maven_trees(trees, inventory, stage, resolution):
 
 
 def gradle_graphs(body, root, resolution):
+    root = Path(root).resolve()
     if body.get('schema_version') != 1 or not isinstance(body.get('projects'), list):
         raise ValueError('Unsupported Gradle resolution output schema')
     occurrences, covered = [], set()

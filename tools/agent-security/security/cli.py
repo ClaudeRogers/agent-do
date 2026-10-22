@@ -140,10 +140,10 @@ def parser():
     actions = m.add_subparsers(dest='monitor_command', required=True)
     init = actions.add_parser('init', help='create a new local portfolio configuration without overwriting a file')
     init.add_argument('--config', required=True)
-    inputs = init.add_mutually_exclusive_group(required=True)
+    inputs = init.add_mutually_exclusive_group()
     inputs.add_argument('--repos-file')
     inputs.add_argument('--path')
-    inputs.add_argument('--runtime-inventory', help='monitor an explicit runtime/deployment inventory JSON file')
+    init.add_argument('--runtime-inventory', help='monitor runtime/deployment inventory, optionally alongside --path or --repos-file')
     init.add_argument('--resolve', choices=['maven', 'gradle'])
     init.add_argument('--interval-hours', type=int, default=24)
     init.add_argument('--max-bytes', type=int, default=16_777_216)
@@ -176,6 +176,8 @@ def parser():
 
 
 def validate(args):
+    if args.command == 'monitor' and args.monitor_command == 'init' and not (args.path or args.repos_file or args.runtime_inventory):
+        raise ValueError('monitor init requires --path, --repos-file, or --runtime-inventory; runtime inventory may accompany either source input')
     if args.command == 'monitor' and args.monitor_command in {'run', 'schedule'} and args.notify_via and not args.notify_recipient:
         raise ValueError('--notify-via requires --notify-recipient')
     if args.command == 'report' and args.list:

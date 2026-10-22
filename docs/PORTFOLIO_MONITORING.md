@@ -45,6 +45,28 @@ The existing [setup guide](SECURITY_SCANNING.md) covers OSV-Scanner v2, `gh` acc
 optional CVSS scoring and read-only file scans. GitHub monitoring uses isolated
 file snapshots; it does not remotely execute Maven/Gradle.
 
+## Create a mixed portfolio from the CLI
+
+`--runtime-inventory` can accompany either one local `--path` or a GitHub
+`--repos-file`. Path and repos-file remain mutually exclusive; at least one
+source/inventory input is required. For example:
+
+```bash
+agent-do security monitor init --config ~/mixed-security.json \
+  --path ~/workspace/map-managed-bff --resolve maven \
+  --runtime-inventory ~/runtime-inventory.json --json
+agent-do security monitor run --config ~/mixed-security.json --allow-builds --json
+agent-do security monitor init --config ~/team-and-runtimes.json \
+  --repos-file ~/team-repos.txt --runtime-inventory ~/runtime-inventory.json --json
+```
+
+A single init call accepts one local path; additional heterogeneous targets can
+be added to the generated configuration's `targets` array. Preserve its
+`schema_version: 1` and generated 32-character hexadecimal `monitor_id`. A
+handwritten file missing those fields is invalid regardless of whether its
+targets are mixed; the data model accepts mixed targets. Do not change the ID
+when editing an existing monitor if you want to preserve its history.
+
 ## Configuration and scope
 
 Keep the generated `schema_version: 1` and `monitor_id` (a unique 32-character

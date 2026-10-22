@@ -37,13 +37,16 @@ agent-do security runtime --path ~/workspace/map-managed-bff \
   --local-java --cvss-min 7 --include-unscored --json
 ```
 
-Oracle Corporation HotSpot/OpenJDK observations have explicit `oracle:java_se` /
-`oracle:openjdk` identity mappings. Other vendors remain **unmapped**, with
+Oracle Corporation HotSpot observations on Java 11+ map to `oracle:jdk`.
+Older Oracle releases require an explicit JDK/JRE identity because the VM name
+alone does not distinguish those installed artifacts. OpenJDK builds
+and other distributions require a verified explicit identity; the VM name alone
+does not establish that artifact mapping. Other vendors remain **unmapped**, with
 incomplete coverage, unless you supply a distribution identity you have verified:
 
 ```bash
 agent-do security runtime --local-java --java /path/to/oracle-jdk/bin/java \
-  --java-cpe 'cpe:2.3:a:oracle:java_se:*:*:*:*:*:*:*:*' --json
+  --java-cpe 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*' --json
 ```
 
 That example is an **Oracle Java identity**, not a generic identity for Temurin,
@@ -61,6 +64,23 @@ numeric range comparison accounts for the update number. Historical Java CPE
 versions such as `7u321` and `8u311` normalize to the equivalent update form; they
 do not become uncertain candidates for a modern Java 21 runtime. Early-access and
 vendor-specific ordering are not guessed.
+
+## Oracle identities and negative results
+
+Modern Oracle JDK advisories use `oracle:jdk` (and Oracle JRE uses `oracle:jre`).
+The earlier `oracle:java_se` example was too narrow for modern JDK assessment.
+Legacy java_se queries now explicitly have limited/incomplete coverage rather
+than allowing a zero-result report to imply complete JDK coverage. Existing saved
+reports are not rewritten; verify your artifact and rerun with the correct CPE.
+Identity changes create a separate monitor comparison scope.
+
+The public NVD mirror fixture for CVE-2024-21235 explicitly lists Oracle JDK
+17.0.12. It provides a positive matching regression alongside the historical
+XStream exclusion. A query returning six records for legacy java_se is not proof
+that this JDK version is unaffected. There is **no default severity threshold**:
+unscored findings are retained unless a supplied filter excludes them. Zero shown
+findings means no matches in the assessed identity/source window and filters;
+it is never a general claim that a version is secure.
 
 ## Project declarations
 
@@ -98,7 +118,7 @@ shows the schema, not a recommended JDK version or a claim that it is secure:
   "components": [
     {
       "id": "bff-prod-jdk",
-      "cpe": "cpe:2.3:a:oracle:java_se:17.0.12:*:*:*:*:*:*:*",
+      "cpe": "cpe:2.3:a:oracle:jdk:17.0.12:*:*:*:*:*:*:*",
       "evidence": {
         "kind": "deployment_inventory",
         "source": "Observed java.version and vendor in the selected deployment",
@@ -118,7 +138,7 @@ shows the schema, not a recommended JDK version or a claim that it is secure:
 ```bash
 agent-do security runtime --inventory ~/runtime-inventory.json --json
 agent-do security runtime --inventory ~/runtime-inventory.json \
-  --package oracle:java_se --cvss-min 7 --include-unscored --json
+  --package oracle:jdk --cvss-min 7 --include-unscored --json
 agent-do security runtime --inventory ~/runtime-inventory.json \
   --cve CVE-2021-44228 --json
 ```
@@ -190,6 +210,15 @@ agent-do security monitor init --config ~/runtime-monitor.json \
 agent-do security monitor run --config ~/runtime-monitor.json --runtime-limit 2000 --json
 agent-do security monitor report --config ~/runtime-monitor.json --json
 agent-do security monitor schedule --config ~/runtime-monitor.json --runtime-limit 2000 --json
+```
+
+Create a mixed local Maven/runtime portfolio directly:
+
+```bash
+agent-do security monitor init --config ~/mixed-security.json \
+  --path ~/workspace/map-managed-bff --resolve maven \
+  --runtime-inventory ~/runtime-inventory.json
+agent-do security monitor run --config ~/mixed-security.json --allow-builds --json
 ```
 
 Or add `{"runtime_inventory": "/path/to/runtime-inventory.json"}` to an existing

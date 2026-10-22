@@ -39,7 +39,7 @@ def cpe_parts(value):
     return parts
 
 
-JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:java_se:*:*:*:*:*:*:*:*'
+JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
 
 
 def java_identity(value):
@@ -61,6 +61,9 @@ def canonical_java_cpe(parts):
         old = re.fullmatch(r'(?:1\.)?([5-8])\.0[._](\d+)', parts[5])
     if old:
         parts[5], parts[6] = '1.' + old[1] + '.0', 'update_' + old[2]
+    update = re.fullmatch(r'update_?(\d+)', parts[6])
+    if update:
+        parts[6] = 'update_' + update[1]
     return parts
 
 
@@ -309,9 +312,11 @@ def probe_java(args):
     # A caller-selected identity is explicit attribution, not vendor inference.
     identity = args.java_cpe
     identity_source = 'caller_selected' if identity else 'unmapped_vendor'
-    if not identity and properties.get('java.vendor') == 'Oracle Corporation' and any(name in properties.get('java.vm.name', '') for name in ('OpenJDK', 'HotSpot')) and 'Graal' not in properties.get('java.vm.name', ''):
-        product = 'openjdk' if 'OpenJDK' in properties.get('java.vm.name', '') else 'java_se'
-        identity = 'cpe:2.3:a:oracle:' + product + ':*:*:*:*:*:*:*:*'
+    parsed_version = numeric_version(version, java=True)
+    # Older Oracle releases had separate JDK/JRE artifacts; VM vendor/name
+    # alone cannot select which product was installed.
+    if not identity and parsed_version and parsed_version[0] >= 11 and properties.get('java.vendor') == 'Oracle Corporation' and 'HotSpot' in properties.get('java.vm.name', '') and 'Graal' not in properties.get('java.vm.name', ''):
+        identity = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
         identity_source = 'oracle_vendor_mapping'
     component = {'id': 'local-java', 'properties': properties,
                  'evidence': {'kind': 'local_java_probe', 'source': str(Path(executable).resolve()), 'observed_at': now(), 'verification': 'observed_local_process'},
@@ -412,6 +417,10 @@ def assess_runtime(args, client, report):
         if not component.get('cpe'):
             report['coverage'].append({'source': 'runtime:' + component['id'], 'status': 'missing', 'reason': 'Vendor-specific CPE identity is not mapped. Rerun with an explicitly verified --java-cpe identity; no cross-vendor JDK inference was made.'})
         else:
+            identity = cpe_parts(component['cpe'])
+            if [part.lower() for part in identity[3:5]] == ['oracle', 'java_se']:
+                report['coverage'].append({'source': 'runtime identity:' + component['id'], 'status': 'limited',
+                    'reason': 'Legacy oracle:java_se identity does not cover modern oracle:jdk/jre advisories. Verify the actual artifact identity; use oracle:jdk for a verified Oracle JDK. Zero results here do not establish full JDK coverage.'})
             # Environment prerequisites may be satisfied only by explicitly
             # co-located evidence. Portfolio-wide components are not one host.
             deployment = component.get('deployment', {})

@@ -54,7 +54,7 @@ def graph(root):
 class ResolutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.project = self.root / 'project'
         self.project.mkdir()
         self.env = patch.dict(os.environ, {'AGENT_DO_HOME': str(self.root / 'state')})
@@ -158,6 +158,15 @@ raise SystemExit(1)
         self.assertEqual(covered, set())
         self.assertTrue(occurrences)
         self.assertTrue(resolution['gaps'])
+
+    def test_gradle_symlinked_root_matches_canonical_manifest(self):
+        alias = self.root / 'project-alias'
+        alias.symlink_to(self.project, target_is_directory=True)
+        resolution = {'modules': [], 'gaps': []}
+        occurrences, covered = gradle_graphs(graph(self.project), alias, resolution)
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(covered, {'build.gradle.kts'})
+        self.assertFalse(resolution['gaps'])
 
     def test_gradle_selected_versions_cycles_and_project_components(self):
         resolution = {'modules': [], 'gaps': []}

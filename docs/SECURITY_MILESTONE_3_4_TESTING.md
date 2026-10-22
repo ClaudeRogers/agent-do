@@ -114,7 +114,7 @@ On an actual Oracle JDK, the identity syntax is:
 
 ```bash
 ./agent-do security runtime --local-java --java /path/to/oracle-jdk/bin/java \
-  --java-cpe 'cpe:2.3:a:oracle:java_se:*:*:*:*:*:*:*:*' \
+  --java-cpe 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*' \
   --include-unscored --json
 ```
 
@@ -137,12 +137,42 @@ with your verified identities and observation times:
 
 Expected: imported evidence remains labeled user-supplied, with original age and
 deployment labels; first/repeat findings are new/ongoing; report reads the digest.
-Add a `runtime_inventory` target to a source portfolio to exercise both scopes in
-one real host run. A complete supported version change can resolve a runtime issue;
+Create a mixed source/runtime portfolio directly:
+
+```bash
+./agent-do security monitor init --config ~/mixed-m3-m4-test.json \
+  --path ~/workspace/map-managed-bff --resolve maven \
+  --runtime-inventory ~/runtime-inventory.json --json
+./agent-do security monitor run --config ~/mixed-m3-m4-test.json --allow-builds --json
+```
+
+This runs both scopes without hand-writing a config or monitor ID. To edit a
+config instead, preserve the generated schema_version and monitor_id; missing
+metadata causes rejection, not the presence of mixed targets. A complete supported version change can resolve a runtime issue;
 a removed component, changed deployment, missing file or uncertain match cannot
 silently resolve earlier evidence. Automated fixtures exercise these transitions
 without changing your real deployments. Reusing old inventory is not proof that
 a deployment was patched or freshly observed.
+
+For a positive runtime applicability check with a verified Oracle JDK inventory
+whose version is 17.0.12, use its `oracle:jdk` CPE and this published advisory:
+
+```bash
+./agent-do security runtime --inventory ~/runtime-inventory.json \
+  --cve CVE-2024-21235 --json
+```
+
+The offline public NVD mirror fixture confirms this version is listed. This host
+command still requires NVD access/current data. Legacy `oracle:java_se` inventory
+now produces an explicit limited-coverage status; replace that example only after
+verifying the actual Oracle JDK identity. There is no default severity threshold
+that would explain away zero findings. Do not classify a zero-result identity
+query as proof that Java 17.0.12 is secure.
+
+The automated suite also covers canonical paths and can be run with a symlinked
+temporary directory to reproduce macOS-style temp path aliases. Fixtures use
+canonical paths for lookup/argument assertions; Gradle containment canonicalizes
+both root and manifest, while retaining outside-root rejection.
 
 ## Record the result accurately
 
