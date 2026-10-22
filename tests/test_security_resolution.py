@@ -100,6 +100,7 @@ from pathlib import Path
 if '--version' in sys.argv:
     print('osv-scanner version: 2.7.0'); raise SystemExit(0)
 stage=Path(sys.argv[-1])
+assert '--verbosity=warn' in sys.argv
 assert not list(stage.rglob('pom.xml')), 'Resolved POM must not be statically rescanned'
 document=json.loads((stage/'agent-do-resolved.cdx.json').read_text())
 packages=[]
@@ -334,13 +335,31 @@ Path(destination).write_text(json.dumps(BODY))
         self.assertEqual(report['summary']['total'], 0)
         self.assertEqual(report['resolution']['occurrences'], [])
 
+    def test_settings_alias_reaches_maven_and_preserves_authentication_environment(self):
+        self.pom()
+        settings = self.root / 'private settings.xml'
+        settings.write_text('<settings>PRIVATE_SETTINGS_CONTENT</settings>')
+        executable = Path(self.maven())
+        executable.write_text(executable.read_text().replace('import sys',
+            "import os, sys\nif '--version' not in sys.argv:\n"
+            "    assert sys.argv[sys.argv.index('--settings')+1] == " + repr(str(settings)) + "\n"
+            "    assert os.environ['ARTIFACTORY_PASSWORD'] == 'PRIVATE_AUTH_VALUE'\n"))
+        with patch.dict(os.environ, {'ARTIFACTORY_PASSWORD': 'PRIVATE_AUTH_VALUE'}):
+            code, report = self.cli('scan', '--path', str(self.project), '--resolve', 'maven',
+                '--settings', str(settings), '--maven', str(executable), '--scanner', self.scanner())
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report['resolution']['settings'], str(settings))
+        self.assertNotIn('PRIVATE_AUTH_VALUE', json.dumps(report))
+        self.assertNotIn('PRIVATE_SETTINGS_CONTENT', json.dumps(report))
+
     def test_build_execution_timeout_and_output_bound(self):
         sleeper = self.binary('sleep-build', 'import time\ntime.sleep(5)\n')
         args = self.args('scan','--path',str(self.project),'--resolve','maven','--scan-timeout','0.1')
         with self.assertRaisesRegex(ValueError, 'timed out'):
             execute([sleeper],args,self.project)
         noisy = self.binary('noisy-build', 'print("x"*1024)\n')
-        args.max_bytes=32
+        # Test the output bound independently of the deliberately tiny timeout.
+        args = self.args('scan','--path',str(self.project),'--resolve','maven','--max-bytes','32')
         with self.assertRaisesRegex(ValueError, 'max-bytes'):
             execute([noisy],args,self.project)
 

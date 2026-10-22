@@ -277,7 +277,7 @@ def resolve(args, report, stage, inventory):
         resolution['output_sha256'] = hashlib.sha256(result.stdout).hexdigest()
         resolution['exit_code'] = result.returncode
         if result.returncode:
-            guidance = (' Maven uses its normal ~/.m2/settings.xml; select another file with --maven-settings PATH and ensure its server IDs match the repository/mirror IDs.' if args.resolve == 'maven' else '')
+            guidance = (' Maven uses its normal ~/.m2/settings.xml; select another file with --maven-settings PATH (alias --settings) and ensure its server IDs match the repository/mirror IDs.' if args.resolve == 'maven' else '')
             raise ValueError('Build dependency resolution failed; check the selected profiles/configurations and repository access.' + guidance + ' Build logs are not persisted because they may contain credentials.')
         if args.resolve == 'maven':
             trees = read_json_trees(result.stdout)

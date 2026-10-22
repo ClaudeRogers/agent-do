@@ -105,7 +105,7 @@ def parser():
     s.add_argument('--maven', help='trusted Maven executable; defaults to executable ./mvnw, then installed mvn')
     s.add_argument('--gradle', help='trusted Gradle executable; defaults to executable ./gradlew, then installed gradle')
     s.add_argument('--maven-profile', action='append', default=[], help='activate a Maven profile; repeat for multiple profiles')
-    s.add_argument('--maven-settings', help='Maven settings.xml for repository/auth/profile configuration')
+    s.add_argument('--maven-settings', '--settings', help='Maven settings.xml for repository/auth/profile configuration (requires --resolve maven)')
     s.add_argument('--gradle-configuration', action='append', default=[], help='Gradle configuration to resolve in each project; repeat (default runtimeClasspath)')
     s.add_argument('--build-property', action='append', default=[], help='NAME=VALUE; Maven -D or Gradle -P project property (repeat; avoid credentials)')
     r = sub.add_parser("report", help="read a saved unfiltered report and apply presentation filters")

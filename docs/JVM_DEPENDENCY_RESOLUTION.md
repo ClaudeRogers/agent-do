@@ -89,8 +89,15 @@ agent-do security scan --path ~/workspace/offer-service --resolve maven \
   --maven-settings ~/.m2/settings.xml --severity critical --include-unscored --json
 ```
 
-`--maven-settings PATH` is forwarded as Maven's `--settings PATH`. The plugin's
-flag is not named `--settings`. Ensure the settings `<server><id>` matches the
+`--maven-settings PATH` (alias `--settings PATH`) is forwarded as Maven's
+`--settings PATH`. For example, the shorter form is:
+
+```bash
+agent-do security scan --path ~/workspace/offer-service --resolve maven \
+  --settings ~/.m2/settings.xml --severity critical --json
+```
+
+Ensure the settings `<server><id>` matches the
 repository or mirror ID used by the project, the necessary profiles are active,
 and any credential environment variables referenced by settings are available
 to the process. Keep credentials in your existing settings/credential mechanism,
@@ -102,6 +109,10 @@ with the project's normal Maven command in your terminal using the same settings
 and profiles; build logs are deliberately not persisted in security reports.
 The scanner can assess private Maven projects when their normal dependency
 resolution succeeds; it does not supply missing repository authorization.
+
+If you still see a build failure without any settings guidance after updating,
+check which checkout your installed `agent-do` points to. From the updated
+checkout, invoke `./agent-do security ...` directly to avoid an older installation.
 
 ### Resolved inventory
 

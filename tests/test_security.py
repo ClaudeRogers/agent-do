@@ -233,6 +233,7 @@ if '--version' in sys.argv:
     raise SystemExit(0)
 stage = Path(sys.argv[-1])
 assert '--all-packages' in sys.argv
+assert '--verbosity=warn' in sys.argv
 assert not list(stage.rglob('osv-scanner.toml'))
 results=[]
 for filename, name, eco in [('package-lock.json','example-npm','npm'),('composer.lock','example/php','Packagist'),('requirements.txt','example-python','PyPI'),('gradle.lockfile','org.example:java','Maven')]:
@@ -298,10 +299,38 @@ raise SystemExit(EXIT_CODE)
         self.assertEqual(code, 1)
         coverage = next(item for item in report['coverage'] if item['source'] == 'OSV-Scanner')
         self.assertEqual(coverage['status'], 'warning')
-        self.assertEqual(coverage['diagnostic_keywords'], ['warning'])
-        self.assertIn('heuristic', coverage['reason'])
+        self.assertEqual(coverage['diagnostic_detection'], 'nonempty_stderr_at_warn_verbosity')
+        self.assertIn('--verbosity=warn', coverage['reason'])
+        self.assertEqual(coverage['diagnostic_lines'], 1)
         self.assertEqual(len(coverage['stderr_sha256']), 64)
         self.assertNotIn('SECRET', json.dumps(report))
+
+    def test_info_logs_containing_warning_words_are_suppressed_by_scanner_verbosity(self):
+        target = self.root / 'info-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner()
+        # Emulate OSV's native level filtering: INFO has no prefix in JSON mode.
+        scanner.write_text(scanner.read_text().replace('import json, sys', "import json, sys\nif '--verbosity=warn' not in sys.argv:\n    print('INFO: 0 error records; failed lookups: 0; warning summary', file=sys.stderr)"))
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+        self.assertEqual(code, 0)
+        self.assertEqual(report['scanner']['verbosity'], 'warn')
+        self.assertEqual(report['coverage'][-1]['status'], 'ok')
+        # The same scan can now be selected as complete.
+        code, selected = self.cli('report', '--latest-complete', '--json')
+        self.assertEqual(code, 0)
+        self.assertEqual(selected['report_id'], report['report_id'])
+
+    def test_diagnostic_without_warning_keywords_still_marks_coverage_incomplete(self):
+        target = self.root / 'skipped-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner()
+        scanner.write_text(scanner.read_text().replace('import json, sys', "import json, sys\nprint('Skipping some package lookups', file=sys.stderr)"))
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+        self.assertEqual(code, 1)
+        self.assertTrue(any(item['status'] == 'warning' for item in report['coverage']))
+        self.assertEqual(report['summary']['total'], 1)
 
     def test_invalid_cli_inputs_are_json_and_make_no_reports(self):
         for argv in (("find", "--cvss-min", "nan"), ("find", "--severity", "hihg"),

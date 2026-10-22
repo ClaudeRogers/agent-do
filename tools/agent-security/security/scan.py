@@ -233,7 +233,10 @@ def scan(args, report):
         # Run from its empty parent so no checkout or user config can suppress findings.
         config = Path(directory) / "empty.toml"
         config.write_text("")
-        argv = [executable, "scan", "source", "--recursive", "--format=json", "--all-packages", "--config=" + str(config), str(stage)]
+        # JSON mode routes INFO logs to stderr without level labels. Ask the
+        # scanner to suppress INFO before assessing remaining diagnostics;
+        # message keywords cannot reliably reconstruct the original log level.
+        argv = [executable, "scan", "source", "--recursive", "--format=json", "--all-packages", "--verbosity=warn", "--config=" + str(config), str(stage)]
         result = run(argv, args, cwd=directory)
         if result.returncode not in {0, 1}:
             report["coverage"].append({"source": "OSV-Scanner", "status": "error", "exit_code": result.returncode, "reason": "Scanner failed; run doctor and inspect scanner directly"})
@@ -253,13 +256,15 @@ def scan(args, report):
         report["scanner"]["raw_output"] = scanner_body
         report["findings"] += rows
         report["packages"] = packages
-        warnings = bool(re.search(r"\b(warn(?:ing)?|error|failed)\b", result.stderr.decode(errors="replace"), re.I))
+        warnings = bool(result.stderr.strip())
+        report['scanner']['verbosity'] = 'warn'
         scanner_coverage = {"source": "OSV-Scanner", "status": "warning" if warnings else "ok", "packages_examined": len(packages),
                                    "advisory_data_freshness": "online lookup; upstream database publication time unavailable",
                                    "warnings": warnings, "data_disclosure": "Package identities and versions are sent to OSV by the scanner"}
         if warnings:
-            scanner_coverage['reason'] = 'Scanner stderr matched warning/error/failure keywords. This is a diagnostic-text heuristic, not a database freshness determination. Raw diagnostics are omitted because they may contain private data.'
-            scanner_coverage['diagnostic_keywords'] = sorted(set(match.lower() for match in re.findall(r'\b(warn(?:ing)?|error|failed)\b', result.stderr.decode(errors='replace'), re.I)))
+            scanner_coverage['reason'] = 'Scanner emitted diagnostics with --verbosity=warn (informational logs suppressed). Remaining diagnostics may affect coverage; raw text is omitted because it may contain private data.'
+            scanner_coverage['diagnostic_detection'] = 'nonempty_stderr_at_warn_verbosity'
+            scanner_coverage['diagnostic_lines'] = sum(bool(line.strip()) for line in result.stderr.splitlines())
             scanner_coverage['stderr_sha256'] = hashlib.sha256(result.stderr).hexdigest()
         report["coverage"].append(scanner_coverage)
         for entry in candidates:

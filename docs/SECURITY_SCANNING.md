@@ -225,11 +225,19 @@ filtering, not assessment completeness.
 
 The scanner's `advisory_data_freshness` field records that upstream publication
 time is unknown on every scan; that field alone does not trigger a warning.
-The current diagnostic check is conservative: scanner stderr containing whole-word
-`warn`, `warning`, `error` or `failed` marks coverage warning/incomplete. This
-text heuristic can match benign messages; it does not prove missing inventory
-or stale data. Warning coverage includes a reason, matched keywords and a stderr
-hash, without preserving potentially private raw diagnostics.
+The scanner runs with `--verbosity=warn`, using OSV's native log-level filtering
+to suppress informational output, including info messages containing words like
+"error". Nonblank stderr remaining at that verbosity marks coverage warning/
+incomplete, even if it contains no warning keywords. Genuine diagnostics are
+not treated as a complete assessment. Warning coverage includes a reason,
+diagnostic-line count and stderr hash; raw diagnostics are not preserved.
+The report records `scanner.verbosity`. This behavior follows OSV-Scanner's
+[verbosity option](https://github.com/google/osv-scanner/blob/v2.7.0/docs/usage.md#set-verbosity-level)
+and [JSON-mode logging](https://github.com/google/osv-scanner/blob/v2.7.0/internal/cmdlogger/handler.go).
+
+Earlier saved reports keep their original assessment status. After updating the
+plugin, rerun the scan to generate a fresh report; an info-only run can then be
+selected by `report --latest-complete` when inventory coverage is complete.
 
 ## Network, cache, and data disclosure
 

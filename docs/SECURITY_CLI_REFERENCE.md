@@ -172,7 +172,7 @@ implicitly. Run in the environment/settings whose selected dependencies matter.
 | `--maven EXECUTABLE` | Requires resolve maven. Default: executable project `./mvnw`, then installed `mvn`. Overrides the selected executable. | `agent-do security scan --path . --resolve maven --maven /opt/maven/bin/mvn --json` |
 | `--gradle EXECUTABLE` | Requires resolve gradle. Default: executable project `./gradlew`, then installed `gradle`. | `agent-do security scan --path . --resolve gradle --gradle /opt/gradle/bin/gradle --json` |
 | `--maven-profile NAME` | **Repeatable**, resolve maven only. Explicitly activate each named profile. Default: no additional requested profiles; normal Maven implicit activation still applies. | `agent-do security scan --path . --resolve maven --maven-profile prod --maven-profile cloud --json` |
-| `--maven-settings PATH` | Existing Maven settings.xml; resolve maven only. Forwarded as Maven `--settings`. Default: normal Maven settings, including `~/.m2/settings.xml`. Use for private Artifactory/Nexus repositories; server IDs must match repository/mirror IDs. No generic plugin `--settings` alias. | `agent-do security scan --path . --resolve maven --maven-settings /path/to/settings.xml --json` |
+| `--maven-settings PATH`, `--settings PATH` | Aliases for an existing Maven settings.xml; resolve maven only. Forwarded as Maven `--settings`. Default: normal Maven settings, including `~/.m2/settings.xml`. Use for private Artifactory/Nexus repositories; server IDs must match repository/mirror IDs. | `agent-do security scan --path . --resolve maven --settings ~/.m2/settings.xml --json` |
 | `--gradle-configuration NAME` | **Repeatable**, resolve gradle only. Default: `runtimeClasspath`. Supplying any replaces that default, so repeat runtimeClasspath explicitly if you also want it. Missing/unresolvable requested configurations are coverage gaps. | `agent-do security scan --path . --resolve gradle --gradle-configuration runtimeClasspath --gradle-configuration testRuntimeClasspath --json` |
 | `--build-property NAME=VALUE` | **Repeatable**; requires resolve. Maven `-D` or Gradle `-P` property. Default: no overrides. Names are letters/digits/underscore/dot/hyphen. Quote the whole assignment if its value contains spaces. Values are not saved as property metadata; keep credentials out of command lines. | `agent-do security scan --path . --resolve maven --build-property spring-framework.version=6.1.14 --build-property skipTests=true --json` |
 
@@ -273,9 +273,11 @@ whose status is not `ok` (such as scanner warnings or missing inventory), even
 if dependency resolution succeeded and findings were returned.
 
 The unknown upstream publication time field is informational and does not itself
-cause exit 1. OSV warning detection currently uses whole-word warning/error/failure
-keywords in stderr; it is conservative and can match benign diagnostic messages.
-Warning coverage includes the detection reason, keyword list and stderr hash.
+cause exit 1. The scanner runs at `--verbosity=warn`, suppressing info logs through
+OSV's native log-level filtering. Nonblank stderr remaining at that verbosity
+still makes coverage incomplete. Warning coverage records the detection reason,
+diagnostic-line count and stderr hash, not raw diagnostics. Old reports retain
+their status; rerun scans after updating to generate new complete evidence.
 
 A zero-findings result with incomplete coverage does not establish that a repo
 is unaffected. Filtering findings does not change an incomplete status. Batch
