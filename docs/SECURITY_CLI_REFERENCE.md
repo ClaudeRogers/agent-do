@@ -275,13 +275,14 @@ if dependency resolution succeeded and findings were returned.
 
 The unknown upstream publication time field is informational and does not itself
 cause exit 1. The scanner runs at `--verbosity=warn`, suppressing info logs through
-OSV's native log-level filtering. Remaining stderr may come from other libraries;
-its severity and coverage impact are **unclassified**, not proven warn-level.
-It conservatively keeps coverage incomplete. Warning coverage records a reason,
-line count and hash. Use explicit `--scanner-diagnostics DIR` to capture the actual
-message locally; the report records its path/hash, not contents. Existing reports
-retain their original assessment. This does not automatically fix every
-`--latest-complete` failure: some diagnostics may indicate real coverage gaps.
+OSV's native log-level filtering. The exact, verified `source` subcommand/file-name
+collision notice is recorded as non-blocking; the internal staging directory was
+also renamed to prevent it. Other stderr remains unclassified and keeps coverage
+incomplete, including when mixed with the known notice. Warning coverage records
+a reason, line count and hash. Use explicit `--scanner-diagnostics DIR` to capture
+messages locally; reports record paths/hashes, not raw contents. Existing reports
+retain their original assessments; rerun after updating so `--latest-complete`
+can select new assessments whose inventory and source coverage completed.
 
 A zero-findings result with incomplete coverage does not establish that a repo
 is unaffected. Filtering findings does not change an incomplete status. Batch

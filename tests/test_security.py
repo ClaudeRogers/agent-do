@@ -23,6 +23,14 @@ from security.scan import acquire, assess_inventory, dependabot, osv_rows, repo_
 from security.sources import Client, SourceError, discover, enrich_kev, ghsa_row, nvd_row
 from security.store import finish, latest_report, new_report, read_report
 
+# Exact OSV 2.7.0 diagnostic captured during laptop testing (not a synthetic
+# approximation containing just the words "source" and "warning").
+OSV_SOURCE_NOTICE = (
+    'Warning: `source` exists as both a subcommand of OSV-Scanner and as a file on the filesystem. '
+    '`source` is assumed to be a subcommand here. If you intended for `source` to be an argument '
+    'to `source`, you must specify `source source` in your command line.'
+)
+
 
 def advisory(identifier="CVE-2026-10001", score=7.0, version="1.0"):
     return finding([identifier], "A fixture vulnerability", "fixture", "https://example.invalid/advisory",
@@ -232,6 +240,8 @@ if '--version' in sys.argv:
     print('osv-scanner version: 2.7.0')
     raise SystemExit(0)
 stage = Path(sys.argv[-1])
+assert stage.name != 'source'
+assert not (Path.cwd() / 'source').exists(), 'staging must not collide with OSV subcommands'
 assert '--all-packages' in sys.argv
 assert '--verbosity=warn' in sys.argv
 assert not list(stage.rglob('osv-scanner.toml'))
@@ -299,7 +309,7 @@ raise SystemExit(EXIT_CODE)
         self.assertEqual(code, 1)
         coverage = next(item for item in report['coverage'] if item['source'] == 'OSV-Scanner')
         self.assertEqual(coverage['status'], 'warning')
-        self.assertEqual(coverage['diagnostic_detection'], 'nonempty_stderr_at_warn_verbosity')
+        self.assertEqual(coverage['diagnostic_detection'], 'unclassified_stderr_after_known_notices')
         self.assertIn('--verbosity=warn', coverage['reason'])
         self.assertEqual(coverage['diagnostic_lines'], 1)
         self.assertEqual(len(coverage['stderr_sha256']), 64)
@@ -374,6 +384,54 @@ raise SystemExit(EXIT_CODE)
         code, report = self.cli('scan', '--path', '.', '--scanner-diagnostics', str(destination), '--json')
         self.assertEqual(code, 2)
         self.assertEqual(destination.read_text(), 'existing')
+
+    def test_verified_source_notice_is_non_blocking_and_latest_complete_selects_scan(self):
+        target = self.root / 'source-notice-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        for notice in [OSV_SOURCE_NOTICE, OSV_SOURCE_NOTICE.replace('on the filesystem.', 'on\n  the filesystem.')]:
+            with self.subTest(notice=notice):
+                scanner = self.scanner()
+                scanner.write_text(scanner.read_text().replace('import json, sys', 'import json, sys\nprint(' + repr(notice) + ', file=sys.stderr)'))
+                code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner),
+                    '--scanner-diagnostics', str(self.root / 'diagnostics'), '--json')
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['summary']['total'], 1)
+                coverage = next(item for item in report['coverage'] if item['source'] == 'OSV-Scanner')
+                self.assertEqual(coverage['status'], 'ok')
+                self.assertFalse(coverage['warnings'])
+                self.assertEqual(coverage['non_blocking_diagnostics'][0]['code'], 'osv_source_subcommand_name_collision')
+                self.assertEqual(coverage['coverage_impact'], 'none')
+                self.assertEqual(Path(report['scanner']['diagnostics']['stderr_file']).read_text(), notice + '\n')
+                code, selected = self.cli('report', '--latest-complete', '--json')
+                self.assertEqual(code, 0)
+                self.assertEqual(selected['report_id'], report['report_id'])
+
+    def test_known_notice_does_not_hide_mixed_or_modified_diagnostics(self):
+        target = self.root / 'mixed-notice-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        for diagnostic in [OSV_SOURCE_NOTICE + '\nQuery failed: PRIVATE_LOOKUP',
+                           'Query failed: PRIVATE_LOOKUP\n' + OSV_SOURCE_NOTICE,
+                           OSV_SOURCE_NOTICE + ' Additional unclassified detail.',
+                           OSV_SOURCE_NOTICE.replace('`source`', '`scan`')]:
+            with self.subTest(diagnostic=diagnostic):
+                scanner = self.scanner()
+                scanner.write_text(scanner.read_text().replace('import json, sys', 'import json, sys\nprint(' + repr(diagnostic) + ', file=sys.stderr)'))
+                code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+                self.assertEqual(code, 1)
+                self.assertTrue(any(item['status'] == 'warning' for item in report['coverage']))
+                self.assertNotIn('PRIVATE_LOOKUP', json.dumps(report))
+
+    def test_recognized_notice_does_not_override_scanner_failure(self):
+        target = self.root / 'failed-source-notice-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner(exit_code=128)
+        scanner.write_text(scanner.read_text().replace('import json, sys', 'import json, sys\nprint(' + repr(OSV_SOURCE_NOTICE) + ', file=sys.stderr)'))
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+        self.assertEqual(code, 1)
+        self.assertTrue(any(item['status'] == 'error' for item in report['coverage']))
 
     def test_invalid_cli_inputs_are_json_and_make_no_reports(self):
         for argv in (("find", "--cvss-min", "nan"), ("find", "--severity", "hihg"),

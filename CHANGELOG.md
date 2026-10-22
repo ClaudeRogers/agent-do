@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Security scans can opt in to `--scanner-diagnostics DIR` to save raw scanner stderr privately in uniquely named mode-0600 files. Default reports retain only diagnostic metadata. Remaining stderr is explicitly unclassified, rather than assumed warn-level; laptop warning classification remains under investigation pending the actual message.
+- Security scans rename the internal staging directory from `source` to `dependency-snapshot`, preventing OSV's subcommand/file-name collision warning. The full verified `source` notice is also classified as non-blocking if emitted; unknown/mixed diagnostics, missing inventory and scanner failures still make coverage incomplete. Rerun scans to create fresh complete reports; historical assessments are not rewritten.
+
+- Security scans can opt in to `--scanner-diagnostics DIR` to save raw scanner stderr privately in uniquely named mode-0600 files. Default reports retain only diagnostic metadata. Unrecognized stderr remains unclassified rather than assumed warn-level.
 
 - Security scans use OSV-Scanner's native `--verbosity=warn` to suppress info logs before evaluating diagnostic stderr. Genuine remaining diagnostics still mark coverage incomplete, including messages without warning keywords. Added Maven `--settings` alias for `--maven-settings`; private repository authorization still uses normal Maven settings and environment.
 

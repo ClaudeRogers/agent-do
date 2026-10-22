@@ -26,6 +26,23 @@ MANIFESTS = {"package.json", "composer.json", "pyproject.toml", "Pipfile", "buil
              "build.gradle.kts", "Cargo.toml", "Gemfile", "setup.py", "setup.cfg"}
 SKIP = {".git", ".gradle", "node_modules", ".venv", "venv", "vendor", "target", "dist", "build", "__pycache__", ".agent-do"}
 
+# OSV 2.7.0 cmd/helpers.go emits this directly to stderr before scanning,
+# outside its level-filtered logger. It explicitly confirms subcommand choice.
+SOURCE_COLLISION_NOTICE = (
+    'Warning: `source` exists as both a subcommand of OSV-Scanner and as a file on the filesystem. '
+    '`source` is assumed to be a subcommand here. If you intended for `source` to be an argument '
+    'to `source`, you must specify `source source` in your command line.'
+)
+SOURCE_COLLISION_PATTERN = re.compile(
+    r'(?m)^[ \t]*' + r'\s+'.join(re.escape(word) for word in SOURCE_COLLISION_NOTICE.split()) + r'[ \t]*(?=\r?$)'
+)
+
+
+def classify_diagnostics(stderr):
+    """Recognize only the complete, verified source-name notice; retain the rest."""
+    remaining, count = SOURCE_COLLISION_PATTERN.subn('', stderr.decode(errors='replace'))
+    return remaining, count
+
 
 def run(argv, args, *, cwd=None):
     env = {**os.environ, "GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
@@ -224,7 +241,9 @@ def osv_rows(body, stage):
 
 def scan(args, report):
     with tempfile.TemporaryDirectory(prefix="agent-security-") as directory:
-        stage = Path(directory) / "source"
+        # OSV checks subcommand names against cwd before parsing. A sibling
+        # named "source" triggers its name-collision notice on every scan.
+        stage = Path(directory) / "dependency-snapshot"
         stage.mkdir()
         inventory = acquire(args, report, stage)
         if args.resolve:
@@ -276,16 +295,25 @@ def scan(args, report):
         report["scanner"]["raw_output"] = scanner_body
         report["findings"] += rows
         report["packages"] = packages
-        warnings = bool(result.stderr.strip())
+        remaining_diagnostics, collision_notices = classify_diagnostics(result.stderr)
+        warnings = bool(remaining_diagnostics.strip())
         scanner_coverage = {"source": "OSV-Scanner", "status": "warning" if warnings else "ok", "packages_examined": len(packages),
                                    "advisory_data_freshness": "online lookup; upstream database publication time unavailable",
                                    "warnings": warnings, "data_disclosure": "Package identities and versions are sent to OSV by the scanner"}
+        if collision_notices:
+            scanner_coverage['non_blocking_diagnostics'] = [{'code': 'osv_source_subcommand_name_collision',
+                'count': collision_notices, 'coverage_impact': 'none'}]
+            if not warnings:
+                scanner_coverage['reason'] = 'Recognized OSV source subcommand name-collision notice; target selection was unambiguous and this notice does not affect coverage.'
+                scanner_coverage['diagnostic_severity'] = 'notice'
+                scanner_coverage['coverage_impact'] = 'none'
+                scanner_coverage['stderr_sha256'] = hashlib.sha256(result.stderr).hexdigest()
         if warnings:
             scanner_coverage['reason'] = 'Scanner stderr remains after requesting --verbosity=warn; its severity and coverage impact are unclassified. Use --scanner-diagnostics DIR to capture the actual message privately; review before sharing. Diagnostics do not by themselves prove a failed scan or stale data.'
-            scanner_coverage['diagnostic_detection'] = 'nonempty_stderr_at_warn_verbosity'
+            scanner_coverage['diagnostic_detection'] = 'unclassified_stderr_after_known_notices'
             scanner_coverage['diagnostic_severity'] = 'unknown'
             scanner_coverage['coverage_impact'] = 'unclassified'
-            scanner_coverage['diagnostic_lines'] = sum(bool(line.strip()) for line in result.stderr.splitlines())
+            scanner_coverage['diagnostic_lines'] = sum(bool(line.strip()) for line in remaining_diagnostics.splitlines())
             scanner_coverage['stderr_sha256'] = hashlib.sha256(result.stderr).hexdigest()
         report["coverage"].append(scanner_coverage)
         for entry in candidates:

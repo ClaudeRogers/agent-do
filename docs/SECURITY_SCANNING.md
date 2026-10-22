@@ -227,13 +227,23 @@ The scanner's `advisory_data_freshness` field records that upstream publication
 time is unknown on every scan; that field alone does not trigger a warning.
 The scanner runs with `--verbosity=warn`, using OSV's native log-level filtering
 to suppress its informational output, including info messages containing words
-like "error". Other libraries may still write to stderr. Remaining output has
-**unclassified severity and coverage impact**; it is not automatically known to
-be warn-level or higher. It conservatively keeps coverage incomplete. Warning
-coverage includes a reason, line count and stderr hash.
+like "error". OSV can also write directly to stderr outside its logger. We
+recognize only the full, verified `source` subcommand/file-name collision notice
+as informational: OSV explicitly confirms it selected the intended subcommand.
+It is recorded under `non_blocking_diagnostics` with coverage impact `none`, and
+does not by itself make a scan incomplete. If any other text remains, severity
+and coverage impact stay unclassified and the scan remains incomplete. Modified
+messages, other command-name notices, mixed unknown diagnostics and scanner
+failures are not silently accepted. Coverage records a reason and diagnostic
+metadata without raw text.
 The report records `scanner.verbosity`. This behavior follows OSV-Scanner's
 [verbosity option](https://github.com/google/osv-scanner/blob/v2.7.0/docs/usage.md#set-verbosity-level)
 and [JSON-mode logging](https://github.com/google/osv-scanner/blob/v2.7.0/internal/cmdlogger/handler.go).
+The [command parser](https://github.com/google/osv-scanner/blob/v2.7.0/cmd/osv-scanner/internal/cmd/helpers.go)
+explains the known notice: it checks command names against files in the working
+directory before scanning. Our original staging directory was named `source`,
+which caused the warning. It is now named `dependency-snapshot` to remove that
+collision; files in your project are not renamed.
 
 Earlier saved reports keep their original assessment status. If a new scan still
 exits incomplete, inspect the actual diagnostic rather than treating every
@@ -257,8 +267,10 @@ Capture does not change assessment status or silently accept unknown warnings.
 OSV's [exit handling](https://github.com/google/osv-scanner/blob/v2.7.0/cmd/osv-scanner/internal/cmd/run.go)
 can return 1 for findings before checking its logged-error flag. A valid result
 document and exit 1 therefore do not by themselves prove all lookups succeeded.
-The remaining warning reported in laptop testing is still under investigation;
-`--latest-complete` will not select that run while its coverage remains unclassified.
+The laptop warning has been identified as the known command-name collision above.
+Rerun the scan after updating: if no other coverage gaps remain, it can exit 0
+and be selected by `report --latest-complete`, even when vulnerabilities exist.
+Historical reports keep their original incomplete status; they are not rewritten.
 
 ## Network, cache, and data disclosure
 

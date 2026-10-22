@@ -20,6 +20,7 @@ from security.cli import main, parser, validate
 from security.resolve import (SBOM_NAME, attach_evidence, coordinate, execute,
                               gradle_graphs, launcher, maven_trees, read_json_trees, sbom)
 from security.store import new_report
+from test_security import OSV_SOURCE_NOTICE
 
 
 def node(artifact='app', version='1.0', children=None, scope='', group='org.example'):
@@ -275,10 +276,13 @@ Path(destination).write_text(json.dumps(BODY))
 
     def test_scanner_must_account_for_every_resolved_component(self):
         self.pom()
-        code, report = self.cli('scan', '--path', str(self.project), '--resolve', 'maven', '--maven', self.maven(), '--scanner', self.scanner(omit=True))
+        scanner = Path(self.scanner(omit=True))
+        scanner.write_text(scanner.read_text().replace('import json, sys', 'import json, sys\nprint(' + repr(OSV_SOURCE_NOTICE) + ', file=sys.stderr)'))
+        code, report = self.cli('scan', '--path', str(self.project), '--resolve', 'maven', '--maven', self.maven(), '--scanner', str(scanner))
         self.assertEqual(code, 1)
         self.assertEqual(report['summary']['total'], 1)
         self.assertTrue(any(x['source']=='resolved SBOM' for x in report['coverage']))
+        self.assertTrue(any(x.get('non_blocking_diagnostics') for x in report['coverage']))
 
     def test_failed_build_cannot_report_clean_or_leak_logs(self):
         self.pom()
