@@ -172,6 +172,7 @@ check_cmd "security multi-target tests" python3 "$SCRIPT_DIR/tests/test_security
 check_cmd "security repository-list tests" python3 "$SCRIPT_DIR/tests/test_security_repositories.py"
 check_cmd "security saved-report tests" python3 "$SCRIPT_DIR/tests/test_security_reports.py"
 check_cmd "security runtime assessment tests" python3 "$SCRIPT_DIR/tests/test_security_runtime.py"
+check_cmd "security runtime collector and Temurin tests" python3 "$SCRIPT_DIR/tests/test_security_collectors.py"
 check_cmd "security portfolio monitoring tests" python3 "$SCRIPT_DIR/tests/test_security_monitor.py"
 check_cmd "ci triage tests" python3 "$SCRIPT_DIR/tests/test_ci_triage.py"
 check_cmd "git guardrail tests" python3 "$SCRIPT_DIR/tests/test_git_guardrails.py"

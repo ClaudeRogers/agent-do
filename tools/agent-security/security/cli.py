@@ -79,6 +79,19 @@ def network(parser):
     parser.add_argument("--kev", action="store_true", help="enrich all results using CISA's exploitation catalog")
 
 
+def collectors(parser):
+    parser.add_argument('--image', action='append', default=[], help='explicit registry image to inspect without starting it; repeat for several images')
+    parser.add_argument('--rootfs', help='explicit unpacked image or mounted host filesystem directory; never inferred from the current machine')
+    parser.add_argument('--kube-context', help='explicit kubectl context for read-only pod image discovery; requires --namespace')
+    parser.add_argument('--namespace', help='one explicit Kubernetes namespace (no implicit current context/namespace)')
+    parser.add_argument('--selector', help='optional Kubernetes pod label selector; requires --kube-context')
+    parser.add_argument('--syft', default='syft', help='trusted installed Syft executable for artifact/JVM release-file inventory')
+    parser.add_argument('--trivy', default='trivy', help='trusted installed Trivy executable for vendor/OS/library vulnerability assessment')
+    parser.add_argument('--kubectl', default='kubectl', help='trusted installed kubectl executable; pod metadata reads only')
+    parser.add_argument('--collect-timeout', type=positive, default=300, help='timeout per collector subprocess, seconds')
+    parser.add_argument('--database-max-age', type=positive, default=86400, help='maximum accepted Trivy vulnerability DB age in seconds')
+
+
 def parser():
     p = ArgumentParser(prog="agent-do security", description="Find advisories, scan dependencies, assess explicit runtimes and monitor portfolios. File scans are read-only; --resolve explicitly executes trusted local Maven/Gradle project code and permits build writes.")
     sub = p.add_subparsers(dest="command", required=True)
@@ -116,11 +129,13 @@ def parser():
     network(runtime)
     runtime.add_argument('--path', help='read static root POM/Gradle/toolchain/Dockerfile declarations without executing project code')
     runtime.add_argument('--inventory', help='versioned JSON runtime/deployment inventory with exact CPE identities and evidence')
+    runtime.add_argument('--temurin-vdr', help='local Adoptium CycloneDX VDR JSON; defaults to digest-verified latest official release')
+    collectors(runtime)
     runtime.add_argument('--local-java', action='store_true', help='explicitly execute the selected local Java binary to observe vendor and version')
     runtime.add_argument('--java', help='trusted Java executable, used only with --local-java (default installed java)')
     runtime.add_argument('--java-cpe', help='verified distribution CPE identity with wildcard version/update; used only with --local-java')
     runtime.add_argument('--probe-timeout', type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help='local Java probe timeout in seconds')
-    runtime.add_argument('--inventory-only', action='store_true', help='collect evidence without network requests or CVE assessment')
+    runtime.add_argument('--inventory-only', action='store_true', help='collect without advisory requests/CVE assessment; explicit image/cluster collectors may contact registries/APIs')
     runtime.add_argument('--limit', type=int, default=1000, help='maximum NVD records examined per runtime component before presentation filters; truncation is explicit')
     r = sub.add_parser("report", help="read a saved unfiltered report and apply presentation filters")
     common(r)
@@ -148,12 +163,14 @@ def parser():
     init.add_argument('--interval-hours', type=int, default=24)
     init.add_argument('--max-bytes', type=int, default=16_777_216)
     init.add_argument('--json', action='store_true')
+    collectors(init)
     monitor_run = actions.add_parser('run', help='scan configured targets and save an unfiltered change digest')
     common(monitor_run)
     network(monitor_run)
     monitor_run.add_argument('--config', required=True)
     monitor_run.add_argument('--due', action='store_true', help='skip if the configured interval has not elapsed since the last attempt')
     monitor_run.add_argument('--allow-builds', action='store_true', help='explicitly authorize trusted configured local Maven/Gradle build execution')
+    monitor_run.add_argument('--allow-collectors', action='store_true', help='authorize configured Syft/Trivy/kubectl execution for this run')
     monitor_run.add_argument('--runtime-limit', type=int, default=1000, help='maximum NVD records examined per imported runtime component; source dependency scans are unaffected')
     monitor_run.add_argument('--scanner', default='osv-scanner')
     monitor_run.add_argument('--scan-timeout', type=positive, default=300)
@@ -167,6 +184,7 @@ def parser():
     scheduled = actions.add_parser('schedule', help='print a reviewable hourly cron entry; never install it automatically')
     scheduled.add_argument('--config', required=True)
     scheduled.add_argument('--allow-builds', action='store_true')
+    scheduled.add_argument('--allow-collectors', action='store_true')
     scheduled.add_argument('--runtime-limit', type=int, default=1000, help='per-component NVD record bound exported into the scheduled runtime assessments')
     scheduled.add_argument('--notify-recipient', help='explicit recipient included in the exported job; nothing is sent during export')
     scheduled.add_argument('--notify-via', help='provider order for the exported job; requires --notify-recipient')
@@ -176,7 +194,20 @@ def parser():
 
 
 def validate(args):
-    if args.command == 'monitor' and args.monitor_command == 'init' and not (args.path or args.repos_file or args.runtime_inventory):
+    if hasattr(args, 'image'):
+        from .collect import image_ref
+        for image in args.image:
+            image_ref(image)
+        if bool(args.kube_context) != bool(args.namespace):
+            raise ValueError('--kube-context and --namespace must be supplied together')
+        if args.selector and not args.kube_context:
+            raise ValueError('--selector requires --kube-context and --namespace')
+        for value in (args.kube_context, args.namespace, args.selector):
+            if value and (value.startswith('-') or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+                raise ValueError('Invalid Kubernetes context/namespace/selector')
+        if args.rootfs and not getattr(args, '_monitor_planned', False) and not Path(args.rootfs).expanduser().is_dir():
+            raise ValueError('--rootfs requires an existing explicitly selected directory')
+    if args.command == 'monitor' and args.monitor_command == 'init' and not (args.path or args.repos_file or args.runtime_inventory or args.image or args.rootfs or args.kube_context):
         raise ValueError('monitor init requires --path, --repos-file, or --runtime-inventory; runtime inventory may accompany either source input')
     if args.command == 'monitor' and args.monitor_command in {'run', 'schedule'} and args.notify_via and not args.notify_recipient:
         raise ValueError('--notify-via requires --notify-recipient')
@@ -197,7 +228,7 @@ def validate(args):
     if getattr(args, "published_after", None) and args.published_before and timestamp(args.published_after) >= timestamp(args.published_before):
         raise ValueError("--published-after must precede --published-before")
     if args.command == 'runtime':
-        if not (args.path or args.inventory or args.local_java):
+        if not (args.path or args.inventory or args.local_java or args.image or args.rootfs or args.kube_context):
             raise ValueError('runtime requires --path, --inventory, or --local-java (may be combined)')
         if (args.java or args.java_cpe) and not args.local_java:
             raise ValueError('--java and --java-cpe require explicit --local-java')
@@ -261,7 +292,10 @@ def doctor(args):
     return {"schema_version": 1, "command": "doctor", "status": "ok" if scanner["v2"] else "incomplete",
             "scanner": scanner, "features": {"advisory_discovery": "available; network not probed",
             "local_scan": "available" if scanner["v2"] else "requires OSV-Scanner v2",
-            "runtime_inventory": "available; explicit CPE inventory and NVD applicability, no automatic deployment collection",
+            "runtime_inventory": "available; explicit CPE/Temurin evidence and vendor advisory assessment",
+            "temurin_assessment": "available; official Adoptium VDR, network not probed",
+            "artifact_collection": "available" if shutil.which('syft') and shutil.which('trivy') else "requires separately installed syft and trivy",
+            "kubernetes_collection": "available" if all(shutil.which(tool) for tool in ('syft', 'trivy', 'kubectl')) else "requires syft, trivy and kubectl; explicit context/namespace and registry/RBAC access",
             "local_java_probe": "java found; executed only with runtime --local-java" if shutil.which("java") else "requires a trusted Java executable selected with runtime --local-java --java PATH",
             "github_acquisition": "gh found; authentication not probed" if shutil.which("gh") else "requires gh",
             "maven_resolution": "installed mvn found" if shutil.which('mvn') else 'requires executable project mvnw or installed Maven; never probed without opt-in',
@@ -374,7 +408,7 @@ def output(payload, json_mode):
     for hint in payload.get('declared_settings', []):
         print('  Declaration only: ' + hint['file'] + ' ' + hint['setting'] + '=' + hint['value'])
     for component in payload.get('runtime_components', []):
-        print('  Runtime: ' + component['id'] + ' — ' + component.get('cpe', 'unmapped CPE identity'))
+        print('  Runtime: ' + component['id'] + ' — ' + component.get('cpe', ':'.join(component.get('java', {}).get(key, '?') for key in ('vendor', 'product', 'version')) if component.get('java') else 'unmapped vendor identity'))
         evidence = component['evidence']
         print('    Evidence: ' + evidence['kind'] + '; observed ' + evidence['observed_at'] + '; ' + evidence['verification'])
         if component.get('properties'):

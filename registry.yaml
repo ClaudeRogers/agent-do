@@ -18,13 +18,13 @@ tools:
     commands:
       find: 'Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]'
       scan: 'Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes'
-      runtime: 'Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--inventory-only] [--json]; local probing explicitly executes a trusted Java executable'
+      runtime: 'Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--image REF] [--rootfs DIR] [--kube-context CTX --namespace NS] [--inventory-only] [--json]; explicit local probing and collectors execute trusted installed helpers'
       report: 'List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]'
       doctor: 'Check scanner and local feature prerequisites without network requests: doctor [--json]'
-      monitor init: 'Create a portfolio without overwriting config: monitor init --config PATH [(--repos-file PATH | --path DIR)] [--runtime-inventory PATH] [--resolve maven|gradle] [--interval-hours N] [--json]; at least one source/inventory input is required'
-      monitor run: 'Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]'
+      monitor init: 'Create a portfolio without overwriting config: monitor init --config PATH [(--repos-file PATH | --path DIR)] [--runtime-inventory PATH] [--image REF] [--rootfs DIR] [--kube-context CTX --namespace NS] [--resolve maven|gradle] [--interval-hours N] [--json]; at least one source/inventory input is required'
+      monitor run: 'Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--allow-collectors] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]'
       monitor report: 'Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]'
-      monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--json]'
+      monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--allow-collectors] [--runtime-limit N] [--notify-recipient ALIAS] [--json]'
     examples:
     - intent: find Oracle Java advisories above CVSS 7
       command: agent-security find --vendor oracle --product jdk --cvss-gt 7 --json
@@ -67,7 +67,7 @@ tools:
         why: >-
           Caller-controlled --limit (100 source records), --max-bytes (16777216 per stream/file),
           --scan-timeout (300 seconds), --cache-ttl (3600 seconds), and --retries (2) are operator
-          defaults, not published ceilings. Truncation and incomplete coverage are explicit.
+          defaults, not published ceilings. Runtime collectors use caller-controlled --collect-timeout (300 seconds) and --database-max-age (86400 seconds). Truncation and incomplete coverage are explicit.
           HTTP timeout defaults to lib/quantities.READ_PROBE_TIMEOUT_SECONDS. Upstream pagination
           uses GitHub's documented maximum 100 records/page and NVD's 2000 records/page;
           NVD date windows are limited to its documented 120-day API window.

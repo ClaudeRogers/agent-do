@@ -7,12 +7,12 @@ running a particular patched JDK. The new command keeps those facts separate.
 Use the [combined milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md)
 to test monitoring and runtime assessment together.
 
-This is the first implementation of milestone 4: static project hints, an explicit
-local Java probe, imported runtime/image/deployment inventory, conservative NVD
-matching, and portfolio monitoring of that inventory. Automatic container image
-inspection, live Kubernetes/AKS/host collection, distribution advisory/backport
-handling and additional runtime probes remain follow-up work within milestone 4.
-Milestone 5 is still remediation/update PRs. Nothing updates your project.
+Milestone 4 includes static hints, explicit local Java probing, imported evidence,
+NVD matching, Adoptium Temurin VDR assessment, explicit Syft/Trivy image/rootfs
+collection and read-only Kubernetes pod image discovery. See
+[collection setup and examples](RUNTIME_COLLECTION.md) and the
+[completion scope](SECURITY_MILESTONE_4_COMPLETION.md). Milestone 5 remains
+remediation/update PRs. Nothing updates your project.
 
 ## Test a local Java project
 
@@ -40,8 +40,9 @@ agent-do security runtime --path ~/workspace/map-managed-bff \
 Oracle Corporation HotSpot observations on Java 11+ map to `oracle:jdk`.
 Older Oracle releases require an explicit JDK/JRE identity because the VM name
 alone does not distinguish those installed artifacts. OpenJDK builds
-and other distributions require a verified explicit identity; the VM name alone
-does not establish that artifact mapping. Other vendors remain **unmapped**, with
+require a verified explicit identity; the VM name alone does not establish that
+artifact mapping. Eclipse Adoptium maps separately to Temurin and its official VDR.
+Other vendors remain **unmapped**, with
 incomplete coverage, unless you supply a distribution identity you have verified:
 
 ```bash

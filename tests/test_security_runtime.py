@@ -583,7 +583,34 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(current['counts']['resolved'], 0)
         self.assertNotEqual(first['targets'][0]['scope'], current['targets'][0]['scope'])
         self.assertEqual(first['targets'][0]['runtime_matcher_schema'], 1)
-        self.assertEqual(current['targets'][0]['runtime_matcher_schema'], 2)
+        self.assertEqual(current['targets'][0]['runtime_matcher_schema'], 3)
+
+    def test_unrelated_complex_cpe_does_not_poison_target_branch(self):
+        target = component()
+        unrelated = match('cpe:2.3:a:webkitgtk:webkitgtk\\+:*:*:*:*:*:*:*:*')
+        old_java = match(versionEndIncluding='1.8.0_452')
+        cve = advisory({'operator': 'OR', 'cpeMatch': [unrelated, old_java]})
+        self.assertIs(applicability(cve, [target], target), False)
+        cve = advisory({'operator': 'OR', 'cpeMatch': [unrelated, match()]})
+        self.assertIs(applicability(cve, [target], target), True)
+
+    def test_related_unsupported_and_missing_and_environment_stay_unknown(self):
+        target = component()
+        unsupported = match(PATTERN.replace('jdk', 'j?k'))
+        self.assertIsNone(applicability(advisory({'cpeMatch': [unsupported]}), [target], target))
+        prerequisite = {'vulnerable': False, 'criteria': 'cpe:2.3:o:fixture:escaped\\+os:*:*:*:*:*:*:*:*'}
+        cve = advisory({'operator': 'AND', 'cpeMatch': [match(), prerequisite]})
+        self.assertIsNone(applicability(cve, [target], target))
+
+    def test_four_v11_candidates_are_excluded_for_java17_without_hiding_positive_branch(self):
+        target = component()
+        for identifier in ('CVE-2023-41993', 'CVE-2022-21449', 'CVE-2022-21426', 'CVE-2022-21434'):
+            with self.subTest(identifier=identifier):
+                cve = self.historical_fixture(identifier)
+                self.assertIs(applicability(cve, [target], target), False)
+                positive = copy.deepcopy(cve)
+                positive['configurations'].append({'cpeMatch': [match(JAVA)]})
+                self.assertIs(applicability(positive, [target], target), True)
 
     def test_stale_receipts_never_appear_complete(self):
         client = Client(page())

@@ -13,7 +13,7 @@ recommendation that a particular release is secure or compatible.
 | --- | --- | --- |
 | `agent-do security find` | Search published advisories, including products your team does not use. | Access to NVD/GitHub advisory APIs; no scanner required. |
 | `agent-do security scan` | Match source dependency versions in a local project, GitHub repository, or repository list. | OSV-Scanner v2; remote acquisition also needs authenticated `gh` access. Explicit JVM resolution also needs Java and Maven/Gradle. |
-| `agent-do security runtime` | Assess explicit runtime versions and deployment evidence, keeping project declarations separate. | NVD for assessment; optional explicit local Java executable probe or imported runtime inventory. Inventory-only is offline. |
+| `agent-do security runtime` | Assess explicit runtime versions and deployment evidence, keeping project declarations separate. | NVD for assessment; optional explicit local Java executable probe or imported runtime inventory. Inventory-only skips advisories; explicit artifact/cluster collectors may contact registries/APIs. |
 | `agent-do security report` | Read and filter an existing unfiltered report. | A saved report; no network or scanner required. |
 | `agent-do security doctor` | Check local scanner prerequisites and credential presence. | No network requests; does not establish authentication or run project builds. |
 | `agent-do security monitor` | Configure portfolios, compare evidence, export recurring jobs and explicitly request notifications through init/run/report/schedule. | Scanner/gh/build prerequisites on the scan host; POSIX locking for runs, cron for an installed recurring job. |
@@ -205,21 +205,21 @@ At least one of path, inventory or local-java is required; they may be combined.
 | `--inventory PATH` | Versioned local runtime/deployment JSON with exact CPE identities and provenance; imported evidence is not independently verified. | `agent-do security runtime --inventory ~/runtime-inventory.json --json` |
 | `--local-java` | Explicitly execute a trusted local Java binary to observe vendor/version/VM properties. Default off; does not select a deployed or Maven JDK implicitly. | `agent-do security runtime --path . --local-java --inventory-only --json` |
 | `--java EXECUTABLE` | Requires local-java; default installed java on PATH. Select another trusted Java executable. | `agent-do security runtime --local-java --java /path/to/jdk/bin/java --inventory-only --json` |
-| `--java-cpe CPE` | Requires local-java; caller-verified CPE 2.3 distribution identity with explicit part/vendor/product and wildcard version/update. Oracle Corporation HotSpot on Java 11+ maps to oracle:jdk; older JDK/JRE artifacts require an explicit identity; other distributions need verified identity work; other vendors remain unmapped by default. This example is for Oracle Java, not all JDKs. An observed non-Oracle vendor rejects an Oracle Java identity before lookup; format errors include an inline example. | `agent-do security runtime --local-java --java-cpe 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*' --json` |
+| `--java-cpe CPE` | Requires local-java; caller-verified CPE 2.3 distribution identity with explicit part/vendor/product and wildcard version/update. Oracle Corporation HotSpot on Java 11+ maps to oracle:jdk; older JDK/JRE artifacts require an explicit identity; Eclipse Adoptium uses its separate official Temurin VDR adapter; other distributions need verified identity work and remain unmapped by default. This example is for Oracle Java, not all JDKs. An observed non-Oracle vendor rejects an Oracle Java identity before lookup; format errors include an inline example. | `agent-do security runtime --local-java --java-cpe 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*' --json` |
 | `--probe-timeout SECONDS` | Finite positive local Java subprocess timeout, default **15** seconds. | `agent-do security runtime --local-java --probe-timeout 30 --inventory-only --json` |
-| `--inventory-only` | Collect/save evidence offline; no advisory lookup or CVE assessment. Rejects advisory score/date/CVE/exploitation filters. | `agent-do security runtime --inventory ~/runtime-inventory.json --inventory-only --json` |
+| `--inventory-only` | Collect/save evidence without advisory lookup; explicit image/cluster collectors may contact registries/APIs. Rejects advisory score/date/CVE/exploitation filters. | `agent-do security runtime --inventory ~/runtime-inventory.json --inventory-only --json` |
 | `--limit INTEGER` | Positive NVD record bound **per runtime component**, default **1000** before presentation filters. Truncation remains incomplete. | `agent-do security runtime --inventory ~/runtime-inventory.json --limit 2000 --json` |
 
 Shared finding filters (except ecosystem), JSON, and the HTTP/cache/KEV controls
 below also apply. Runtime package names are CPE `vendor:product`, not Maven
 coordinates. Unsupported CPE/version conditions and missing environment evidence
 remain labeled candidates with incomplete coverage. No published fix is inferred
-from NVD version bounds. Automatic image/cluster collection is not implemented.
+from NVD version bounds. Explicit image/rootfs/Kubernetes collection and Adoptium VDR assessment are documented in [runtime collection](RUNTIME_COLLECTION.md), including every added flag and example.
 
 ## HTTP, cache and enrichment options
 
 These options are available on **find, scan, runtime and monitor run**.
-Runtime inventory-only performs no requests. HTTP/cache flags control
+Runtime inventory-only skips advisory requests; explicit artifact/cluster collectors may contact registries/APIs. HTTP/cache flags control
 agent-do's advisory and KEV client, **not** `gh`, Maven/Gradle or OSV-Scanner's
 own network/cache/retry behavior. A file-only scan without KEV enrichment may
 make no requests through this client. Use scan-timeout for external subprocesses.
@@ -412,3 +412,16 @@ counts represent advisory/package/version/repository targets, not globally
 unique CVEs. Source scans do not inventory your machine's OS, installed runtimes,
 AKS configuration, or deployed artifacts. There is no scheduler, automatic
 remediation command, or vulnerability-threshold CI exit mode in this interface.
+
+## Milestone 4 collector and Temurin parameters
+
+`runtime` and `monitor init` accept `--image` (repeatable), `--rootfs`,
+`--kube-context`, `--namespace`, `--selector`, `--syft`, `--trivy`, `--kubectl`,
+`--collect-timeout` (300 seconds) and `--database-max-age` (86400 seconds).
+`runtime --temurin-vdr FILE` selects a local Adoptium vendor document; otherwise
+Temurin uses the digest-checked official public release. Monitor run/schedule
+require `--allow-collectors` for configured collector execution.
+The [collector parameter table](RUNTIME_COLLECTION.md#collector-parameters) explains
+**every flag with an example**, prerequisites, defaults and scope limitations.
+Inventory-only skips advisory requests; explicitly selected image/cluster collectors
+still contact registries/Kubernetes. Local/static/imported inventory-only remains offline.

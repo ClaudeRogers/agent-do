@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Milestone 4 completion adds the official Adoptium Temurin VDR adapter, explicit Syft/Trivy image and mounted-rootfs assessment, and read-only Kubernetes pod-image collection. Collector targets join portfolios behind per-run `--allow-collectors`. Reports retain pinned image identity, vendor/backport evidence and acquisition failures without raw image configuration or pod secrets. Runtime matcher revision 3 isolates unrelated unsupported CPE predicates; four v11 Java candidates have regression fixtures. See `docs/RUNTIME_COLLECTION.md` and the expanded host acceptance checklist. Live collector acceptance remains separate from offline fixture tests.
+
 - Runtime matcher revision 2 understands pre-Java-5 `1.x.y_N` bounds, separate CPE update criteria and leading zeroes. Public CVE-2012-1723/1531 regression fixtures now exclude modern Java while preserving affected historical versions. Runtime monitor comparison baselines include the matcher revision so earlier evidence remains unverified when matching rules change; source monitor baselines are unaffected.
 
 - Security monitor digests include a top-level assessment summary with current observation counts and source coverage issues. Plain-text runs/reports print NVD timeout errors and incomplete-coverage warnings before lifecycle counts. Unknown counts on historical digests remain unknown; candidate findings are retained through incomplete scans, and later timeouts preserve them as unverified.
@@ -10,7 +12,7 @@
 
 - Milestone 3/4 acceptance coverage now includes mixed source/runtime portfolios, a public XStream historical-Java regression, friendly monitor overwrite protection, and cron portability guidance. Runtime matching understands Java `7u`/`8u` versions, rejects Oracle Java identities on observed non-Oracle JDKs before lookup, and includes inline CPE syntax hints. See `docs/SECURITY_MILESTONE_3_4_TESTING.md`.
 
-- `security runtime` separates static Java/build/image declarations from explicitly observed local Java and imported runtime/deployment CPE inventory. NVD configuration conditions, numeric ranges and missing environment evidence produce attributable inventory matches or candidates. Runtime inventories can join recurring portfolios with per-component history and conservative scope changes. Automatic image/cluster collectors and distro backport assessment remain milestone 4 follow-ups. See `docs/RUNTIME_ASSESSMENT.md`.
+- `security runtime` separates static Java/build/image declarations from explicitly observed local Java and imported runtime/deployment CPE inventory. NVD configuration conditions, numeric ranges and missing environment evidence produce attributable inventory matches or candidates. Runtime inventories can join recurring portfolios with per-component history and conservative scope changes. The explicit collector/vendor paths are now documented in `docs/RUNTIME_COLLECTION.md`. See `docs/RUNTIME_ASSESSMENT.md`.
 
 - `security monitor init|run|report|schedule` adds local/GitHub portfolio configuration, due intervals, locked atomic history, alias-aware new/ongoing/resolved/unverified digests, reviewable cron export and explicit existing-notify routing. Failed scans, changed scopes and removed targets never silently resolve earlier findings. Local build execution requires `--allow-builds`; no scheduler or notification is enabled automatically. See `docs/PORTFOLIO_MONITORING.md`.
 

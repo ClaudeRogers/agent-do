@@ -39,7 +39,7 @@ def cpe_parts(value):
     return parts
 
 
-RUNTIME_MATCHER_SCHEMA = 2
+RUNTIME_MATCHER_SCHEMA = 3
 
 JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
 
@@ -141,11 +141,29 @@ def match_component(match, component):
 
 
 def same_product(match, component):
+    """Compare identity before parsing unsupported version/environment fields.
+
+    A complex NetApp/WebKit predicate cannot make an unrelated JDK branch
+    uncertain. An unparseable identity remains potentially relevant, however.
+    """
     try:
-        pattern, actual = cpe_parts(match.get('criteria')), cpe_parts(component['cpe'])
-        return all(pattern[i] == '*' or pattern[i].lower() == actual[i].lower() for i in (2, 3, 4))
-    except UnsupportedCPE:
-        return False
+        value = match.get('criteria')
+        pattern = re.split(r'(?<!\\):', value)
+        actual = cpe_parts(component['cpe'])
+        if len(pattern) != 13 or pattern[:2] != ['cpe', '2.3']:
+            return None
+        uncertain = False
+        for index in (2, 3, 4):
+            field = pattern[index]
+            if field == '*':
+                continue
+            if not re.fullmatch(r'[A-Za-z0-9_.+*-]+', field) or '*' in field:
+                uncertain = True
+            elif field.lower() != actual[index].lower():
+                return False
+        return None if uncertain else True
+    except (UnsupportedCPE, TypeError, KeyError):
+        return None
 
 
 def combine(values, operator):
@@ -162,12 +180,14 @@ def evaluate(node, components, target):
     A true OR branch for another product must not turn a target's uncertain
     branch into a confirmed match. Negated branches cannot prove vulnerability.
     """
+    if node.get('operator', 'OR') not in {'AND', 'OR'} or not isinstance(node.get('negate', False), bool):
+        return None, None
     results = []
     for match in node.get('cpeMatch', []):
-        relevant = [component for component in components if same_product(match, component)]
+        relevant = [component for component in components if same_product(match, component) is not False]
         values = [match_component(match, component) for component in relevant]
         truth = combine(values, 'OR') if relevant else None
-        target_value = match_component(match, target) if same_product(match, target) else False
+        target_value = match_component(match, target) if same_product(match, target) is not False else False
         witness = target_value if match.get('vulnerable') is True else False
         results.append((truth, witness))
     for child in node.get('nodes', []) + node.get('children', []):
@@ -187,17 +207,6 @@ def evaluate(node, components, target):
 
 
 def applicability(cve, components, target):
-    def supported(node):
-        if node.get('operator', 'OR') not in {'AND', 'OR'} or not isinstance(node.get('negate', False), bool):
-            return False
-        for match in node.get('cpeMatch', []):
-            try:
-                cpe_parts(match.get('criteria'))
-            except UnsupportedCPE:
-                return False
-        return all(supported(child) for child in node.get('nodes', []) + node.get('children', []))
-    if not all(supported(config) for config in cve.get('configurations', [])):
-        return None
     values = [evaluate(config, components, target)[1] for config in cve.get('configurations', [])]
     return combine(values, 'OR') if values else None
 
@@ -278,15 +287,22 @@ def load_inventory(path, maximum):
         raise ValueError('Runtime inventory requires schema_version: 1 and a nonempty components array')
     components, ids = [], set()
     for entry in value['components']:
-        if not isinstance(entry, dict) or set(entry) - {'id', 'cpe', 'evidence', 'deployment'}:
-            raise ValueError('Runtime component fields: id, cpe, evidence, optional deployment')
+        if not isinstance(entry, dict) or set(entry) - {'id', 'cpe', 'java', 'evidence', 'deployment'}:
+            raise ValueError('Runtime component fields: id, cpe or java, evidence, optional deployment')
         identity = entry.get('id')
         if not isinstance(identity, str) or not identity.strip() or identity in ids:
             raise ValueError('Every runtime component needs a unique nonempty string id')
         ids.add(identity)
-        parts = cpe_parts(entry.get('cpe'))
-        if any(parts[i] in {'*', '-'} for i in (2, 3, 4, 5)):
-            raise ValueError('Inventory CPE must specify exact part, vendor, product and version')
+        if ('cpe' in entry) == ('java' in entry):
+            raise ValueError('Runtime component needs exactly one cpe or java identity')
+        if 'java' in entry:
+            java = entry['java']
+            if not isinstance(java, dict) or set(java) - {'vendor', 'product', 'version', 'runtime_version'} or java.get('vendor') != 'eclipse_adoptium' or java.get('product') != 'temurin' or not isinstance(java.get('version'), str) or not java['version'].strip() or any(not isinstance(v, str) for v in java.values()):
+                raise ValueError('Java identity requires vendor eclipse_adoptium, product temurin, version, optional runtime_version')
+        else:
+            parts = cpe_parts(entry.get('cpe'))
+            if any(parts[i] in {'*', '-'} for i in (2, 3, 4, 5)):
+                raise ValueError('Inventory CPE must specify exact part, vendor, product and version')
         evidence = entry.get('evidence')
         if not isinstance(evidence, dict) or set(evidence) != {'kind', 'source', 'observed_at'} or evidence.get('kind') not in {'manual', 'deployment_inventory', 'image_inventory'}:
             raise ValueError('Imported evidence requires kind (manual/deployment_inventory/image_inventory), source and observed_at')
@@ -328,6 +344,12 @@ def probe_java(args):
     component = {'id': 'local-java', 'properties': properties,
                  'evidence': {'kind': 'local_java_probe', 'source': str(Path(executable).resolve()), 'observed_at': now(), 'verification': 'observed_local_process'},
                  'identity_source': identity_source}
+    if not identity:
+        from .temurin import identity as temurin_identity
+        mapped = temurin_identity(properties.get('java.vendor'), version, properties.get('java.runtime.version'))
+        if mapped:
+            component['java'] = mapped
+            component['identity_source'] = 'adoptium_vendor_mapping'
     if identity:
         parts = java_identity(identity)
         if parts[3].lower() == 'oracle' and parts[4].lower() in {'java_se', 'jdk', 'jre', 'openjdk'} and properties.get('java.vendor') != 'Oracle Corporation':
@@ -391,7 +413,7 @@ def assess_runtime(args, client, report):
         'Local Java is the selected executable on this host, not proof of the JDK used by Maven, a container, or a deployment.',
         'Imported runtime/deployment inventory is user supplied; its age and accuracy are not independently verified.',
         'NVD CPE matches assess only supplied components and configuration prerequisites; exploitability and deployment reachability are not assessed.',
-        'No image pull, cluster/host discovery, OS package manager advisory lookup, or remediation is performed. Distribution-specific backports require vendor advisory assessment.',
+        'Image/rootfs collection uses Syft and Trivy only when explicitly requested. Kubernetes reads pod image IDs, not running processes, writable container layers, host nodes or managed control-plane vulnerabilities. OS backports use Trivy vendor adapters. No remediation is performed.',
         'Publication/date/score options filter findings after full product/version assessment; --limit bounds NVD records per component. No fix is inferred from version-range boundaries.'
     ]
     report['runtime_components'] = components = []
@@ -413,16 +435,23 @@ def assess_runtime(args, client, report):
             report['coverage'].append({'source': 'local Java probe', 'status': 'ok'})
         except (OSError, ValueError) as exc:
             report['coverage'].append({'source': 'local Java probe', 'status': 'error', 'error': str(exc)})
+    from .collect import collect
+    collect(args, report)
+    if len({component['id'] for component in components}) != len(components):
+        raise ValueError('Collected and imported runtime component IDs collide')
     if args.inventory_only:
-        report['notes'].append('Inventory only: no advisory service contacted and no CVEs assessed.')
+        report['notes'].append('Inventory only: no advisory service contacted and no CVEs assessed. Explicit image/cluster collectors may contact registries and Kubernetes APIs.')
         report['scope'] = 'runtime_inventory_only'
-        if not components and not args.path:
+        if not components and not args.path and not report.get('artifact_inventory'):
             report['coverage'].append({'source': 'runtime inventory', 'status': 'missing', 'reason': 'No runtime evidence supplied'})
         return
-    if not components:
+    if not components and not report.get('artifact_inventory'):
         report['coverage'].append({'source': 'runtime inventory', 'status': 'missing', 'reason': 'Project declarations cannot identify an installed runtime. Supply --local-java or --inventory PATH.'})
     for component in components:
-        if not component.get('cpe'):
+        if component.get('java', {}).get('product') == 'temurin':
+            from .temurin import assess
+            assess(component, args, client, report)
+        elif not component.get('cpe'):
             report['coverage'].append({'source': 'runtime:' + component['id'], 'status': 'missing', 'reason': 'Vendor-specific CPE identity is not mapped. Rerun with an explicitly verified --java-cpe identity; no cross-vendor JDK inference was made.'})
         else:
             identity = cpe_parts(component['cpe'])

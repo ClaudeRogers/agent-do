@@ -1,11 +1,17 @@
 # Test milestones 3 and 4 together
 
+The [milestone 4 completion scope](SECURITY_MILESTONE_4_COMPLETION.md) and
+[collector/vendor guide](RUNTIME_COLLECTION.md) define the newly implemented
+acceptance boundary. Complete the additional host checks at the end of this guide
+before marking live collectors accepted. Offline fixture success alone is insufficient.
+
 Use this checklist after pulling `feat/security-cve-scanning` for PR #64. It covers
 milestone 3 portfolio monitoring, the implemented portion of milestone 4 runtime
 assessment, and the existing scan/report regression checks. It does **not** treat
 an exported cron line as proof of scheduling or an inventory-only report as a CVE
-assessment. Automatic image/cluster collectors and vendor/backport integrations
-remain milestone 4 follow-up work.
+assessment. Explicit image/rootfs/Kubernetes collectors and Temurin/vendor advisory
+paths now have a separate acceptance section below. Their offline fixture tests
+are not proof of registry, cluster or vendor-network access on the user's host.
 
 ## Run the automated suite
 
@@ -104,9 +110,8 @@ delivery remain separate host tests; no notification is enabled by this checklis
 Expected: the selected local JDK vendor/patch is observed; POM/image references
 remain declaration-only hints; the final command either assesses a supported
 Oracle runtime identity or explicitly reports incomplete/unmapped vendor coverage.
-For Eclipse Adoptium/Temurin, inventory-only can pass while runtime CVE assessment
-remains unavailable until a verified distribution identity/adapter is provided.
-That is a coverage limitation, not a passed CVE scan. Do not substitute Oracle's
+Eclipse Adoptium/Temurin now uses the official Adoptium VDR adapter. A VDR fetch
+failure remains incomplete and is not a passed CVE scan. Do not substitute Oracle's
 identity to make the command return findings. An explicit Oracle identity on an
 observed non-Oracle JDK now returns incomplete before any NVD query.
 
@@ -225,3 +230,83 @@ The v6 laptop report covers M3's basic host workflow and M4's local hints/probe.
 It does not yet exercise imported deployment inventory, mixed portfolios, real
 scheduled execution, live delivery, or deployment collection. Automated coverage
 and the host checklist above make those distinctions explicit.
+
+## Milestone 4 completion: vendor and collectors
+
+New automated tests are in `tests/test_security_collectors.py`. They cover
+Temurin exact/older/newer/unsupported patch listings and vendor integrity; private
+asset redirects; Syft-to-Trivy digest agreement; JVM release-file identity without
+Oracle substitution; backport fix preservation; stale/EOL databases; missing
+helper/registry errors; explicit Kubernetes scope and missing/pending image IDs;
+and collector monitoring authorization, lifecycle and failure retention.
+The four v11 Oracle candidates have matching-only public NVD fixtures in the
+runtime suite: unrelated escaped NetApp/WebKit predicates no longer poison Java
+branches. Related unsupported semantics still stay uncertain. Matcher revision 3
+creates a separate baseline; an old candidate becoming unverified is not a patch.
+
+Run this compact host acceptance pass after pulling the completion commit:
+
+```bash
+./agent-do security doctor --json
+./agent-do security runtime --local-java --inventory-only --json
+./agent-do security runtime --local-java --timeout 60 --json
+./agent-do security runtime --inventory ~/runtime-inventory-v8.json \
+  --limit 2000 --cache-ttl 86400 --include-unscored --json
+
+# Install current Syft/Trivy first (macOS: brew install syft trivy).
+./agent-do security runtime --image eclipse-temurin:21-jre --inventory-only --json
+./agent-do security runtime --image eclipse-temurin:21-jre --collect-timeout 600 --json
+./agent-do security monitor init --config ~/image-m4-completion.json \
+  --image eclipse-temurin:21-jre --interval-hours 24 --json
+./agent-do security monitor run --config ~/image-m4-completion.json --allow-collectors --json
+./agent-do security monitor run --config ~/image-m4-completion.json --allow-collectors --json
+./agent-do security monitor run --config ~/image-m4-completion.json --json
+```
+
+Expected evidence:
+
+- Adoptium observations map to Temurin, never Oracle; live assessment has an official
+  VDR release tag/digest/receipts or an explicit acquisition error. Do not count a
+  fetch failure as successful vendor assessment. A candidate is not confirmed
+  exposure. A zero result is scoped to the supplied version and vendor report.
+- Reusing the v11 Oracle dataset excludes those four unrelated-complex-CPE
+  candidates; new NVD data can legitimately change counts. Check IDs and matching
+  evidence rather than assuming a permanent count of four.
+- Image reports preserve one pinned repository digest, JVM vendor/release metadata,
+  Syft/Trivy versions and DB age, without image environment/config secrets. Both
+  collectors must confirm the immutable reference. Nonempty helper diagnostics or
+  missing/stale metadata stay incomplete; investigate rather than accepting them.
+- Two image monitor runs produce new then ongoing evidence when findings exist.
+  The final run without authorization is incomplete and retains earlier evidence
+  as unverified; it executes no collectors. Zero findings cannot exercise a positive
+  lifecycle test—retain the fixture test result separately.
+
+For a mounted host/image root, select a disposable snapshot explicitly:
+
+```bash
+./agent-do security runtime --rootfs /mnt/approved-snapshot --inventory-only --json
+./agent-do security runtime --rootfs /mnt/approved-snapshot --json
+```
+
+For Kubernetes/AKS, use an explicitly approved context and namespace with an
+existing workload; no cluster mutation is performed:
+
+```bash
+./agent-do security runtime --kube-context team-aks --namespace services \
+  --selector app=bff --inventory-only --json
+./agent-do security runtime --kube-context team-aks --namespace services \
+  --selector app=bff --json
+```
+
+Check normal/init/ephemeral container coverage and confirm reported image digests
+against pod status. Pending pods, missing pullable digests, denied RBAC, no matching
+pods and unavailable registry credentials must remain incomplete. Node operating
+systems, managed control planes and writable container layers are outside this
+collector's scope. If you lack cluster access, mark the live Kubernetes test
+**not run**, not passed or a known-good feature. Never paste raw credentials,
+image config or pod environment into a test report.
+
+Record helper versions, command, exit code, status, evidence and actual coverage
+errors. Report vendor/image/rootfs/Kubernetes live checks separately from the
+fixture suite. Full milestone closure requires host acceptance for the collection
+paths the team intends to use; milestone 5 implementation has not started.

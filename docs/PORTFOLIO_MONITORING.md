@@ -276,6 +276,27 @@ Tests exercise transitions, failures, alias/version changes, new scopes, removed
 targets, due intervals, locks, failed state writes, config rejection, opt-in
 notifications, cron export and a local Maven/scanner fixture pipeline. They do
 not establish live multi-repository compatibility, actual cron execution, or
-notification delivery on your host. Milestone 4 now adds explicit runtime/deployment inventory; automatic collectors remain follow-up work;
+notification delivery on your host. Milestone 4 adds explicit runtime/deployment inventory and opt-in collectors (see below);
 milestone 5 adds remediation/update PRs. Monitoring never automatically updates,
 publishes or deploys a repository.
+
+## Explicit runtime collectors
+
+Milestone 4 can also save image/rootfs/Kubernetes collector targets in the same
+portfolio as source and imported evidence. See [runtime collection](RUNTIME_COLLECTION.md)
+for every collector parameter, examples, helper prerequisites and coverage limits.
+
+```bash
+agent-do security monitor init --config ~/team-images.json \
+  --path ~/workspace/bff --resolve maven --image eclipse-temurin:21-jre --json
+agent-do security monitor run --config ~/team-images.json \
+  --allow-builds --allow-collectors --json
+agent-do security monitor schedule --config ~/team-images.json \
+  --allow-builds --allow-collectors --json
+```
+
+Init executes no collectors. Run/schedule require explicit `--allow-collectors`;
+missing authorization is a coverage failure, not a resolved vulnerability.
+The exported PATH, Python, helper paths, registry credentials and Kubernetes
+configuration belong to the scan host. Review and regenerate for another machine
+or CI runner. Export installs nothing.

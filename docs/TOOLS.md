@@ -3791,13 +3791,13 @@ Concurrency: `mixed`
 
 - `find`: Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
 - `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
-- `runtime`: Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--inventory-only] [--json]; local probing explicitly executes a trusted Java executable
+- `runtime`: Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--image REF] [--rootfs DIR] [--kube-context CTX --namespace NS] [--inventory-only] [--json]; explicit local probing and collectors execute trusted installed helpers
 - `report`: List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]
 - `doctor`: Check scanner and local feature prerequisites without network requests: doctor [--json]
-- `monitor init`: Create a portfolio without overwriting config: monitor init --config PATH [(--repos-file PATH | --path DIR)] [--runtime-inventory PATH] [--resolve maven|gradle] [--interval-hours N] [--json]; at least one source/inventory input is required
-- `monitor run`: Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]
+- `monitor init`: Create a portfolio without overwriting config: monitor init --config PATH [(--repos-file PATH | --path DIR)] [--runtime-inventory PATH] [--image REF] [--rootfs DIR] [--kube-context CTX --namespace NS] [--resolve maven|gradle] [--interval-hours N] [--json]; at least one source/inventory input is required
+- `monitor run`: Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--allow-collectors] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]
 - `monitor report`: Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]
-- `monitor schedule`: Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--json]
+- `monitor schedule`: Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--allow-collectors] [--runtime-limit N] [--notify-recipient ALIAS] [--json]
 
 **Examples**
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 import urllib.error
@@ -27,6 +28,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise SourceError("Advisory source redirected; update the source adapter")
 
 
+class AdoptiumAssetRedirect(urllib.request.HTTPRedirectHandler):
+    """Public release downloads only; never forward API credentials."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlsplit(newurl)
+        if target.scheme != 'https' or target.username or target.password or target.port not in (None, 443) or target.hostname != 'release-assets.githubusercontent.com':
+            raise SourceError('Unapproved Adoptium asset redirect')
+        return urllib.request.Request(newurl, headers={'Accept': 'application/json', 'User-Agent': 'agent-do-security/1'})
+
+
 class Client:
     def __init__(self, args):
         self.args = args
@@ -36,7 +46,8 @@ class Client:
 
     def get(self, url):
         parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname not in {"services.nvd.nist.gov", "api.github.com", "www.cisa.gov"}:
+        asset = parsed.hostname == 'github.com' and re_asset_path(parsed.path) and not parsed.query
+        if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or (not asset and parsed.hostname not in {"services.nvd.nist.gov", "api.github.com", "www.cisa.gov"}):
             raise SourceError("Unapproved advisory endpoint")
         headers = {"Accept": "application/json", "User-Agent": "agent-do-security/1"}
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -65,14 +76,16 @@ class Client:
                         time.sleep(delay)
                 requested_at = time.monotonic()
                 request = urllib.request.Request(url, headers=headers)
-                with self.open(request, timeout=self.args.timeout) as response:
+                opener = urllib.request.build_opener(AdoptiumAssetRedirect()).open if asset else self.open
+                with opener(request, timeout=self.args.timeout) as response:
                     if parsed.hostname == 'services.nvd.nist.gov':
                         self.last_nvd_request = requested_at
                     body = response.read(self.args.max_bytes + 1)
                     if len(body) > self.args.max_bytes:
                         raise SourceError("Source response exceeds --max-bytes; no records discarded silently")
                     value = json.loads(body)
-                    meta = {"link": response.headers.get("Link", ""), "last-modified": response.headers.get("Last-Modified", "")}
+                    meta = {"link": response.headers.get("Link", ""), "last-modified": response.headers.get("Last-Modified", ""),
+                            'sha256': hashlib.sha256(body).hexdigest()}
                 fetched = now()
                 atomic_json(path, {"fetched_at": fetched, "body": value, "headers": meta})
                 self.receipts.append({"url": url, "fetched_at": fetched, "cache": False, "stale": False})
@@ -100,6 +113,11 @@ class Client:
             self.receipts.append({"url": url, "fetched_at": cached["fetched_at"], "cache": True, "stale": True, "error": failure})
             return cached["body"], cached.get("headers", {})
         raise SourceError(failure)
+
+
+def re_asset_path(path):
+    import re
+    return bool(re.fullmatch(r'/adoptium/temurin-vdr-generator/releases/download/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.json', path))
 
 
 def nvd_row(cve):

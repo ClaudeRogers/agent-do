@@ -19,7 +19,7 @@ def package_key(row):
         name = name.lower()
     # Maven coordinates, Go import paths and other case-sensitive names must
     # remain distinct even if their advisories share a CVE alias.
-    return [eco, name, package.get('runtime_id')] if eco == 'cpe' else [eco, name]
+    return [eco, name, package.get('runtime_id')] if eco in {'cpe', 'runtime'} else [eco, name]
 
 
 def groups(rows):

@@ -44,8 +44,8 @@ def classify_diagnostics(stderr):
     return remaining, count
 
 
-def run(argv, args, *, cwd=None):
-    env = {**os.environ, "GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+def run(argv, args, *, cwd=None, environment=None):
+    env = {**(os.environ if environment is None else environment), "GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
     try:
         result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=args.scan_timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:

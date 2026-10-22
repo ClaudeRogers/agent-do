@@ -307,8 +307,8 @@ see [portfolio monitoring](PORTFOLIO_MONITORING.md) for installation and limits.
 Publication date and first detection are distinct, and failed/partial scans do
 not resolve prior findings. [Runtime assessment](RUNTIME_ASSESSMENT.md) now adds
 project hints, explicit local Java probing and imported runtime/deployment CPE
-evidence, including portfolio monitoring. Automatic image/cluster collection and
-distro advisory handling remain milestone 4 follow-ups. Remediation PRs
+evidence, including portfolio monitoring. Explicit image/rootfs/Kubernetes collection, Temurin advisories and Trivy vendor/backport
+assessment are described in [runtime collection](RUNTIME_COLLECTION.md). Remediation PRs
 come afterward, with isolated lockfile updates and tests. The optional unrelated
 advisory digest remains separate from repository remediation tasks.
 
