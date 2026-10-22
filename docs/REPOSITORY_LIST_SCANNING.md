@@ -100,9 +100,10 @@ GitHub list scans use file snapshots and never run repository build scripts.
 remote projects requiring build resolution are reported with coverage gaps.
 See [JVM dependency resolution](JVM_DEPENDENCY_RESOLUTION.md).
 
-This is the repository-list and batch-scan portion of milestone 3. It does not
-add a recurring scheduler, comparison with earlier reports, deployed-artifact
-inspection, OS/runtime inventory or automatic update PRs.
+This is the repository-list and batch-scan portion of milestone 3. For saved
+portfolios, recurring cron export, change digests and opt-in notifications, see
+[portfolio monitoring](PORTFOLIO_MONITORING.md). Batch `scan` itself does not start
+a schedule. Deployed artifacts, OS/runtime inventory and update PRs remain later work.
 
 ## Validation
 

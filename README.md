@@ -127,4 +127,6 @@ Give the mind a vessel whose every act keeps a receipt, and build every institut
 
 Vulnerability discovery and local/GitHub source dependency scans are available through `agent-do security`; see [the scanning guide](docs/SECURITY_SCANNING.md) for setup, filters, evidence, and coverage limits, and [the parameter reference](docs/SECURITY_CLI_REFERENCE.md) for every option with example commands.
 
+Use [portfolio monitoring](docs/PORTFOLIO_MONITORING.md) for saved team configurations, scope-aware change digests, recurring cron exports, and explicitly requested notifications.
+
 The full system map is in [ARCHITECTURE.md](ARCHITECTURE.md); hook wiring is in [docs/INTEGRATION.md](docs/INTEGRATION.md); the tool catalog is generated into [docs/TOOLS.md](docs/TOOLS.md). MIT license.

@@ -21,6 +21,7 @@ from .sources import Client, SourceError, discover, enrich_kev
 from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
+from .monitor import initialize, read_digest, run_monitor, schedule
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -123,10 +124,45 @@ def parser():
     d.add_argument("--scanner", default="osv-scanner")
     d.add_argument("--scan-timeout", type=positive, default=READ_PROBE_TIMEOUT_SECONDS)
     d.add_argument("--max-bytes", type=int, default=16_777_216)
+    m = sub.add_parser('monitor', help='configure portfolio scans, compare evidence, and export a recurring cron job')
+    actions = m.add_subparsers(dest='monitor_command', required=True)
+    init = actions.add_parser('init', help='create a new local portfolio configuration without overwriting a file')
+    init.add_argument('--config', required=True)
+    inputs = init.add_mutually_exclusive_group(required=True)
+    inputs.add_argument('--repos-file')
+    inputs.add_argument('--path')
+    init.add_argument('--resolve', choices=['maven', 'gradle'])
+    init.add_argument('--interval-hours', type=int, default=24)
+    init.add_argument('--max-bytes', type=int, default=16_777_216)
+    init.add_argument('--json', action='store_true')
+    monitor_run = actions.add_parser('run', help='scan configured targets and save an unfiltered change digest')
+    common(monitor_run)
+    network(monitor_run)
+    monitor_run.add_argument('--config', required=True)
+    monitor_run.add_argument('--due', action='store_true', help='skip if the configured interval has not elapsed since the last attempt')
+    monitor_run.add_argument('--allow-builds', action='store_true', help='explicitly authorize trusted configured local Maven/Gradle build execution')
+    monitor_run.add_argument('--scanner', default='osv-scanner')
+    monitor_run.add_argument('--scan-timeout', type=positive, default=300)
+    monitor_run.add_argument('--notify-recipient', help='explicitly send digest counts/path to this existing agent-do notify recipient')
+    monitor_run.add_argument('--notify-via', help='provider order forwarded to notify; requires --notify-recipient')
+    monitor_report = actions.add_parser('report', help='read/refilter a saved monitor digest without scanning')
+    common(monitor_report)
+    monitor_report.add_argument('--config', required=True)
+    monitor_report.add_argument('--file', help='specific digest; defaults to this monitor latest committed digest')
+    monitor_report.add_argument('--max-bytes', type=int, default=16_777_216)
+    scheduled = actions.add_parser('schedule', help='print a reviewable hourly cron entry; never install it automatically')
+    scheduled.add_argument('--config', required=True)
+    scheduled.add_argument('--allow-builds', action='store_true')
+    scheduled.add_argument('--notify-recipient', help='explicit recipient included in the exported job; nothing is sent during export')
+    scheduled.add_argument('--notify-via', help='provider order for the exported job; requires --notify-recipient')
+    scheduled.add_argument('--max-bytes', type=int, default=16_777_216)
+    scheduled.add_argument('--json', action='store_true')
     return p
 
 
 def validate(args):
+    if args.command == 'monitor' and args.monitor_command in {'run', 'schedule'} and args.notify_via and not args.notify_recipient:
+        raise ValueError('--notify-via requires --notify-recipient')
     if args.command == 'report' and args.list:
         filters = ('cve', 'ecosystem', 'package', 'cvss_min', 'cvss_gt', 'include_unscored', 'severity',
                    'published_after', 'published_before', 'updated_after', 'known_exploited', 'fix_available', 'target')
@@ -212,6 +248,45 @@ def output(payload, json_mode):
         return
     if payload.get("error"):
         print("security: " + payload["error"], file=sys.stderr)
+        return
+    if payload.get('command', '').startswith('monitor '):
+        print('agent-do security ' + payload['command'] + ' — ' + payload['status'])
+        if payload.get('config'):
+            print('  Config: ' + payload['config'])
+        if payload.get('skipped'):
+            print('  Not due; next due: ' + payload['next_due'])
+        if payload.get('cron'):
+            print(payload['cron'])
+        if payload.get('changes') is not None:
+            print('  Comparison: ' + payload['comparison_status'])
+            for assessed in payload['targets']:
+                target = assessed['target']
+                print('  Target: ' + (target.get('repo') or target.get('path', '')) + ' — ' + assessed['status'])
+                for coverage in assessed.get('coverage', []):
+                    if coverage['status'] != 'ok':
+                        print('    Coverage: ' + coverage['source'] + ' — ' + coverage['status'] + ': ' + coverage.get('reason', coverage.get('error', '')))
+            for category, count in payload['counts'].items():
+                print(f"  {category}: {payload.get('shown_counts', payload['counts'])[category]} shown / {count}")
+                for issue in payload['changes'][category]:
+                    target = issue['target']
+                    rows = issue['findings']
+                    representative = max(rows, key=lambda row: row['cvss'] if row['cvss'] is not None else -1)
+                    package = representative.get('package') or {}
+                    versions = sorted({str((row.get('package') or {}).get('version') or '?') for row in rows})
+                    print('    ' + (target.get('repo') or target.get('path', '')) + ': ' + ', '.join(issue['aliases']) + ' — ' + representative['severity'] + ' ' + package.get('name', '') + '@' + ','.join(versions))
+                    print('      ' + representative['summary'].replace('\n', ' '))
+                    fixes = sorted({version for row in rows for affected in row['affected'] for version in affected.get('fixed_versions', [])})
+                    if fixes:
+                        print('      Published fixes (compatibility not verified): ' + ', '.join(fixes))
+                    print('      First detected: ' + issue['first_detected_at'] + '; last seen: ' + issue['last_seen_at'])
+                    if issue.get('reason'):
+                        print('      ' + issue['reason'])
+            print('  Source assessment: ' + payload['source_report'])
+            print('  Digest: ' + payload['saved_digest'])
+        for note in payload.get('notes', []):
+            print('  ' + note)
+        if payload.get('notification'):
+            print('  Notification: ' + payload['notification']['status'])
         return
     print("agent-do security " + payload["command"] + " — " + payload["status"])
     if payload["command"] == "doctor":
@@ -300,6 +375,15 @@ def main(argv=None):
         validate(args)
         if args.command == "doctor":
             payload = doctor(args)
+        elif args.command == 'monitor':
+            if args.monitor_command == 'init':
+                payload = initialize(args)
+            elif args.monitor_command == 'schedule':
+                payload = schedule(args, ROOT)
+            else:
+                from .monitor import present_digest
+                result = run_monitor(args, lambda argv: p.parse_args(argv), validate, ROOT) if args.monitor_command == 'run' else read_digest(args)
+                payload = present_digest(result, args)
         elif args.command == "report":
             if args.list:
                 entries = list_reports()

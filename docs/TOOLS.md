@@ -98,7 +98,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
-| [security](#security) | Published vulnerability discovery and source dependency scanning for local and GitHub repositories | mixed | 4 |
+| [security](#security) | Published vulnerability discovery and source dependency scanning for local and GitHub repositories | mixed | 8 |
 | [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
@@ -3782,6 +3782,8 @@ Concurrency: `mixed`
 - save unfiltered attributable reports with explicit coverage gaps and refilter them later
 - explicitly opt in to private scanner stderr capture for diagnosing unclassified coverage warnings
 - attach separately scoped Dependabot alert evidence through gh alerts when available
+- monitor configured local/GitHub portfolios with due intervals, scope-aware finding transitions, and durable digests
+- export reviewable recurring cron jobs and explicitly opt in to existing notify delivery
 
 **Commands**
 
@@ -3789,6 +3791,10 @@ Concurrency: `mixed`
 - `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
 - `report`: List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]
 - `doctor`: Check scanner and local feature prerequisites without network requests: doctor [--json]
+- `monitor init`: Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR) [--resolve maven|gradle] [--interval-hours N] [--json]
+- `monitor run`: Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--notify-recipient ALIAS] [--cvss-min N] [--json]
+- `monitor report`: Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]
+- `monitor schedule`: Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--notify-recipient ALIAS] [--json]
 
 **Examples**
 
@@ -3805,6 +3811,10 @@ agent-do security scan --repo https://github.com/owner/repo --ref main --json
 agent-do security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
 # list previous security assessments including failed scans
 agent-do security report --list --json
+# configure daily scans of my team repositories
+agent-do security monitor init --config ./team-security.json --repos-file ./team-repos.txt --interval-hours 24 --json
+# scan my portfolio and show newly detected and ongoing vulnerabilities
+agent-do security monitor run --config ./team-security.json --cvss-min 7 --include-unscored --json
 # resolve Spring Boot dependencies from Maven parents and BOMs before scanning
 agent-do security scan --path . --resolve maven --maven-profile prod --json
 # scan Gradle runtime and test dependencies at their selected versions
@@ -3821,12 +3831,14 @@ agent-do security find --target java --target spring-boot --target angular --tar
 
 **Safety (from contracts)**
 
-- Read-only (snapshot/verify; safe to parallelize): `doctor`, `report`
-- Write (connect/interact/save): `find`, `scan`
-- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `scan`
+- Read-only (snapshot/verify; safe to parallelize): `doctor`, `monitor report`, `monitor schedule`, `report`
+- Write (connect/interact/save): `find`, `monitor init`, `monitor run`, `scan`
+- sensitive (emits or persists secret material; guard output): `monitor run`
+- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `monitor run`, `scan`
+- long_running (daemon/stream/session; may never return): `monitor run`
 - polymorphic (beat decided by payload or flag at call time): `scan`
-- composite (one call performs several beats internally): `find`, `scan`
-- own_state (writes only its own cache/state; parallel-safe): `find`
+- composite (one call performs several beats internally): `find`, `monitor run`, `scan`
+- own_state (writes only its own cache/state; parallel-safe): `find`, `monitor init`, `monitor run`
 
 ### sentry
 

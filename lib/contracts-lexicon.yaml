@@ -358,6 +358,10 @@ overrides:
     scan: {beats: [snapshot, interact, save], attributes: [composite, polymorphic, passthrough]}
     report: {beats: [snapshot]}
     doctor: {beats: [verify]}
+    monitor init: {beats: [save], attributes: [own_state]}
+    monitor run: {beats: [snapshot, interact, verify, save], attributes: [composite, passthrough, own_state, long_running, sensitive]}
+    monitor report: {beats: [snapshot]}
+    monitor schedule: {beats: [snapshot]}
   gh:
     portfolio add: {beats: [interact], attributes: [own_state]}     # writes only ~/.agent-do/gh/portfolio.yaml
     portfolio remove: {beats: [interact], attributes: [own_state]}

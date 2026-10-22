@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `security monitor init|run|report|schedule` adds local/GitHub portfolio configuration, due intervals, locked atomic history, alias-aware new/ongoing/resolved/unverified digests, reviewable cron export and explicit existing-notify routing. Failed scans, changed scopes and removed targets never silently resolve earlier findings. Local build execution requires `--allow-builds`; no scheduler or notification is enabled automatically. See `docs/PORTFOLIO_MONITORING.md`.
+
 - Security scans rename the internal staging directory from `source` to `dependency-snapshot`, preventing OSV's subcommand/file-name collision warning. The full verified `source` notice is also classified as non-blocking if emitted; unknown/mixed diagnostics, missing inventory and scanner failures still make coverage incomplete. Rerun scans to create fresh complete reports; historical assessments are not rewritten.
 
 - Security scans can opt in to `--scanner-diagnostics DIR` to save raw scanner stderr privately in uniquely named mode-0600 files. Default reports retain only diagnostic metadata. Unrecognized stderr remains unclassified rather than assumed warn-level.

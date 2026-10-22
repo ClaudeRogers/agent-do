@@ -15,6 +15,7 @@ recommendation that a particular release is secure or compatible.
 | `agent-do security scan` | Match source dependency versions in a local project, GitHub repository, or repository list. | OSV-Scanner v2; remote acquisition also needs authenticated `gh` access. Explicit JVM resolution also needs Java and Maven/Gradle. |
 | `agent-do security report` | Read and filter an existing unfiltered report. | A saved report; no network or scanner required. |
 | `agent-do security doctor` | Check local scanner prerequisites and credential presence. | No network requests; does not establish authentication or run project builds. |
+| `agent-do security monitor` | Configure portfolios, compare evidence, export recurring jobs and explicitly request notifications through init/run/report/schedule. | Scanner/gh/build prerequisites on the scan host; POSIX locking for runs, cron for an installed recurring job. |
 
 Put options **after the subcommand**. Unless stated otherwise, value options
 accept one value, are not repeatable, and have no active restriction when omitted.
@@ -27,7 +28,7 @@ repeated targets combine with OR. Filters never remove findings from the saved
 | Parameter | Commands | Behavior and default | Example |
 | --- | --- | --- | --- |
 | `-h`, `--help` | Top level and all subcommands | Print help and exit; no assessment runs. | `agent-do security --help` or `agent-do security scan --help` |
-| `--json` | All four | Emit one JSON document instead of human-readable output. | `agent-do security doctor --json` |
+| `--json` | All assessment commands and monitor subcommands | Emit one JSON document instead of human-readable output. | `agent-do security doctor --json` |
 
 ```bash
 agent-do security find --help
@@ -38,7 +39,8 @@ agent-do security doctor --help
 
 ## Shared finding filters
 
-All parameters in this table are available on **find, scan and report**.
+All parameters in this table are available on **find, scan and report**,
+and on **monitor run/report**.
 Examples use saved reports so you can experiment without repeating a scan.
 On `find`, ecosystem/package flags also choose source query criteria.
 
@@ -247,6 +249,85 @@ and credential presence. It does not validate upstream access or execute builds.
 | `--scanner EXECUTABLE` | Trusted scanner to probe using `--version`; default `osv-scanner` on PATH. | `agent-do security doctor --scanner /usr/local/bin/osv-scanner --json` |
 | `--scan-timeout SECONDS` | Finite positive number, default **15**, for the scanner version subprocess. Scan's default is 300. | `agent-do security doctor --scan-timeout 30 --json` |
 | `--max-bytes INTEGER` | Positive integer, default **16777216**, maximum captured subprocess stream size. | `agent-do security doctor --max-bytes 1048576 --json` |
+
+## Monitor: portfolio configuration, runs and digests
+
+See [portfolio monitoring](PORTFOLIO_MONITORING.md) for configuration fields,
+comparison semantics, state recovery, cron installation and notification setup.
+These verbs remain inside the existing security family. Help is available on
+`agent-do security monitor --help` and each nested subcommand.
+
+### monitor init
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--config PATH` | Required destination JSON file. Creates privately; refuses to overwrite an existing file. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --json` |
+| `--repos-file PATH` | Initialize targets from a text/JSON GitHub list; mutually exclusive with path. Copies normalized entries, not a live reference to the list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt` |
+| `--path DIR` | Initialize one local target; mutually exclusive with repos-file. Relative input becomes an absolute path. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --json` |
+| `--resolve TOOL` | Optional maven/gradle resolution plan; requires path. Does not execute it during initialization. Runs/scheduled jobs need allow-builds. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --resolve maven` |
+| `--interval-hours INTEGER` | Positive whole hours between due attempts; default **24**. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --interval-hours 12` |
+| `--max-bytes INTEGER` | Positive file bound, default **16777216**, for reading the repository list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --max-bytes 33554432` |
+| `--json` | Structured creation result; no scan, scheduling or notification occurs. | `agent-do security monitor init --config ~/bff-security.json --path . --json` |
+
+### monitor run
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--config PATH` | Required existing portfolio configuration. All target options are validated before scanning. | `agent-do security monitor run --config ~/team-security.json --json` |
+| `--due` | Skip without scanning/notifying if the interval since the last committed attempt has not elapsed. Default: run immediately. Failed attempts also advance the due interval. | `agent-do security monitor run --config ~/team-security.json --due --json` |
+| `--allow-builds` | Explicitly authorize trusted local Maven/Gradle execution configured in targets. Default off; without it build targets are incomplete and other targets continue. | `agent-do security monitor run --config ~/bff-security.json --allow-builds --json` |
+| `--scanner EXECUTABLE` | Trusted OSV-Scanner v2 executable for all targets; default osv-scanner. | `agent-do security monitor run --config ~/team-security.json --scanner /usr/local/bin/osv-scanner --json` |
+| `--scan-timeout SECONDS` | Positive finite per scanner/GitHub/build subprocess timeout; default **300**. | `agent-do security monitor run --config ~/bff-security.json --allow-builds --scan-timeout 600 --json` |
+| `--notify-recipient ALIAS` | Explicitly send filtered change counts/status/path through existing agent-do notify routing. Default: **no send**. Recipient and credentials must already be configured. Failure makes command incomplete without rolling back scan evidence. | `agent-do security monitor run --config ~/team-security.json --notify-recipient security-team --json` |
+| `--notify-via LIST` | Provider order forwarded to notify, e.g. slack,email; requires notify-recipient. Default existing notify routing. | `agent-do security monitor run --config ~/team-security.json --notify-recipient security-team --notify-via slack --json` |
+
+All [shared finding filters](#shared-finding-filters), `--json`, and HTTP/cache/KEV
+options are also available on monitor run, with their existing values/defaults.
+HTTP/cache controls affect KEV enrichment here, not the scanner/build's own
+networking; timeout also bounds explicit notification delivery. Max-bytes bounds
+the config and per scan input/stream, not total portfolio size. Filters affect
+presentation/notification counts only, never persisted transitions or evidence.
+Curated advisory `--target` and scan `--dependabot`/`--scanner-diagnostics` options
+are not monitor-run options. Build executables/settings/profiles/properties go in
+the per-target config `options`; monitor run does not accept direct --resolve.
+
+```bash
+agent-do security monitor run --config ~/team-security.json --cvss-min 7 --include-unscored --kev --json
+```
+
+### monitor report
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--config PATH` | Required monitor identity; default reads this monitor's latest committed digest, including incomplete runs. Never selects another portfolio's latest result. | `agent-do security monitor report --config ~/team-security.json --json` |
+| `--file PATH` | Specific historical digest from this monitor; rejects another monitor/schema. | `agent-do security monitor report --config ~/team-security.json --file /path/to/digest.json --json` |
+| `--max-bytes INTEGER` | Positive config file bound, default **16777216**. | `agent-do security monitor report --config ~/team-security.json --max-bytes 33554432 --json` |
+
+All shared finding filters and JSON/help are supported. This is read-only; it
+neither scans nor refreshes KEV. Resolved/unverified issues use last-seen evidence.
+Unknown saved exploitation status is rejected for a known-exploited filter.
+Counts remain unfiltered; shown_counts reflects presentation filters.
+
+```bash
+agent-do security monitor report --config ~/team-security.json --severity critical,high --json
+```
+
+### monitor schedule
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--config PATH` | Required portfolio config on the scan host. Emits an hourly cron check with due gating; **does not install it**. | `agent-do security monitor schedule --config ~/team-security.json` |
+| `--allow-builds` | Required if local build resolution is configured; includes that explicit authorization in the exported job. | `agent-do security monitor schedule --config ~/bff-security.json --allow-builds --json` |
+| `--notify-recipient ALIAS` | Include explicit notification recipient in the exported command; sends nothing during export. | `agent-do security monitor schedule --config ~/team-security.json --notify-recipient security-team --json` |
+| `--notify-via LIST` | Include provider order; requires notify-recipient. | `agent-do security monitor schedule --config ~/team-security.json --notify-recipient security-team --notify-via slack --json` |
+| `--max-bytes INTEGER` | Config/scan bound forwarded to the job, default **16777216**. | `agent-do security monitor schedule --config ~/team-security.json --max-bytes 33554432 --json` |
+| `--json` | Emit cron, interval, notes and installed=false as JSON. Text prints the reviewable line and notes. | `agent-do security monitor schedule --config ~/team-security.json --json` |
+
+Review and install the exported line using crontab -e on macOS/Linux. It pins the
+current Python/tool/config path, PATH and AGENT_DO_HOME, not credentials. Jobs run
+when the host is awake and its cron service runs. Run schedule on the destination
+host and regenerate after moving its checkout/Python environment. Other runtime
+flags can be added explicitly to the reviewed monitor-run command if needed.
 
 ## Environment variables
 

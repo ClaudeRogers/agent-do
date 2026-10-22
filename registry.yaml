@@ -11,11 +11,17 @@ tools:
     - save unfiltered attributable reports with explicit coverage gaps and refilter them later
     - explicitly opt in to private scanner stderr capture for diagnosing unclassified coverage warnings
     - attach separately scoped Dependabot alert evidence through gh alerts when available
+    - monitor configured local/GitHub portfolios with due intervals, scope-aware finding transitions, and durable digests
+    - export reviewable recurring cron jobs and explicitly opt in to existing notify delivery
     commands:
       find: 'Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]'
       scan: 'Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes'
       report: 'List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]'
       doctor: 'Check scanner and local feature prerequisites without network requests: doctor [--json]'
+      monitor init: 'Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR) [--resolve maven|gradle] [--interval-hours N] [--json]'
+      monitor run: 'Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--notify-recipient ALIAS] [--cvss-min N] [--json]'
+      monitor report: 'Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]'
+      monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--notify-recipient ALIAS] [--json]'
     examples:
     - intent: find Oracle Java advisories above CVSS 7
       command: agent-security find --vendor oracle --product jdk --cvss-gt 7 --json
@@ -29,6 +35,10 @@ tools:
       command: agent-security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
     - intent: list previous security assessments including failed scans
       command: agent-security report --list --json
+    - intent: configure daily scans of my team repositories
+      command: agent-security monitor init --config ./team-security.json --repos-file ./team-repos.txt --interval-hours 24 --json
+    - intent: scan my portfolio and show newly detected and ongoing vulnerabilities
+      command: agent-security monitor run --config ./team-security.json --cvss-min 7 --include-unscored --json
     - intent: resolve Spring Boot dependencies from Maven parents and BOMs before scanning
       command: agent-security scan --path . --resolve maven --maven-profile prod --json
     - intent: scan Gradle runtime and test dependencies at their selected versions
@@ -62,7 +72,11 @@ tools:
           profile query counts are measured from the versioned catalog and reported.
           Repository-list scans run sequentially over all unique repo/ref entries in a
           caller-supplied file bounded by --max-bytes; subprocess timeouts apply per call,
-          not to the full portfolio. No repository count cap or background schedule is implied.
+          not to the full portfolio. No repository count cap is implied. Monitor configuration
+          uses the same caller-controlled --max-bytes bound. --interval-hours defaults to 24,
+          a whole positive number of hours chosen by the operator. Exported cron checks are
+          hourly and --due gates actual scans; cadence is an operator default, not a ceiling.
+          Comparisons measure all retained findings without an arbitrary count/history cap.
           NVD pacing uses the published 5 or 50 requests per 30 seconds without/with
           an API key (6 or 0.6 seconds), shared by every query in the invocation.
     contracts:
@@ -70,13 +84,20 @@ tools:
       - find
       - scan
       - report
+      - monitor run
+      - monitor report
+      - monitor schedule
       interact:
       - scan
+      - monitor run
       verify:
       - doctor
+      - monitor run
       save:
       - find
       - scan
+      - monitor init
+      - monitor run
       attributes:
         find:
         - composite
@@ -85,6 +106,14 @@ tools:
         - composite
         - polymorphic
         - passthrough
+        monitor init:
+        - own_state
+        monitor run:
+        - composite
+        - passthrough
+        - own_state
+        - long_running
+        - sensitive
     concurrency: mixed
   brief:
     description: Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions,

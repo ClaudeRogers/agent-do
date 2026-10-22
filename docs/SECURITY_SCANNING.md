@@ -2,6 +2,8 @@
 
 For every flag, its defaults, supported commands and example usage, see the
 [complete command and parameter reference](SECURITY_CLI_REFERENCE.md).
+For saved portfolios, recurring jobs and change digests, see
+[portfolio monitoring](PORTFOLIO_MONITORING.md).
 
 `agent-do security` finds published advisories and assesses source dependency
 inventories. It supports local directories and GitHub repositories. Ordinary
@@ -299,10 +301,11 @@ printed. Temporary/private reports can contain repository and package identities
 
 Local repository lists and sequential batch scans are available through
 `scan --repos-file`; see [repository-list scanning](REPOSITORY_LIST_SCANNING.md).
-Compatible-inventory change reports, recurring scheduling and notifications
-remain future work. Publication date and first
-detection must be distinct, and failed/partial scans must never resolve prior
-findings. Image/SBOM and deployment mapping follow that work. Remediation PRs
+Configured portfolios, compatible-scope change reports, due intervals, cron
+export and explicit notification routing are available through `monitor`;
+see [portfolio monitoring](PORTFOLIO_MONITORING.md) for installation and limits.
+Publication date and first detection are distinct, and failed/partial scans do
+not resolve prior findings. Runtime/image/deployment mapping follows that work. Remediation PRs
 come afterward, with isolated lockfile updates and tests. The optional unrelated
 advisory digest remains separate from repository remediation tasks.
 
@@ -314,6 +317,7 @@ python3 tests/test_security_resolution.py
 python3 tests/test_security_targets.py
 python3 tests/test_security_repositories.py
 python3 tests/test_security_reports.py
+python3 tests/test_security_monitor.py
 ./agent-do harness contracts validate
 ./agent-do harness contracts drift --tool security
 ./agent-do harness bounds drift --tool security
