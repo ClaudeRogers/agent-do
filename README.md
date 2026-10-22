@@ -125,4 +125,6 @@ A team that runs ten agents without something like this pays for the same job tw
 
 Give the mind a vessel whose every act keeps a receipt, and build every institution as if no habit survives the shift, because here none does; the handoff, never the recollection, is the continuity.
 
+Vulnerability discovery and local/GitHub source dependency scans are available through `agent-do security`; see [the scanning guide](docs/SECURITY_SCANNING.md) for setup, filters, evidence, and coverage limits, and [the parameter reference](docs/SECURITY_CLI_REFERENCE.md) for every option with example commands.
+
 The full system map is in [ARCHITECTURE.md](ARCHITECTURE.md); hook wiring is in [docs/INTEGRATION.md](docs/INTEGRATION.md); the tool catalog is generated into [docs/TOOLS.md](docs/TOOLS.md). MIT license.

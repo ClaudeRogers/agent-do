@@ -1,4 +1,88 @@
 tools:
+  security:
+    description: Published vulnerability discovery and source dependency scanning for local and GitHub repositories
+    capabilities:
+    - find NVD CVEs by CPE vendor/product or keywords and GitHub advisories by ecosystem/package
+    - combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
+    - scan isolated dependency-file snapshots with OSV-Scanner v2; file-only mode does not execute target code
+    - scan a local text/JSON list of GitHub repositories with per-repository commits, findings, and failure coverage
+    - explicitly opt in to local Maven/Gradle build resolution with exact selected versions, scopes, and dependency paths
+    - filter by CVSS, severity, advisory dates, package, published fixes, and CISA known exploitation
+    - save unfiltered attributable reports with explicit coverage gaps and refilter them later
+    - attach separately scoped Dependabot alert evidence through gh alerts when available
+    commands:
+      find: 'Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]'
+      scan: 'Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes'
+      report: 'Read and filter saved evidence: report [--latest | --file PATH] [--target NAME ...] [--json]'
+      doctor: 'Check scanner and local feature prerequisites without network requests: doctor [--json]'
+    examples:
+    - intent: find Oracle Java advisories above CVSS 7
+      command: agent-security find --vendor oracle --product jdk --cvss-gt 7 --json
+    - intent: find LiteLLM advisories in the Python ecosystem
+      command: agent-security find --ecosystem pypi --package litellm --json
+    - intent: scan a local repository for high severity vulnerabilities
+      command: agent-security scan --path . --cvss-min 7 --include-unscored --json
+    - intent: scan a GitHub repository at a specific ref
+      command: agent-security scan --repo https://github.com/owner/repo --ref main --json
+    - intent: scan all team repositories saved in a local file
+      command: agent-security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
+    - intent: resolve Spring Boot dependencies from Maven parents and BOMs before scanning
+      command: agent-security scan --path . --resolve maven --maven-profile prod --json
+    - intent: scan Gradle runtime and test dependencies at their selected versions
+      command: agent-security scan --path . --resolve gradle --gradle-configuration runtimeClasspath --gradle-configuration testRuntimeClasspath --json
+    - intent: search recent advisories across my Java, Angular, Node, and AKS stack
+      command: agent-security find --target java --target spring-boot --target angular --target nodejs --target aks --published-after 2026-10-15 --cvss-min 7 --include-unscored --json
+    routing:
+      discover_keywords: [security, cve, vulnerability, vulnerabilities, osv, dependabot, cvss]
+      prompt_patterns:
+      - '\b(scan|find|check)\b.*\b(cves?|vulnerabilit(?:y|ies))\b'
+      recommended_entrypoints:
+      - agent-do security doctor --json
+      - agent-do security scan --path . --json
+      default_command: doctor
+    credentials:
+      optional: [NVD_API_KEY, GH_TOKEN, GITHUB_TOKEN]
+      notes:
+      - NVD_API_KEY raises upstream NVD request allowance; public advisory discovery can work without credentials.
+      - GitHub acquisition uses the installed gh authentication. Token presence alone does not prove access.
+    bounds:
+      '*':
+        source: none
+        why: >-
+          Caller-controlled --limit (100 source records), --max-bytes (16777216 per stream/file),
+          --scan-timeout (300 seconds), --cache-ttl (3600 seconds), and --retries (2) are operator
+          defaults, not published ceilings. Truncation and incomplete coverage are explicit.
+          HTTP timeout defaults to lib/quantities.READ_PROBE_TIMEOUT_SECONDS. Upstream pagination
+          uses GitHub's documented maximum 100 records/page and NVD's 2000 records/page;
+          NVD date windows are limited to its documented 120-day API window.
+          In multi-target discovery --limit applies independently per component query;
+          profile query counts are measured from the versioned catalog and reported.
+          Repository-list scans run sequentially over all unique repo/ref entries in a
+          caller-supplied file bounded by --max-bytes; subprocess timeouts apply per call,
+          not to the full portfolio. No repository count cap or background schedule is implied.
+          NVD pacing uses the published 5 or 50 requests per 30 seconds without/with
+          an API key (6 or 0.6 seconds), shared by every query in the invocation.
+    contracts:
+      snapshot:
+      - find
+      - scan
+      - report
+      interact:
+      - scan
+      verify:
+      - doctor
+      save:
+      - find
+      - scan
+      attributes:
+        find:
+        - composite
+        - own_state
+        scan:
+        - composite
+        - polymorphic
+        - passthrough
+    concurrency: mixed
   brief:
     description: Estate briefing engine — joins GitHub PRs, the manna board, live coord sessions,
       and git into ranked threads, a delta since last look, one-tap suggestions carried as data,

@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""Offline contract tests for vulnerability evidence and false-clean regressions."""
+from __future__ import annotations
+
+import contextlib
+import copy
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools" / "agent-security"))
+from security.cli import main, parser
+from security.model import cvss_scores, finding, matches, merge_findings, present
+from security.scan import acquire, assess_inventory, dependabot, osv_rows, repo_name
+from security.sources import Client, SourceError, discover, enrich_kev, ghsa_row, nvd_row
+from security.store import finish, latest_report, new_report, read_report
+
+
+def advisory(identifier="CVE-2026-10001", score=7.0, version="1.0"):
+    return finding([identifier], "A fixture vulnerability", "fixture", "https://example.invalid/advisory",
+                   scores=[{"score": score, "version": "3.1", "vector": None, "source": "fixture"}] if score is not None else [],
+                   published="2026-10-01T00:00:00Z", modified="2026-10-03T00:00:00Z",
+                   package={"name": "fixture", "ecosystem": "PyPI", "version": version})
+
+
+class FakeClient:
+    def __init__(self, pages):
+        self.pages = iter(pages)
+        self.receipts = []
+        self.urls = []
+
+    def get(self, url):
+        self.urls.append(url)
+        self.receipts.append({"url": url, "fetched_at": "2026-10-22T00:00:00Z", "stale": False})
+        value = next(self.pages)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class SecurityTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.env = patch.dict(os.environ, {"AGENT_DO_HOME": str(self.root / "state")})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.temporary.cleanup()
+
+    def args(self, *argv):
+        return parser().parse_args(argv)
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(argv))
+        return code, json.loads(out.getvalue())
+
+    def test_score_boundaries_and_unscored(self):
+        row = advisory()
+        self.assertTrue(matches(row, self.args("report", "--cvss-min", "7")))
+        self.assertFalse(matches(row, self.args("report", "--cvss-gt", "7")))
+        self.assertFalse(matches(advisory(score=None), self.args("report", "--cvss-min", "7")))
+        self.assertTrue(matches(advisory(score=None), self.args("report", "--cvss-min", "7", "--include-unscored")))
+        report = new_report("scan", {})
+        report["findings"] = [row, advisory(score=None)]
+        view = present(report, self.args("report", "--cvss-gt", "7"))
+        self.assertEqual(view["summary"], {"total": 2, "shown": 0, "excluded": 2, "unscored": 1})
+        self.assertEqual(len(report["findings"]), 2)
+
+    def test_numeric_score_survives_missing_vector_library(self):
+        with patch.dict(sys.modules, {"cvss": None}):
+            scores = cvss_scores([{"score": 8.1, "vector_string": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"}], "GitHub")
+        self.assertEqual(scores[0]["score"], 8.1)
+        self.assertEqual(scores[0]["version"], "3.1")
+
+    def test_dates_and_alias_filter(self):
+        row = advisory()
+        self.assertTrue(matches(row, self.args("report", "--published-after", "2026-10-01")))
+        self.assertFalse(matches(row, self.args("report", "--published-before", "2026-10-01")))
+        self.assertTrue(matches(row, self.args("report", "--updated-after", "2026-10-02")))
+        row["aliases"].append("CVE-2026-12345")
+        self.assertTrue(matches(row, self.args("report", "--cve", "CVE-2026-12345")))
+
+    def test_php_ecosystem_aliases_and_fix_filter(self):
+        row = advisory()
+        row["package"]["ecosystem"] = "Packagist"
+        self.assertTrue(matches(row, self.args("report", "--ecosystem", "composer")))
+        self.assertFalse(matches(row, self.args("report", "--fix-available")))
+        row["affected"] = [{"fixed_versions": ["2.0"]}]
+        self.assertTrue(matches(row, self.args("report", "--fix-available")))
+
+    def test_fix_filter_does_not_borrow_another_packages_fix(self):
+        row = advisory()
+        row["package"] = None
+        row["affected"] = [{"package": {"name": "a", "ecosystem": "pip"}, "fixed_versions": []},
+                           {"package": {"name": "b", "ecosystem": "pip"}, "fixed_versions": ["2.0"]}]
+        self.assertFalse(matches(row, self.args("report", "--package", "a", "--fix-available")))
+        self.assertTrue(matches(row, self.args("report", "--package", "b", "--fix-available")))
+
+    def test_alias_union_preserves_versions_and_occurrences(self):
+        a = advisory("GHSA-aaaa-bbbb-cccc")
+        b = advisory()
+        bridge = copy.deepcopy(a)
+        bridge["aliases"] += b["aliases"]
+        b["evidence"] = [{"path": "sub/requirements.txt"}]
+        c = advisory(version="2.0")
+        rows = merge_findings([a, b, bridge, c])
+        self.assertEqual(len(rows), 2)
+        same = next(x for x in rows if x["package"]["version"] == "1.0")
+        self.assertEqual(same["id"], "CVE-2026-10001")
+        self.assertIn({"path": "sub/requirements.txt"}, same["evidence"])
+
+    def test_nvd_scoring_and_cpe(self):
+        row = nvd_row({"id": "CVE-2026-10001", "descriptions": [{"lang": "en", "value": "test"}],
+                       "metrics": {"cvssMetricV31": [{"source": "nvd@nist.gov", "cvssData": {"version": "3.1", "baseScore": 9.8}}]},
+                       "configurations": [{"nodes": [{"cpeMatch": [{"criteria": "cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*", "vulnerable": True}]}]}]})
+        self.assertEqual(row["cvss"], 9.8)
+        self.assertEqual(row["severity"], "critical")
+        self.assertEqual(len(row["affected"]), 1)
+
+    def test_nvd_pagination_and_truncation(self):
+        def cve(i):
+            return {"cve": {"id": "CVE-2026-" + str(10000+i)}}
+        client = FakeClient([({"vulnerabilities": [cve(1), cve(2)], "totalResults": 3}, {}),
+                             ({"vulnerabilities": [cve(3)], "totalResults": 3}, {})])
+        report = new_report("find", {})
+        discover(self.args("find", "--vendor", "oracle", "--limit", "4"), client, report)
+        self.assertEqual(len(report["findings"]), 3)
+        self.assertIn("startIndex=2", client.urls[1])
+        self.assertEqual(report["coverage"][0]["status"], "ok")
+        client = FakeClient([({"vulnerabilities": [cve(1), cve(2)], "totalResults": 3}, {})])
+        report = new_report("find", {})
+        discover(self.args("find", "--limit", "2"), client, report)
+        self.assertTrue(report["coverage"][0]["truncated"])
+
+    def test_partial_page_failure_retains_findings(self):
+        client = FakeClient([({"vulnerabilities": [{"cve": {"id": "CVE-2026-10001"}}], "totalResults": 2}, {}), SourceError("rate limit")])
+        report = new_report("find", {})
+        with self.assertRaises(SourceError):
+            discover(self.args("find"), client, report)
+        self.assertEqual(len(report["findings"]), 1)
+
+    def test_github_pagination_and_package_identity(self):
+        row = {"ghsa_id": "GHSA-aaaa-bbbb-cccc", "cve_id": "CVE-2026-10001", "severity": "high",
+               "vulnerabilities": [{"package": {"ecosystem": "pip", "name": "litellm"}, "first_patched_version": "2.0", "vulnerable_version_range": "< 2.0"}]}
+        client = FakeClient([([row], {"link": '<next>; rel="next"'}), ([], {})])
+        report = new_report("find", {})
+        discover(self.args("find", "--ecosystem", "pypi", "--package", "litellm"), client, report)
+        self.assertIn("ecosystem=pip", client.urls[0])
+        self.assertIn("page=2", client.urls[1])
+        self.assertEqual(report["findings"][0]["affected"][0]["fixed_versions"], ["2.0"])
+
+    def test_kev_unknown_failure_and_membership(self):
+        report = new_report("scan", {})
+        report["findings"] = [advisory(), advisory("CVE-2026-20002")]
+        enrich_kev(FakeClient([SourceError("offline")]), report)
+        self.assertIsNone(report["findings"][0]["known_exploited"])
+        enrich_kev(FakeClient([({"vulnerabilities": [{"cveID": "CVE-2026-10001"}]}, {})]), report)
+        self.assertTrue(report["findings"][0]["known_exploited"])
+        self.assertFalse(report["findings"][1]["known_exploited"])
+
+    def test_cache_refresh_stale_and_rate_limit(self):
+        args = self.args("find", "--retries", "0")
+        client = Client(args)
+        class Response(io.BytesIO):
+            headers = {}
+        client.open = lambda *a, **k: Response(b'{"vulnerabilities": []}')
+        url = "https://api.github.com/advisories?fixture=cache"
+        client.get(url)
+        client.open = lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("offline"))
+        client.get(url)
+        self.assertTrue(client.receipts[-1]["cache"])
+        args.refresh = True
+        with self.assertRaises(SourceError):
+            client.get(url)
+        args.allow_stale = True
+        client.get(url)
+        self.assertTrue(client.receipts[-1]["stale"])
+        args.allow_stale = False
+        args.retries = 1
+        client.open = lambda *a, **k: (_ for _ in ()).throw(urllib.error.HTTPError(url, 429, "limit", {"Retry-After": "60"}, None))
+        with self.assertRaisesRegex(SourceError, "Retry-After"):
+            client.get(url)
+
+    def test_http_size_bound_and_endpoint_validation(self):
+        args = self.args("find", "--max-bytes", "2")
+        client = Client(args)
+        class Response(io.BytesIO):
+            headers = {}
+        client.open = lambda *a, **k: Response(b'{}x')
+        with self.assertRaises(SourceError):
+            client.get("https://api.github.com/advisories")
+        with self.assertRaises(SourceError):
+            client.get("https://attacker.invalid/advisories")
+
+    def test_local_manifest_snapshot_unresolved_and_symlinks(self):
+        target = self.root / "repo"
+        target.mkdir()
+        (target / "requirements.txt").write_text("litellm>=1\n")
+        (target / "package.json").write_text('{"scripts":{"install":"touch PWNED"}}')
+        outside = self.root / "private"
+        outside.write_text("secret")
+        (target / "composer.lock").symlink_to(outside)
+        stage = self.root / "stage"
+        stage.mkdir()
+        report = new_report("scan", {})
+        entries = acquire(self.args("scan", "--path", str(target)), report, stage)
+        assess_inventory(entries, stage, report)
+        self.assertFalse((stage / "composer.lock").exists())
+        self.assertFalse((target / "PWNED").exists())
+        self.assertTrue(any(x["status"] == "unresolved" for x in report["coverage"]))
+        self.assertTrue(any(x["status"] == "unsupported" for x in report["coverage"]))
+        self.assertIsNotNone(report["target"]["inventory_sha256"])
+
+    def scanner(self, exit_code=1):
+        script = self.root / "osv-scanner"
+        script.write_text('''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+if '--version' in sys.argv:
+    print('osv-scanner version: 2.7.0')
+    raise SystemExit(0)
+stage = Path(sys.argv[-1])
+assert '--all-packages' in sys.argv
+assert not list(stage.rglob('osv-scanner.toml'))
+results=[]
+for filename, name, eco in [('package-lock.json','example-npm','npm'),('composer.lock','example/php','Packagist'),('requirements.txt','example-python','PyPI'),('gradle.lockfile','org.example:java','Maven')]:
+    for path in stage.rglob(filename):
+        results.append({'source': {'path': str(path), 'type':'lockfile'}, 'packages': [{'package':{'name':name,'version':'1.0','ecosystem':eco}, 'vulnerabilities':[{'id':'CVE-2026-10001','summary':'Fixture advisory','published':'2026-10-01T00:00:00Z','affected':[{'package':{'name':name,'ecosystem':eco},'ranges':[{'type':'ECOSYSTEM','events':[{'introduced':'0'},{'fixed':'2.0'}]}]}]}]}]})
+print(json.dumps({'results':results}))
+raise SystemExit(EXIT_CODE)
+'''.replace("EXIT_CODE", str(exit_code)))
+        script.chmod(0o755)
+        return script
+
+    def test_cli_scan_four_ecosystems_and_saved_refilter(self):
+        target = self.root / "repo"
+        target.mkdir()
+        for filename, content in (("package-lock.json", '{}'), ("composer.lock", '{}'), ("requirements.txt", 'example-python==1.0\n'), ("gradle.lockfile", 'org.example:java:1.0=runtimeClasspath\n')):
+            (target / filename).write_text(content)
+        (target / "osv-scanner.toml").write_text('[[IgnoredVulns]]\nid="CVE-2026-10001"\n')
+        before = {p.name: p.read_bytes() for p in target.iterdir()}
+        code, data = self.cli("scan", "--path", str(target), "--scanner", str(self.scanner()), "--json")
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["summary"]["total"], 4)
+        self.assertEqual(len(data["packages"]), 4)
+        self.assertTrue(all(x["affected"][0]["fixed_versions"] == ["2.0"] for x in data["findings"]))
+        self.assertEqual(before, {p.name: p.read_bytes() for p in target.iterdir()})
+        saved = read_report(data["saved_report"])
+        code, view = self.cli("report", "--latest", "--cvss-min", "7", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(view["summary"]["shown"], 0)
+        self.assertEqual(len(saved["findings"]), 4)
+        code, view = self.cli("report", "--latest", "--cvss-min", "7", "--include-unscored", "--json")
+        self.assertEqual(view["summary"]["shown"], 4)
+        self.assertEqual(os.stat(data["saved_report"]).st_mode & 0o777, 0o600)
+
+    def test_failed_scanner_and_missing_scanner_never_report_clean(self):
+        target = self.root / "repo"
+        target.mkdir()
+        (target / "package-lock.json").write_text('{}')
+        for scanner in (str(self.root / "absent"), str(self.scanner(exit_code=128))):
+            code, data = self.cli("scan", "--path", str(target), "--scanner", scanner, "--json")
+            self.assertEqual(code, 1)
+            self.assertEqual(data["status"], "incomplete")
+            self.assertEqual(latest_report()["status"], "incomplete")
+
+    def test_invalid_cli_inputs_are_json_and_make_no_reports(self):
+        for argv in (("find", "--cvss-min", "nan"), ("find", "--severity", "hihg"),
+                     ("find", "--published-after", "yesterday"), ("find", "--package", "litellm"),
+                     ("scan", "--repo", "https://evil.invalid/owner/repo"), ("scan", "--path", ".", "--ref", "main")):
+            code, data = self.cli(*argv, "--json")
+            self.assertEqual(code, 2, argv)
+            self.assertEqual(data["status"], "error")
+
+    def test_report_rejects_unknown_schema_and_unknown_kev(self):
+        path = self.root / "report.json"
+        path.write_text('{"schema_version":999,"findings":[]}')
+        code, _ = self.cli("report", "--file", str(path), "--json")
+        self.assertEqual(code, 2)
+        report = new_report("scan", {})
+        report["findings"] = [advisory()]
+        finish(report)
+        code, _ = self.cli("report", "--known-exploited", "--json")
+        self.assertEqual(code, 2)
+
+    def test_github_immutable_acquisition_and_truncated_tree(self):
+        stage = self.root / "stage"
+        stage.mkdir()
+        sha = "a" * 40
+        args = self.args("scan", "--repo", "https://github.com/acme/project", "--ref", "feature/x")
+        report = new_report("scan", {})
+        calls = []
+        def api(args, endpoint):
+            calls.append(endpoint)
+            if endpoint == "repos/acme/project": return {"default_branch": "main"}
+            if "/commits/" in endpoint: return {"sha": sha}
+            return {"truncated": True, "tree": []}
+        with patch("security.scan.github", api):
+            with self.assertRaisesRegex(ValueError, "truncated"):
+                acquire(args, report, stage)
+        self.assertEqual(report["target"]["commit"], sha)
+        self.assertIn("feature%2Fx", calls[1])
+        self.assertIn(sha, calls[2])
+
+    def test_github_snapshot_fetches_only_selected_commit_manifests(self):
+        import base64
+        stage = self.root / "stage"
+        stage.mkdir()
+        sha = "b" * 40
+        calls = []
+        content = b'{"packages":{},"lockfileVersion":3}'
+        def api(args, endpoint):
+            calls.append(endpoint)
+            if endpoint == "repos/acme/project": return {"default_branch": "main"}
+            if "/commits/" in endpoint: return {"sha": sha}
+            if "/git/trees/" in endpoint:
+                return {"truncated": False, "tree": [
+                    {"path": "app/package-lock.json", "type": "blob", "mode": "100644", "sha": "c"*40},
+                    {"path": "app/install.sh", "type": "blob", "mode": "100755", "sha": "d"*40}]}
+            return {"encoding": "base64", "content": base64.b64encode(content).decode()}
+        report = new_report("scan", {})
+        with patch("security.scan.github", api):
+            acquire(self.args("scan", "--repo", "acme/project"), report, stage)
+        self.assertEqual((stage / "app/package-lock.json").read_bytes(), content)
+        self.assertFalse((stage / "app/install.sh").exists())
+        self.assertEqual(report["target"]["commit"], sha)
+        self.assertEqual(len(calls), 4)
+
+    def test_nonregular_local_manifest_is_not_opened_as_a_stream(self):
+        target = self.root / "repo"
+        target.mkdir()
+        os.mkfifo(target / "requirements.txt")
+        stage = self.root / "stage"
+        stage.mkdir()
+        report = new_report("scan", {})
+        entries = acquire(self.args("scan", "--path", str(target)), report, stage)
+        self.assertEqual(entries, [])
+        self.assertEqual(report["coverage"][0]["status"], "unsupported")
+
+    def test_local_git_status_cannot_execute_repo_fsmonitor(self):
+        target = self.root / "repo"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True)
+        watcher = self.root / "watcher"
+        watcher.write_text('#!/bin/sh\ntouch "' + str(target / "PWNED") + '"\n')
+        watcher.chmod(0o755)
+        subprocess.run(["git", "-C", str(target), "config", "core.fsmonitor", str(watcher)], check=True)
+        (target / "requirements.txt").write_text('example==1.0\n')
+        subprocess.run(["git", "-C", str(target), "-c", "core.fsmonitor=false", "add", "requirements.txt"], check=True)
+        subprocess.run(["git", "-C", str(target), "-c", "core.fsmonitor=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+        # Test the scan path after setup, including protection from optional index writes.
+        marker = target / "PWNED"
+        marker.unlink(missing_ok=True)
+        index = target / ".git/index"
+        before = index.read_bytes()
+        stage = self.root / "stage"
+        stage.mkdir()
+        acquire(self.args("scan", "--path", str(target)), new_report("scan", {}), stage)
+        self.assertFalse(marker.exists())
+        self.assertEqual(index.read_bytes(), before)
+
+    def test_stale_source_data_cannot_produce_complete_cli_report(self):
+        def discovery(args, client, report):
+            report["findings"] = [advisory()]
+            report["coverage"] = [{"source": "NVD", "status": "ok", "receipts": [{"stale": True}]}]
+        with patch("security.cli.discover", discovery):
+            code, data = self.cli("find", "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(data["coverage"][0]["status"], "stale")
+        self.assertEqual(data["summary"]["total"], 1)
+
+    def test_network_failure_publishes_incomplete_report_with_existing_findings(self):
+        def discovery(args, client, report):
+            report["findings"] = [advisory()]
+            raise SourceError("rate limited on page 2")
+        with patch("security.cli.discover", discovery):
+            code, data = self.cli("find", "--json")
+        self.assertEqual(code, 1)
+        self.assertEqual(data["summary"]["total"], 1)
+        self.assertEqual(read_report(data["saved_report"])["status"], "incomplete")
+
+    def test_dependabot_disabled_and_error_are_not_zero(self):
+        args = self.args("scan", "--repo", "acme/project")
+        report = new_report("scan", {"kind": "github", "repository": "acme/project"})
+        rows = [{"repo": "acme/project", "status": "disabled", "count": None}]
+        result = subprocess.CompletedProcess([], 0, json.dumps({"repos": rows}).encode(), b"")
+        with patch("security.scan.run", return_value=result):
+            dependabot(args, report, ROOT / "tools" / "agent-gh")
+        self.assertEqual(report["coverage"][0]["status"], "disabled")
+        self.assertIsNone(report["dependabot"]["repos"][0]["count"])
+        finish(report)
+        self.assertEqual(report["status"], "incomplete")
+
+
+if __name__ == "__main__":
+    unittest.main()

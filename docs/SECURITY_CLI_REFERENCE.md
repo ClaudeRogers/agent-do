@@ -1,0 +1,266 @@
+# Security command and parameter reference
+
+This reference covers every option currently accepted by `agent-do security`.
+Use the [scanning guide](SECURITY_SCANNING.md) for installation and how to read
+coverage. Commands below assume agent-do is installed; run `./agent-do` instead
+from its checkout if needed. Replace example repository names and `/path/to/...`
+paths with your own. Example version overrides illustrate syntax, not a
+recommendation that a particular release is secure or compatible.
+
+## Choose a command
+
+| Command | Purpose | Requirements |
+| --- | --- | --- |
+| `agent-do security find` | Search published advisories, including products your team does not use. | Access to NVD/GitHub advisory APIs; no scanner required. |
+| `agent-do security scan` | Match source dependency versions in a local project, GitHub repository, or repository list. | OSV-Scanner v2; remote acquisition also needs authenticated `gh` access. Explicit JVM resolution also needs Java and Maven/Gradle. |
+| `agent-do security report` | Read and filter an existing unfiltered report. | A saved report; no network or scanner required. |
+| `agent-do security doctor` | Check local scanner prerequisites and credential presence. | No network requests; does not establish authentication or run project builds. |
+
+Put options **after the subcommand**. Unless stated otherwise, value options
+accept one value, are not repeatable, and have no active restriction when omitted.
+Boolean flags are off by default. Shared presentation filters combine with AND;
+repeated targets combine with OR. Filters never remove findings from the saved
+`find`/`scan` report.
+
+## Help and output
+
+| Parameter | Commands | Behavior and default | Example |
+| --- | --- | --- | --- |
+| `-h`, `--help` | Top level and all subcommands | Print help and exit; no assessment runs. | `agent-do security --help` or `agent-do security scan --help` |
+| `--json` | All four | Emit one JSON document instead of human-readable output. | `agent-do security doctor --json` |
+
+```bash
+agent-do security find --help
+agent-do security scan --help
+agent-do security report --help
+agent-do security doctor --help
+```
+
+## Shared finding filters
+
+All parameters in this table are available on **find, scan and report**.
+Examples use saved reports so you can experiment without repeating a scan.
+On `find`, ecosystem/package flags also choose source query criteria.
+
+| Parameter | Values, default and meaning | Example |
+| --- | --- | --- |
+| `--cve ID` | `CVE-YYYY-NNNN` with at least four digits in the final component; matches advisory aliases, case-insensitively. Does not accept a GHSA ID. | `agent-do security report --latest --cve CVE-2021-44228 --json` |
+| `--ecosystem NAME` | One ecosystem or alias from the list below. Filters affected package ecosystems. | `agent-do security report --latest --ecosystem java --json` |
+| `--package NAME` | Exact package name, matched case-insensitively during presentation. **find requires `--ecosystem`**; scan/report do not. Maven coordinates use `group:artifact`. | `agent-do security find --ecosystem pypi --package litellm --json` |
+| `--cvss-min NUMBER` | Inclusive minimum base score, 0–10. Uses the highest available numeric base score. Mutually exclusive with `--cvss-gt`. | `agent-do security report --latest --cvss-min 7 --json` |
+| `--cvss-gt NUMBER` | Exclusive minimum base score, 0–10; `7` excludes exactly 7.0. Mutually exclusive with `--cvss-min`. | `agent-do security report --latest --cvss-gt 7 --json` |
+| `--include-unscored` | Retain records with no numeric score when using a CVSS threshold. Without a threshold, unscored records are already eligible; other filters can still exclude them. | `agent-do security report --latest --cvss-min 7 --include-unscored --json` |
+| `--severity LIST` | Comma-separated values: `critical,high,medium,low,none,unknown`. Case-insensitive; use no spaces. Matches any listed severity. | `agent-do security report --latest --severity critical,high --json` |
+| `--published-after DATE` | Inclusive advisory publication boundary. ISO date or timestamp; omitted timezone means UTC. | `agent-do security report --latest --published-after 2026-10-15 --json` |
+| `--published-before DATE` | Exclusive advisory publication boundary; must be later than `--published-after` if both are supplied. | `agent-do security report --latest --published-after 2026-10-15 --published-before 2026-10-22 --json` |
+| `--updated-after DATE` | Inclusive advisory revision boundary, using the same date format. It is not the date your repository changed. | `agent-do security report --latest --updated-after 2026-10-01T12:00:00Z --json` |
+| `--known-exploited` | Keep only records matched by a CVE alias in CISA KEV. find/scan fetch the catalog automatically. report requires previously enriched evidence and rejects findings whose exploitation status is unknown. | `agent-do security scan --path . --known-exploited --json` |
+| `--fix-available` | Keep advisories with an explicitly published fixed package version. Does not test upgrade compatibility or infer a fix from NVD CPE bounds. | `agent-do security report --latest --fix-available --json` |
+
+Accepted ecosystem names and normalization:
+
+| Accepted input | Package ecosystem |
+| --- | --- |
+| `python`, `pypi`, `pip` | pip / Python packages |
+| `javascript`, `node`, `npm` | npm packages |
+| `php`, `composer`, `packagist` | Composer packages |
+| `java`, `maven` | Maven packages |
+| `rust`, `crates.io` | Rust packages |
+| `go`, `rubygems`, `nuget`, `pub`, `erlang`, `actions`, `swift` | Same named ecosystem |
+
+An ecosystem filter refers to packages, not an installed runtime or cloud
+platform. For example, `--ecosystem node` does not inventory the Node.js binary.
+There are no `--java`, `--python`, `--oracle`, `--since`, or `--days` flags.
+Use `--target`, `--ecosystem`, `--vendor`/`--product`, and explicit date boundaries.
+
+## Find: advisory sources and targets
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--target NAME` | **Repeatable.** Canonical names: `java`, `spring-boot`, `angular`, `nodejs`, `aks`. Case-insensitive aliases: `springboot` → `spring-boot`, `node` → `nodejs`. Uses curated queries; duplicate targets do not repeat searches. Cannot combine with vendor/product/query/ecosystem/package selectors or an explicit source other than `auto`. | `agent-do security find --target java --target springboot --target angular --target node --target aks --cvss-min 7 --json` |
+| `--source NAME` | `auto` (default), `nvd`, `github`. auto selects GitHub for ecosystem/package queries and NVD otherwise. Explicit NVD rejects ecosystem/package; explicit GitHub rejects vendor/product/query. | `agent-do security find --source github --ecosystem npm --package @angular/core --json` |
+| `--vendor NAME` | NVD CPE vendor component, e.g. `oracle`. Letters, digits, underscore, dot and hyphen only. Requires NVD/auto; cannot combine with ecosystem/package. No curated vendor alias conversion. | `agent-do security find --vendor oracle --product jdk --cvss-gt 7 --json` |
+| `--product NAME` | NVD CPE product component, e.g. `cpython`. Same syntax/source restrictions as vendor. Can be used without vendor. | `agent-do security find --product cpython --cvss-min 7 --json` |
+| `--query TEXT` | Broad NVD keyword search; quote multiple words. Not an exact product identity. Unsupported with GitHub source or curated targets. | `agent-do security find --query 'java runtime' --cvss-min 7 --json` |
+| `--limit INTEGER` | Positive integer, default **100 source records examined before presentation filters**. With targets, applies independently to each component query, not the combined output. Exhausting the limit while more records exist marks coverage truncated/incomplete. | `agent-do security find --target spring-boot --limit 500 --json` |
+
+Target queries and candidate relevance are documented in
+[multi-target discovery](MULTI_TARGET_DISCOVERY.md). Java profiles are curated
+rather than exhaustive; Spring Boot and Angular profiles search selected package
+identities. AKS/Kubernetes advisory candidates do not establish that your cluster
+is affected. `find` does not scan any repository or deployment.
+
+### Search a seven-day or thirty-day publication window
+
+These fixed examples end at **2026-10-22 00:00 UTC**, exclusively. Change the dates
+for your run. Database publication dates can lag vendor announcements. The
+following use the same lower-inclusive, upper-exclusive boundaries:
+
+```bash
+# Seven days across several platforms.
+agent-do security find --target java --target springboot --target angular \
+  --target node --target aks \
+  --published-after 2026-10-15 --published-before 2026-10-22 \
+  --cvss-min 7 --include-unscored --json
+
+# Thirty days of Python package advisories.
+agent-do security find --ecosystem python \
+  --published-after 2026-09-22 --published-before 2026-10-22 \
+  --limit 500 --json
+```
+
+For NVD discovery, each requested publication/modification interval must be
+positive and at most **120 days**. If only the publication start is given, its
+end is request time. If only the publication end is given, its start is 120 days
+earlier. An update start uses request time as its end. With no date filters,
+there is no automatically imposed 120-day publication window. These API window
+rules do not limit local filtering of saved reports. Combined date filters must
+match one captured source event, rather than mixing dates from different sources.
+
+## Scan: choose exactly one input
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--path DIR` | Local source directory, including uncommitted dependency files. Required unless repo or repos-file is given; mutually exclusive with both. Local Git identity is recorded when available. | `agent-do security scan --path /path/to/service --json` |
+| `--repo REPOSITORY` | GitHub HTTPS repository URL or `owner/repo`. Resolves the selected ref to an immutable commit and fetches dependency files through `gh`. Mutually exclusive with path/repos-file. | `agent-do security scan --repo https://github.com/my-team/backend --json` |
+| `--repos-file PATH` | Local UTF-8 text or JSON repository list. Scans every unique repo/requested-ref pair sequentially; failures do not stop later repos. Mutually exclusive with path/repo. | `agent-do security scan --repos-file ~/team-repos.txt --cvss-min 7 --include-unscored --json` |
+| `--ref REF` | Branch, tag or commit. Requires repo or repos-file. Default: each repo's default branch. For a list, supplies a shared default; JSON per-entry refs override it. | `agent-do security scan --repo my-team/backend --ref release/1.x --json` |
+| `--scanner EXECUTABLE` | Trusted OSV-Scanner v2 command/path. Default: `osv-scanner` on PATH. Also available on doctor. | `agent-do security scan --path . --scanner /usr/local/bin/osv-scanner --json` |
+| `--scan-timeout SECONDS` | Finite positive number. Default **300** on scan; timeout per scanner, GitHub or build subprocess invocation, including probes. Not a whole-batch deadline. Also on doctor, with a different default below. | `agent-do security scan --repos-file ~/team-repos.txt --scan-timeout 600 --json` |
+| `--dependabot` | Attach separately scoped GitHub default-branch alerts. Requires repo or repos-file and the `gh alerts` provider from PR #51 or its successor. Unavailable/disabled alerts make coverage incomplete; alerts are not merged as commit-equivalent findings. | `agent-do security scan --repo my-team/backend --dependabot --json` |
+
+A plain `team-repos.txt` can contain whole-line comments and blank lines:
+
+```text
+# My team's repositories
+https://github.com/my-team/backend
+my-team/frontend
+my-team/shared-library
+```
+
+For different branches, use `team-repos.json`:
+
+```json
+[
+  "my-team/backend",
+  {"repo": "my-team/frontend", "ref": "release/1.x"},
+  {"repo": "my-team/shared-library", "ref": null}
+]
+```
+
+```bash
+agent-do security scan --repos-file ~/team-repos.json --ref main --json
+```
+
+Here backend uses `main`, frontend uses `release/1.x`, and the library's explicit
+null selects its default branch. Text files accept one repo per line, not local
+directory paths, wildcards, embedded credentials, inline comments or non-GitHub
+hosts. JSON objects accept only `repo` and optional `ref`. See
+[repository-list scanning](REPOSITORY_LIST_SCANNING.md) for duplicate handling,
+per-repository evidence, coverage and report counts.
+
+## Scan: explicit Maven and Gradle resolution
+
+Every option in this table is **scan-only**. `--resolve` requires a trusted
+local `--path`; it executes project build code and permits build/cache writes.
+It is rejected with repo and repos-file. File-only scans never enable it
+implicitly. Run in the environment/settings whose selected dependencies matter.
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--resolve TOOL` | `maven` or `gradle`. Off by default. Resolve selected versions, including inherited/BOM-managed and transitive dependencies, and scan a generated SBOM. | `agent-do security scan --path . --resolve maven --json` |
+| `--maven EXECUTABLE` | Requires resolve maven. Default: executable project `./mvnw`, then installed `mvn`. Overrides the selected executable. | `agent-do security scan --path . --resolve maven --maven /opt/maven/bin/mvn --json` |
+| `--gradle EXECUTABLE` | Requires resolve gradle. Default: executable project `./gradlew`, then installed `gradle`. | `agent-do security scan --path . --resolve gradle --gradle /opt/gradle/bin/gradle --json` |
+| `--maven-profile NAME` | **Repeatable**, resolve maven only. Explicitly activate each named profile. Default: no additional requested profiles; normal Maven implicit activation still applies. | `agent-do security scan --path . --resolve maven --maven-profile prod --maven-profile cloud --json` |
+| `--maven-settings PATH` | Existing Maven settings.xml; resolve maven only. Default: Maven's normal settings behavior. | `agent-do security scan --path . --resolve maven --maven-settings /path/to/settings.xml --json` |
+| `--gradle-configuration NAME` | **Repeatable**, resolve gradle only. Default: `runtimeClasspath`. Supplying any replaces that default, so repeat runtimeClasspath explicitly if you also want it. Missing/unresolvable requested configurations are coverage gaps. | `agent-do security scan --path . --resolve gradle --gradle-configuration runtimeClasspath --gradle-configuration testRuntimeClasspath --json` |
+| `--build-property NAME=VALUE` | **Repeatable**; requires resolve. Maven `-D` or Gradle `-P` property. Default: no overrides. Names are letters/digits/underscore/dot/hyphen. Quote the whole assignment if its value contains spaces. Values are not saved as property metadata; keep credentials out of command lines. | `agent-do security scan --path . --resolve maven --build-property spring-framework.version=6.1.14 --build-property skipTests=true --json` |
+
+Profile/configuration names accept letters, digits, underscore, dot, exclamation
+mark and hyphen; repeat the option instead of passing comma-separated names.
+Property names `outputFile`, `outputType`, `verbose`, `appendOutput`, `skip`,
+`mdep.skip`, and names starting `agentdo.security.` are reserved for inventory
+capture and rejected. Maven options cannot be used with Gradle, or vice versa.
+All build options require explicit resolution.
+
+[JVM dependency resolution](JVM_DEPENDENCY_RESOLUTION.md) describes scopes,
+modules, excluded configurations, wrappers, side effects and unresolved gaps.
+Resolution does not establish what is packaged, installed or deployed.
+
+## HTTP, cache and enrichment options
+
+These options are available on **find and scan**. HTTP/cache flags control
+agent-do's advisory and KEV client, **not** `gh`, Maven/Gradle or OSV-Scanner's
+own network/cache/retry behavior. A file-only scan without KEV enrichment may
+make no requests through this client. Use scan-timeout for external subprocesses.
+
+| Parameter | Values, default and meaning | Example |
+| --- | --- | --- |
+| `--timeout SECONDS` | Finite positive number, default **15**. Per advisory/KEV HTTP request timeout; also bounds accepted Retry-After delays. Not a full-command deadline. | `agent-do security find --target java --timeout 30 --json` |
+| `--retries INTEGER` | Nonnegative integer, default **2** retries after the first request. Retries HTTP 429/500/502/503/504; ordinary connection failures/timeouts are not automatically retried. | `agent-do security find --ecosystem npm --retries 0 --json` |
+| `--cache-ttl SECONDS` | Finite positive number, default **3600** (one hour). Maximum age for a fresh client cache hit; does not change report retention. | `agent-do security find --target angular --cache-ttl 300 --json` |
+| `--refresh` | Bypass fresh client cache and fetch again. Does not force upstream databases to publish new data. May still fall back to an explicitly allowed cached response if fetching fails. | `agent-do security find --target angular --refresh --json` |
+| `--allow-stale` | Permit marked cached-response fallback after a fetch failure. Makes coverage incomplete (exit 1), even if findings are returned. Does not create offline OSV scanning support. | `agent-do security find --target java --allow-stale --json` |
+| `--max-bytes INTEGER` | Positive integer, default **16777216** (16 MiB). Bounds each client response, input manifest, repository-list file, and captured subprocess stream/build inventory where applicable. Not a portfolio-wide total. Also on doctor. | `agent-do security scan --repos-file ~/team-repos.txt --max-bytes 33554432 --json` |
+| `--kev` | Enrich all findings with CISA KEV match status without filtering to matches. Default: exploitation status unknown. `--known-exploited` already requests enrichment. Catalog failure leaves unknown status and incomplete coverage. | `agent-do security scan --path . --kev --json` |
+
+The HTTP client caches responses under `$AGENT_DO_HOME/security/cache` (default
+`~/.agent-do/security/cache`). Refresh/TTL options do not delete prior reports.
+NVD requests share rate pacing. Truncation, errors, stale data and unresolved
+inventory remain visible regardless of presentation filters.
+
+## Report: choose saved evidence
+
+Shared finding filters above and JSON/help are supported. Report has **no**
+network/cache/enrichment flags; it cannot refresh a source or run a new scan.
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--latest` | Read the newest saved report; also the default when neither latest nor file is given. Mutually exclusive with file. The latest report may be a find or scan, including an incomplete run. | `agent-do security report --latest --cvss-min 7 --json` |
+| `--file PATH` | Read a specific saved JSON report. Mutually exclusive with latest. This is a report file, **not** a repository-list input. | `agent-do security report --file /path/to/report.json --severity critical,high --json` |
+| `--target NAME` | **Repeatable**, same names/aliases as find. Only filters saved multi-target advisory discovery to targets originally searched; errors if any requested target was not searched. Does not select repository names in a batch report or initiate new searches. | `agent-do security report --latest --target java --target springboot --json` |
+
+`find`/`scan` save unfiltered schema-version-1 JSON in
+`$AGENT_DO_HOME/security/reports` (default `~/.agent-do/security/reports`). Report
+filtering is read-only and does not save another copy. Record the printed
+`saved_report` path to revisit a particular assessment rather than relying on
+latest. Reports can contain private repository/package identities.
+
+## Doctor: local prerequisites
+
+These are the complete doctor options; help and JSON behave as described above.
+Doctor checks scanner availability/version and reports other feature prerequisites
+and credential presence. It does not validate upstream access or execute builds.
+
+| Parameter | Values and default | Example |
+| --- | --- | --- |
+| `--scanner EXECUTABLE` | Trusted scanner to probe using `--version`; default `osv-scanner` on PATH. | `agent-do security doctor --scanner /usr/local/bin/osv-scanner --json` |
+| `--scan-timeout SECONDS` | Finite positive number, default **15**, for the scanner version subprocess. Scan's default is 300. | `agent-do security doctor --scan-timeout 30 --json` |
+| `--max-bytes INTEGER` | Positive integer, default **16777216**, maximum captured subprocess stream size. | `agent-do security doctor --max-bytes 1048576 --json` |
+
+## Environment variables
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `AGENT_DO_HOME` | Relocate private security cache/reports from `~/.agent-do/security` to `$AGENT_DO_HOME/security`. | `AGENT_DO_HOME=/path/to/team-agent-state agent-do security scan --path . --json` |
+| `NVD_API_KEY` | Optional NVD key for higher published request allowance. | After configuring the key in your environment: `agent-do security find --target java --json` |
+| `GH_TOKEN`, `GITHUB_TOKEN` | Optional GitHub advisory API authentication; GH_TOKEN takes precedence in this client. GitHub repository acquisition uses installed gh authentication and its normal configuration. | After configuring authentication: `agent-do security scan --repo my-team/backend --json` |
+
+Use existing credential management or your shell's secure environment setup;
+never put tokens in repository links or list files. No command starts interactive
+GitHub login automatically.
+
+## Interpret results and exit codes
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Assessment completed within declared scope, **even if vulnerabilities were found**; or doctor passed its scanner check. |
+| `1` | Incomplete: missing scanner, unsupported/unresolved input, inaccessible repo/ref, source failure, truncation or stale evidence. A batch failure does not stop other repos. |
+| `2` | Invalid options, unreadable/invalid input file or unsupported saved report. |
+
+A zero-findings result with incomplete coverage does not establish that a repo
+is unaffected. Filtering findings does not change an incomplete status. Batch
+counts represent advisory/package/version/repository targets, not globally
+unique CVEs. Source scans do not inventory your machine's OS, installed runtimes,
+AKS configuration, or deployed artifacts. There is no scheduler, automatic
+remediation command, or vulnerability-threshold CI exit mode in this interface.

@@ -1,0 +1,305 @@
+"""Public agent-do security command surface."""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import math
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "lib"))
+from quantities import READ_PROBE_TIMEOUT_SECONDS
+
+from .model import ECOSYSTEMS, merge_findings, present, timestamp
+from .scan import dependabot, repo_name, run, scan
+from .sources import Client, SourceError, discover, enrich_kev
+from .store import finish, latest_report, new_report, read_report
+from .targets import PROFILES, canonical_target, discover_targets
+from .repositories import load_repositories, scan_repositories
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def positive(value):
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return number
+
+
+def score(value):
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 10:
+        raise argparse.ArgumentTypeError("CVSS score must be between 0 and 10")
+    return number
+
+
+def date(value):
+    try:
+        timestamp(value)
+        return value
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("use an ISO date or timestamp (UTC if timezone omitted)") from exc
+
+
+def common(parser):
+    parser.add_argument("--json", action="store_true", help="emit one versioned JSON document")
+    parser.add_argument("--cve", help="match a CVE identifier, including advisory aliases")
+    parser.add_argument("--ecosystem", choices=sorted(ECOSYSTEMS), help="package ecosystem; python/pypi normalize to pip")
+    parser.add_argument("--package", help="exact package name; discovery requires --ecosystem")
+    scores = parser.add_mutually_exclusive_group()
+    scores.add_argument("--cvss-min", type=score, help="inclusive minimum CVSS base score")
+    scores.add_argument("--cvss-gt", type=score, help="exclusive minimum CVSS base score")
+    parser.add_argument("--include-unscored", action="store_true", help="retain unscored records with a score threshold")
+    parser.add_argument("--severity", help="comma-separated: critical,high,medium,low,none,unknown")
+    parser.add_argument("--published-after", type=date, help="inclusive publication boundary")
+    parser.add_argument("--published-before", type=date, help="exclusive publication boundary")
+    parser.add_argument("--updated-after", type=date, help="inclusive advisory revision boundary")
+    parser.add_argument("--known-exploited", action="store_true", help="only matches in CISA KEV")
+    parser.add_argument("--fix-available", action="store_true", help="only records with a published fixed version")
+
+
+def network(parser):
+    parser.add_argument("--timeout", type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help="per HTTP request timeout, seconds")
+    parser.add_argument("--retries", type=int, default=2, help="HTTP rate-limit/server-error retries")
+    parser.add_argument("--cache-ttl", type=positive, default=3600, help="HTTP cache age, seconds")
+    parser.add_argument("--refresh", action="store_true", help="bypass fresh cache entries")
+    parser.add_argument("--allow-stale", action="store_true", help="allow explicitly marked stale cache after fetch failure")
+    parser.add_argument("--max-bytes", type=int, default=16_777_216, help="maximum bytes per response, manifest, or subprocess stream")
+    parser.add_argument("--kev", action="store_true", help="enrich all results using CISA's exploitation catalog")
+
+
+def parser():
+    p = ArgumentParser(prog="agent-do security", description="Find advisories and scan dependencies. File scans are read-only; --resolve explicitly executes trusted local Maven/Gradle project code and permits build writes.")
+    sub = p.add_subparsers(dest="command", required=True)
+    f = sub.add_parser("find", help="discover published advisories; does not assess repository exposure")
+    common(f)
+    network(f)
+    f.add_argument("--source", choices=["auto", "nvd", "github"], default="auto")
+    f.add_argument("--vendor", help="NVD CPE vendor component, such as oracle")
+    f.add_argument("--product", help="NVD CPE product component, such as cpython")
+    f.add_argument("--query", help="broad NVD keyword search; not an exact product identity")
+    f.add_argument("--limit", type=int, default=100, help="maximum source records examined before presentation filters; truncation is explicit")
+    f.add_argument('--target', type=canonical_target, choices=sorted(PROFILES), action='append', default=[],
+                   help='repeat to combine curated searches; aliases: springboot, node; --limit applies per component query')
+    s = sub.add_parser("scan", help="assess an isolated dependency-file snapshot with OSV-Scanner v2")
+    common(s)
+    network(s)
+    target = s.add_mutually_exclusive_group(required=True)
+    target.add_argument("--path", help="local source directory, including uncommitted dependency files")
+    target.add_argument("--repo", help="GitHub URL or owner/repo; requires authenticated gh for acquisition")
+    target.add_argument('--repos-file', help='local text/JSON list of GitHub repositories; scan all sequentially in one report')
+    s.add_argument("--ref", help="branch, tag, or commit; defaults to repository default branch")
+    s.add_argument("--scanner", default="osv-scanner", help="trusted OSV-Scanner v2 executable")
+    s.add_argument("--scan-timeout", type=positive, default=300, help="timeout per scanner/GitHub subprocess, seconds")
+    s.add_argument("--dependabot", action="store_true", help="attach separately scoped default-branch alerts through gh alerts (PR #51)")
+    s.add_argument('--resolve', choices=['maven', 'gradle'], help='opt in to executing local build code to resolve exact JVM dependencies (requires --path)')
+    s.add_argument('--maven', help='trusted Maven executable; defaults to executable ./mvnw, then installed mvn')
+    s.add_argument('--gradle', help='trusted Gradle executable; defaults to executable ./gradlew, then installed gradle')
+    s.add_argument('--maven-profile', action='append', default=[], help='activate a Maven profile; repeat for multiple profiles')
+    s.add_argument('--maven-settings', help='Maven settings.xml for repository/auth/profile configuration')
+    s.add_argument('--gradle-configuration', action='append', default=[], help='Gradle configuration to resolve in each project; repeat (default runtimeClasspath)')
+    s.add_argument('--build-property', action='append', default=[], help='NAME=VALUE; Maven -D or Gradle -P project property (repeat; avoid credentials)')
+    r = sub.add_parser("report", help="read a saved unfiltered report and apply presentation filters")
+    common(r)
+    r.add_argument('--target', type=canonical_target, choices=sorted(PROFILES), action='append', default=[],
+                   help='filter saved multi-target findings to searched targets (repeat for OR)')
+    selected = r.add_mutually_exclusive_group()
+    selected.add_argument("--latest", action="store_true", help="read the newest saved report (default)")
+    selected.add_argument("--file", help="read a particular saved JSON report")
+    d = sub.add_parser("doctor", help="check local feature prerequisites without network requests")
+    d.add_argument("--json", action="store_true")
+    d.add_argument("--scanner", default="osv-scanner")
+    d.add_argument("--scan-timeout", type=positive, default=READ_PROBE_TIMEOUT_SECONDS)
+    d.add_argument("--max-bytes", type=int, default=16_777_216)
+    return p
+
+
+def validate(args):
+    if getattr(args, "max_bytes", 1) <= 0 or getattr(args, "limit", 1) <= 0 or getattr(args, "retries", 0) < 0:
+        raise ValueError("--max-bytes and --limit must be positive; --retries must be nonnegative")
+    if getattr(args, "cve", None) and not re.fullmatch(r"CVE-\d{4}-\d{4,}", args.cve, re.I):
+        raise ValueError("--cve must be a CVE-YYYY-NNNN identifier")
+    if getattr(args, "severity", None):
+        values = args.severity.lower().split(",")
+        if not values or set(values) - {"critical", "high", "medium", "low", "none", "unknown"}:
+            raise ValueError("Unknown --severity value")
+        args.severity = ",".join(values)
+    if getattr(args, "published_after", None) and args.published_before and timestamp(args.published_after) >= timestamp(args.published_before):
+        raise ValueError("--published-after must precede --published-before")
+    if args.command == "find":
+        if args.target:
+            args.target = list(dict.fromkeys(args.target))
+            if args.source != 'auto' or any((args.vendor, args.product, args.query, args.ecosystem, args.package)):
+                raise ValueError('--target chooses its own source/criteria; use shared CVSS/date/CVE filters or run a separate manual query')
+        if args.package and not args.ecosystem:
+            raise ValueError("Package discovery requires --ecosystem")
+        if (args.vendor or args.product) and (args.ecosystem or args.package):
+            raise ValueError("Vendor/product discovery and ecosystem/package discovery use different sources; run separate queries")
+        for value in (args.vendor, args.product):
+            if value and not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+                raise ValueError("Vendor/product must be one CPE component; use --query for free text")
+    if args.command == "scan":
+        if args.resolve and not args.path:
+            raise ValueError('--resolve executes build code and requires a trusted local --path checkout; clone GitHub projects first')
+        if not args.resolve and (args.maven or args.gradle or args.maven_profile or args.maven_settings or args.gradle_configuration or args.build_property):
+            raise ValueError('Build options require explicit --resolve maven|gradle')
+        if args.resolve == 'maven' and (args.gradle or args.gradle_configuration):
+            raise ValueError('Gradle options require --resolve gradle')
+        if args.resolve == 'gradle' and (args.maven or args.maven_profile or args.maven_settings):
+            raise ValueError('Maven options require --resolve maven')
+        for value in args.maven_profile + args.gradle_configuration:
+            if not re.fullmatch(r'[A-Za-z0-9_.!-]+', value):
+                raise ValueError('Profile/configuration names must be individual names; repeat the option for multiple selections')
+        for value in args.build_property:
+            name, separator, _ = value.partition('=')
+            if not separator or not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+                raise ValueError('--build-property must be NAME=VALUE')
+            if name in {'outputFile', 'outputType', 'verbose', 'appendOutput', 'skip', 'mdep.skip'} or name.startswith('agentdo.security.'):
+                raise ValueError('This build property is reserved by dependency inventory capture')
+        if args.maven_settings and not Path(args.maven_settings).expanduser().is_file():
+            raise ValueError('--maven-settings must name an existing settings file')
+        if args.ref and not (args.repo or args.repos_file):
+            raise ValueError("--ref requires --repo or --repos-file")
+        if args.dependabot and not (args.repo or args.repos_file):
+            raise ValueError("--dependabot requires --repo or --repos-file")
+        if args.repo:
+            repo_name(args.repo)
+
+
+def doctor(args):
+    binary = shutil.which(args.scanner)
+    scanner = {"available": bool(binary), "version": None, "v2": False}
+    if binary:
+        result = run([binary, "--version"], args)
+        scanner["version"] = result.stdout.decode(errors="replace").strip()
+        scanner["v2"] = result.returncode == 0 and bool(re.search(r"(?:version[: ]+|v)2\.", scanner["version"], re.I))
+    return {"schema_version": 1, "command": "doctor", "status": "ok" if scanner["v2"] else "incomplete",
+            "scanner": scanner, "features": {"advisory_discovery": "available; network not probed",
+            "local_scan": "available" if scanner["v2"] else "requires OSV-Scanner v2",
+            "github_acquisition": "gh found; authentication not probed" if shutil.which("gh") else "requires gh",
+            "maven_resolution": "installed mvn found" if shutil.which('mvn') else 'requires executable project mvnw or installed Maven; never probed without opt-in',
+            "gradle_resolution": "installed gradle found" if shutil.which('gradle') else 'requires executable project gradlew or installed Gradle; never probed without opt-in',
+            "vector_scoring": "available" if importlib.util.find_spec("cvss") else "install optional cvss package; numeric scores and raw vectors remain available",
+            "dependabot": "requires gh alerts from PR #51 or successor"},
+            "credentials_present": {name: bool(os.environ.get(name)) for name in ("NVD_API_KEY", "GH_TOKEN", "GITHUB_TOKEN")},
+            "notes": ["Credential presence does not establish authorization. No network requests made."]}
+
+
+def output(payload, json_mode):
+    if json_mode:
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return
+    if payload.get("error"):
+        print("security: " + payload["error"], file=sys.stderr)
+        return
+    print("agent-do security " + payload["command"] + " — " + payload["status"])
+    if payload["command"] == "doctor":
+        for name, state in payload["features"].items():
+            print("  " + name + ": " + state)
+        return
+    summary = payload["summary"]
+    print(f"  {summary['shown']} shown / {summary['total']} findings; {summary['excluded']} filtered; {summary['unscored']} unscored")
+    for target in payload.get('target_summaries', []):
+        print(f"  Target: {target['target']} — {target['status']}; {target['shown']}/{target['total']} findings shown across {target['queries']} queries")
+    for repository in payload.get('repository_summaries', []):
+        print(f"  Repository: {repository['repository']} ({repository['requested_ref'] or 'default branch'}) — {repository['status']}; {repository['shown']}/{repository['total']} findings shown; commit {repository['commit'] or 'unavailable'}")
+    if payload.get('resolution'):
+        resolution = payload['resolution']
+        print(f"  Resolution: {resolution['tool']} — {resolution['status']}; {len(resolution.get('occurrences', []))} dependency occurrences")
+    for row in payload["findings"]:
+        package = row.get("package") or {}
+        label = package.get("name", "") + ("@" + package["version"] if package.get("version") else "")
+        print(f"  {row['id']}  CVSS {row['cvss'] if row['cvss'] is not None else '?'}  {row['severity']}  {label}")
+        if row.get('repository_target'):
+            target = row['repository_target']
+            print(f"    Repository: {target['repository']} ({target['requested_ref'] or 'default branch'}); commit {target['commit'] or 'unavailable'}")
+        if row.get('matched_targets'):
+            print('    Matched targets: ' + ', '.join(row['matched_targets']))
+            for match in row.get('target_matches', []):
+                if match['relation'].endswith('_candidate'):
+                    print('    Candidate relevance: ' + match['target'] + ' — ' + match['relation'])
+        print("    " + row["summary"].replace("\n", " "))
+        fixes = sorted({v for a in row["affected"] for v in a.get("fixed_versions", [])})
+        if fixes:
+            print("    Published fixes (compatibility not verified): " + ", ".join(fixes))
+        for source in row["sources"]:
+            print("    " + str(source["url"]))
+        for evidence in row['evidence']:
+            if evidence.get('dependency_path'):
+                print('    ' + evidence.get('dependency_scope', 'unknown') + ': ' + ' -> '.join(evidence['dependency_path']))
+    if not payload["findings"]:
+        print("  No matching records in the assessed inventory/source window; review coverage below.")
+    for source in payload["coverage"]:
+        identity = source['source'] + (' [' + source['query_id'] + ']' if source.get('query_id') else '')
+        if source.get('repository_target'):
+            target = source['repository_target']
+            identity += f" [{target['repository']} @ {target['requested_ref'] or 'default branch'}]"
+        print("  Coverage: " + identity + " — " + source["status"] + (": " + source.get("reason", source.get("error", "")) if source.get("reason") or source.get("error") else ""))
+    for profile in payload.get('target', {}).get('profiles', []):
+        print('  Target scope (' + profile['target'] + '): ' + profile['scope'])
+    for note in payload.get("notes", []) + payload.get("limitations", []):
+        print("  " + note)
+    if payload.get("saved_report"):
+        print("  Saved: " + payload["saved_report"])
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    p = parser()
+    # Keep parser errors machine-readable when the caller requests JSON.
+    try:
+        args = p.parse_args(argv)
+        validate(args)
+        if args.command == "doctor":
+            payload = doctor(args)
+        elif args.command == "report":
+            report = read_report(args.file) if args.file else latest_report()
+            if args.target:
+                searched = report.get('target', {}).get('targets', [])
+                if not set(args.target) <= set(searched):
+                    raise ValueError('Requested targets were not searched in this saved report; repeat find with --target')
+            if args.known_exploited and any(x["known_exploited"] is None for x in report["findings"]):
+                raise ValueError("Saved report has unknown exploitation status; repeat find/scan with --kev")
+            payload = present(report, args)
+        else:
+            batch_target = load_repositories(args.repos_file, args.max_bytes, args.ref) if args.command == 'scan' and args.repos_file else None
+            report = new_report(args.command, batch_target or ({"kind": "github", "repository": args.repo} if args.command == "scan" and args.repo else {"kind": "local", "path": args.path} if args.command == "scan" else {"kind": "advisory_query"}))
+            client = Client(args)
+            try:
+                if args.command == "find":
+                    if args.target:
+                        discover_targets(args, client, report)
+                    else:
+                        discover(args, client, report)
+                elif batch_target:
+                    scan_repositories(args, report, ROOT / 'tools' / 'agent-gh')
+                else:
+                    scan(args, report)
+                    if args.dependabot:
+                        dependabot(args, report, ROOT / "tools" / "agent-gh")
+                report["findings"] = merge_findings(report["findings"])
+                if args.kev or args.known_exploited:
+                    enrich_kev(client, report)
+            except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:
+                report["coverage"].append({"source": args.command, "status": "error", "error": str(exc), "receipts": client.receipts[:]})
+            report["findings"] = merge_findings(report["findings"])
+            for source in report["coverage"]:
+                if any(x.get("stale") for x in source.get("receipts", [])):
+                    source['stale'] = True
+                    if source['status'] == 'ok':
+                        source["status"] = "stale"
+            payload = present(finish(report), args)
+        output(payload, args.json)
+        return 1 if payload["status"] != "complete" and payload["status"] != "ok" else 0
+    except (ValueError, OSError, SourceError) as exc:
+        output({"schema_version": 1, "status": "error", "error": str(exc)}, "--json" in argv)
+        return 2

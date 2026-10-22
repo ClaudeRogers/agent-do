@@ -18,7 +18,7 @@ commands. Per-verb truth lives in each tool's safety note, derived
 from its `contracts:` block: verbs touching only the snapshot and
 verify beats are read-only; connect, interact, and save verbs write.
 
-## Summary (102 tools)
+## Summary (103 tools)
 
 | Tool | Description | Concurrency | Commands |
 |------|-------------|-------------|----------|
@@ -98,6 +98,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
+| [security](#security) | Published vulnerability discovery and source dependency scanning for local and GitHub repositories | mixed | 4 |
 | [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
@@ -3763,6 +3764,66 @@ agent-do screen type 'hello world'
 
 - Read-only (snapshot/verify; safe to parallelize): `cursor`, `displays`, `elements`, `find`, `snapshot`
 - Write (connect/interact/save): `click`, `press`, `scroll`, `type`
+
+### security
+
+Published vulnerability discovery and source dependency scanning for local and GitHub repositories
+
+Concurrency: `mixed`
+
+**Capabilities**
+
+- find NVD CVEs by CPE vendor/product or keywords and GitHub advisories by ecosystem/package
+- combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
+- scan isolated dependency-file snapshots with OSV-Scanner v2; file-only mode does not execute target code
+- scan a local text/JSON list of GitHub repositories with per-repository commits, findings, and failure coverage
+- explicitly opt in to local Maven/Gradle build resolution with exact selected versions, scopes, and dependency paths
+- filter by CVSS, severity, advisory dates, package, published fixes, and CISA known exploitation
+- save unfiltered attributable reports with explicit coverage gaps and refilter them later
+- attach separately scoped Dependabot alert evidence through gh alerts when available
+
+**Commands**
+
+- `find`: Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
+- `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
+- `report`: Read and filter saved evidence: report [--latest | --file PATH] [--target NAME ...] [--json]
+- `doctor`: Check scanner and local feature prerequisites without network requests: doctor [--json]
+
+**Examples**
+
+```bash
+# find Oracle Java advisories above CVSS 7
+agent-do security find --vendor oracle --product jdk --cvss-gt 7 --json
+# find LiteLLM advisories in the Python ecosystem
+agent-do security find --ecosystem pypi --package litellm --json
+# scan a local repository for high severity vulnerabilities
+agent-do security scan --path . --cvss-min 7 --include-unscored --json
+# scan a GitHub repository at a specific ref
+agent-do security scan --repo https://github.com/owner/repo --ref main --json
+# scan all team repositories saved in a local file
+agent-do security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
+# resolve Spring Boot dependencies from Maven parents and BOMs before scanning
+agent-do security scan --path . --resolve maven --maven-profile prod --json
+# scan Gradle runtime and test dependencies at their selected versions
+agent-do security scan --path . --resolve gradle --gradle-configuration runtimeClasspath --gradle-configuration testRuntimeClasspath --json
+# search recent advisories across my Java, Angular, Node, and AKS stack
+agent-do security find --target java --target spring-boot --target angular --target nodejs --target aks --published-after 2026-10-15 --cvss-min 7 --include-unscored --json
+```
+
+**Credentials**
+
+- Optional: `NVD_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`
+- Note: NVD_API_KEY raises upstream NVD request allowance; public advisory discovery can work without credentials.
+- Note: GitHub acquisition uses the installed gh authentication. Token presence alone does not prove access.
+
+**Safety (from contracts)**
+
+- Read-only (snapshot/verify; safe to parallelize): `doctor`, `report`
+- Write (connect/interact/save): `find`, `scan`
+- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `scan`
+- polymorphic (beat decided by payload or flag at call time): `scan`
+- composite (one call performs several beats internally): `find`, `scan`
+- own_state (writes only its own cache/state; parallel-safe): `find`
 
 ### sentry
 
