@@ -53,14 +53,46 @@ def finish(report):
 
 
 def read_report(path):
-    value = json.loads(Path(path).read_text())
-    if value.get("schema_version") != SCHEMA_VERSION or not isinstance(value.get("findings"), list):
+    value = json.loads(Path(path).expanduser().read_text())
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION or not isinstance(value.get("findings"), list):
         raise ValueError("Unsupported report schema")
     return value
 
 
-def latest_report():
-    paths = sorted((home() / "reports").glob("*.json"))
+def report_paths():
+    return sorted((home() / 'reports').glob('*.json'), reverse=True)
+
+
+def list_reports():
+    entries = []
+    for path in report_paths():
+        entry = {'file': str(path)}
+        try:
+            report = read_report(path)
+            entry.update({'report_id': report['report_id'], 'created_at': report['created_at'],
+                'command': report['command'], 'target': report['target'], 'status': report['status'],
+                'findings': len(report['findings']),
+                'unscored': sum(row.get('cvss') is None for row in report['findings']),
+                'coverage_gaps': [item for item in report['coverage'] if item['status'] != 'ok']})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            entry = {'file': str(path), 'status': 'unreadable',
+                     'error': 'Cannot read report metadata; file is unreadable or has an unsupported structure'}
+        entries.append(entry)
+    return entries
+
+
+def latest_report(complete_only=False):
+    if complete_only:
+        entries = list_reports()
+        selected = next((entry for entry in entries if entry['status'] == 'complete'), None)
+        if not selected:
+            raise ValueError('No complete saved security reports; use report --list to inspect available assessments')
+        report = read_report(selected['file'])
+        report['selection_notes'] = ['Selected the newest complete report across all projects and commands. It may be older than an incomplete assessment; check its target and timestamp.']
+        if any(entry['status'] == 'unreadable' for entry in entries):
+            report['selection_notes'].append('Some saved reports could not be read; use report --list to inspect them.')
+        return report
+    paths = report_paths()
     if not paths:
         raise ValueError("No saved security reports; run find or scan first")
-    return read_report(paths[-1])
+    return read_report(paths[0])

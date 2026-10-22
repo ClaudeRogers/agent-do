@@ -285,6 +285,7 @@ Path(destination).write_text(json.dumps(BODY))
         self.assertEqual(code, 1)
         self.assertEqual(report['resolution']['status'], 'incomplete')
         self.assertNotIn('SECRET_CREDENTIAL_VALUE', json.dumps(report))
+        self.assertIn('--maven-settings PATH', json.dumps(report['coverage']))
 
     def test_version_probe_retains_only_version_number(self):
         self.pom()

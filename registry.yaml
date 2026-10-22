@@ -13,7 +13,7 @@ tools:
     commands:
       find: 'Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]'
       scan: 'Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes'
-      report: 'Read and filter saved evidence: report [--latest | --file PATH] [--target NAME ...] [--json]'
+      report: 'List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]'
       doctor: 'Check scanner and local feature prerequisites without network requests: doctor [--json]'
     examples:
     - intent: find Oracle Java advisories above CVSS 7
@@ -26,6 +26,8 @@ tools:
       command: agent-security scan --repo https://github.com/owner/repo --ref main --json
     - intent: scan all team repositories saved in a local file
       command: agent-security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
+    - intent: list previous security assessments including failed scans
+      command: agent-security report --list --json
     - intent: resolve Spring Boot dependencies from Maven parents and BOMs before scanning
       command: agent-security scan --path . --resolve maven --maven-profile prod --json
     - intent: scan Gradle runtime and test dependencies at their selected versions

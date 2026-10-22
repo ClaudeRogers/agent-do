@@ -3786,7 +3786,7 @@ Concurrency: `mixed`
 
 - `find`: Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
 - `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
-- `report`: Read and filter saved evidence: report [--latest | --file PATH] [--target NAME ...] [--json]
+- `report`: List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]
 - `doctor`: Check scanner and local feature prerequisites without network requests: doctor [--json]
 
 **Examples**
@@ -3802,6 +3802,8 @@ agent-do security scan --path . --cvss-min 7 --include-unscored --json
 agent-do security scan --repo https://github.com/owner/repo --ref main --json
 # scan all team repositories saved in a local file
 agent-do security scan --repos-file ./team-repos.txt --cvss-min 7 --include-unscored --json
+# list previous security assessments including failed scans
+agent-do security report --list --json
 # resolve Spring Boot dependencies from Maven parents and BOMs before scanning
 agent-do security scan --path . --resolve maven --maven-profile prod --json
 # scan Gradle runtime and test dependencies at their selected versions

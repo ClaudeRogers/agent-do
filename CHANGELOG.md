@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Security report browsing now supports `report --list` and explicit `--latest-complete` selection. Default latest selection flags incomplete assessments with recovery commands rather than silently substituting older findings. Maven failure guidance points to existing `--maven-settings` support; setup and filter documentation clarify scanner installation, fix availability and unscored exit behavior.
+
 - `security scan --repos-file PATH` scans every GitHub repository in a local text/JSON list, with optional per-repo refs, duplicate suppression, isolated failures, per-repo summaries, and one unfiltered saved report. This adds the batch-scan portion of portfolio monitoring; scheduling and change tracking remain future work.
 
 - `security find --target NAME` is repeatable for combined Java, Spring Boot, Angular, Node.js, and AKS advisory discovery. Curated query criteria, candidate relevance, per-query failures/truncation, and matched targets survive deduplication and saved-report filtering. NVD requests share rate pacing, and date filters preserve source-specific publication/revision events.

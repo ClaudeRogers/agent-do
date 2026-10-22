@@ -276,6 +276,33 @@ raise SystemExit(EXIT_CODE)
             self.assertEqual(data["status"], "incomplete")
             self.assertEqual(latest_report()["status"], "incomplete")
 
+    def test_unknown_upstream_freshness_and_unscored_vectors_alone_are_not_warnings(self):
+        target = self.root / 'freshness-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(self.scanner()), '--json')
+        self.assertEqual(code, 0)
+        coverage = next(item for item in report['coverage'] if item['source'] == 'OSV-Scanner')
+        self.assertEqual(coverage['status'], 'ok')
+        self.assertFalse(coverage['warnings'])
+        self.assertIn('publication time unavailable', coverage['advisory_data_freshness'])
+        self.assertEqual(report['summary']['unscored'], 1)
+
+    def test_scanner_warning_reason_explains_detection_without_leaking_diagnostics(self):
+        target = self.root / 'warning-project'
+        target.mkdir()
+        (target / 'requirements.txt').write_text('example-python==1.0\n')
+        scanner = self.scanner()
+        scanner.write_text(scanner.read_text().replace('import json, sys', "import json, sys\nprint('WARNING private diagnostic SECRET', file=sys.stderr)"))
+        code, report = self.cli('scan', '--path', str(target), '--scanner', str(scanner), '--json')
+        self.assertEqual(code, 1)
+        coverage = next(item for item in report['coverage'] if item['source'] == 'OSV-Scanner')
+        self.assertEqual(coverage['status'], 'warning')
+        self.assertEqual(coverage['diagnostic_keywords'], ['warning'])
+        self.assertIn('heuristic', coverage['reason'])
+        self.assertEqual(len(coverage['stderr_sha256']), 64)
+        self.assertNotIn('SECRET', json.dumps(report))
+
     def test_invalid_cli_inputs_are_json_and_make_no_reports(self):
         for argv in (("find", "--cvss-min", "nan"), ("find", "--severity", "hihg"),
                      ("find", "--published-after", "yesterday"), ("find", "--package", "litellm"),

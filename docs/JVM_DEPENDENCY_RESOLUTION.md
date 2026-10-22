@@ -78,6 +78,33 @@ Inventory-control properties are reserved and cannot be overridden by this flag.
 
 ## Maven behavior
 
+### Private Maven repositories (Artifactory/Nexus)
+
+Maven retains its normal settings behavior, including `~/.m2/settings.xml` and
+environment-based configuration. The plugin does not replace your home directory
+or require repository credentials as plugin arguments. To select a settings file:
+
+```bash
+agent-do security scan --path ~/workspace/offer-service --resolve maven \
+  --maven-settings ~/.m2/settings.xml --severity critical --include-unscored --json
+```
+
+`--maven-settings PATH` is forwarded as Maven's `--settings PATH`. The plugin's
+flag is not named `--settings`. Ensure the settings `<server><id>` matches the
+repository or mirror ID used by the project, the necessary profiles are active,
+and any credential environment variables referenced by settings are available
+to the process. Keep credentials in your existing settings/credential mechanism,
+not in build properties or repository-list URLs. Settings contents are not copied
+into the report; the settings path is recorded.
+
+If resolution fails, the error points to settings and repository access. Diagnose
+with the project's normal Maven command in your terminal using the same settings
+and profiles; build logs are deliberately not persisted in security reports.
+The scanner can assess private Maven projects when their normal dependency
+resolution succeeds; it does not supply missing repository authorization.
+
+### Resolved inventory
+
 The resolver invokes the pinned goal
 `org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree`, with JSON output
 and verbose conflict output disabled. It captures JSON trees from stdout,

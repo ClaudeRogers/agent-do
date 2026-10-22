@@ -17,7 +17,15 @@ agent-do security doctor --json
 ```
 
 Install [OSV-Scanner v2](https://google.github.io/osv-scanner/installation/)
-for source scans. Choose a trusted installed executable with `--scanner PATH`.
+separately for source scans; it is **required** and not bundled with agent-do.
+On macOS with Homebrew:
+
+```bash
+brew install osv-scanner
+agent-do security doctor --json
+```
+
+Choose a trusted installed executable with `--scanner PATH`.
 GitHub repository acquisition also requires `gh` and suitable repository access.
 The command never starts an interactive login.
 
@@ -149,6 +157,8 @@ profiles/settings, configurations, dependency paths, and build-execution scope.
 
 ```bash
 agent-do security report --latest --cvss-min 7 --include-unscored --json
+agent-do security report --list --json
+agent-do security report --latest-complete --severity critical,high --json
 agent-do security report --file /path/to/report.json --severity critical,high
 agent-do security scan --path . --kev --json
 agent-do security report --latest --known-exploited --json
@@ -161,6 +171,9 @@ version, vector, and source. Severity follows that score when available; otherwi
 it uses the advisory's category or `unknown`. Aliases are merged transitively;
 different installed versions remain separate findings. Evidence paths from
 multiple occurrences are retained. A published fix is not a tested upgrade plan.
+
+`--fix-available` keeps findings **with** a published fix; it does not remove
+them as already resolved. If all 17 findings have fixes, all 17 remain shown.
 
 Dates accept ISO dates/timestamps; a missing timezone means UTC.
 `--published-after` is inclusive, `--published-before` is exclusive, and
@@ -184,6 +197,15 @@ Reports use schema version 1 and unique filenames; a later failed scan never
 overwrites earlier evidence. `report` reads saved evidence without network
 requests or modifying it. It reports total, shown, excluded, and unscored counts.
 
+`report --latest` includes failed/incomplete assessments and explicitly flags
+them; it never silently replaces a recent failure with older findings. Use
+`report --list` to see timestamps, targets, status, counts, coverage gaps and
+paths for all reports, then `report --file PATH` to choose one. Alternatively,
+`report --latest-complete` explicitly selects the newest complete assessment
+across **all projects and commands**, which may be older or for a different
+project. Always check the target and timestamp. These four selectors are mutually
+exclusive. Listing accepts `--json` but not finding filters.
+
 Execution exit codes:
 
 - `0`: assessment completed within its declared scope, including completed
@@ -194,6 +216,20 @@ Execution exit codes:
 
 No matching findings means no known matches in the successfully assessed
 inventory and source window. Review coverage before interpreting that result.
+
+Unscored CVSS values alone do **not** cause exit 1. If a scan resolves dependencies
+and returns findings but exits incomplete, inspect non-`ok` entries in the JSON
+`coverage` array. Scanner stderr warnings, unassessed inventory and unavailable
+providers can still cause incomplete coverage. `--include-unscored` changes score
+filtering, not assessment completeness.
+
+The scanner's `advisory_data_freshness` field records that upstream publication
+time is unknown on every scan; that field alone does not trigger a warning.
+The current diagnostic check is conservative: scanner stderr containing whole-word
+`warn`, `warning`, `error` or `failed` marks coverage warning/incomplete. This
+text heuristic can match benign messages; it does not prove missing inventory
+or stale data. Warning coverage includes a reason, matched keywords and a stderr
+hash, without preserving potentially private raw diagnostics.
 
 ## Network, cache, and data disclosure
 
@@ -236,6 +272,7 @@ python3 tests/test_security.py
 python3 tests/test_security_resolution.py
 python3 tests/test_security_targets.py
 python3 tests/test_security_repositories.py
+python3 tests/test_security_reports.py
 ./agent-do harness contracts validate
 ./agent-do harness contracts drift --tool security
 ./agent-do harness bounds drift --tool security

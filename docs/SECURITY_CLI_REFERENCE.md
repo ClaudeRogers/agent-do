@@ -55,7 +55,7 @@ On `find`, ecosystem/package flags also choose source query criteria.
 | `--published-before DATE` | Exclusive advisory publication boundary; must be later than `--published-after` if both are supplied. | `agent-do security report --latest --published-after 2026-10-15 --published-before 2026-10-22 --json` |
 | `--updated-after DATE` | Inclusive advisory revision boundary, using the same date format. It is not the date your repository changed. | `agent-do security report --latest --updated-after 2026-10-01T12:00:00Z --json` |
 | `--known-exploited` | Keep only records matched by a CVE alias in CISA KEV. find/scan fetch the catalog automatically. report requires previously enriched evidence and rejects findings whose exploitation status is unknown. | `agent-do security scan --path . --known-exploited --json` |
-| `--fix-available` | Keep advisories with an explicitly published fixed package version. Does not test upgrade compatibility or infer a fix from NVD CPE bounds. | `agent-do security report --latest --fix-available --json` |
+| `--fix-available` | Keep advisories **with** an explicitly published fixed package version; does not remove them. If all 17 findings have fixes, all 17 remain. Does not test upgrade compatibility or infer a fix from NVD CPE bounds. | `agent-do security report --latest --fix-available --json` |
 
 Accepted ecosystem names and normalization:
 
@@ -172,7 +172,7 @@ implicitly. Run in the environment/settings whose selected dependencies matter.
 | `--maven EXECUTABLE` | Requires resolve maven. Default: executable project `./mvnw`, then installed `mvn`. Overrides the selected executable. | `agent-do security scan --path . --resolve maven --maven /opt/maven/bin/mvn --json` |
 | `--gradle EXECUTABLE` | Requires resolve gradle. Default: executable project `./gradlew`, then installed `gradle`. | `agent-do security scan --path . --resolve gradle --gradle /opt/gradle/bin/gradle --json` |
 | `--maven-profile NAME` | **Repeatable**, resolve maven only. Explicitly activate each named profile. Default: no additional requested profiles; normal Maven implicit activation still applies. | `agent-do security scan --path . --resolve maven --maven-profile prod --maven-profile cloud --json` |
-| `--maven-settings PATH` | Existing Maven settings.xml; resolve maven only. Default: Maven's normal settings behavior. | `agent-do security scan --path . --resolve maven --maven-settings /path/to/settings.xml --json` |
+| `--maven-settings PATH` | Existing Maven settings.xml; resolve maven only. Forwarded as Maven `--settings`. Default: normal Maven settings, including `~/.m2/settings.xml`. Use for private Artifactory/Nexus repositories; server IDs must match repository/mirror IDs. No generic plugin `--settings` alias. | `agent-do security scan --path . --resolve maven --maven-settings /path/to/settings.xml --json` |
 | `--gradle-configuration NAME` | **Repeatable**, resolve gradle only. Default: `runtimeClasspath`. Supplying any replaces that default, so repeat runtimeClasspath explicitly if you also want it. Missing/unresolvable requested configurations are coverage gaps. | `agent-do security scan --path . --resolve gradle --gradle-configuration runtimeClasspath --gradle-configuration testRuntimeClasspath --json` |
 | `--build-property NAME=VALUE` | **Repeatable**; requires resolve. Maven `-D` or Gradle `-P` property. Default: no overrides. Names are letters/digits/underscore/dot/hyphen. Quote the whole assignment if its value contains spaces. Values are not saved as property metadata; keep credentials out of command lines. | `agent-do security scan --path . --resolve maven --build-property spring-framework.version=6.1.14 --build-property skipTests=true --json` |
 
@@ -216,8 +216,10 @@ network/cache/enrichment flags; it cannot refresh a source or run a new scan.
 
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |
-| `--latest` | Read the newest saved report; also the default when neither latest nor file is given. Mutually exclusive with file. The latest report may be a find or scan, including an incomplete run. | `agent-do security report --latest --cvss-min 7 --json` |
-| `--file PATH` | Read a specific saved JSON report. Mutually exclusive with latest. This is a report file, **not** a repository-list input. | `agent-do security report --file /path/to/report.json --severity critical,high --json` |
+| `--latest` | Read the newest saved report, including incomplete runs; the default without a selector. Explicitly flags an incomplete assessment and suggests recovery commands. Does not silently substitute older results. | `agent-do security report --latest --cvss-min 7 --json` |
+| `--latest-complete` | Explicitly select the newest report whose status is complete, skipping incomplete/unreadable reports. Searches **all projects and commands**; may select older findings for a different project. Shows a selection note; errors if no complete report exists. | `agent-do security report --latest-complete --severity critical,high --json` |
+| `--list` | List all saved reports newest first, with timestamps, targets, assessment status, finding/unscored counts, coverage gaps and file paths. Does not display finding details or accept finding filters. Empty list exits 0; unreadable entries are shown and make listing exit 1. Incomplete assessments listed normally do not make listing fail. | `agent-do security report --list --json` |
+| `--file PATH` | Read a specific saved JSON report. This is a report file, **not** a repository-list input. | `agent-do security report --file /path/to/report.json --severity critical,high --json` |
 | `--target NAME` | **Repeatable**, same names/aliases as find. Only filters saved multi-target advisory discovery to targets originally searched; errors if any requested target was not searched. Does not select repository names in a batch report or initiate new searches. | `agent-do security report --latest --target java --target springboot --json` |
 
 `find`/`scan` save unfiltered schema-version-1 JSON in
@@ -225,6 +227,13 @@ network/cache/enrichment flags; it cannot refresh a source or run a new scan.
 filtering is read-only and does not save another copy. Record the printed
 `saved_report` path to revisit a particular assessment rather than relying on
 latest. Reports can contain private repository/package identities.
+
+`--latest`, `--latest-complete`, `--list` and `--file` are mutually exclusive.
+After a failed Gradle scan, `--latest` still shows that failure rather than an
+older Maven assessment. Use `--list` to locate the earlier project's file and
+then `--file` to refilter it. Listing and selection never rewrite saved evidence.
+JSON selection notices appear in `selection_notes`; JSON listing uses `reports`
+metadata entries rather than the single-report `findings`/`summary` shape.
 
 ## Doctor: local prerequisites
 
@@ -257,6 +266,16 @@ GitHub login automatically.
 | `0` | Assessment completed within declared scope, **even if vulnerabilities were found**; or doctor passed its scanner check. |
 | `1` | Incomplete: missing scanner, unsupported/unresolved input, inaccessible repo/ref, source failure, truncation or stale evidence. A batch failure does not stop other repos. |
 | `2` | Invalid options, unreadable/invalid input file or unsupported saved report. |
+
+Unscored CVSS values alone do **not** cause exit 1. They affect score filtering
+and the unscored count. For an incomplete assessment, inspect `coverage` entries
+whose status is not `ok` (such as scanner warnings or missing inventory), even
+if dependency resolution succeeded and findings were returned.
+
+The unknown upstream publication time field is informational and does not itself
+cause exit 1. OSV warning detection currently uses whole-word warning/error/failure
+keywords in stderr; it is conservative and can match benign diagnostic messages.
+Warning coverage includes the detection reason, keyword list and stderr hash.
 
 A zero-findings result with incomplete coverage does not establish that a repo
 is unaffected. Filtering findings does not change an incomplete status. Batch

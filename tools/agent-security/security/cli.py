@@ -18,7 +18,7 @@ from quantities import READ_PROBE_TIMEOUT_SECONDS
 from .model import ECOSYSTEMS, merge_findings, present, timestamp
 from .scan import dependabot, repo_name, run, scan
 from .sources import Client, SourceError, discover, enrich_kev
-from .store import finish, latest_report, new_report, read_report
+from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
 
@@ -113,7 +113,9 @@ def parser():
     r.add_argument('--target', type=canonical_target, choices=sorted(PROFILES), action='append', default=[],
                    help='filter saved multi-target findings to searched targets (repeat for OR)')
     selected = r.add_mutually_exclusive_group()
-    selected.add_argument("--latest", action="store_true", help="read the newest saved report (default)")
+    selected.add_argument("--latest", action="store_true", help="read the newest saved report, including incomplete assessments (default)")
+    selected.add_argument('--latest-complete', action='store_true', help='explicitly select the newest complete report across all projects; may be older')
+    selected.add_argument('--list', action='store_true', help='list saved report paths, timestamps, targets, status, findings and coverage gaps')
     selected.add_argument("--file", help="read a particular saved JSON report")
     d = sub.add_parser("doctor", help="check local feature prerequisites without network requests")
     d.add_argument("--json", action="store_true")
@@ -124,6 +126,11 @@ def parser():
 
 
 def validate(args):
+    if args.command == 'report' and args.list:
+        filters = ('cve', 'ecosystem', 'package', 'cvss_min', 'cvss_gt', 'include_unscored', 'severity',
+                   'published_after', 'published_before', 'updated_after', 'known_exploited', 'fix_available', 'target')
+        if any(getattr(args, key) is not None and getattr(args, key) is not False and getattr(args, key) != [] for key in filters):
+            raise ValueError('--list lists report metadata; apply finding filters with --file, --latest or --latest-complete')
     if getattr(args, "max_bytes", 1) <= 0 or getattr(args, "limit", 1) <= 0 or getattr(args, "retries", 0) < 0:
         raise ValueError("--max-bytes and --limit must be positive; --retries must be nonnegative")
     if getattr(args, "cve", None) and not re.fullmatch(r"CVE-\d{4}-\d{4,}", args.cve, re.I):
@@ -206,6 +213,27 @@ def output(payload, json_mode):
         for name, state in payload["features"].items():
             print("  " + name + ": " + state)
         return
+    if 'reports' in payload:
+        for report in payload['reports']:
+            target = report.get('target', {})
+            label = target.get('repository') or target.get('path') or ', '.join(target.get('targets', [])) or target.get('kind', 'unknown')
+            print(f"  {report.get('created_at', '?')}  {report.get('command', '?')}  {label} — {report['status']}; {report.get('findings', '?')} findings; {report.get('unscored', '?')} unscored")
+            for gap in report.get('coverage_gaps', []):
+                print(f"    Coverage: {gap['source']} — {gap['status']}: {gap.get('reason', gap.get('error', ''))}")
+            if report.get('error'):
+                print('    ' + report['error'])
+            print('    File: ' + report['file'])
+        if not payload['reports']:
+            print('  No saved security reports; run find or scan first.')
+        return
+    for note in payload.get('selection_notes', []):
+        print('  Report selection: ' + note)
+    if payload.get('created_at'):
+        print('  Assessed: ' + payload['created_at'])
+    target = payload.get('target', {})
+    label = target.get('repository') or target.get('path')
+    if label:
+        print('  Target: ' + label)
     summary = payload["summary"]
     print(f"  {summary['shown']} shown / {summary['total']} findings; {summary['excluded']} filtered; {summary['unscored']} unscored")
     for target in payload.get('target_summaries', []):
@@ -262,7 +290,14 @@ def main(argv=None):
         if args.command == "doctor":
             payload = doctor(args)
         elif args.command == "report":
-            report = read_report(args.file) if args.file else latest_report()
+            if args.list:
+                entries = list_reports()
+                payload = {'schema_version': 1, 'command': 'report', 'status': 'incomplete' if any(entry['status'] == 'unreadable' for entry in entries) else 'ok', 'reports': entries}
+                output(payload, args.json)
+                return 1 if payload['status'] == 'incomplete' else 0
+            report = read_report(args.file) if args.file else latest_report(complete_only=args.latest_complete)
+            if not args.file and not args.latest_complete and report['status'] != 'complete':
+                report.setdefault('selection_notes', []).append('The newest saved assessment is incomplete. No earlier result was substituted. Use report --list to choose --file PATH, or explicitly request --latest-complete (which may concern a different project).')
             if args.target:
                 searched = report.get('target', {}).get('targets', [])
                 if not set(args.target) <= set(searched):

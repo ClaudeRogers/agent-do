@@ -254,9 +254,14 @@ def scan(args, report):
         report["findings"] += rows
         report["packages"] = packages
         warnings = bool(re.search(r"\b(warn(?:ing)?|error|failed)\b", result.stderr.decode(errors="replace"), re.I))
-        report["coverage"].append({"source": "OSV-Scanner", "status": "warning" if warnings else "ok", "packages_examined": len(packages),
+        scanner_coverage = {"source": "OSV-Scanner", "status": "warning" if warnings else "ok", "packages_examined": len(packages),
                                    "advisory_data_freshness": "online lookup; upstream database publication time unavailable",
-                                   "warnings": warnings, "data_disclosure": "Package identities and versions are sent to OSV by the scanner"})
+                                   "warnings": warnings, "data_disclosure": "Package identities and versions are sent to OSV by the scanner"}
+        if warnings:
+            scanner_coverage['reason'] = 'Scanner stderr matched warning/error/failure keywords. This is a diagnostic-text heuristic, not a database freshness determination. Raw diagnostics are omitted because they may contain private data.'
+            scanner_coverage['diagnostic_keywords'] = sorted(set(match.lower() for match in re.findall(r'\b(warn(?:ing)?|error|failed)\b', result.stderr.decode(errors='replace'), re.I)))
+            scanner_coverage['stderr_sha256'] = hashlib.sha256(result.stderr).hexdigest()
+        report["coverage"].append(scanner_coverage)
         for entry in candidates:
             if entry["path"] not in assessed:
                 report["coverage"].append({"source": entry["path"], "status": "unresolved", "reason": "Scanner did not report package inventory for this file"})
