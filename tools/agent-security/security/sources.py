@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -116,7 +117,6 @@ class Client:
 
 
 def re_asset_path(path):
-    import re
     return bool(re.fullmatch(r'/adoptium/temurin-vdr-generator/releases/download/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.json', path))
 
 

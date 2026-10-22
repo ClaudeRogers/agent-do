@@ -148,6 +148,10 @@ def same_product(match, component):
     """
     try:
         value = match.get('criteria')
+        # Unlike strict inventory cpe_parts(), preserve escaped colons when
+        # splitting upstream predicates so complex syntax does not prevent
+        # ruling out an unrelated vendor/product. Relevant unsupported syntax
+        # still remains uncertain in the full matcher.
         pattern = re.split(r'(?<!\\):', value)
         actual = cpe_parts(component['cpe'])
         if len(pattern) != 13 or pattern[:2] != ['cpe', '2.3']:

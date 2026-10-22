@@ -21,7 +21,7 @@ from .sources import Client, SourceError, discover, enrich_kev
 from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
-from .monitor import initialize, read_digest, run_monitor, schedule
+from .monitor import initialize, present_digest, read_digest, run_monitor, schedule
 from .runtime import assess_runtime, java_identity
 
 
@@ -469,7 +469,6 @@ def main(argv=None):
             elif args.monitor_command == 'schedule':
                 payload = schedule(args, ROOT)
             else:
-                from .monitor import present_digest
                 result = run_monitor(args, lambda argv: p.parse_args(argv), validate, ROOT) if args.monitor_command == 'run' else read_digest(args)
                 payload = present_digest(result, args)
         elif args.command == 'runtime':
@@ -480,7 +479,7 @@ def main(argv=None):
                 assess_runtime(args, client, report)
                 if not args.inventory_only and (args.kev or args.known_exploited):
                     enrich_kev(client, report)
-            except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:
+            except (SourceError, OSError, ValueError) as exc:
                 report['coverage'].append({'source': 'runtime', 'status': 'error', 'error': str(exc)})
             for source in report['coverage']:
                 if any(item.get('stale') for item in source.get('receipts', [])):
@@ -523,7 +522,7 @@ def main(argv=None):
                         dependabot(args, report, ROOT / "tools" / "agent-gh")
                 if args.kev or args.known_exploited:
                     enrich_kev(client, report)
-            except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:
+            except (SourceError, OSError, ValueError) as exc:
                 report["coverage"].append({"source": args.command, "status": "error", "error": str(exc), "receipts": client.receipts[:]})
             report["findings"] = merge_findings(report["findings"])
             for source in report["coverage"]:

@@ -75,6 +75,32 @@ class SecurityTests(unittest.TestCase):
             code = main(list(argv))
         return code, json.loads(out.getvalue())
 
+    def test_dispatch_does_not_hide_programming_errors(self):
+        cases = [
+            ('security.cli.discover', ['find', '--vendor', 'oracle', '--product', 'jdk']),
+            ('security.cli.assess_runtime', ['runtime', '--local-java', '--inventory-only']),
+        ]
+        for target, argv in cases:
+            for error in (KeyError, TypeError):
+                with self.subTest(target=target, error=error.__name__):
+                    with patch(target, side_effect=error('internal defect')):
+                        with self.assertRaises(error):
+                            self.cli(*argv, '--json')
+
+    def test_dispatch_keeps_expected_failures_as_incomplete_reports(self):
+        cases = [
+            ('security.cli.discover', ['find', '--vendor', 'oracle', '--product', 'jdk']),
+            ('security.cli.assess_runtime', ['runtime', '--local-java', '--inventory-only']),
+        ]
+        for target, argv in cases:
+            for error in (SourceError, OSError, ValueError):
+                with self.subTest(target=target, error=error.__name__):
+                    with patch(target, side_effect=error('expected failure')):
+                        code, payload = self.cli(*argv, '--json')
+                    self.assertEqual(code, 1)
+                    self.assertEqual(payload['status'], 'incomplete')
+                    self.assertEqual(payload['coverage'][-1]['error'], 'expected failure')
+
     def test_score_boundaries_and_unscored(self):
         row = advisory()
         self.assertTrue(matches(row, self.args("report", "--cvss-min", "7")))
