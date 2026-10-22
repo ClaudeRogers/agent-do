@@ -473,6 +473,49 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result['targets'][0]['status'], 'incomplete')
         self.assertEqual(result['targets'][1]['status'], 'complete')
 
+    def test_incomplete_candidates_are_committed_and_timeout_is_top_level(self):
+        config = self.monitor_init(self.inventory())
+        candidate = advisory({'operator': 'AND', 'cpeMatch': [match(), {'vulnerable': False, 'criteria': WINDOWS}]})
+        code, first = self.monitor_run(config, page(candidate))
+        self.assertEqual(code, 1)
+        self.assertEqual(first['counts']['new'], 1)
+        self.assertEqual(first['assessment_summary']['findings_observed'], 1)
+        self.assertEqual(first['assessment_summary']['runtime_candidates'], 1)
+        self.assertEqual(first['assessment_summary']['coverage_issues'][0]['status'], 'uncertain')
+        source = read_report(first['source_report'])
+        self.assertEqual(source['findings'][0]['runtime_match']['relation'], 'candidate')
+        code, repeated = self.monitor_run(config, page(candidate))
+        self.assertEqual(code, 1)
+        self.assertEqual(repeated['counts']['ongoing'], 1)
+        code, failed = self.monitor_run(config, SourceError('TimeoutError: advisory fetch failed'))
+        self.assertEqual(code, 1)
+        self.assertEqual(failed['counts']['unverified'], 1)
+        self.assertEqual(failed['counts']['resolved'], 0)
+        summary = failed['assessment_summary']
+        self.assertEqual(summary['findings_observed'], 0)
+        self.assertEqual(summary['runtime_candidates'], 0)
+        self.assertEqual(summary['targets_incomplete'], 1)
+        self.assertEqual(summary['coverage_issues'][0]['status'], 'error')
+        self.assertIn('TimeoutError', summary['coverage_issues'][0]['message'])
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text):
+            code = main(['monitor', 'report', '--config', str(config)])
+        self.assertEqual(code, 1)
+        rendered = text.getvalue()
+        self.assertIn('ERROR: NVD runtime:jdk', rendered)
+        self.assertIn('TimeoutError: advisory fetch failed', rendered)
+        self.assertIn('zero findings or zero changes do not establish absence', rendered)
+        self.assertLess(rendered.index('TimeoutError'), rendered.index('  new:'))
+
+    def test_first_runtime_timeout_has_no_false_clean_zero_summary(self):
+        config = self.monitor_init(self.inventory())
+        code, failed = self.monitor_run(config, SourceError('TimeoutError: advisory fetch failed'))
+        self.assertEqual(code, 1)
+        self.assertTrue(all(count == 0 for count in failed['counts'].values()))
+        self.assertEqual(failed['comparison_status'], 'complete')
+        self.assertEqual(failed['assessment_summary']['status'], 'incomplete')
+        self.assertIn('TimeoutError', failed['assessment_summary']['coverage_issues'][0]['message'])
+
     def test_stale_receipts_never_appear_complete(self):
         client = Client(page())
         original = client.get

@@ -131,6 +131,36 @@ OS, container and deployed-artifact evidence can now be supplied through
 [runtime inventory targets](RUNTIME_ASSESSMENT.md). This does not automatically
 collect live runtime or deployment evidence.
 
+## Assessment errors and zero change counts
+
+Each new run stores a top-level `assessment_summary` separately from lifecycle
+`counts`. It reports complete/incomplete target counts, current unfiltered
+`findings_observed`, `runtime_inventory_matches`, `runtime_candidates`, and
+`coverage_issues` with source, target, status and diagnostic message. These count
+observations, not deduplicated lifecycle issues or filtered presentation rows.
+
+Text output prints this assessment summary and source errors before change counts.
+For example, an NVD timeout is printed as `ERROR: NVD runtime:...` with
+`TimeoutError: advisory fetch failed`, accompanied by an explicit warning that
+zero findings/changes do not establish absence of vulnerabilities. JSON callers
+can read `assessment_summary.coverage_issues` without searching nested targets.
+
+An incomplete assessment still commits any findings and candidates it detected.
+A candidate can be new or ongoing while applicability remains uncertain. A later
+failed lookup retains earlier issues as unverified; it cannot resolve them. A
+first-ever failed lookup can have all lifecycle counts at zero and
+`comparison_status: complete` because there is no previous issue history to
+compare. Its assessment is still incomplete, not a successful vulnerability check.
+
+A cache hit and a new HTTP request can have different outcomes. The generic
+uncertain-coverage message is not proof of which environmental prerequisite is
+missing; consult the actual candidate evidence. Do not infer that a timeout
+produced the same assessment as a cached candidate list.
+
+Viewing older digests adds a coverage summary without rewriting saved evidence.
+Their observed-finding counts are shown as unknown, not reconstructed as zero
+from lifecycle history. Use their linked source report for original observations.
+
 ## What the changes mean
 
 | Category | Meaning |

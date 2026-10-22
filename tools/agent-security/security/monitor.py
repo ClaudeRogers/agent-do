@@ -203,6 +203,30 @@ def scope_key(target, report, max_bytes):
     return fingerprint(descriptor)
 
 
+def assessment_summary(targets, rows=None):
+    """Keep acquisition failures visible independently of issue transitions.
+
+    Missing row counts on older digests stay unknown, never inferred as zero
+    from lifecycle counts which may include historical/unverified evidence.
+    """
+    issues = []
+    for target in targets:
+        for coverage in target.get('coverage', []):
+            if coverage['status'] != 'ok':
+                issues.append({'target_key': target['target_key'], 'target': target['target'],
+                               'source': coverage['source'], 'status': coverage['status'],
+                               'message': coverage.get('error') or coverage.get('reason') or 'Coverage incomplete'})
+    incomplete = sum(target['status'] != 'complete' for target in targets)
+    return {'status': 'incomplete' if incomplete or issues else 'complete',
+            'targets_total': len(targets), 'targets_complete': len(targets) - incomplete,
+            'targets_incomplete': incomplete,
+            'findings_observed': len(rows) if rows is not None else None,
+            'runtime_inventory_matches': sum(row.get('runtime_match', {}).get('relation') == 'inventory_match' for row in rows) if rows is not None else None,
+            'runtime_candidates': sum(row.get('runtime_match', {}).get('relation') == 'candidate' for row in rows) if rows is not None else None,
+            'coverage_issues': issues,
+            'interpretation': 'Incomplete assessment: zero findings or zero changes do not establish absence of vulnerabilities. Detected findings/candidates are retained. Only a complete compatible assessment of a target can resolve its earlier evidence.' if incomplete or issues else 'Assessment completed for the supplied scope; findings and change counts are not an all-clear signal.'}
+
+
 def run_monitor(args, parse_scan, validate_scan, root):
     config = load_config(args.config, args.max_bytes)
     # Validate every target before any acquisition or project execution.
@@ -311,6 +335,7 @@ def run_monitor(args, parse_scan, validate_scan, root):
                   'run_id': report['report_id'], 'created_at': at, 'status': report['status'],
                   'comparison_status': 'partial' if changes['unverified'] else 'complete',
                   'targets': target_summaries, 'changes': changes,
+                  'assessment_summary': assessment_summary(target_summaries, report['findings']),
                   'counts': {category: len(issues) for category, issues in changes.items()},
                   'source_report': report['saved_report'],
                   'notes': ['New means first detected in this monitor/scope, not newly published.',
@@ -363,6 +388,8 @@ def present_digest(result, args):
     payload = copy.deepcopy(result)
     if 'changes' not in payload:
         return payload
+    if 'assessment_summary' not in payload:
+        payload['assessment_summary'] = assessment_summary(payload.get('targets', []))
     if args.monitor_command == 'report' and args.known_exploited and any(row.get('known_exploited') is None for issues in payload['changes'].values() for issue in issues for row in issue['findings']):
         raise ValueError('Some monitor evidence has unknown exploitation status; repeat monitoring with --kev')
     payload['changes'] = {category: [issue for issue in issues if any(matches(row, args) for row in issue['findings'])]

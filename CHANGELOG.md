@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Security monitor digests include a top-level assessment summary with current observation counts and source coverage issues. Plain-text runs/reports print NVD timeout errors and incomplete-coverage warnings before lifecycle counts. Unknown counts on historical digests remain unknown; candidate findings are retained through incomplete scans, and later timeouts preserve them as unverified.
+
 - Security tests now handle symlinked/macOS temporary paths; Gradle canonicalizes both source root and manifest before containment checks. Monitor init accepts runtime inventory alongside a local path or GitHub list, with actionable configuration metadata errors and host-specific cron guidance in output. Oracle HotSpot runtime identity is corrected to `oracle:jdk`; legacy `oracle:java_se` scans explicitly report limited JDK coverage. A public CVE-2024-21235 fixture positively matches Oracle JDK 17.0.12; no default severity filter is implied by empty results.
 
 - Milestone 3/4 acceptance coverage now includes mixed source/runtime portfolios, a public XStream historical-Java regression, friendly monitor overwrite protection, and cron portability guidance. Runtime matching understands Java `7u`/`8u` versions, rejects Oracle Java identities on observed non-Oracle JDKs before lookup, and includes inline CPE syntax hints. See `docs/SECURITY_MILESTONE_3_4_TESTING.md`.

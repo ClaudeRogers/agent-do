@@ -174,6 +174,21 @@ temporary directory to reproduce macOS-style temp path aliases. Fixtures use
 canonical paths for lookup/argument assertions; Gradle containment canonicalizes
 both root and manifest, while retaining outside-root rejection.
 
+## Check failed acquisition separately from candidate findings
+
+Read `assessment_summary` in monitor run/report JSON and its prominently printed
+text equivalent. Source errors appear before lifecycle counts, including NVD
+`TimeoutError: advisory fetch failed`. With no earlier history, a failed scan can
+have zero new/ongoing/resolved/unverified counts; that is not a clean assessment.
+
+An uncertain candidate list and a network failure are different outcomes. The
+automated suite verifies that a candidate is committed as new, remains ongoing
+on a repeated incomplete assessment, and becomes unverified after a later timeout.
+The timeout summary reports zero current observations and an explicit source
+error while preserving historical evidence. It never claims the prior candidate
+was resolved. The summary's observed counts are unfiltered; normal lifecycle
+presentation filters still apply independently.
+
 ## Record the result accurately
 
 Record branch commit, command, exit code, report status, comparison status, counts

@@ -324,6 +324,11 @@ the per-target config `options`; monitor run does not accept direct --resolve.
 agent-do security monitor run --config ~/team-security.json --cvss-min 7 --include-unscored --kev --json
 ```
 
+Monitor run/report results include `assessment_summary`: unfiltered current
+observations and prominently surfaced coverage issues, separate from lifecycle
+counts. A zero-count timeout is incomplete; uncertain candidates are retained.
+See [assessment diagnostics](PORTFOLIO_MONITORING.md#assessment-errors-and-zero-change-counts).
+
 ### monitor report
 
 | Parameter | Values, default and restrictions | Example |

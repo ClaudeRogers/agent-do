@@ -288,13 +288,23 @@ def output(payload, json_mode):
         if payload.get('cron'):
             print(payload['cron'])
         if payload.get('changes') is not None:
+            assessment = payload.get('assessment_summary')
+            if assessment:
+                observed = str(assessment['findings_observed']) if assessment['findings_observed'] is not None else 'unknown (historical digest)'
+                print(f"  Assessment: {assessment['status']}; {assessment['targets_complete']}/{assessment['targets_total']} targets complete; {observed} observed findings before filters")
+                if assessment['runtime_candidates'] is not None:
+                    print(f"  Runtime evidence: {assessment['runtime_inventory_matches']} inventory matches; {assessment['runtime_candidates']} candidates")
+                if assessment['status'] != 'complete':
+                    print('  WARNING: ' + assessment['interpretation'])
+                for issue in assessment['coverage_issues']:
+                    target = issue['target']
+                    label = target.get('repo') or target.get('path') or target.get('runtime_inventory', issue['target_key'])
+                    prefix = 'ERROR' if issue['status'] == 'error' else 'COVERAGE'
+                    print(f"  {prefix}: {issue['source']} [{label}] — {issue['status']}: {issue['message']}")
             print('  Comparison: ' + payload['comparison_status'])
             for assessed in payload['targets']:
                 target = assessed['target']
                 print('  Target: ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '')) + ' — ' + assessed['status'])
-                for coverage in assessed.get('coverage', []):
-                    if coverage['status'] != 'ok':
-                        print('    Coverage: ' + coverage['source'] + ' — ' + coverage['status'] + ': ' + coverage.get('reason', coverage.get('error', '')))
             for category, count in payload['counts'].items():
                 print(f"  {category}: {payload.get('shown_counts', payload['counts'])[category]} shown / {count}")
                 for issue in payload['changes'][category]:

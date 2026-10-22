@@ -360,6 +360,24 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(second['counts']['ongoing'], 1)
         self.assertEqual(second['counts']['unverified'], 0)
 
+    def test_historical_digest_summary_preserves_unknown_observations_and_saved_bytes(self):
+        code, first = self.cli()
+        self.assertEqual(code, 0)
+        state = self.state()
+        state['latest_digest'].pop('assessment_summary')
+        path = home() / 'monitors' / ('a' * 32) / 'state.json'
+        path.write_text(json.dumps(state))
+        before = path.read_bytes()
+        code, report = self.cli('report')
+        self.assertEqual(code, 0)
+        self.assertIsNone(report['assessment_summary']['findings_observed'])
+        self.assertIsNone(report['assessment_summary']['runtime_candidates'])
+        self.assertEqual(report['counts'], first['counts'])
+        code, text = self.cli('report', text=True)
+        self.assertEqual(code, 0)
+        self.assertIn('unknown (historical digest)', text)
+        self.assertEqual(path.read_bytes(), before)
+
     def test_changed_settings_content_is_not_a_compatible_baseline(self):
         settings = self.root / 'settings.xml'; settings.write_text('<settings>FIRST_PRIVATE_VALUE</settings>')
         config = json.loads(self.config.read_text())
