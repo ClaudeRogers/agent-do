@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import re
+import selectors
+import signal
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path, PurePosixPath
 
@@ -45,14 +49,51 @@ def classify_diagnostics(stderr):
 
 
 def run(argv, args, *, cwd=None, environment=None):
+    """Drain both pipes fairly, bounding each stream before buffering more.
+
+    A limit/timeout kills the process group, including children that inherited
+    its pipes. Return bytes only after both streams and the process complete.
+    """
     env = {**(os.environ if environment is None else environment), "GH_PROMPT_DISABLED": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+    process, complete = None, False
     try:
-        result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=args.scan_timeout, check=False)
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   bufsize=0, start_new_session=True)
+        deadline = time.monotonic() + args.scan_timeout
+        streams = {'stdout': bytearray(), 'stderr': bytearray()}
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+            selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, args.scan_timeout)
+                for key, _ in selector.select(remaining):
+                    buffer = streams[key.data]
+                    data = os.read(key.fd, min(io.DEFAULT_BUFFER_SIZE, args.max_bytes - len(buffer) + 1))
+                    if not data:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    elif len(buffer) + len(data) > args.max_bytes:
+                        raise ValueError(Path(argv[0]).name + " output exceeds --max-bytes")
+                    else:
+                        buffer.extend(data)
+        status = process.wait(timeout=max(0, deadline - time.monotonic()))
+        complete = True
+        return subprocess.CompletedProcess(argv, status, bytes(streams['stdout']), bytes(streams['stderr']))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError(Path(argv[0]).name + ": unavailable or timed out") from exc
-    if len(result.stdout) > args.max_bytes or len(result.stderr) > args.max_bytes:
-        raise ValueError(Path(argv[0]).name + " output exceeds --max-bytes")
-    return result
+    finally:
+        if process is not None:
+            if not complete:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
 
 def github(args, endpoint):

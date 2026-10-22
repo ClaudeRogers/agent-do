@@ -176,6 +176,15 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(report['findings'][0]['affected'][0]['fixed_versions'], ['1.2+deb12u1'])
         self.assertNotIn('PRIVATE_CONFIG', json.dumps(report))
 
+    def test_package_and_fix_filters_keep_fixable_trivy_findings_on_scan_and_report(self):
+        with patch('security.collect.execute', side_effect=[(sbom(), False), (trivy(), False), (database(), False)]):
+            code, report = self.cli('runtime', '--image', IMAGE, '--package', 'debian:libssl', '--fix-available')
+        self.assertEqual(code, 0)
+        self.assertEqual(report['summary']['shown'], 1)
+        code, saved = self.cli('report', '--file', report['saved_report'], '--package', 'debian:libssl', '--fix-available')
+        self.assertEqual(code, 0)
+        self.assertEqual(saved['summary']['shown'], 1)
+
     def test_image_inventory_only_never_runs_vulnerability_scan(self):
         with patch('security.collect.execute', return_value=(sbom(java=True), False)) as helper, patch('security.sources.Client.get') as get:
             code, report = self.cli('runtime', '--image', IMAGE, '--inventory-only')
@@ -267,6 +276,35 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(report['coverage'][0]['status'], 'ok')
         self.assertEqual(report['artifact_inventory'][0]['syft_version'], 'fixture-syft')
         get.assert_not_called()
+
+    def test_relative_collector_paths_and_path_entries_resolve_before_chdir(self):
+        helper = self.root / 'bin' / 'syft'
+        helper.parent.mkdir()
+        implementation = self.root / 'real-helper'
+        implementation.write_text('#!' + sys.executable + '\nimport sys\nfrom pathlib import Path\n'
+                                  'if Path(sys.argv[0]).name != "syft": sys.exit(64)\n'
+                                  'print(' + repr(json.dumps(sbom())) + ')\n')
+        implementation.chmod(0o755)
+        helper.symlink_to(implementation)
+        original = Path.cwd()
+        try:
+            os.chdir(self.root)
+            for selected in ('./bin/syft', 'bin/syft', 'syft'):
+                with self.subTest(selected=selected), patch.dict(os.environ, {'PATH': 'bin' + os.pathsep + os.environ.get('PATH', '')}):
+                    code, report = self.cli('runtime', '--rootfs', str(self.root), '--syft', selected, '--inventory-only')
+                self.assertEqual(code, 0)
+                self.assertEqual(report['artifact_inventory'][0]['syft_version'], 'fixture-syft')
+        finally:
+            os.chdir(original)
+
+    def test_collector_output_overflow_is_an_incomplete_assessment(self):
+        helper = self.root / 'oversized-syft'
+        helper.write_text('#!' + sys.executable + '\nimport os\nos.write(1,b"x"*2048)\n')
+        helper.chmod(0o755)
+        code, report = self.cli('runtime', '--rootfs', str(self.root), '--syft', str(helper), '--max-bytes', '1024', '--inventory-only')
+        self.assertEqual(code, 1)
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertTrue(any('output exceeds --max-bytes' in item.get('error', '') for item in report['coverage']))
 
     def test_invalid_runtime_inputs_fail_before_helpers(self):
         for argv in (['--image', 'https://user:password@example.com/image'], ['--kube-context', 'fixture'], ['--namespace', 'default'], ['--selector', 'app=bff'], ['--rootfs', '/does-not-exist']):

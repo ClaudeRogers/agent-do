@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,9 @@ def execute(argv, args, *, empty_config=False):
     # Prevent ambient scanner filters, output-file settings, remote servers and
     # ignore policies from silently narrowing an assessment. Retain only registry
     # authentication/cache settings from these helpers' environment namespaces.
+    # Resolve before entering the temporary cwd, including relative PATH entries.
+    executable = shutil.which(argv[0])
+    argv = [str(Path(executable).absolute()) if executable else argv[0], *argv[1:]]
     allowed = {'TRIVY_USERNAME', 'TRIVY_PASSWORD', 'TRIVY_REGISTRY_TOKEN', 'TRIVY_CACHE_DIR'}
     environment = {key: value for key, value in os.environ.items() if not key.startswith(('TRIVY_', 'SYFT_')) or
                    key in allowed or re.fullmatch(r'SYFT_REGISTRY_AUTH_(?:\d+_)?(?:USERNAME|PASSWORD|TOKEN|AUTHORITY)', key)}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Security review fixes preserve combined package/fix filters, enforce scanner/collector output limits during reads, and resolve collector executable paths before changing directories.
+
 - New `agent-do security` family for NVD/GitHub advisory discovery, multi-platform searches, CVSS/severity/date filters, optional CISA KEV and saved unfiltered reports. See `docs/SECURITY_SCANNING.md` and `docs/SECURITY_CLI_REFERENCE.md`.
 - Source scans use isolated dependency snapshots and OSV-Scanner v2. Explicit local Maven/Gradle resolution captures selected transitive versions and dependency paths, with normal private Maven settings support. GitHub repository lists support isolated sequential batch scans.
 - Portfolio monitoring adds due intervals, atomic locked history, new/ongoing/resolved/unverified comparisons, cron export and explicit notification routing. Failed scans and changed scopes never silently resolve earlier evidence. Builds and collectors require separate execution opt-ins; scheduling and notifications are never enabled automatically.

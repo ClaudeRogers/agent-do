@@ -157,10 +157,15 @@ def matches(row, args):
     if args.known_exploited and row["known_exploited"] is not True:
         return False
     if args.fix_available:
-        relevant = [x for x in row["affected"]
-                    if (not args.package or x.get("package", {}).get("name", "").lower() == args.package.lower())
-                    and (not args.ecosystem or ecosystem(x.get("package", {}).get("ecosystem")) == ecosystem(args.ecosystem))]
-        if not any(x.get("fixed_versions") for x in relevant):
+        for affected in row['affected']:
+            package = affected.get('package') or row.get('package') or {}
+            if args.package and package.get('name', '').lower() != args.package.lower():
+                continue
+            if args.ecosystem and ecosystem(package.get('ecosystem')) != ecosystem(args.ecosystem):
+                continue
+            if affected.get('fixed_versions'):
+                break
+        else:
             return False
     return True
 

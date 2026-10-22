@@ -86,6 +86,11 @@ a configuration file. The file is removed after success, failure or timeout. No
 wrapper script is required. Trivy's empty ignore file remains separate.
 No Docker daemon or execution of image binaries is used.
 
+Relative helper paths (for example `--syft ./bin/syft`) and relative PATH entries
+are resolved from the invoking directory before collection switches to its private
+working directory. Output is bounded per stdout/stderr stream while reading;
+overflow or timeout terminates the command process group and leaves coverage incomplete.
+
 ## Image and mounted filesystem assessment
 
 ```bash

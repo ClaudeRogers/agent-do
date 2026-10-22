@@ -61,6 +61,10 @@ On `find`, ecosystem/package flags also choose source query criteria.
 | `--known-exploited` | Keep only records matched by a CVE alias in CISA KEV. find/scan fetch the catalog automatically. report requires previously enriched evidence and rejects findings whose exploitation status is unknown. | `agent-do security scan --path . --known-exploited --json` |
 | `--fix-available` | Keep advisories **with** an explicitly published fixed package version; does not remove them. If all 17 findings have fixes, all 17 remain. Does not test upgrade compatibility or infer a fix from NVD CPE bounds. | `agent-do security report --latest --fix-available --json` |
 
+`--package` and `--fix-available` can be combined for runtime/package findings.
+Fix entries without their own package identity use the finding's package;
+an explicitly different package's fix is never borrowed.
+
 Accepted ecosystem names and normalization:
 
 | Accepted input | Package ecosystem |

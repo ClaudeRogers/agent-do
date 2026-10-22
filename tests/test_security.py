@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -19,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools" / "agent-security"))
 from security.cli import main, parser
 from security.model import cvss_scores, finding, matches, merge_findings, present
-from security.scan import acquire, assess_inventory, dependabot
+from security.scan import acquire, assess_inventory, dependabot, run as run_process
 from security.sources import Client, SourceError, discover, enrich_kev, nvd_row
 from security.store import finish, latest_report, new_report, read_report
 
@@ -115,6 +116,52 @@ class SecurityTests(unittest.TestCase):
                            {"package": {"name": "b", "ecosystem": "pip"}, "fixed_versions": ["2.0"]}]
         self.assertFalse(matches(row, self.args("report", "--package", "a", "--fix-available")))
         self.assertTrue(matches(row, self.args("report", "--package", "b", "--fix-available")))
+        row['package'] = {'name': 'a', 'ecosystem': 'pip', 'version': '1.0'}
+        self.assertFalse(matches(row, self.args('report', '--package', 'a', '--fix-available')))
+
+    def test_combined_fix_filters_fall_back_to_finding_package(self):
+        row = advisory()
+        row['package'] = {'name': 'debian:libssl', 'ecosystem': 'runtime', 'version': '1.2'}
+        row['affected'] = [{'fixed_versions': ['1.2+deb12u1']}]
+        for flags in (['--package', 'debian:libssl'], ['--fix-available'], ['--package', 'debian:libssl', '--fix-available']):
+            self.assertTrue(matches(row, self.args('report', *flags)))
+        row['package'] = {'name': 'vendor/package', 'ecosystem': 'Packagist', 'version': '1.0'}
+        self.assertTrue(matches(row, self.args('report', '--package', 'vendor/package', '--ecosystem', 'composer', '--fix-available')))
+        row['affected'][0]['fixed_versions'] = []
+        self.assertFalse(matches(row, self.args('report', '--package', 'vendor/package', '--fix-available')))
+
+    def test_subprocess_preserves_each_stream_at_limit_and_nonzero_status(self):
+        args = self.args('scan', '--path', str(self.root), '--max-bytes', '1024')
+        result = run_process([sys.executable, '-c', "import os,sys;os.write(1,b'x'*1024);os.write(2,b'y'*1024);sys.exit(7)"], args)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stdout, b'x' * 1024)
+        self.assertEqual(result.stderr, b'y' * 1024)
+
+    def test_subprocess_stops_oversized_stdout_or_stderr_before_completion(self):
+        args = self.args('scan', '--path', str(self.root), '--max-bytes', '1024')
+        for stream in (1, 2):
+            marker = self.root / ('completed-' + str(stream))
+            script = 'import os,sys,time;from pathlib import Path;os.write(' + str(stream) + ",b'x'*2048);time.sleep(.3);Path(sys.argv[1]).write_text('completed')"
+            with self.subTest(stream=stream), self.assertRaisesRegex(ValueError, 'output exceeds --max-bytes'):
+                run_process([sys.executable, '-c', script, str(marker)], args)
+            self.assertFalse(marker.exists(), 'The producer completed before its output limit was enforced')
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'POSIX process groups required')
+    def test_subprocess_timeout_kills_children_holding_output_pipes(self):
+        args = self.args('scan', '--path', str(self.root), '--scan-timeout', '.5')
+        marker, ready = self.root / 'child-completed', self.root / 'child-started'
+        script = ('import os,sys,time\nfrom pathlib import Path\n'
+                  'if os.fork()==0:\n'
+                  ' Path(sys.argv[2]).write_text("started")\n'
+                  ' time.sleep(.8)\n'
+                  ' Path(sys.argv[1]).write_text("completed")\n'
+                  ' os._exit(0)\n'
+                  'os._exit(0)\n')
+        with self.assertRaisesRegex(ValueError, 'timed out'):
+            run_process([sys.executable, '-c', script, str(marker), str(ready)], args)
+        self.assertTrue(ready.exists(), 'Child did not start; timeout cleanup was not exercised')
+        time.sleep(.4)
+        self.assertFalse(marker.exists(), 'The descendant survived the command timeout')
 
     def test_alias_union_preserves_versions_and_occurrences(self):
         a = advisory("GHSA-aaaa-bbbb-cccc")
