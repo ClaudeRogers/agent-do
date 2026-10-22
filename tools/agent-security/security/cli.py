@@ -22,6 +22,7 @@ from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
 from .monitor import initialize, read_digest, run_monitor, schedule
+from .runtime import assess_runtime, cpe_parts
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -79,7 +80,7 @@ def network(parser):
 
 
 def parser():
-    p = ArgumentParser(prog="agent-do security", description="Find advisories and scan dependencies. File scans are read-only; --resolve explicitly executes trusted local Maven/Gradle project code and permits build writes.")
+    p = ArgumentParser(prog="agent-do security", description="Find advisories, scan dependencies, assess explicit runtimes and monitor portfolios. File scans are read-only; --resolve explicitly executes trusted local Maven/Gradle project code and permits build writes.")
     sub = p.add_subparsers(dest="command", required=True)
     f = sub.add_parser("find", help="discover published advisories; does not assess repository exposure")
     common(f)
@@ -110,6 +111,17 @@ def parser():
     s.add_argument('--maven-settings', '--settings', help='Maven settings.xml for repository/auth/profile configuration (requires --resolve maven)')
     s.add_argument('--gradle-configuration', action='append', default=[], help='Gradle configuration to resolve in each project; repeat (default runtimeClasspath)')
     s.add_argument('--build-property', action='append', default=[], help='NAME=VALUE; Maven -D or Gradle -P project property (repeat; avoid credentials)')
+    runtime = sub.add_parser('runtime', help='assess explicit runtime/deployment CPE inventory; project declarations remain hints')
+    common(runtime)
+    network(runtime)
+    runtime.add_argument('--path', help='read static root POM/Gradle/toolchain/Dockerfile declarations without executing project code')
+    runtime.add_argument('--inventory', help='versioned JSON runtime/deployment inventory with exact CPE identities and evidence')
+    runtime.add_argument('--local-java', action='store_true', help='explicitly execute the selected local Java binary to observe vendor and version')
+    runtime.add_argument('--java', help='trusted Java executable, used only with --local-java (default installed java)')
+    runtime.add_argument('--java-cpe', help='verified distribution CPE identity with wildcard version/update; used only with --local-java')
+    runtime.add_argument('--probe-timeout', type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help='local Java probe timeout in seconds')
+    runtime.add_argument('--inventory-only', action='store_true', help='collect evidence without network requests or CVE assessment')
+    runtime.add_argument('--limit', type=int, default=1000, help='maximum NVD records examined per runtime component before presentation filters; truncation is explicit')
     r = sub.add_parser("report", help="read a saved unfiltered report and apply presentation filters")
     common(r)
     r.add_argument('--target', type=canonical_target, choices=sorted(PROFILES), action='append', default=[],
@@ -131,6 +143,7 @@ def parser():
     inputs = init.add_mutually_exclusive_group(required=True)
     inputs.add_argument('--repos-file')
     inputs.add_argument('--path')
+    inputs.add_argument('--runtime-inventory', help='monitor an explicit runtime/deployment inventory JSON file')
     init.add_argument('--resolve', choices=['maven', 'gradle'])
     init.add_argument('--interval-hours', type=int, default=24)
     init.add_argument('--max-bytes', type=int, default=16_777_216)
@@ -141,6 +154,7 @@ def parser():
     monitor_run.add_argument('--config', required=True)
     monitor_run.add_argument('--due', action='store_true', help='skip if the configured interval has not elapsed since the last attempt')
     monitor_run.add_argument('--allow-builds', action='store_true', help='explicitly authorize trusted configured local Maven/Gradle build execution')
+    monitor_run.add_argument('--runtime-limit', type=int, default=1000, help='maximum NVD records examined per imported runtime component; source dependency scans are unaffected')
     monitor_run.add_argument('--scanner', default='osv-scanner')
     monitor_run.add_argument('--scan-timeout', type=positive, default=300)
     monitor_run.add_argument('--notify-recipient', help='explicitly send digest counts/path to this existing agent-do notify recipient')
@@ -153,6 +167,7 @@ def parser():
     scheduled = actions.add_parser('schedule', help='print a reviewable hourly cron entry; never install it automatically')
     scheduled.add_argument('--config', required=True)
     scheduled.add_argument('--allow-builds', action='store_true')
+    scheduled.add_argument('--runtime-limit', type=int, default=1000, help='per-component NVD record bound exported into the scheduled runtime assessments')
     scheduled.add_argument('--notify-recipient', help='explicit recipient included in the exported job; nothing is sent during export')
     scheduled.add_argument('--notify-via', help='provider order for the exported job; requires --notify-recipient')
     scheduled.add_argument('--max-bytes', type=int, default=16_777_216)
@@ -168,8 +183,8 @@ def validate(args):
                    'published_after', 'published_before', 'updated_after', 'known_exploited', 'fix_available', 'target')
         if any(getattr(args, key) is not None and getattr(args, key) is not False and getattr(args, key) != [] for key in filters):
             raise ValueError('--list lists report metadata; apply finding filters with --file, --latest or --latest-complete')
-    if getattr(args, "max_bytes", 1) <= 0 or getattr(args, "limit", 1) <= 0 or getattr(args, "retries", 0) < 0:
-        raise ValueError("--max-bytes and --limit must be positive; --retries must be nonnegative")
+    if getattr(args, "max_bytes", 1) <= 0 or getattr(args, "limit", 1) <= 0 or getattr(args, "runtime_limit", 1) <= 0 or getattr(args, "retries", 0) < 0:
+        raise ValueError("--max-bytes, --limit and --runtime-limit must be positive; --retries must be nonnegative")
     if getattr(args, "cve", None) and not re.fullmatch(r"CVE-\d{4}-\d{4,}", args.cve, re.I):
         raise ValueError("--cve must be a CVE-YYYY-NNNN identifier")
     if getattr(args, "severity", None):
@@ -179,6 +194,19 @@ def validate(args):
         args.severity = ",".join(values)
     if getattr(args, "published_after", None) and args.published_before and timestamp(args.published_after) >= timestamp(args.published_before):
         raise ValueError("--published-after must precede --published-before")
+    if args.command == 'runtime':
+        if not (args.path or args.inventory or args.local_java):
+            raise ValueError('runtime requires --path, --inventory, or --local-java (may be combined)')
+        if (args.java or args.java_cpe) and not args.local_java:
+            raise ValueError('--java and --java-cpe require explicit --local-java')
+        if args.java_cpe:
+            parts = cpe_parts(args.java_cpe)
+            if parts[5] != '*' or parts[6] != '*' or any(parts[i] in {'*', '-'} for i in (2, 3, 4)):
+                raise ValueError('--java-cpe must specify part/vendor/product with wildcard version/update')
+        if args.ecosystem:
+            raise ValueError('Runtime identities use CPE, not package ecosystems; use --package vendor:product or --cve')
+        if args.inventory_only and (args.kev or args.known_exploited or args.cve or args.package or args.cvss_min is not None or args.cvss_gt is not None or args.severity or args.published_after or args.published_before or args.updated_after or args.fix_available or args.include_unscored):
+            raise ValueError('--inventory-only does not assess advisories; CVE/score/date/exploitation filters do not apply')
     if args.command == "find":
         if args.target:
             args.target = list(dict.fromkeys(args.target))
@@ -233,6 +261,8 @@ def doctor(args):
     return {"schema_version": 1, "command": "doctor", "status": "ok" if scanner["v2"] else "incomplete",
             "scanner": scanner, "features": {"advisory_discovery": "available; network not probed",
             "local_scan": "available" if scanner["v2"] else "requires OSV-Scanner v2",
+            "runtime_inventory": "available; explicit CPE inventory and NVD applicability, no automatic deployment collection",
+            "local_java_probe": "java found; executed only with runtime --local-java" if shutil.which("java") else "requires a trusted Java executable selected with runtime --local-java --java PATH",
             "github_acquisition": "gh found; authentication not probed" if shutil.which("gh") else "requires gh",
             "maven_resolution": "installed mvn found" if shutil.which('mvn') else 'requires executable project mvnw or installed Maven; never probed without opt-in',
             "gradle_resolution": "installed gradle found" if shutil.which('gradle') else 'requires executable project gradlew or installed Gradle; never probed without opt-in',
@@ -261,7 +291,7 @@ def output(payload, json_mode):
             print('  Comparison: ' + payload['comparison_status'])
             for assessed in payload['targets']:
                 target = assessed['target']
-                print('  Target: ' + (target.get('repo') or target.get('path', '')) + ' — ' + assessed['status'])
+                print('  Target: ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '')) + ' — ' + assessed['status'])
                 for coverage in assessed.get('coverage', []):
                     if coverage['status'] != 'ok':
                         print('    Coverage: ' + coverage['source'] + ' — ' + coverage['status'] + ': ' + coverage.get('reason', coverage.get('error', '')))
@@ -273,7 +303,9 @@ def output(payload, json_mode):
                     representative = max(rows, key=lambda row: row['cvss'] if row['cvss'] is not None else -1)
                     package = representative.get('package') or {}
                     versions = sorted({str((row.get('package') or {}).get('version') or '?') for row in rows})
-                    print('    ' + (target.get('repo') or target.get('path', '')) + ': ' + ', '.join(issue['aliases']) + ' — ' + representative['severity'] + ' ' + package.get('name', '') + '@' + ','.join(versions))
+                    print('    ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '')) + ': ' + ', '.join(issue['aliases']) + ' — ' + representative['severity'] + ' ' + package.get('name', '') + '@' + ','.join(versions))
+                    if representative.get('runtime_match'):
+                        print('      Runtime applicability: ' + representative['runtime_match']['component_id'] + ' — ' + representative['runtime_match']['relation'])
                     print('      ' + representative['summary'].replace('\n', ' '))
                     fixes = sorted({version for row in rows for affected in row['affected'] for version in affected.get('fixed_versions', [])})
                     if fixes:
@@ -296,7 +328,7 @@ def output(payload, json_mode):
     if 'reports' in payload:
         for report in payload['reports']:
             target = report.get('target', {})
-            label = target.get('repository') or target.get('path') or ', '.join(target.get('targets', [])) or target.get('kind', 'unknown')
+            label = target.get('repository') or target.get('path') or target.get('inventory') or ', '.join(target.get('targets', [])) or target.get('kind', 'unknown')
             print(f"  {report.get('created_at', '?')}  {report.get('command', '?')}  {label} — {report['status']}; {report.get('findings', '?')} findings; {report.get('unscored', '?')} unscored")
             for gap in report.get('coverage_gaps', []):
                 print(f"    Coverage: {gap['source']} — {gap['status']}: {gap.get('reason', gap.get('error', ''))}")
@@ -311,7 +343,7 @@ def output(payload, json_mode):
     if payload.get('created_at'):
         print('  Assessed: ' + payload['created_at'])
     target = payload.get('target', {})
-    label = target.get('repository') or target.get('path')
+    label = target.get('repository') or target.get('path') or target.get('inventory')
     if label:
         print('  Target: ' + label)
     summary = payload["summary"]
@@ -329,7 +361,19 @@ def output(payload, json_mode):
         print(f"  Resolution: {resolution['tool']} — {resolution['status']}; {len(resolution.get('occurrences', []))} dependency occurrences")
     if payload.get('scanner', {}).get('diagnostics'):
         print('  Private scanner diagnostics: ' + payload['scanner']['diagnostics']['stderr_file'])
+    for hint in payload.get('declared_settings', []):
+        print('  Declaration only: ' + hint['file'] + ' ' + hint['setting'] + '=' + hint['value'])
+    for component in payload.get('runtime_components', []):
+        print('  Runtime: ' + component['id'] + ' — ' + component.get('cpe', 'unmapped CPE identity'))
+        evidence = component['evidence']
+        print('    Evidence: ' + evidence['kind'] + '; observed ' + evidence['observed_at'] + '; ' + evidence['verification'])
+        if component.get('properties'):
+            print('    Java: ' + component['properties'].get('java.vendor', 'unknown vendor') + ' ' + component['properties'].get('java.runtime.version', component['properties'].get('java.version', '?')))
+        if component.get('deployment'):
+            print('    Deployment: ' + json.dumps(component['deployment'], sort_keys=True))
     for row in payload["findings"]:
+        if row.get('runtime_match'):
+            print('  Runtime applicability: ' + row['runtime_match']['component_id'] + ' — ' + row['runtime_match']['relation'])
         package = row.get("package") or {}
         label = package.get("name", "") + ("@" + package["version"] if package.get("version") else "")
         print(f"  {row['id']}  CVSS {row['cvss'] if row['cvss'] is not None else '?'}  {row['severity']}  {label}")
@@ -350,7 +394,7 @@ def output(payload, json_mode):
         for evidence in row['evidence']:
             if evidence.get('dependency_path'):
                 print('    ' + evidence.get('dependency_scope', 'unknown') + ': ' + ' -> '.join(evidence['dependency_path']))
-    if not payload["findings"]:
+    if not payload["findings"] and payload.get("scope") != "runtime_inventory_only":
         print("  No matching records in the assessed inventory/source window; review coverage below.")
     for source in payload["coverage"]:
         identity = source['source'] + (' [' + source['query_id'] + ']' if source.get('query_id') else '')
@@ -384,6 +428,23 @@ def main(argv=None):
                 from .monitor import present_digest
                 result = run_monitor(args, lambda argv: p.parse_args(argv), validate, ROOT) if args.monitor_command == 'run' else read_digest(args)
                 payload = present_digest(result, args)
+        elif args.command == 'runtime':
+            report = new_report('runtime', {'kind': 'runtime_inventory', 'path': str(Path(args.path).expanduser().resolve()) if args.path else None,
+                                           'inventory': str(Path(args.inventory).expanduser().resolve()) if args.inventory else None})
+            client = Client(args)
+            try:
+                assess_runtime(args, client, report)
+                if not args.inventory_only and (args.kev or args.known_exploited):
+                    enrich_kev(client, report)
+            except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:
+                report['coverage'].append({'source': 'runtime', 'status': 'error', 'error': str(exc)})
+            for source in report['coverage']:
+                if any(item.get('stale') for item in source.get('receipts', [])):
+                    source['stale'] = True
+                    if source['status'] == 'ok':
+                        source['status'] = 'stale'
+            report['findings'] = merge_findings(report['findings'])
+            payload = present(finish(report), args)
         elif args.command == "report":
             if args.list:
                 entries = list_reports()

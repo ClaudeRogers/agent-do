@@ -19,6 +19,7 @@ from .repositories import load_repositories
 from .scan import repo_name, scan
 from .sources import Client, SourceError, enrich_kev
 from .store import atomic_json, digest, finish, home, new_report
+from .runtime import assess_runtime, cpe_parts, load_inventory
 
 BUILD_OPTIONS = {'maven', 'gradle', 'maven_settings', 'maven_profile', 'gradle_configuration', 'build_property'}
 LIST_OPTIONS = {'maven_profile', 'gradle_configuration', 'build_property'}
@@ -49,10 +50,19 @@ def load_config(filename, max_bytes):
         raise ValueError('Monitor targets must be a nonempty array')
     seen = set()
     for target in value['targets']:
-        if not isinstance(target, dict) or set(target) - {'repo', 'ref', 'path', 'resolve', 'options'}:
+        if not isinstance(target, dict) or set(target) - {'repo', 'ref', 'path', 'resolve', 'options', 'runtime_inventory'}:
             raise ValueError('Invalid monitor target fields')
-        if ('repo' in target) == ('path' in target):
-            raise ValueError('Each monitor target needs exactly one repo or path')
+        if sum(key in target for key in ('repo', 'path', 'runtime_inventory')) != 1:
+            raise ValueError('Each monitor target needs exactly one repo, path or runtime_inventory')
+        if 'runtime_inventory' in target:
+            if set(target) != {'runtime_inventory'} or not isinstance(target['runtime_inventory'], str) or not target['runtime_inventory']:
+                raise ValueError('Runtime monitor target accepts only a nonempty runtime_inventory path')
+            target['runtime_inventory'] = str((path.parent / Path(target['runtime_inventory']).expanduser()).resolve())
+            target['_key'] = fingerprint({'runtime_inventory': target['runtime_inventory']})
+            if target['_key'] in seen:
+                raise ValueError('Duplicate runtime inventory in monitor configuration')
+            seen.add(target['_key'])
+            continue
         if 'repo' in target:
             if not isinstance(target['repo'], str):
                 raise ValueError('Monitor repo must be a GitHub repository string')
@@ -100,7 +110,10 @@ def initialize(args):
         raise ValueError('--interval-hours must be at least 1')
     if args.resolve and not args.path:
         raise ValueError('Monitor build resolution requires local --path')
-    if args.repos_file:
+    if getattr(args, 'runtime_inventory', None):
+        load_inventory(args.runtime_inventory, args.max_bytes)
+        targets = [{'runtime_inventory': str(Path(args.runtime_inventory).expanduser().resolve())}]
+    elif args.repos_file:
         entries = load_repositories(args.repos_file, args.max_bytes)['repositories']
         targets = [{'repo': entry['repository'], 'ref': entry['requested_ref']} for entry in entries]
     else:
@@ -118,7 +131,8 @@ def initialize(args):
 
 
 def scan_arguments(target, args, parse_scan, validate_scan):
-    argv = ['scan', '--repo', target['repo']] if 'repo' in target else ['scan', '--path', target['path']]
+    argv = (['runtime', '--inventory', target['runtime_inventory']] if 'runtime_inventory' in target else
+            ['scan', '--repo', target['repo']] if 'repo' in target else ['scan', '--path', target['path']])
     if target.get('ref'):
         argv += ['--ref', target['ref']]
     if target.get('resolve'):
@@ -129,6 +143,8 @@ def scan_arguments(target, args, parse_scan, validate_scan):
     selected = parse_scan(argv)
     for key in NETWORK_OPTIONS:
         setattr(selected, key, getattr(args, key))
+    if 'runtime_inventory' in target:
+        selected.limit = args.runtime_limit
     selected.scanner, selected.scan_timeout = args.scanner, args.scan_timeout
     validate_scan(selected)
     return selected
@@ -163,6 +179,17 @@ def scope_key(target, report, max_bytes):
         if len(content) > max_bytes:
             raise ValueError('Monitor settings fingerprint input exceeds --max-bytes')
         descriptor['settings_sha256'] = digest(content)
+    if 'runtime_inventory' in target:
+        descriptor['runtime_inventory'] = target['runtime_inventory']
+        descriptor['runtime_matcher_schema'] = 1
+        descriptor['runtime_scope'] = []
+        for component in report.get('runtime_components', []):
+            parts = cpe_parts(component['cpe'])
+            parts[5:7] = ['*', '*']
+            descriptor['runtime_scope'].append({'id': component['id'], 'product_identity': ':'.join(parts),
+                                               'deployment': component.get('deployment', {}),
+                                               'evidence_kind': component['evidence']['kind']})
+        descriptor['runtime_scope'].sort(key=lambda row: row['id'])
     descriptor['effective_ref'] = report.get('target', {}).get('requested_ref')
     descriptor['scanner_version'] = report.get('scanner', {}).get('version')
     descriptor['build_version'] = report.get('resolution', {}).get('version')
@@ -202,18 +229,27 @@ def run_monitor(args, parse_scan, validate_scan, root):
                     'reason': 'not due', 'next_due': (due + timedelta(hours=config['interval_hours'])).isoformat(),
                     'last_digest': state.get('last_digest')}
         report = new_report('scan', {'kind': 'portfolio', 'monitor_id': config['monitor_id'], 'config': config['_file']})
+        if any('runtime_inventory' in target for target in config['targets']):
+            report['scope'] = 'portfolio_source_and_explicit_runtime_inventory'
+            report['limitations'] = ['Source dependency assessment and explicit runtime inventory are separate scopes. Imported deployment evidence is not independently verified; live deployments, reachability and remediation are not established.']
         report['monitor'] = {'config_sha256': config['_sha256'], 'interval_hours': config['interval_hours']}
         children = []
         client = Client(args)
         for target, scan_args in zip(config['targets'], selected):
-            child = new_report('scan', {'kind': 'github', 'repository': target['repo']} if 'repo' in target else {'kind': 'local', 'path': target['path']})
+            runtime_target = 'runtime_inventory' in target
+            child = new_report('runtime' if runtime_target else 'scan',
+                {'kind': 'runtime_inventory', 'inventory': target['runtime_inventory']} if runtime_target else
+                {'kind': 'github', 'repository': target['repo']} if 'repo' in target else {'kind': 'local', 'path': target['path']})
             try:
                 if target.get('resolve') and not args.allow_builds:
                     raise ValueError('Local build execution requires monitor run --allow-builds')
-                scan(scan_args, child)
+                if runtime_target:
+                    assess_runtime(scan_args, client, child)
+                else:
+                    scan(scan_args, child)
             except (OSError, SourceError, ValueError, KeyError, TypeError) as exc:
                 child['coverage'].append({'source': 'monitor target', 'status': 'error', 'error': str(exc)})
-            identity = {'entry_id': target['_key'], 'repository': target.get('repo', target.get('path')),
+            identity = {'entry_id': target['_key'], 'repository': target.get('repo', target.get('path', target.get('runtime_inventory'))),
                         'requested_ref': target.get('ref'), 'commit': child['target'].get('commit')}
             for row in child['findings']:
                 row['repository_target'] = identity.copy()
@@ -242,7 +278,7 @@ def run_monitor(args, parse_scan, validate_scan, root):
         for target, child in zip(config['targets'], children):
             key = target['_key']
             active_keys.add(key)
-            label = {k: v for k, v in target.items() if k in {'repo', 'ref', 'path', 'resolve'}}
+            label = {k: v for k, v in target.items() if k in {'repo', 'ref', 'path', 'resolve', 'runtime_inventory'}}
             history = state['targets'].setdefault(key, {'target': label, 'scopes': {}})
             history['target'] = label
             coverage = shared + [item for item in report['coverage'] if item.get('repository_target', {}).get('entry_id') == key]
@@ -332,7 +368,7 @@ def present_digest(result, args):
 def schedule(args, root):
     config = load_config(args.config, args.max_bytes)
     executable = (root / 'tools' / 'agent-security' / 'agent-security').resolve()
-    argv = [sys.executable, str(executable), 'monitor', 'run', '--config', config['_file'], '--due', '--max-bytes', str(args.max_bytes), '--json']
+    argv = [sys.executable, str(executable), 'monitor', 'run', '--config', config['_file'], '--due', '--max-bytes', str(args.max_bytes), '--runtime-limit', str(args.runtime_limit), '--json']
     if args.allow_builds:
         argv.append('--allow-builds')
     if args.notify_recipient:

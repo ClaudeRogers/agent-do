@@ -72,7 +72,15 @@ A `targets` array can mix entries such as:
 ]
 ```
 
-Each entry accepts exactly one `repo` or `path`. GitHub `ref` is optional and
+Each source entry accepts exactly one `repo` or `path`. A runtime entry accepts
+only `runtime_inventory`, pointing to the versioned inventory JSON described in
+[runtime assessment](RUNTIME_ASSESSMENT.md). Initialize a runtime-only portfolio
+with `monitor init --config PATH --runtime-inventory PATH`. Use
+`monitor run --runtime-limit N` for the per-component NVD record bound (default
+1000). Runtime issue IDs remain distinct; changed membership/deployment identity
+keeps earlier findings unverified.
+
+For source entries, GitHub `ref` is optional and
 otherwise selects the default branch. `resolve` is local-only. Local `options`
 accept `maven`, `gradle`, `maven_settings` executable/settings strings and
 `maven_profile`, `gradle_configuration`, `build_property` arrays of strings.
@@ -94,7 +102,9 @@ This compares observed dependencies under the configured build environment;
 it does not independently enumerate every implicitly activated profile or prove
 that ambient credentials/environment stayed identical. Use consistent build
 settings and environment when evaluating the same scope over time. Runtime/JDK,
-OS, container and deployed-artifact awareness remain milestone 4.
+OS, container and deployed-artifact evidence can now be supplied through
+[runtime inventory targets](RUNTIME_ASSESSMENT.md). This does not automatically
+collect live runtime or deployment evidence.
 
 ## What the changes mean
 
@@ -207,6 +217,6 @@ Tests exercise transitions, failures, alias/version changes, new scopes, removed
 targets, due intervals, locks, failed state writes, config rejection, opt-in
 notifications, cron export and a local Maven/scanner fixture pipeline. They do
 not establish live multi-repository compatibility, actual cron execution, or
-notification delivery on your host. Milestone 4 adds runtime/deployment inventory;
+notification delivery on your host. Milestone 4 now adds explicit runtime/deployment inventory; automatic collectors remain follow-up work;
 milestone 5 adds remediation/update PRs. Monitoring never automatically updates,
 publishes or deploys a repository.

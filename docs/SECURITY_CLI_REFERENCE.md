@@ -13,6 +13,7 @@ recommendation that a particular release is secure or compatible.
 | --- | --- | --- |
 | `agent-do security find` | Search published advisories, including products your team does not use. | Access to NVD/GitHub advisory APIs; no scanner required. |
 | `agent-do security scan` | Match source dependency versions in a local project, GitHub repository, or repository list. | OSV-Scanner v2; remote acquisition also needs authenticated `gh` access. Explicit JVM resolution also needs Java and Maven/Gradle. |
+| `agent-do security runtime` | Assess explicit runtime versions and deployment evidence, keeping project declarations separate. | NVD for assessment; optional explicit local Java executable probe or imported runtime inventory. Inventory-only is offline. |
 | `agent-do security report` | Read and filter an existing unfiltered report. | A saved report; no network or scanner required. |
 | `agent-do security doctor` | Check local scanner prerequisites and credential presence. | No network requests; does not establish authentication or run project builds. |
 | `agent-do security monitor` | Configure portfolios, compare evidence, export recurring jobs and explicitly request notifications through init/run/report/schedule. | Scanner/gh/build prerequisites on the scan host; POSIX locking for runs, cron for an installed recurring job. |
@@ -21,7 +22,7 @@ Put options **after the subcommand**. Unless stated otherwise, value options
 accept one value, are not repeatable, and have no active restriction when omitted.
 Boolean flags are off by default. Shared presentation filters combine with AND;
 repeated targets combine with OR. Filters never remove findings from the saved
-`find`/`scan` report.
+`find`/`scan`/`runtime` report.
 
 ## Help and output
 
@@ -39,8 +40,9 @@ agent-do security doctor --help
 
 ## Shared finding filters
 
-All parameters in this table are available on **find, scan and report**,
-and on **monitor run/report**.
+All parameters in this table are available on **find, scan, runtime and report**,
+and on **monitor run/report**. Runtime rejects package `--ecosystem` selectors;
+use `--package vendor:product`. Runtime inventory-only rejects advisory filters.
 Examples use saved reports so you can experiment without repeating a scan.
 On `find`, ecosystem/package flags also choose source query criteria.
 
@@ -72,7 +74,8 @@ Accepted ecosystem names and normalization:
 
 An ecosystem filter refers to packages, not an installed runtime or cloud
 platform. For example, `--ecosystem node` does not inventory the Node.js binary.
-There are no `--java`, `--python`, `--oracle`, `--since`, or `--days` flags.
+There are no discovery `--java`, `--python`, `--oracle`, `--since`, or `--days` flags.
+Runtime has a distinct `--java EXECUTABLE` option described below.
 Use `--target`, `--ecosystem`, `--vendor`/`--product`, and explicit date boundaries.
 
 ## Find: advisory sources and targets
@@ -190,9 +193,33 @@ All build options require explicit resolution.
 modules, excluded configurations, wrappers, side effects and unresolved gaps.
 Resolution does not establish what is packaged, installed or deployed.
 
+## Runtime: explicit evidence and applicability
+
+See [runtime assessment](RUNTIME_ASSESSMENT.md) for the inventory JSON schema,
+match strength, vendor mappings, deployment labels and remaining milestone 4 work.
+At least one of path, inventory or local-java is required; they may be combined.
+
+| Parameter | Values, default and restrictions | Example |
+| --- | --- | --- |
+| `--path DIR` | Static root POM/Gradle/tool-version/Dockerfile hints; no build execution or parent resolution. Does not establish an installed runtime. | `agent-do security runtime --path . --inventory-only --json` |
+| `--inventory PATH` | Versioned local runtime/deployment JSON with exact CPE identities and provenance; imported evidence is not independently verified. | `agent-do security runtime --inventory ~/runtime-inventory.json --json` |
+| `--local-java` | Explicitly execute a trusted local Java binary to observe vendor/version/VM properties. Default off; does not select a deployed or Maven JDK implicitly. | `agent-do security runtime --path . --local-java --inventory-only --json` |
+| `--java EXECUTABLE` | Requires local-java; default installed java on PATH. Select another trusted Java executable. | `agent-do security runtime --local-java --java /path/to/jdk/bin/java --inventory-only --json` |
+| `--java-cpe CPE` | Requires local-java; caller-verified CPE 2.3 distribution identity with explicit part/vendor/product and wildcard version/update. Oracle HotSpot/OpenJDK observations have narrow automatic mappings; other vendors remain unmapped by default. This example is for Oracle Java, not all JDKs. | `agent-do security runtime --local-java --java-cpe 'cpe:2.3:a:oracle:java_se:*:*:*:*:*:*:*:*' --json` |
+| `--probe-timeout SECONDS` | Finite positive local Java subprocess timeout, default **15** seconds. | `agent-do security runtime --local-java --probe-timeout 30 --inventory-only --json` |
+| `--inventory-only` | Collect/save evidence offline; no advisory lookup or CVE assessment. Rejects advisory score/date/CVE/exploitation filters. | `agent-do security runtime --inventory ~/runtime-inventory.json --inventory-only --json` |
+| `--limit INTEGER` | Positive NVD record bound **per runtime component**, default **1000** before presentation filters. Truncation remains incomplete. | `agent-do security runtime --inventory ~/runtime-inventory.json --limit 2000 --json` |
+
+Shared finding filters (except ecosystem), JSON, and the HTTP/cache/KEV controls
+below also apply. Runtime package names are CPE `vendor:product`, not Maven
+coordinates. Unsupported CPE/version conditions and missing environment evidence
+remain labeled candidates with incomplete coverage. No published fix is inferred
+from NVD version bounds. Automatic image/cluster collection is not implemented.
+
 ## HTTP, cache and enrichment options
 
-These options are available on **find and scan**. HTTP/cache flags control
+These options are available on **find, scan, runtime and monitor run**.
+Runtime inventory-only performs no requests. HTTP/cache flags control
 agent-do's advisory and KEV client, **not** `gh`, Maven/Gradle or OSV-Scanner's
 own network/cache/retry behavior. A file-only scan without KEV enrichment may
 make no requests through this client. Use scan-timeout for external subprocesses.
@@ -220,12 +247,12 @@ network/cache/enrichment flags; it cannot refresh a source or run a new scan.
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |
 | `--latest` | Read the newest saved report, including incomplete runs; the default without a selector. Explicitly flags an incomplete assessment and suggests recovery commands. Does not silently substitute older results. | `agent-do security report --latest --cvss-min 7 --json` |
-| `--latest-complete` | Explicitly select the newest report whose status is complete, skipping incomplete/unreadable reports. Searches **all projects and commands**; may select older findings for a different project. Shows a selection note; errors if no complete report exists. | `agent-do security report --latest-complete --severity critical,high --json` |
+| `--latest-complete` | Explicitly select the newest report whose status is complete, skipping incomplete/unreadable reports. Searches **all projects and commands**; may select older findings for a different project, including inventory-only evidence with no CVE assessment. Shows a selection note; errors if no complete report exists. | `agent-do security report --latest-complete --severity critical,high --json` |
 | `--list` | List all saved reports newest first, with timestamps, targets, assessment status, finding/unscored counts, coverage gaps and file paths. Does not display finding details or accept finding filters. Empty list exits 0; unreadable entries are shown and make listing exit 1. Incomplete assessments listed normally do not make listing fail. | `agent-do security report --list --json` |
 | `--file PATH` | Read a specific saved JSON report. This is a report file, **not** a repository-list input. | `agent-do security report --file /path/to/report.json --severity critical,high --json` |
 | `--target NAME` | **Repeatable**, same names/aliases as find. Only filters saved multi-target advisory discovery to targets originally searched; errors if any requested target was not searched. Does not select repository names in a batch report or initiate new searches. | `agent-do security report --latest --target java --target springboot --json` |
 
-`find`/`scan` save unfiltered schema-version-1 JSON in
+`find`/`scan`/`runtime` save unfiltered schema-version-1 JSON in
 `$AGENT_DO_HOME/security/reports` (default `~/.agent-do/security/reports`). Report
 filtering is read-only and does not save another copy. Record the printed
 `saved_report` path to revisit a particular assessment rather than relying on
@@ -262,9 +289,10 @@ These verbs remain inside the existing security family. Help is available on
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |
 | `--config PATH` | Required destination JSON file. Creates privately; refuses to overwrite an existing file. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --json` |
-| `--repos-file PATH` | Initialize targets from a text/JSON GitHub list; mutually exclusive with path. Copies normalized entries, not a live reference to the list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt` |
-| `--path DIR` | Initialize one local target; mutually exclusive with repos-file. Relative input becomes an absolute path. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --json` |
+| `--repos-file PATH` | Initialize targets from a text/JSON GitHub list; mutually exclusive with path and runtime-inventory. Copies normalized entries, not a live reference to the list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt` |
+| `--path DIR` | Initialize one local target; mutually exclusive with repos-file and runtime-inventory. Relative input becomes an absolute path. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --json` |
 | `--resolve TOOL` | Optional maven/gradle resolution plan; requires path. Does not execute it during initialization. Runs/scheduled jobs need allow-builds. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --resolve maven` |
+| `--runtime-inventory PATH` | Initialize one runtime inventory target; mutually exclusive with path/repos-file. Validate inventory without contacting NVD or executing probes. | `agent-do security monitor init --config ~/runtime-monitor.json --runtime-inventory ~/runtime-inventory.json --json` |
 | `--interval-hours INTEGER` | Positive whole hours between due attempts; default **24**. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --interval-hours 12` |
 | `--max-bytes INTEGER` | Positive file bound, default **16777216**, for reading the repository list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --max-bytes 33554432` |
 | `--json` | Structured creation result; no scan, scheduling or notification occurs. | `agent-do security monitor init --config ~/bff-security.json --path . --json` |
@@ -276,7 +304,8 @@ These verbs remain inside the existing security family. Help is available on
 | `--config PATH` | Required existing portfolio configuration. All target options are validated before scanning. | `agent-do security monitor run --config ~/team-security.json --json` |
 | `--due` | Skip without scanning/notifying if the interval since the last committed attempt has not elapsed. Default: run immediately. Failed attempts also advance the due interval. | `agent-do security monitor run --config ~/team-security.json --due --json` |
 | `--allow-builds` | Explicitly authorize trusted local Maven/Gradle execution configured in targets. Default off; without it build targets are incomplete and other targets continue. | `agent-do security monitor run --config ~/bff-security.json --allow-builds --json` |
-| `--scanner EXECUTABLE` | Trusted OSV-Scanner v2 executable for all targets; default osv-scanner. | `agent-do security monitor run --config ~/team-security.json --scanner /usr/local/bin/osv-scanner --json` |
+| `--runtime-limit INTEGER` | Positive NVD record bound per imported runtime component; default **1000**. Source dependency scans unaffected. | `agent-do security monitor run --config ~/runtime-monitor.json --runtime-limit 2000 --json` |
+| `--scanner EXECUTABLE` | Trusted OSV-Scanner v2 executable for source dependency targets; default osv-scanner. | `agent-do security monitor run --config ~/team-security.json --scanner /usr/local/bin/osv-scanner --json` |
 | `--scan-timeout SECONDS` | Positive finite per scanner/GitHub/build subprocess timeout; default **300**. | `agent-do security monitor run --config ~/bff-security.json --allow-builds --scan-timeout 600 --json` |
 | `--notify-recipient ALIAS` | Explicitly send filtered change counts/status/path through existing agent-do notify routing. Default: **no send**. Recipient and credentials must already be configured. Failure makes command incomplete without rolling back scan evidence. | `agent-do security monitor run --config ~/team-security.json --notify-recipient security-team --json` |
 | `--notify-via LIST` | Provider order forwarded to notify, e.g. slack,email; requires notify-recipient. Default existing notify routing. | `agent-do security monitor run --config ~/team-security.json --notify-recipient security-team --notify-via slack --json` |
@@ -313,6 +342,13 @@ agent-do security monitor report --config ~/team-security.json --severity critic
 ```
 
 ### monitor schedule
+
+`--runtime-limit INTEGER` (positive, default **1000**) is exported into the cron
+job so scheduled runtime assessment can use the same bound as manual runs:
+
+```bash
+agent-do security monitor schedule --config ~/runtime-monitor.json --runtime-limit 2000 --json
+```
 
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |

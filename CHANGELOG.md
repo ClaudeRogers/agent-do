@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `security runtime` separates static Java/build/image declarations from explicitly observed local Java and imported runtime/deployment CPE inventory. NVD configuration conditions, numeric ranges and missing environment evidence produce attributable inventory matches or candidates. Runtime inventories can join recurring portfolios with per-component history and conservative scope changes. Automatic image/cluster collectors and distro backport assessment remain milestone 4 follow-ups. See `docs/RUNTIME_ASSESSMENT.md`.
+
 - `security monitor init|run|report|schedule` adds local/GitHub portfolio configuration, due intervals, locked atomic history, alias-aware new/ongoing/resolved/unverified digests, reviewable cron export and explicit existing-notify routing. Failed scans, changed scopes and removed targets never silently resolve earlier findings. Local build execution requires `--allow-builds`; no scheduler or notification is enabled automatically. See `docs/PORTFOLIO_MONITORING.md`.
 
 - Security scans rename the internal staging directory from `source` to `dependency-snapshot`, preventing OSV's subcommand/file-name collision warning. The full verified `source` notice is also classified as non-blocking if emitted; unknown/mixed diagnostics, missing inventory and scanner failures still make coverage incomplete. Rerun scans to create fresh complete reports; historical assessments are not rewritten.

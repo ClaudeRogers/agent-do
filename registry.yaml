@@ -1,6 +1,6 @@
 tools:
   security:
-    description: Published vulnerability discovery and source dependency scanning for local and GitHub repositories
+    description: Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring
     capabilities:
     - find NVD CVEs by CPE vendor/product or keywords and GitHub advisories by ecosystem/package
     - combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
@@ -13,15 +13,18 @@ tools:
     - attach separately scoped Dependabot alert evidence through gh alerts when available
     - monitor configured local/GitHub portfolios with due intervals, scope-aware finding transitions, and durable digests
     - export reviewable recurring cron jobs and explicitly opt in to existing notify delivery
+    - separate project Java declarations from observed local Java and imported runtime/deployment CPE evidence
+    - preserve NVD applicability conditions and monitor exact runtime inventory with per-component lifecycle evidence
     commands:
       find: 'Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]'
       scan: 'Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes'
+      runtime: 'Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--inventory-only] [--json]; local probing explicitly executes a trusted Java executable'
       report: 'List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]'
       doctor: 'Check scanner and local feature prerequisites without network requests: doctor [--json]'
-      monitor init: 'Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR) [--resolve maven|gradle] [--interval-hours N] [--json]'
-      monitor run: 'Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--notify-recipient ALIAS] [--cvss-min N] [--json]'
+      monitor init: 'Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR | --runtime-inventory PATH) [--resolve maven|gradle] [--interval-hours N] [--json]'
+      monitor run: 'Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]'
       monitor report: 'Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]'
-      monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--notify-recipient ALIAS] [--json]'
+      monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--json]'
     examples:
     - intent: find Oracle Java advisories above CVSS 7
       command: agent-security find --vendor oracle --product jdk --cvss-gt 7 --json
@@ -76,6 +79,8 @@ tools:
           uses the same caller-controlled --max-bytes bound. --interval-hours defaults to 24,
           a whole positive number of hours chosen by the operator. Exported cron checks are
           hourly and --due gates actual scans; cadence is an operator default, not a ceiling.
+          Runtime --limit and monitor --runtime-limit default to 1000 NVD records per component;
+          --probe-timeout uses the shared read-probe timeout. These are operator defaults.
           Comparisons measure all retained findings without an arbitrary count/history cap.
           NVD pacing uses the published 5 or 50 requests per 30 seconds without/with
           an API key (6 or 0.6 seconds), shared by every query in the invocation.
@@ -83,19 +88,23 @@ tools:
       snapshot:
       - find
       - scan
+      - runtime
       - report
       - monitor run
       - monitor report
       - monitor schedule
       interact:
       - scan
+      - runtime
       - monitor run
       verify:
+      - runtime
       - doctor
       - monitor run
       save:
       - find
       - scan
+      - runtime
       - monitor init
       - monitor run
       attributes:
@@ -106,6 +115,12 @@ tools:
         - composite
         - polymorphic
         - passthrough
+        runtime:
+        - composite
+        - polymorphic
+        - passthrough
+        - own_state
+        - sensitive
         monitor init:
         - own_state
         monitor run:

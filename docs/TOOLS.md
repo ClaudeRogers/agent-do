@@ -98,7 +98,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
-| [security](#security) | Published vulnerability discovery and source dependency scanning for local and GitHub repositories | mixed | 8 |
+| [security](#security) | Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring | mixed | 9 |
 | [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
@@ -3767,7 +3767,7 @@ agent-do screen type 'hello world'
 
 ### security
 
-Published vulnerability discovery and source dependency scanning for local and GitHub repositories
+Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring
 
 Concurrency: `mixed`
 
@@ -3784,17 +3784,20 @@ Concurrency: `mixed`
 - attach separately scoped Dependabot alert evidence through gh alerts when available
 - monitor configured local/GitHub portfolios with due intervals, scope-aware finding transitions, and durable digests
 - export reviewable recurring cron jobs and explicitly opt in to existing notify delivery
+- separate project Java declarations from observed local Java and imported runtime/deployment CPE evidence
+- preserve NVD applicability conditions and monitor exact runtime inventory with per-component lifecycle evidence
 
 **Commands**
 
 - `find`: Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
 - `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
+- `runtime`: Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--inventory-only] [--json]; local probing explicitly executes a trusted Java executable
 - `report`: List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]
 - `doctor`: Check scanner and local feature prerequisites without network requests: doctor [--json]
-- `monitor init`: Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR) [--resolve maven|gradle] [--interval-hours N] [--json]
-- `monitor run`: Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--notify-recipient ALIAS] [--cvss-min N] [--json]
+- `monitor init`: Create a portfolio without overwriting config: monitor init --config PATH (--repos-file PATH | --path DIR | --runtime-inventory PATH) [--resolve maven|gradle] [--interval-hours N] [--json]
+- `monitor run`: Assess and compare a portfolio: monitor run --config PATH [--due] [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--cvss-min N] [--json]
 - `monitor report`: Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]
-- `monitor schedule`: Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--notify-recipient ALIAS] [--json]
+- `monitor schedule`: Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--runtime-limit N] [--notify-recipient ALIAS] [--json]
 
 **Examples**
 
@@ -3832,13 +3835,13 @@ agent-do security find --target java --target spring-boot --target angular --tar
 **Safety (from contracts)**
 
 - Read-only (snapshot/verify; safe to parallelize): `doctor`, `monitor report`, `monitor schedule`, `report`
-- Write (connect/interact/save): `find`, `monitor init`, `monitor run`, `scan`
-- sensitive (emits or persists secret material; guard output): `monitor run`
-- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `monitor run`, `scan`
+- Write (connect/interact/save): `find`, `monitor init`, `monitor run`, `runtime`, `scan`
+- sensitive (emits or persists secret material; guard output): `monitor run`, `runtime`
+- passthrough (arbitrary-payload escape hatch; beat decided by the argument): `monitor run`, `runtime`, `scan`
 - long_running (daemon/stream/session; may never return): `monitor run`
-- polymorphic (beat decided by payload or flag at call time): `scan`
-- composite (one call performs several beats internally): `find`, `monitor run`, `scan`
-- own_state (writes only its own cache/state; parallel-safe): `find`, `monitor init`, `monitor run`
+- polymorphic (beat decided by payload or flag at call time): `runtime`, `scan`
+- composite (one call performs several beats internally): `find`, `monitor run`, `runtime`, `scan`
+- own_state (writes only its own cache/state; parallel-safe): `find`, `monitor init`, `monitor run`, `runtime`
 
 ### sentry
 

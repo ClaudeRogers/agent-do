@@ -354,6 +354,7 @@ patterns:
 # review. `skip: true` excludes a verb from proposing (manual review item).
 overrides:
   security:
+    runtime: {beats: [snapshot, interact, verify, save], attributes: [composite, polymorphic, passthrough, own_state, sensitive]}
     find: {beats: [snapshot, save], attributes: [composite, own_state]}
     scan: {beats: [snapshot, interact, save], attributes: [composite, polymorphic, passthrough]}
     report: {beats: [snapshot]}

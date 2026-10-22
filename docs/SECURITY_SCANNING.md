@@ -305,7 +305,10 @@ Configured portfolios, compatible-scope change reports, due intervals, cron
 export and explicit notification routing are available through `monitor`;
 see [portfolio monitoring](PORTFOLIO_MONITORING.md) for installation and limits.
 Publication date and first detection are distinct, and failed/partial scans do
-not resolve prior findings. Runtime/image/deployment mapping follows that work. Remediation PRs
+not resolve prior findings. [Runtime assessment](RUNTIME_ASSESSMENT.md) now adds
+project hints, explicit local Java probing and imported runtime/deployment CPE
+evidence, including portfolio monitoring. Automatic image/cluster collection and
+distro advisory handling remain milestone 4 follow-ups. Remediation PRs
 come afterward, with isolated lockfile updates and tests. The optional unrelated
 advisory digest remains separate from repository remediation tasks.
 
@@ -318,6 +321,7 @@ python3 tests/test_security_targets.py
 python3 tests/test_security_repositories.py
 python3 tests/test_security_reports.py
 python3 tests/test_security_monitor.py
+python3 tests/test_security_runtime.py
 ./agent-do harness contracts validate
 ./agent-do harness contracts drift --tool security
 ./agent-do harness bounds drift --tool security
