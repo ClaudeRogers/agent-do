@@ -308,8 +308,8 @@ Publication date and first detection are distinct, and failed/partial scans do
 not resolve prior findings. [Runtime assessment](RUNTIME_ASSESSMENT.md) now adds
 project hints, explicit local Java probing and imported runtime/deployment CPE
 evidence, including portfolio monitoring. Explicit image/rootfs/Kubernetes collection, Temurin advisories and Trivy vendor/backport
-assessment are described in [runtime collection](RUNTIME_COLLECTION.md). Remediation PRs
-come afterward, with isolated lockfile updates and tests. The optional unrelated
+assessment are described in [runtime collection](RUNTIME_COLLECTION.md). The [planned upgrade feature](PLANNED_UPGRADES.md) covers remediation PRs,
+isolated updates and verification; it is not implemented yet. The optional unrelated
 advisory digest remains separate from repository remediation tasks.
 
 ## Validation
@@ -318,13 +318,7 @@ See the [milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md) for
 combined automated tests and host checks, including runtime inventory monitoring.
 
 ```bash
-python3 tests/test_security.py
-python3 tests/test_security_resolution.py
-python3 tests/test_security_targets.py
-python3 tests/test_security_repositories.py
-python3 tests/test_security_reports.py
-python3 tests/test_security_monitor.py
-python3 tests/test_security_runtime.py
+python3 -m unittest discover -s tests -p 'test_security*.py'
 ./agent-do harness contracts validate
 ./agent-do harness contracts drift --tool security
 ./agent-do harness bounds drift --tool security

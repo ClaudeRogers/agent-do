@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Offline vendor, artifact and deployment acceptance tests (no live claims)."""
 import contextlib
-import copy
 import io
 import json
 import os
@@ -14,12 +13,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/agent-security'))
-from security.cli import main, parser, validate
-from security.collect import artifact, execute, image_ref, java_components
+from security.cli import main, parser
+from security.collect import execute, java_components
 from security.model import now
-from security.runtime import applicability
 from security.sources import AdoptiumAssetRedirect, SourceError
-from security.store import new_report
 from security.temurin import document, relation, version
 
 IMAGE = 'example.invalid/team/bff@sha256:' + 'a' * 64

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/agent-security'))
 from security.cli import main
 from security.comparison import compare_target
-from security.monitor import fingerprint, load_config, locked
+from security.monitor import load_config, locked
 from security.store import home
 from test_security import FakeClient, advisory
 from security.sources import SourceError

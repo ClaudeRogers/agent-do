@@ -16,10 +16,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools/agent-security'))
-from security.cli import main, parser, validate
+from security.cli import main, parser
 from security.resolve import (SBOM_NAME, attach_evidence, coordinate, execute,
                               gradle_graphs, launcher, maven_trees, read_json_trees, sbom)
-from security.store import new_report
 from test_security import OSV_SOURCE_NOTICE
 
 

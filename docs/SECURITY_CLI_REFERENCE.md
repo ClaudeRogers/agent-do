@@ -196,7 +196,7 @@ Resolution does not establish what is packaged, installed or deployed.
 ## Runtime: explicit evidence and applicability
 
 See [runtime assessment](RUNTIME_ASSESSMENT.md) for the inventory JSON schema,
-match strength, vendor mappings, deployment labels and remaining milestone 4 work.
+match strength, vendor mappings, deployment labels and assessment limits.
 At least one of path, inventory or local-java is required; they may be combined.
 
 | Parameter | Values, default and restrictions | Example |

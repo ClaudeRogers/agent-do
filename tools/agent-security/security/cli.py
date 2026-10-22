@@ -521,7 +521,6 @@ def main(argv=None):
                     scan(args, report)
                     if args.dependabot:
                         dependabot(args, report, ROOT / "tools" / "agent-gh")
-                report["findings"] = merge_findings(report["findings"])
                 if args.kev or args.known_exploited:
                     enrich_kev(client, report)
             except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:

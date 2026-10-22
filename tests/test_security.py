@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools" / "agent-security"))
 from security.cli import main, parser
 from security.model import cvss_scores, finding, matches, merge_findings, present
-from security.scan import acquire, assess_inventory, dependabot, osv_rows, repo_name
-from security.sources import Client, SourceError, discover, enrich_kev, ghsa_row, nvd_row
+from security.scan import acquire, assess_inventory, dependabot
+from security.sources import Client, SourceError, discover, enrich_kev, nvd_row
 from security.store import finish, latest_report, new_report, read_report
 
 # Exact OSV 2.7.0 diagnostic captured during laptop testing (not a synthetic

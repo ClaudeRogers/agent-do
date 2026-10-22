@@ -11,7 +11,7 @@ Milestone 4 includes static hints, explicit local Java probing, imported evidenc
 NVD matching, Adoptium Temurin VDR assessment, explicit Syft/Trivy image/rootfs
 collection and read-only Kubernetes pod image discovery. See
 [collection setup and examples](RUNTIME_COLLECTION.md) and the
-[completion scope](SECURITY_MILESTONE_4_COMPLETION.md). Milestone 5 remains
+[accepted scope and deferred validation](SECURITY_MILESTONE_3_4_TESTING.md#accepted-scope-and-deferred-validation). Milestone 5 remains
 remediation/update PRs. Nothing updates your project.
 
 ## Test a local Java project
@@ -209,22 +209,16 @@ Wildcard versions can be constrained by NVD range fields; a wildcard alone is
 not a reason to label a match uncertain. A JDK appearing only as a non-vulnerable
 platform prerequisite is not itself a vulnerable JDK match.
 
-The v10 laptop examples exposed a parser gap: the public NVD mirror records for
-CVE-2012-1723 and CVE-2012-1531 contain upper bounds `1.4.2_37` and `1.4.2_38`.
-The latter also contains vulnerable JDK entries, not only JavaFX. Earlier matching
-could not parse these pre-Java-5 bounds and retained candidates for Java 17.
-The updated matcher understands legacy `1.x.y_N` updates, including separate
-CPE update fields and leading zeroes. Both records exclude Java 17/21 while
-retaining matches at their affected historical Java 1.4 patch boundaries.
-Unknown vendor/EA/build suffixes still remain uncertain rather than guessed.
-These two examples do not establish the cause of every other candidate.
+The matcher supports legacy `1.x.y_N` bounds, separate update fields and leading
+zeroes. Public regression extracts for CVE-2012-1723/1531 exclude Java 17/21 while
+preserving their historical Java 1.4 patch boundaries. Unrelated escaped NetApp
+or WebKit predicates do not make a Java branch uncertain. Unsupported conditions
+that could affect the target and missing environment prerequisites remain unknown.
 
-New runtime reports identify `runtime_matcher_schema: 2`. Runtime monitoring
-starts a separate comparison baseline when matching rules change; old baseline
-issues remain unverified, never described as deployment fixes. Source monitoring
-is unaffected. Existing saved reports and history are not rewritten. Use a fresh
-monitor config when testing only the new baseline's counts, or inspect both
-assessment and comparison status on an existing monitor.
+New reports identify `runtime_matcher_schema: 3`. Runtime monitoring starts a
+separate baseline when matching rules change; earlier issues remain unverified,
+not reported as deployment fixes. Existing saved reports/history are not rewritten.
+Inspect assessment and comparison status separately on an existing monitor.
 
 ## Include runtimes in a recurring portfolio
 

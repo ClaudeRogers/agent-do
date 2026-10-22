@@ -16,10 +16,10 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools' / 'agent-security'))
 from security.cli import main, parser
-from security.runtime import (applicability, assess_runtime, cpe_parts, declared_settings,
+from security.runtime import (applicability, declared_settings,
                               load_inventory, match_component, probe_java)
 from security.sources import SourceError
-from security.store import new_report, read_report
+from security.store import read_report
 
 JAVA = 'cpe:2.3:a:oracle:jdk:17.0.12:*:*:*:*:*:*:*'
 PATTERN = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
@@ -608,6 +608,8 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(identifier=identifier):
                 cve = self.historical_fixture(identifier)
                 self.assertIs(applicability(cve, [target], target), False)
+                affected = component(cpe=JAVA.replace('17.0.12:*', '1.8.0:update401' if identifier == 'CVE-2023-41993' else '17.0.2:*'))
+                self.assertIs(applicability(cve, [affected], affected), True)
                 positive = copy.deepcopy(cve)
                 positive['configurations'].append({'cpeMatch': [match(JAVA)]})
                 self.assertIs(applicability(positive, [target], target), True)

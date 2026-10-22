@@ -9,7 +9,6 @@ from .model import cvss_scores, finding
 from .sources import SourceError, re_asset_path
 
 RELEASE = 'https://api.github.com/repos/adoptium/temurin-vdr-generator/releases/latest'
-PROJECT = 'https://github.com/adoptium/temurin-vdr-generator'
 
 
 def identity(vendor, version, runtime_version=None):
@@ -50,6 +49,17 @@ def document(args, client):
                   'published_at': release.get('published_at'), 'verification': 'official_release_digest_checked'}
 
 
+def listed_versions(affects):
+    """Yield status and parsed patch listings using one VDR interpretation."""
+    for target in affects:
+        if target.get('ref') != 'pkg:github/openjdk/jdk':
+            continue
+        for entry in target.get('versions', []):
+            values = [entry['version']] if entry.get('version') else entry.get('range', '').removeprefix('vers:generic/').split('|')
+            for value in values:
+                yield entry.get('status', 'affected'), version(value)
+
+
 def relation(affects, current):
     """Exact VDR listings match; earlier releases stay candidates, not guesses.
 
@@ -58,20 +68,11 @@ def relation(affects, current):
     """
     from .runtime import compare
     known, unknown = [], False
-    for target in affects:
-        if target.get('ref') != 'pkg:github/openjdk/jdk':
-            continue
-        for entry in target.get('versions', []):
-            if entry.get('status', 'affected') != 'affected':
-                unknown = True
-                continue
-            values = [entry['version']] if entry.get('version') else entry.get('range', '').removeprefix('vers:generic/').split('|')
-            for value in values:
-                parsed = version(value)
-                if parsed is None:
-                    unknown = True
-                elif current and parsed[0] == current[0]:
-                    known.append(parsed)
+    for status, parsed in listed_versions(affects):
+        if status != 'affected' or parsed is None:
+            unknown = True
+        elif current and parsed[0] == current[0]:
+            known.append(parsed)
     if current is None:
         return None
     if any(compare(current, item) == 0 for item in known):
@@ -89,15 +90,8 @@ def assess(component, args, client, report):
         if not isinstance(body, dict) or body.get('bomFormat') != 'CycloneDX' or body.get('metadata', {}).get('component', {}).get('name') != 'Eclipse Temurin' or not isinstance(body.get('vulnerabilities'), list) or not body['vulnerabilities']:
             raise SourceError('Unsupported or empty Eclipse Temurin VDR document')
         current = version(component['java']['version'])
-        branches = set()
-        for item in body['vulnerabilities']:
-            for target in item.get('affects', []):
-                if target.get('ref') == 'pkg:github/openjdk/jdk':
-                    for entry in target.get('versions', []):
-                        for text in [entry['version']] if entry.get('version') else entry.get('range', '').removeprefix('vers:generic/').split('|'):
-                            parsed = version(text)
-                            if parsed:
-                                branches.add(parsed[0])
+        branches = {parsed[0] for item in body['vulnerabilities']
+                    for _, parsed in listed_versions(item.get('affects', [])) if parsed}
         unknown, examined = current is None, 0
         for item in body['vulnerabilities']:
             if not re.fullmatch(r'CVE-\d{4}-\d{4,}', str(item.get('id', ''))):
