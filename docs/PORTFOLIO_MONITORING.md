@@ -102,7 +102,8 @@ only `runtime_inventory`, pointing to the versioned inventory JSON described in
 [runtime assessment](RUNTIME_ASSESSMENT.md). Initialize a runtime-only portfolio
 with `monitor init --config PATH --runtime-inventory PATH`. Use
 `monitor run --runtime-limit N` for the per-component NVD record bound (default
-1000). Runtime issue IDs remain distinct; changed membership/deployment identity
+1000). Runtime issue IDs remain distinct; runtime matcher revisions also establish
+a separate comparison baseline, retaining earlier findings as unverified; changed membership/deployment identity
 keeps earlier findings unverified.
 
 For source entries, GitHub `ref` is optional and

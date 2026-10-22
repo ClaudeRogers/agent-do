@@ -19,7 +19,7 @@ from .repositories import load_repositories
 from .scan import repo_name, scan
 from .sources import Client, SourceError, enrich_kev
 from .store import atomic_json, digest, finish, home, new_report
-from .runtime import assess_runtime, cpe_parts, load_inventory
+from .runtime import RUNTIME_MATCHER_SCHEMA, assess_runtime, cpe_parts, load_inventory
 
 BUILD_OPTIONS = {'maven', 'gradle', 'maven_settings', 'maven_profile', 'gradle_configuration', 'build_property'}
 LIST_OPTIONS = {'maven_profile', 'gradle_configuration', 'build_property'}
@@ -187,7 +187,7 @@ def scope_key(target, report, max_bytes):
         descriptor['settings_sha256'] = digest(content)
     if 'runtime_inventory' in target:
         descriptor['runtime_inventory'] = target['runtime_inventory']
-        descriptor['runtime_matcher_schema'] = 1
+        descriptor['runtime_matcher_schema'] = report.get('runtime_matcher_schema', RUNTIME_MATCHER_SCHEMA)
         descriptor['runtime_scope'] = []
         for component in report.get('runtime_components', []):
             parts = cpe_parts(component['cpe'])
@@ -319,13 +319,14 @@ def run_monitor(args, parse_scan, validate_scan, root):
             history['scopes'][scope]['evidence_scope'] = {
                 'scanner_version': child.get('scanner', {}).get('version'),
                 'build_version': child.get('resolution', {}).get('version'),
+                'runtime_matcher_schema': child.get('runtime_matcher_schema'),
                 'effective_ref': child['target'].get('requested_ref'),
                 'configuration_fingerprint': fingerprint({k: v for k, v in target.items() if not k.startswith('_')})}
             for category, issues in transitions.items():
                 changes[category].extend({**issue, 'target_key': key, 'target': history['target']} for issue in issues)
             target_summaries.append({'target_key': key, 'target': history['target'], 'commit': child['target'].get('commit'),
                                      'status': 'complete' if complete else 'incomplete', 'scope': scope,
-                                     'coverage': coverage,
+                                     'coverage': coverage, 'runtime_matcher_schema': child.get('runtime_matcher_schema'),
                                      'counts': {category: len(issues) for category, issues in transitions.items()}})
         for key, history in state['targets'].items():
             if key not in active_keys:
@@ -340,7 +341,7 @@ def run_monitor(args, parse_scan, validate_scan, root):
                   'source_report': report['saved_report'],
                   'notes': ['New means first detected in this monitor/scope, not newly published.',
                             'Resolved means no longer detected in a complete compatible source assessment; deployment remediation is not established.',
-                            'Different scanner/build versions or configuration create separate baselines; earlier unresolved issues stay unverified.']}
+                            'Different scanner/build versions, runtime matcher revisions or configuration create separate baselines; earlier unresolved issues stay unverified.']}
         result['saved_digest'] = str(directory / 'digests' / (at.replace(':', '-') + '-' + result['run_id'] + '.json'))
         state.update({'last_attempt_at': at, 'last_digest': result['saved_digest']})
         # One state replacement includes the digest for crash recovery. A failed

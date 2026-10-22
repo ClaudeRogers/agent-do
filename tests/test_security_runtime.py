@@ -516,6 +516,75 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(failed['assessment_summary']['status'], 'incomplete')
         self.assertIn('TimeoutError', failed['assessment_summary']['coverage_issues'][0]['message'])
 
+    def historical_fixture(self, identifier):
+        return json.loads((ROOT / 'tests/fixtures/security' / (identifier + '.json')).read_text())['cve']
+
+    def test_public_2012_bounds_exclude_modern_java_without_candidates(self):
+        cves = [self.historical_fixture(identifier) for identifier in ('CVE-2012-1723', 'CVE-2012-1531')]
+        for version in ('17.0.12', '21.0.8'):
+            target = component(cpe=JAVA.replace('17.0.12', version))
+            for cve in cves:
+                self.assertIs(applicability(cve, [target], target), False)
+        body = {'totalResults': 2, 'vulnerabilities': [{'cve': cve} for cve in cves]}
+        with patch('security.cli.Client', return_value=Client(body)):
+            code, report = self.cli('runtime', '--inventory', str(self.inventory()))
+        self.assertEqual(code, 0)
+        self.assertEqual(report['findings'], [])
+        self.assertEqual(report['coverage'][0]['records_examined'], 2)
+
+    def test_public_2012_bounds_preserve_affected_java14_and_patch_boundary(self):
+        for identifier, last in [('CVE-2012-1723', 37), ('CVE-2012-1531', 38)]:
+            cve = self.historical_fixture(identifier)
+            for form in ('1.4.2_{}:*', '1.4.2:update{}', '1.4.2:update_{}'):
+                with self.subTest(identifier=identifier, form=form):
+                    target = component(cpe=JAVA.replace('17.0.12:*', form.format(last)))
+                    self.assertIs(applicability(cve, [target], target), True)
+                    patched = component(cpe=JAVA.replace('17.0.12:*', form.format(last + 1)))
+                    self.assertIs(applicability(cve, [patched], patched), False)
+
+    def test_pre_java5_range_bounds_and_unknown_suffixes(self):
+        old = component(cpe=JAVA.replace('17.0.12:*', '1.4.2:update_37'))
+        for key, expected in [('versionEndIncluding', True), ('versionEndExcluding', False), ('versionStartIncluding', True), ('versionStartExcluding', False)]:
+            self.assertIs(match_component(match(**{key: '1.4.2_37'}), old), expected)
+        self.assertIsNone(match_component(match(versionEndIncluding='1.4.2_37-b03'), old))
+        ancient = component(cpe=JAVA.replace('17.0.12:*', '1.3.1_05:*'))
+        self.assertIs(match_component(match(versionEndIncluding='1.3.1_05'), ancient), True)
+        criterion = PATTERN.replace(':*:*:*:*:*:*:*:*', ':1.3.1:update5:*:*:*:*:*:*')
+        self.assertIs(match_component(match(criterion), ancient), True)
+
+    def test_legacy_base_boundary_and_separate_update_criterion(self):
+        criterion = PATTERN.replace(':*:*:*:*:*:*:*:*', ':*:update36:*:*:*:*:*:*')
+        old = component(cpe=JAVA.replace('17.0.12:*', '1.5.0:update_36'))
+        self.assertIs(match_component(match(criterion, versionEndIncluding='1.5.0'), old), True)
+        self.assertIs(match_component(match(criterion, versionEndExcluding='1.5.0'), old), False)
+        different_update = component(cpe=JAVA.replace('17.0.12:*', '1.5.0:update_37'))
+        self.assertIs(match_component(match(criterion, versionEndIncluding='1.5.0'), different_update), False)
+
+    def test_unbounded_wildcard_and_nonvulnerable_platform_have_distinct_meanings(self):
+        target = component()
+        self.assertIs(applicability(advisory({'cpeMatch': [match()]}), [target], target), True)
+        fx = component('javafx', JAVA.replace('oracle:jdk:17.0.12', 'oracle:javafx:2.0'))
+        cve = advisory({'operator': 'AND', 'cpeMatch': [match(PATTERN.replace('oracle:jdk', 'oracle:javafx')),
+                                                    {'criteria': PATTERN, 'vulnerable': False}]})
+        self.assertIs(applicability(cve, [target, fx], target), False)
+        self.assertIs(applicability(cve, [target, fx], fx), True)
+
+    def test_changed_runtime_matcher_baseline_preserves_old_evidence(self):
+        config = self.monitor_init(self.inventory())
+        with patch('security.runtime.RUNTIME_MATCHER_SCHEMA', 1):
+            code, first = self.monitor_run(config, page())
+        self.assertEqual(code, 0)
+        self.assertEqual(first['counts']['new'], 1)
+        code, current = self.monitor_run(config, page())
+        self.assertEqual(code, 0)
+        self.assertEqual(current['comparison_status'], 'partial')
+        self.assertEqual(current['counts']['new'], 1)
+        self.assertEqual(current['counts']['unverified'], 1)
+        self.assertEqual(current['counts']['resolved'], 0)
+        self.assertNotEqual(first['targets'][0]['scope'], current['targets'][0]['scope'])
+        self.assertEqual(first['targets'][0]['runtime_matcher_schema'], 1)
+        self.assertEqual(current['targets'][0]['runtime_matcher_schema'], 2)
+
     def test_stale_receipts_never_appear_complete(self):
         client = Client(page())
         original = client.get

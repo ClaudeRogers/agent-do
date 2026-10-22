@@ -174,6 +174,30 @@ temporary directory to reproduce macOS-style temp path aliases. Fixtures use
 canonical paths for lookup/argument assertions; Gradle containment canonicalizes
 both root and manifest, while retaining outside-root rejection.
 
+## Check the historical Java candidate regression
+
+For verified modern Oracle JDK inventory, these targeted queries should examine
+the records and exclude the historical CVEs:
+
+```bash
+./agent-do security runtime --inventory ~/runtime-inventory-v8.json \
+  --cve CVE-2012-1723 --timeout 60 --json
+./agent-do security runtime --inventory ~/runtime-inventory-v8.json \
+  --cve CVE-2012-1531 --timeout 60 --json
+```
+
+The public regression fixtures include the actual legacy upper bounds
+`1.4.2_37`/`1.4.2_38`. Tests retain affected historical Java 1.4 matches as well as
+excluding modern Java. Also rerun the positive CVE-2024-21235 check above; the fix
+does not suppress historical CVEs by identifier or suppress all wildcard matches.
+
+Runtime matcher revision 2 uses a new monitor comparison baseline. Earlier
+baseline findings remain unverified on an existing monitor; a new baseline's
+complete assessment does not claim they were patched. A fresh disposable monitor
+config can isolate new/ongoing counts for acceptance testing. Remaining broad-scan
+candidates still require their own evidence review; these two cases do not explain
+all candidate causes automatically.
+
 ## Check failed acquisition separately from candidate findings
 
 Read `assessment_summary` in monitor run/report JSON and its prominently printed

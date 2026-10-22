@@ -39,6 +39,8 @@ def cpe_parts(value):
     return parts
 
 
+RUNTIME_MATCHER_SCHEMA = 2
+
 JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
 
 
@@ -56,14 +58,17 @@ def java_identity(value):
 
 def canonical_java_cpe(parts):
     parts = parts[:]
-    old = re.fullmatch(r'([5-8])u(\d+)', parts[5])
-    if not old:
-        old = re.fullmatch(r'(?:1\.)?([5-8])\.0[._](\d+)', parts[5])
-    if old:
+    short = re.fullmatch(r'([5-8])u(\d+)', parts[5])
+    legacy = re.fullmatch(r'1\.([2-8])\.(\d+)[._](\d+)', parts[5])
+    compact = re.fullmatch(r'([5-8])\.0[._](\d+)', parts[5])
+    if legacy:
+        parts[5], parts[6] = '1.' + legacy[1] + '.' + legacy[2], 'update_' + legacy[3]
+    elif short or compact:
+        old = short or compact
         parts[5], parts[6] = '1.' + old[1] + '.0', 'update_' + old[2]
     update = re.fullmatch(r'update_?(\d+)', parts[6])
     if update:
-        parts[6] = 'update_' + update[1]
+        parts[6] = 'update_' + str(int(update[1]))
     return parts
 
 
@@ -72,19 +77,17 @@ def numeric_version(value, java=False):
     # and Linux distribution revisions need dedicated semantics and stay unknown.
     if java:
         value = re.sub(r'\+\d+(?:\.\d+)*$', '', value)
+        legacy = re.fullmatch(r'1\.([2-8])\.(\d+)(?:[._](\d+))?', value)
+        if legacy:
+            return (int(legacy[1]), int(legacy[2]), int(legacy[3] or 0))
         short = re.fullmatch(r'([5-8])u(\d+)', value)
-        if short:
-            return (int(short[1]), 0, int(short[2]))
-        old = re.fullmatch(r'(?:1\.)?([5-8])\.0[._](\d+)', value)
-        if old:
+        compact = re.fullmatch(r'([5-8])\.0[._](\d+)', value)
+        if short or compact:
+            old = short or compact
             return (int(old[1]), 0, int(old[2]))
-        base = re.fullmatch(r'1\.([5-8])\.0', value)
-        if base:
-            return (int(base[1]), 0, 0)
     if not re.fullmatch(r'\d+(?:\.\d+)*', value):
         return None
-    result = tuple(int(part) for part in value.split('.'))
-    return result
+    return tuple(int(part) for part in value.split('.'))
 
 
 def compare(left, right):
@@ -109,7 +112,7 @@ def match_component(match, component):
         elif pattern[index].lower() != actual[index].lower():
             return False
     current_value = actual[5]
-    if java and re.fullmatch(r'1\.[5-8]\.0', actual[5]) and re.fullmatch(r'update_\d+', actual[6]):
+    if java and re.fullmatch(r'1\.[2-8]\.\d+', actual[5]) and re.fullmatch(r'update_\d+', actual[6]):
         current_value += '_' + actual[6].removeprefix('update_')
     current = numeric_version(current_value, java)
     if pattern[5] != '*':
@@ -126,9 +129,13 @@ def match_component(match, component):
         if key not in match:
             continue
         bound = numeric_version(match[key], java)
-        if bound is None or current is None:
+        # A legacy base-version boundary constrains the CPE version field;
+        # its separate update criterion is evaluated above. Embedded update
+        # boundaries (1.4.2_37, 8u431) compare the full Java security version.
+        selected_current = numeric_version(actual[5], java) if java and re.fullmatch(r'1\.[2-8]\.\d+', match[key]) else current
+        if bound is None or selected_current is None:
             uncertain = True
-        elif not accepts(compare(current, bound)):
+        elif not accepts(compare(selected_current, bound)):
             return False
     return None if uncertain else True
 
@@ -378,6 +385,7 @@ def assess_component(component, components, args, client, report):
 
 def assess_runtime(args, client, report):
     report['scope'] = 'explicit_runtime_inventory'
+    report['runtime_matcher_schema'] = RUNTIME_MATCHER_SCHEMA
     report['limitations'] = [
         'Declared compiler targets, toolchains and Docker image tags do not establish an installed or deployed runtime version.',
         'Local Java is the selected executable on this host, not proof of the JDK used by Maven, a container, or a deployment.',

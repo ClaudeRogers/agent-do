@@ -202,6 +202,29 @@ Latest-complete selection spans commands, including inventory-only reports; insp
 completed, even with findings; exit 1 means incomplete coverage; invalid CLI input
 returns 2. Inventory-only exit 0 makes no CVE claim.
 
+## Historical Java bounds and matcher revisions
+
+Wildcard versions can be constrained by NVD range fields; a wildcard alone is
+not a reason to label a match uncertain. A JDK appearing only as a non-vulnerable
+platform prerequisite is not itself a vulnerable JDK match.
+
+The v10 laptop examples exposed a parser gap: the public NVD mirror records for
+CVE-2012-1723 and CVE-2012-1531 contain upper bounds `1.4.2_37` and `1.4.2_38`.
+The latter also contains vulnerable JDK entries, not only JavaFX. Earlier matching
+could not parse these pre-Java-5 bounds and retained candidates for Java 17.
+The updated matcher understands legacy `1.x.y_N` updates, including separate
+CPE update fields and leading zeroes. Both records exclude Java 17/21 while
+retaining matches at their affected historical Java 1.4 patch boundaries.
+Unknown vendor/EA/build suffixes still remain uncertain rather than guessed.
+These two examples do not establish the cause of every other candidate.
+
+New runtime reports identify `runtime_matcher_schema: 2`. Runtime monitoring
+starts a separate comparison baseline when matching rules change; old baseline
+issues remain unverified, never described as deployment fixes. Source monitoring
+is unaffected. Existing saved reports and history are not rewritten. Use a fresh
+monitor config when testing only the new baseline's counts, or inspect both
+assessment and comparison status on an existing monitor.
+
 ## Include runtimes in a recurring portfolio
 
 ```bash
