@@ -314,6 +314,9 @@ advisory digest remains separate from repository remediation tasks.
 
 ## Validation
 
+See the [milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md) for
+combined automated tests and host checks, including runtime inventory monitoring.
+
 ```bash
 python3 tests/test_security.py
 python3 tests/test_security_resolution.py

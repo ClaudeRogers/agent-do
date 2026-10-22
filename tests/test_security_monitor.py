@@ -368,6 +368,15 @@ class MonitorTests(unittest.TestCase):
         result = compare_target({}, 'scope', [upper, lower], True, '2026-10-22T00:00:00Z', 'two')
         self.assertEqual(len(result['new']), 1)
 
+    def test_init_existing_config_is_friendly_and_byte_preserving(self):
+        before = self.config.read_bytes()
+        code, result = self.cli('init', '--path', str(self.root))
+        self.assertEqual(code, 2)
+        self.assertIn('Monitor config already exists:', result['error'])
+        self.assertIn('Nothing was overwritten', result['error'])
+        self.assertNotIn('Errno', result['error'])
+        self.assertEqual(self.config.read_bytes(), before)
+
     def test_init_from_repo_file_or_local_root_does_not_overwrite_config(self):
         self.config.unlink()
         repos = self.root / 'repos.txt'; repos.write_text('acme/one\nhttps://github.com/acme/two\n')

@@ -6,6 +6,9 @@ It supports GitHub repository links and trusted local projects, including explic
 Maven/Gradle resolution. It exports a cron job for recurring execution on your
 scan host; it never installs a scheduler automatically. Notifications are opt-in.
 
+Use the [combined milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md)
+for automated and host acceptance checks.
+
 ## Start with your repository list
 
 ```bash
@@ -185,7 +188,10 @@ Maven/Gradle, network and credential setup available to the scheduler account.
 Jobs require the machine to be awake. A missed interval is checked at the next
 hourly invocation; this is not a hosted scheduler or catch-up queue. macOS/Linux
 POSIX locking and a working cron service are required. Run `monitor schedule`
-again after relocating the checkout or Python environment.
+again after relocating the checkout or Python environment. The exported PATH is
+a snapshot of this session on this machine, not a portable CI setup. Regenerate
+on the intended host/account and review its tool paths and credentials instead
+of copying a laptop command unchanged to another machine.
 
 ## Optional notifications
 

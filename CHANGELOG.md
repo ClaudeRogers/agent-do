@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Milestone 3/4 acceptance coverage now includes mixed source/runtime portfolios, a public XStream historical-Java regression, friendly monitor overwrite protection, and cron portability guidance. Runtime matching understands Java `7u`/`8u` versions, rejects Oracle Java identities on observed non-Oracle JDKs before lookup, and includes inline CPE syntax hints. See `docs/SECURITY_MILESTONE_3_4_TESTING.md`.
+
 - `security runtime` separates static Java/build/image declarations from explicitly observed local Java and imported runtime/deployment CPE inventory. NVD configuration conditions, numeric ranges and missing environment evidence produce attributable inventory matches or candidates. Runtime inventories can join recurring portfolios with per-component history and conservative scope changes. Automatic image/cluster collectors and distro backport assessment remain milestone 4 follow-ups. See `docs/RUNTIME_ASSESSMENT.md`.
 
 - `security monitor init|run|report|schedule` adds local/GitHub portfolio configuration, due intervals, locked atomic history, alias-aware new/ongoing/resolved/unverified digests, reviewable cron export and explicit existing-notify routing. Failed scans, changed scopes and removed targets never silently resolve earlier findings. Local build execution requires `--allow-builds`; no scheduler or notification is enabled automatically. See `docs/PORTFOLIO_MONITORING.md`.

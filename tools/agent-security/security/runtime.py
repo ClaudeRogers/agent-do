@@ -39,14 +39,45 @@ def cpe_parts(value):
     return parts
 
 
+JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:java_se:*:*:*:*:*:*:*:*'
+
+
+def java_identity(value):
+    try:
+        parts = cpe_parts(value)
+        if parts[5] != '*' or parts[6] != '*' or any(parts[i] in {'*', '-'} for i in (2, 3, 4)):
+            raise UnsupportedCPE('--java-cpe must specify part/vendor/product with wildcard version/update')
+        return parts
+    except UnsupportedCPE as exc:
+        raise ValueError(str(exc) + '; format example: --java-cpe "' + JAVA_CPE_EXAMPLE +
+                         '" (Oracle Java only; choose the verified identity for the observed vendor). '
+                         'Inspect first with runtime --local-java --inventory-only.') from exc
+
+
+def canonical_java_cpe(parts):
+    parts = parts[:]
+    old = re.fullmatch(r'([5-8])u(\d+)', parts[5])
+    if not old:
+        old = re.fullmatch(r'(?:1\.)?([5-8])\.0[._](\d+)', parts[5])
+    if old:
+        parts[5], parts[6] = '1.' + old[1] + '.0', 'update_' + old[2]
+    return parts
+
+
 def numeric_version(value, java=False):
     # Build metadata does not affect JDK security patch ordering. EA/vendor suffixes
     # and Linux distribution revisions need dedicated semantics and stay unknown.
     if java:
         value = re.sub(r'\+\d+(?:\.\d+)*$', '', value)
-        old = re.fullmatch(r'(?:1\.)?8\.0[._](\d+)', value)
+        short = re.fullmatch(r'([5-8])u(\d+)', value)
+        if short:
+            return (int(short[1]), 0, int(short[2]))
+        old = re.fullmatch(r'(?:1\.)?([5-8])\.0[._](\d+)', value)
         if old:
-            return (8, 0, int(old[1]))
+            return (int(old[1]), 0, int(old[2]))
+        base = re.fullmatch(r'1\.([5-8])\.0', value)
+        if base:
+            return (int(base[1]), 0, 0)
     if not re.fullmatch(r'\d+(?:\.\d+)*', value):
         return None
     result = tuple(int(part) for part in value.split('.'))
@@ -63,7 +94,9 @@ def match_component(match, component):
         pattern, actual = cpe_parts(match.get('criteria')), cpe_parts(component['cpe'])
     except (UnsupportedCPE, KeyError):
         return None
-    java = actual[4] in {'java_se', 'jdk', 'jre', 'openjdk'}
+    java = actual[4].lower() in {'java_se', 'jdk', 'jre', 'openjdk'}
+    if java:
+        pattern, actual = canonical_java_cpe(pattern), canonical_java_cpe(actual)
     uncertain = False
     for index in (2, 3, 4, 6, 7, 8, 9, 10, 11, 12):
         if pattern[index] == '*':
@@ -73,7 +106,7 @@ def match_component(match, component):
         elif pattern[index].lower() != actual[index].lower():
             return False
     current_value = actual[5]
-    if java and actual[5] == '1.8.0' and re.fullmatch(r'update_\d+', actual[6]):
+    if java and re.fullmatch(r'1\.[5-8]\.0', actual[5]) and re.fullmatch(r'update_\d+', actual[6]):
         current_value += '_' + actual[6].removeprefix('update_')
     current = numeric_version(current_value, java)
     if pattern[5] != '*':
@@ -284,14 +317,14 @@ def probe_java(args):
                  'evidence': {'kind': 'local_java_probe', 'source': str(Path(executable).resolve()), 'observed_at': now(), 'verification': 'observed_local_process'},
                  'identity_source': identity_source}
     if identity:
-        parts = cpe_parts(identity)
-        if parts[5] != '*' or any(parts[i] in {'*', '-'} for i in (2, 3, 4)) or parts[6] != '*':
-            raise ValueError('--java-cpe must specify part/vendor/product with wildcard version/update')
-        # NVD Java 8 CPE commonly uses 1.8.0 + update_N rather than
-        # java.version's 1.8.0_NNN. Preserve that representation explicitly.
-        old = re.fullmatch(r'1\.8\.0_(\d+)', version)
-        parts[5], parts[6] = ('1.8.0', 'update_' + old[1]) if old else (version, '*')
-        component['cpe'] = ':'.join(parts)
+        parts = java_identity(identity)
+        if parts[3].lower() == 'oracle' and parts[4].lower() in {'java_se', 'jdk', 'jre', 'openjdk'} and properties.get('java.vendor') != 'Oracle Corporation':
+            raise ValueError('Selected Oracle Java CPE conflicts with the observed non-Oracle vendor. '
+                             'Use runtime --local-java --inventory-only to inspect vendor/version, then verify that distribution identity. '
+                             'Oracle Java advisories cannot establish exposure for an Adoptium/Temurin or other non-Oracle JDK.')
+        # Preserve old JDK update versions in the equivalent CPE fields.
+        parts[5], parts[6] = version, '*'
+        component['cpe'] = ':'.join(canonical_java_cpe(parts))
     return component
 
 

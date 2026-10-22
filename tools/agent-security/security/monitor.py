@@ -123,7 +123,10 @@ def initialize(args):
     value = {'schema_version': 1, 'monitor_id': uuid.uuid4().hex, 'interval_hours': args.interval_hours, 'targets': targets}
     path = Path(args.config).expanduser().resolve()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ValueError('Monitor config already exists: ' + str(path) + '; choose a new --config path or use monitor run with the existing config. Nothing was overwritten.') from exc
     with os.fdopen(fd, 'w') as stream:
         json.dump(value, stream, indent=2)
         stream.write('\n')

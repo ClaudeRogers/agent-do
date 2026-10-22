@@ -22,7 +22,7 @@ from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
 from .monitor import initialize, read_digest, run_monitor, schedule
-from .runtime import assess_runtime, cpe_parts
+from .runtime import assess_runtime, java_identity
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -200,9 +200,7 @@ def validate(args):
         if (args.java or args.java_cpe) and not args.local_java:
             raise ValueError('--java and --java-cpe require explicit --local-java')
         if args.java_cpe:
-            parts = cpe_parts(args.java_cpe)
-            if parts[5] != '*' or parts[6] != '*' or any(parts[i] in {'*', '-'} for i in (2, 3, 4)):
-                raise ValueError('--java-cpe must specify part/vendor/product with wildcard version/update')
+            java_identity(args.java_cpe)
         if args.ecosystem:
             raise ValueError('Runtime identities use CPE, not package ecosystems; use --package vendor:product or --cve')
         if args.inventory_only and (args.kev or args.known_exploited or args.cve or args.package or args.cvss_min is not None or args.cvss_gt is not None or args.severity or args.published_after or args.published_before or args.updated_after or args.fix_available or args.include_unscored):

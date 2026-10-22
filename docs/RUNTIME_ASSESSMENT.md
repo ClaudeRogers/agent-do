@@ -4,6 +4,9 @@
 scanning. A POM's `java.version=17` is a declaration, not proof that production is
 running a particular patched JDK. The new command keeps those facts separate.
 
+Use the [combined milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md)
+to test monitoring and runtime assessment together.
+
 This is the first implementation of milestone 4: static project hints, an explicit
 local Java probe, imported runtime/image/deployment inventory, conservative NVD
 matching, and portfolio monitoring of that inventory. Automatic container image
@@ -45,13 +48,18 @@ agent-do security runtime --local-java --java /path/to/oracle-jdk/bin/java \
 
 That example is an **Oracle Java identity**, not a generic identity for Temurin,
 Corretto, Debian, GraalVM or every other Java distribution. Do not force it onto a
-different vendor to obtain results. An explicit identity is marked caller-selected;
+different vendor to obtain results. Oracle Java identities are rejected before
+lookup when the probe reports a non-Oracle vendor, including Adoptium/Temurin.
+Other unmapped distributions still need verified identity/adapter work; an
+inventory-only success does not establish CVE coverage. An explicit identity is marked caller-selected;
 the plugin does not independently verify the mapping. Vendor mappings are kept
 narrow to avoid false claims of affected or patched distributions.
 
 Modern Java patch versions and build metadata are preserved. Java 8 observations
 such as `1.8.0_422` become CPE version `1.8.0`, update `update_422`; supported
-numeric range comparison accounts for the update number. Early-access and
+numeric range comparison accounts for the update number. Historical Java CPE
+versions such as `7u321` and `8u311` normalize to the equivalent update form; they
+do not become uncertain candidates for a modern Java 21 runtime. Early-access and
 vendor-specific ordering are not guessed.
 
 ## Project declarations
@@ -207,6 +215,7 @@ python3 tests/test_security_runtime.py
 
 Tests cover numeric boundaries, Java 8 updates, actual local Java probing when
 installed, privacy, declarations, missing vendor mapping, NVD conditions,
-cross-host isolation, truncation/failure/staleness, report reuse and runtime monitor
+cross-host isolation, truncation/failure/staleness, the public XStream historical
+Java regression, vendor mismatch guards, report reuse and mixed source/runtime monitor
 lifecycle safety. Advisory matching tests use offline NVD fixtures; real NVD and
 your deployment evidence still need host validation.

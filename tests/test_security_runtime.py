@@ -173,8 +173,67 @@ class RuntimeTests(unittest.TestCase):
     def test_non_oracle_vendor_needs_explicit_mapping(self):
         with patch('security.runtime.shutil.which', return_value='/usr/bin/java'), patch('security.runtime.run', return_value=subprocess.CompletedProcess([], 0, b'', b'java.vendor = Eclipse Adoptium\njava.version = 17.0.12')):
             self.assertNotIn('cpe', probe_java(self.args('--local-java')))
-            result = probe_java(self.args('--local-java', '--java-cpe', PATTERN))
+            result = probe_java(self.args('--local-java', '--java-cpe', PATTERN.replace('oracle:java_se', 'fixture:fixture_jdk')))
         self.assertEqual(result['identity_source'], 'caller_selected')
+
+    def test_oracle_identity_on_adoptium_is_incomplete_without_nvd_lookup(self):
+        output = b'java.vendor = Eclipse Adoptium\njava.version = 21.0.8\njava.runtime.version = 21.0.8+9-LTS'
+        with patch('security.runtime.shutil.which', return_value='/usr/bin/java'), patch('security.runtime.run', return_value=subprocess.CompletedProcess([], 0, b'', output)), patch('security.sources.Client.get') as get:
+            code, report = self.cli('runtime', '--local-java', '--java-cpe', PATTERN)
+        self.assertEqual(code, 1)
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertEqual(report['findings'], [])
+        self.assertIn('non-Oracle vendor', report['coverage'][0]['error'])
+        get.assert_not_called()
+
+    def test_cpe_errors_include_format_example_and_offline_inspection_command(self):
+        for value in ('not-a-cpe', PATTERN.replace(':*:*:*:*:*:*:*:*', ':21.*:*:*:*:*:*:*:*'), JAVA):
+            with self.subTest(value=value):
+                code, report = self.cli('runtime', '--local-java', '--java-cpe', value)
+                self.assertEqual(code, 2)
+                self.assertIn('format example:', report['error'])
+                self.assertIn('--java-cpe "' + PATTERN + '"', report['error'])
+                self.assertIn('--inventory-only', report['error'])
+
+    def xstream_fixture(self):
+        return json.loads((ROOT / 'tests/fixtures/security/CVE-2021-21349.json').read_text())['cve']
+
+    def test_public_xstream_configuration_excludes_modern_jdk(self):
+        cve = self.xstream_fixture()
+        target = component(cpe=JAVA.replace('17.0.12', '21.0.8'))
+        self.assertIs(applicability(cve, [target], target), False)
+        with patch('security.cli.Client', return_value=Client(page(cve))):
+            code, report = self.cli('runtime', '--inventory', str(self.inventory(target)))
+        self.assertEqual(code, 0)
+        self.assertEqual(report['findings'], [])
+        self.assertEqual(report['coverage'][0]['records_examined'], 1)
+
+    def test_public_xstream_configuration_retains_affected_historical_jdk(self):
+        cve = self.xstream_fixture()
+        for version in ('8u311:*', '1.8.0:update_311', '1.8.0_311:*', '7u321:*', '1.7.0:update_321', '1.7.0_321:*'):
+            with self.subTest(version=version):
+                target = component(cpe=JAVA.replace('17.0.12:*', version))
+                self.assertIs(applicability(cve, [target], target), True)
+        target = component(cpe=JAVA.replace('17.0.12:*', '8u312:*'))
+        self.assertIs(applicability(cve, [target], target), False)
+
+    def test_legacy_short_version_numeric_range_boundaries(self):
+        old = component(cpe=JAVA.replace('17.0.12:*', '1.8.0:update_422'))
+        self.assertIs(match_component(match(versionEndExcluding='8u431'), old), True)
+        self.assertIs(match_component(match(versionEndExcluding='8u421'), old), False)
+        self.assertIs(match_component(match(cpe=PATTERN.replace(':*:*:*:*:*:*:*:*', ':8u422:*:*:*:*:*:*:*')), old), True)
+        self.assertIs(match_component(match(cpe=PATTERN.replace(':*:*:*:*:*:*:*:*', ':7u321:*:*:*:*:*:*:*')), component()), False)
+
+    def test_project_java17_is_separate_from_observed_java21(self):
+        (self.root / 'pom.xml').write_text('<project><properties><java.version>17</java.version></properties></project>')
+        output = b'java.vendor = Oracle Corporation\njava.vm.name = Java HotSpot(TM) 64-Bit Server VM\njava.version = 21.0.8\njava.runtime.version = 21.0.8+9-LTS'
+        cve = advisory({'cpeMatch': [match(versionStartIncluding='21', versionEndExcluding='21.0.9')]})
+        with patch('security.runtime.shutil.which', return_value='/usr/bin/java'), patch('security.runtime.run', return_value=subprocess.CompletedProcess([], 0, b'', output)), patch('security.cli.Client', return_value=Client(page(cve))):
+            code, report = self.cli('runtime', '--path', str(self.root), '--local-java')
+        self.assertEqual(code, 0)
+        self.assertEqual(report['declared_settings'][0]['value'], '17')
+        self.assertEqual(report['findings'][0]['package']['version'], '21.0.8')
+        self.assertIn('21.0.8', report['runtime_components'][0]['cpe'])
 
     def test_probe_failure_cannot_appear_as_clean_scan(self):
         with patch('security.runtime.shutil.which', return_value=None):
@@ -306,6 +365,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(failed['counts']['unverified'], 1)
         self.assertEqual(failed['counts']['resolved'], 0)
+
+    def test_mixed_source_and_runtime_portfolio_keeps_independent_transitions(self):
+        from security.model import finding
+        inventory = self.inventory()
+        config = self.monitor_init(inventory)
+        value = json.loads(config.read_text())
+        value['targets'].append({'path': str(self.root)})
+        config.write_text(json.dumps(value))
+        row = finding(['CVE-2026-22222'], 'Library fixture', 'fixture', 'https://example.invalid', package={'ecosystem': 'Maven', 'name': 'example:library', 'version': '1.0'})
+        def scan(args, report):
+            report['findings'] = [copy.deepcopy(row)]
+            report['coverage'] = [{'source': 'source fixture', 'status': 'ok'}]
+            report['scanner'] = {'version': 'fixture-v2'}
+        with patch('security.monitor.scan', side_effect=scan):
+            code, first = self.monitor_run(config, page())
+            self.assertEqual(code, 0)
+            self.assertEqual(first['counts']['new'], 2)
+            code, partial = self.monitor_run(config, SourceError('fixture runtime lookup failure'))
+            self.assertEqual(code, 1)
+            self.assertEqual(partial['counts']['ongoing'], 1)
+            self.assertEqual(partial['counts']['unverified'], 1)
+            self.assertEqual(partial['counts']['resolved'], 0)
+            self.inventory(component(cpe=JAVA.replace('17.0.12', '17.0.13')))
+            code, second = self.monitor_run(config, page())
+            self.assertEqual(code, 0)
+            self.assertEqual(second['counts']['ongoing'], 1)
+            self.assertEqual(second['counts']['resolved'], 1)
+            self.assertEqual(second['counts']['unverified'], 0)
+            code, failed = self.monitor_run(config, SourceError('fixture runtime lookup failure'))
+            self.assertEqual(code, 1)
+            self.assertEqual(failed['counts']['ongoing'], 1)
+            self.assertEqual(failed['counts']['resolved'], 0)
+        source_report = read_report(second['source_report'])
+        self.assertEqual(source_report['scope'], 'portfolio_source_and_explicit_runtime_inventory')
+        self.assertEqual({child['command'] for child in source_report['repositories']}, {'scan', 'runtime'})
+
+    def test_runtime_schedule_exports_same_limit_without_installation_or_scan(self):
+        config = self.monitor_init(self.inventory())
+        with patch('security.monitor.subprocess.run') as process, patch('security.sources.Client.get') as get:
+            code, result = self.cli('monitor', 'schedule', '--config', str(config), '--runtime-limit', '2500')
+        self.assertEqual(code, 0)
+        self.assertFalse(result['installed'])
+        self.assertIn('--runtime-limit 2500', result['cron'])
+        self.assertIn('--due', result['cron'])
+        process.assert_not_called()
+        get.assert_not_called()
 
     def test_stale_receipts_never_appear_complete(self):
         client = Client(page())
