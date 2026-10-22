@@ -1,6 +1,6 @@
 tools:
   security:
-    description: Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring
+    description: CVE discovery, dependency/runtime assessment and portfolio monitoring
     capabilities:
     - find NVD CVEs by CPE vendor/product or keywords and GitHub advisories by ecosystem/package
     - combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
@@ -26,12 +26,12 @@ tools:
       monitor report: 'Read/refilter a monitor digest: monitor report --config PATH [--file PATH] [--severity LIST] [--json]'
       monitor schedule: 'Export a reviewable cron entry without installing: monitor schedule --config PATH [--allow-builds] [--allow-collectors] [--runtime-limit N] [--notify-recipient ALIAS] [--json]'
     examples:
-    - intent: find Oracle Java advisories above CVSS 7
-      command: agent-security find --vendor oracle --product jdk --cvss-gt 7 --json
-    - intent: find LiteLLM advisories in the Python ecosystem
+    - intent: find Oracle JDK CVEs
+      command: agent-security find --vendor oracle --product jdk --json
+    - intent: find LiteLLM advisories
       command: agent-security find --ecosystem pypi --package litellm --json
-    - intent: scan a local repository for high severity vulnerabilities
-      command: agent-security scan --path . --cvss-min 7 --include-unscored --json
+    - intent: scan local dependencies
+      command: agent-security scan --path . --json
     - intent: scan a GitHub repository at a specific ref
       command: agent-security scan --repo https://github.com/owner/repo --ref main --json
     - intent: scan all team repositories saved in a local file

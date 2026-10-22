@@ -98,7 +98,7 @@ verify beats are read-only; connect, interact, and save verbs write.
 | [repl](#repl) | Control interactive REPLs (Python, Node, psql, etc.) | mixed | 5 |
 | [resend](#resend) | Resend domain management and DNS verification — exact records, verification state, and public DNS checks | mixed | 7 |
 | [screen](#screen) | Vision-based screen perception and control (macOS) | mixed | 9 |
-| [security](#security) | Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring | mixed | 9 |
+| [security](#security) | CVE discovery, dependency/runtime assessment and portfolio monitoring | mixed | 9 |
 | [sentry](#sentry) | Sentry error tracking, issue management, alerts, and releases | mixed | 12 |
 | [serial](#serial) | Serial port communication | mixed | 3 |
 | [sessions](#sessions) | Search and retrieve AI coding session history | read | 9 |
@@ -3767,7 +3767,7 @@ agent-do screen type 'hello world'
 
 ### security
 
-Published vulnerability discovery, source dependency scans, explicit runtime assessment and portfolio monitoring
+CVE discovery, dependency/runtime assessment and portfolio monitoring
 
 Concurrency: `mixed`
 
@@ -3802,12 +3802,12 @@ Concurrency: `mixed`
 **Examples**
 
 ```bash
-# find Oracle Java advisories above CVSS 7
-agent-do security find --vendor oracle --product jdk --cvss-gt 7 --json
-# find LiteLLM advisories in the Python ecosystem
+# find Oracle JDK CVEs
+agent-do security find --vendor oracle --product jdk --json
+# find LiteLLM advisories
 agent-do security find --ecosystem pypi --package litellm --json
-# scan a local repository for high severity vulnerabilities
-agent-do security scan --path . --cvss-min 7 --include-unscored --json
+# scan local dependencies
+agent-do security scan --path . --json
 # scan a GitHub repository at a specific ref
 agent-do security scan --repo https://github.com/owner/repo --ref main --json
 # scan all team repositories saved in a local file
