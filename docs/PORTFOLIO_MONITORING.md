@@ -1,13 +1,10 @@
-# Portfolio monitoring (milestone 3)
+# Portfolio monitoring
 
-`agent-do security monitor` scans a saved portfolio, compares compatible evidence,
-and writes a digest of **new**, **ongoing**, **resolved**, and **unverified** issues.
-It supports GitHub repository links and trusted local projects, including explicit
-Maven/Gradle resolution. It exports a cron job for recurring execution on your
-scan host; it never installs a scheduler automatically. Notifications are opt-in.
-
-Use the [combined milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md)
-for automated and host acceptance checks.
+`agent-do security monitor` assesses saved local/GitHub/runtime targets and tracks
+**new**, **ongoing**, **resolved**, and **unverified** issues. It exports recurring
+jobs but installs no scheduler. Notifications are opt-in. See the
+[CLI reference](SECURITY_CLI_REFERENCE.md#monitor-portfolio-configuration-runs-and-digests)
+for parameters and the [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md) for tests.
 
 ## Start with your repository list
 
@@ -18,70 +15,51 @@ agent-do security monitor run --config ~/team-security.json --json
 agent-do security monitor report --config ~/team-security.json --json
 ```
 
-Initialization copies the normalized repository/ref entries from your existing
-[text/JSON repository list](REPOSITORY_LIST_SCANNING.md). It does not scan or
-execute project code. The configuration is a private local JSON file; an existing
-file is never overwritten. Edit its `targets` array when your portfolio changes;
-later changes to the original repository-list file are not imported automatically.
+Init copies entries from the [text/JSON repo list](REPOSITORY_LIST_SCANNING.md)
+into a private config without scanning. It refuses overwrite. Later changes to
+the original list are not imported automatically; edit the config's `targets`.
 
 ## Monitor your local Spring Boot project
 
 ```bash
 agent-do security monitor init --config ~/bff-security.json \
-  --path ~/workspace/map-managed-bff --resolve maven
-agent-do security monitor run --config ~/bff-security.json --allow-builds \
-  --cvss-min 7 --include-unscored --json
-agent-do security monitor report --config ~/bff-security.json --severity critical,high
+  --path ~/workspace/my-service --resolve maven
+agent-do security monitor run --config ~/bff-security.json \
+  --allow-builds --cvss-min 7 --include-unscored --json
 ```
 
-`--allow-builds` is mandatory on each execution that runs configured local build
-resolution. Without it, that target is incomplete, no build runs, other targets
-continue, and earlier findings cannot be resolved. Exporting a scheduled build
-also requires the flag so the reviewable job makes that authorization explicit.
-Use only trusted local projects. Build wrappers/extensions can execute project
-code, contact configured repositories and write build files/caches.
-
-The existing [setup guide](SECURITY_SCANNING.md) covers OSV-Scanner v2, `gh` access,
-optional CVSS scoring and read-only file scans. GitHub monitoring uses isolated
-file snapshots; it does not remotely execute Maven/Gradle.
+Configured resolution requires `--allow-builds` on each run and schedule export.
+Without it, no build runs, that target is incomplete and earlier issues remain
+unverified; other targets continue. Trusted wrappers/extensions can execute code,
+contact repositories and write caches/files. GitHub targets use file snapshots,
+not remote Maven/Gradle execution. See [setup](SECURITY_SCANNING.md) and
+[JVM resolution](JVM_DEPENDENCY_RESOLUTION.md) for prerequisites.
 
 ## Create a mixed portfolio from the CLI
 
-`--runtime-inventory` can accompany either one local `--path` or a GitHub
-`--repos-file`. Path and repos-file remain mutually exclusive; at least one
-source/inventory input is required. For example:
-
 ```bash
 agent-do security monitor init --config ~/mixed-security.json \
-  --path ~/workspace/map-managed-bff --resolve maven \
+  --path ~/workspace/my-service --resolve maven \
   --runtime-inventory ~/runtime-inventory.json --json
 agent-do security monitor run --config ~/mixed-security.json --allow-builds --json
-agent-do security monitor init --config ~/team-and-runtimes.json \
-  --repos-file ~/team-repos.txt --runtime-inventory ~/runtime-inventory.json --json
 ```
 
-A single init call accepts one local path; additional heterogeneous targets can
-be added to the generated configuration's `targets` array. Preserve its
-`schema_version: 1` and generated 32-character hexadecimal `monitor_id`. A
-handwritten file missing those fields is invalid regardless of whether its
-targets are mixed; the data model accepts mixed targets. Do not change the ID
-when editing an existing monitor if you want to preserve its history.
+Imported runtime and collector selections can accompany a local path or repo list.
+`--path` and `--repos-file` are mutually exclusive. Init accepts one local source
+path; add further heterogeneous targets to the generated config.
 
 ## Configuration and scope
 
-Keep the generated `schema_version: 1` and `monitor_id` (a unique 32-character
-identifier). Reusing the same ID reuses the same history and lock; initialize a
-new file if you want an independent monitor. `interval_hours` is a positive whole
-number (default 24). Relative target/settings paths resolve beside the config.
-
-A `targets` array can mix entries such as:
+Preserve generated `schema_version: 1` and the 32-character `monitor_id`; that ID
+owns history and locking. Initialize a new config for independent history.
+`interval_hours` is a positive integer, default 24. Relative target/settings paths
+resolve beside the config. Example `targets` entries:
 
 ```json
 [
   {"repo": "my-team/backend", "ref": "main"},
-  {"repo": "my-team/frontend"},
   {
-    "path": "/path/to/offer-service",
+    "path": "/path/to/my-service",
     "resolve": "maven",
     "options": {
       "maven_settings": "/path/to/settings.xml",
@@ -89,116 +67,68 @@ A `targets` array can mix entries such as:
       "build_property": ["example=production"]
     }
   },
-  {
-    "path": "/path/to/gradle-project",
-    "resolve": "gradle",
-    "options": {"gradle_configuration": ["runtimeClasspath", "testRuntimeClasspath"]}
-  }
+  {"runtime_inventory": "/path/to/runtime-inventory.json"}
 ]
 ```
 
-Each source entry accepts exactly one `repo` or `path`. A runtime entry accepts
-only `runtime_inventory`, pointing to the versioned inventory JSON described in
-[runtime assessment](RUNTIME_ASSESSMENT.md). Initialize a runtime-only portfolio
-with `monitor init --config PATH --runtime-inventory PATH`. Use
-`monitor run --runtime-limit N` for the per-component NVD record bound (default
-1000). Runtime issue IDs remain distinct; runtime matcher revisions also establish
-a separate comparison baseline, retaining earlier findings as unverified; changed membership/deployment identity
-keeps earlier findings unverified.
+Source entries select exactly one `repo` or `path`; GitHub ref defaults to the
+default branch. Local build `options` accept `maven`, `gradle`, `maven_settings`
+strings and `maven_profile`, `gradle_configuration`, `build_property` string arrays.
+Runtime entries select `runtime_inventory` or a generated `runtime_collect` target;
+see [runtime evidence](RUNTIME_ASSESSMENT.md) and [collectors](RUNTIME_COLLECTION.md).
+Use `--runtime-limit N` for the per-component NVD bound, default 1000.
 
-For source entries, GitHub `ref` is optional and
-otherwise selects the default branch. `resolve` is local-only. Local `options`
-accept `maven`, `gradle`, `maven_settings` executable/settings strings and
-`maven_profile`, `gradle_configuration`, `build_property` arrays of strings.
-Normal scan validation rejects incompatible options and reserved properties.
-Unknown fields and duplicate repository/ref or path identities are rejected
-before scanning. Credentials belong in normal build/gh credential mechanisms,
-not repository URLs or properties. Property values are fingerprinted rather than
-copied into digests or state. Explicit settings contents are hashed for scope
-comparison, not stored in reports.
+Unknown fields, incompatible options and duplicate identities are rejected.
+Credentials belong in normal build/gh mechanisms, not URLs/properties. Property
+values and settings contents are fingerprinted for comparison, not copied into
+state/digests. Keep the build environment consistent: implicit profiles and ambient
+credential/environment changes are not independently enumerated.
 
-Repository/ref and local path identities are tracked independently. Comparisons
-require the same configuration/build options, explicit settings content,
-scanner version, build version and effective branch. A version/scope change
-creates a separate baseline. Existing active issues in other scopes, or removed
-portfolio targets, remain **unverified**, never silently resolved. Older scope
-ledgers remain retained for audit and can be compared if that scope returns.
-
-This compares observed dependencies under the configured build environment;
-it does not independently enumerate every implicitly activated profile or prove
-that ambient credentials/environment stayed identical. Use consistent build
-settings and environment when evaluating the same scope over time. Runtime/JDK,
-OS, container and deployed-artifact evidence can now be supplied through
-[runtime inventory targets](RUNTIME_ASSESSMENT.md). This does not automatically
-collect live runtime or deployment evidence.
+Scanner/build/matcher versions, build options, settings contents and effective
+branch changes create separate baselines. Runtime membership/product/deployment
+changes can also change scope. Earlier active issues in other scopes or removed
+targets stay unverified. A vulnerable dependency version change alone stays ongoing
+when the advisory/package identity still matches.
 
 ## Assessment errors and zero change counts
 
-Each new run stores a top-level `assessment_summary` separately from lifecycle
-`counts`. It reports complete/incomplete target counts, current unfiltered
-`findings_observed`, `runtime_inventory_matches`, `runtime_candidates`, and
-`coverage_issues` with source, target, status and diagnostic message. These count
-observations, not deduplicated lifecycle issues or filtered presentation rows.
+Read `assessment_summary` before lifecycle counts. It contains current unfiltered
+`findings_observed`, runtime inventory-match/candidate counts, target completeness
+and `coverage_issues` with source/target/status/message. Text prints source errors
+before change counts. A first failed lookup can have zero lifecycle counts and a
+complete comparison because no history exists, while the assessment is incomplete.
 
-Text output prints this assessment summary and source errors before change counts.
-For example, an NVD timeout is printed as `ERROR: NVD runtime:...` with
-`TimeoutError: advisory fetch failed`, accompanied by an explicit warning that
-zero findings/changes do not establish absence of vulnerabilities. JSON callers
-can read `assessment_summary.coverage_issues` without searching nested targets.
-
-An incomplete assessment still commits any findings and candidates it detected.
-A candidate can be new or ongoing while applicability remains uncertain. A later
-failed lookup retains earlier issues as unverified; it cannot resolve them. A
-first-ever failed lookup can have all lifecycle counts at zero and
-`comparison_status: complete` because there is no previous issue history to
-compare. Its assessment is still incomplete, not a successful vulnerability check.
-
-A cache hit and a new HTTP request can have different outcomes. The generic
-uncertain-coverage message is not proof of which environmental prerequisite is
-missing; consult the actual candidate evidence. Do not infer that a timeout
-produced the same assessment as a cached candidate list.
-
-Viewing older digests adds a coverage summary without rewriting saved evidence.
-Their observed-finding counts are shown as unknown, not reconstructed as zero
-from lifecycle history. Use their linked source report for original observations.
+Candidates detected during incomplete scans are retained as new/ongoing; a later
+timeout keeps them unverified. A cached candidate list and a failed fresh request
+are different outcomes. Historical digests missing observation counts show unknown,
+not an inferred zero; their source report retains original observations.
 
 ## What the changes mean
 
 | Category | Meaning |
 | --- | --- |
-| `new` | First detected in this monitor/scope, or reappeared after resolution (`reopened: true`). It does not mean newly announced. |
-| `ongoing` | Present in the current assessment and previously active in the same scope. A changed vulnerable package version remains ongoing. |
-| `resolved` | No longer detected in a **complete compatible source assessment**. It does not prove deployment remediation or exploitability. |
-| `unverified` | Earlier evidence retained because the current scan failed, scope changed, or the target was not scanned. |
+| `new` | First detected in this scope or reopened after resolution; not newly announced. |
+| `ongoing` | Previously active and detected again in the same scope. |
+| `resolved` | Absent from a complete compatible assessment; not proof of deployment remediation. |
+| `unverified` | Earlier evidence retained because assessment failed, scope changed or target was not scanned. |
 
-CVE/GHSA aliases are matched transitively. Multiple versions/occurrences of the
-same advisory/package within a target form one tracked issue; different package
-names/ecosystems or repositories remain separate. Issue IDs and first-detected
-UTC timestamps persist through version changes and reopening. Advisory publication
-and modification dates remain on the original findings and are never used as
-first detection. Positive evidence from an incomplete scan is retained; absence
-from that scan cannot resolve earlier findings.
+Aliases match transitively. Versions/occurrences of one advisory/package within a
+target form one issue; different packages/targets remain separate. IDs and first
+observed timestamps persist. Advisory publication dates remain distinct.
 
-The digest has two distinct status fields:
-
-- `status`: completeness of the current requested assessment (and explicit
-  notification delivery, if requested). Exit 0 can include vulnerabilities;
-  exit 1 means incomplete; exit 2 means invalid configuration/state/input.
-- `comparison_status`: `partial` when prior issues remain unverified, otherwise
-  `complete`. A current scan can complete while older scopes are not comparable.
-  Inspect both fields and the counts; exit 0 is not an all-clear signal.
+`status` reports current assessment/delivery completeness: exit 0 can include
+vulnerabilities, 1 is incomplete, 2 is invalid input/state. `comparison_status`
+is partial when older issues remain unverified. A current assessment can complete
+without a complete historical comparison; inspect both.
 
 ## Evidence, filtering and failure recovery
 
-Each run saves an unfiltered schema-version-1 source report in the usual
-`$AGENT_DO_HOME/security/reports` directory and a digest under
-`$AGENT_DO_HOME/security/monitors/<monitor_id>/digests`. Default home is
-`~/.agent-do`. State and its latest embedded digest are committed together by
-atomic replacement under a per-monitor nonblocking POSIX lock. Concurrent runs
-of the same monitor are rejected; malformed state is not silently reset.
-A state-write failure cannot advance the baseline. The raw assessment remains
-available. If a crash interrupts the separate historical digest-file write,
-`monitor report` can still recover the latest digest embedded in committed state.
+Runs save unfiltered reports under `$AGENT_DO_HOME/security/reports` and digests
+under `security/monitors/<monitor_id>/digests`; default home is `~/.agent-do`.
+State/latest digest commit atomically under a nonblocking POSIX lock. Concurrent
+runs are rejected; malformed state is not reset. Failed state writes do not advance
+the baseline. If a historical digest-file write is interrupted, the latest digest
+is recoverable from committed state.
 
 ```bash
 agent-do security monitor report --config ~/team-security.json --cvss-min 9 --json
@@ -206,97 +136,60 @@ agent-do security monitor report --config ~/team-security.json \
   --file /path/to/older-digest.json --severity critical,high --json
 ```
 
-Shared score, severity, package, CVE, date, fix and exploitation filters apply to
-display only; saved evidence/history and `counts` remain unfiltered.
-`shown_counts` reports the filtered view. Resolved/unverified filters use their
-last-seen evidence. `--known-exploited` needs known KEV status in that evidence;
-use `--kev` on runs to collect enrichment. `--target` is a curated advisory-search
-option and is not a monitor selector. `security report --latest` can read the raw
-aggregate source report, but `monitor report --config ...` selects this portfolio's
-latest committed digest rather than a global report from another project.
+Filters affect display and `shown_counts`, not saved evidence or `counts`.
+Resolved/unverified filters use last-seen evidence. `--known-exploited` requires
+KEV enrichment already collected with `--kev`. `--target` selects curated discovery,
+not monitor targets. Use `monitor report --config` for this portfolio's digest;
+`security report --latest` selects globally across projects/commands.
 
 ## Recurring execution on your machine
 
-Generate the job **on the machine that will run it**:
-
 ```bash
-agent-do security monitor schedule --config ~/team-security.json
+agent-do security monitor schedule --config ~/team-security.json --json
 agent-do security monitor schedule --config ~/bff-security.json --allow-builds --json
 ```
 
-Review the emitted `cron` line and install it using `crontab -e`. No cron entry
-is installed by the plugin. It checks hourly and invokes `monitor run --due`;
-actual scans occur only after `interval_hours` since the last committed attempt.
-A failed attempt also advances the due interval to avoid tight retry loops.
-To retry immediately, run without `--due`:
+Review the emitted cron line and install with `crontab -e` on the scan host. The
+plugin installs nothing. Hourly invocations use `--due`; scans run only after the
+configured interval since the last committed attempt, including failed attempts.
+Run without `--due` to retry immediately.
 
-```bash
-agent-do security monitor run --config ~/team-security.json --due --json
-agent-do security monitor run --config ~/team-security.json --json
-```
-
-The export pins the current Python/tool/config paths, PATH, and AGENT_DO_HOME;
-it does not embed tokens or copy authentication variables. Make existing `gh`,
-Maven/Gradle, network and credential setup available to the scheduler account.
-Jobs require the machine to be awake. A missed interval is checked at the next
-hourly invocation; this is not a hosted scheduler or catch-up queue. macOS/Linux
-POSIX locking and a working cron service are required. Run `monitor schedule`
-again after relocating the checkout or Python environment. The exported PATH is
-a snapshot of this session on this machine, not a portable CI setup. Regenerate
-on the intended host/account and review its tool paths and credentials instead
-of copying a laptop command unchanged to another machine.
+Export pins this host's Python/tool/config paths, PATH and AGENT_DO_HOME, without
+tokens. Provide the scheduler account's normal credentials/network setup. Regenerate
+after moving checkout/Python or changing hosts; a laptop PATH is not portable CI
+configuration. The machine must be awake with working cron and POSIX locking;
+this is not a hosted scheduler or missed-job catch-up queue.
 
 ## Optional notifications
 
-No message is sent unless explicitly requested. Use an already configured
-`agent-do notify` recipient/provider; normal notification credentials and any
-provider approval requirements still apply:
+Use an existing configured notify recipient/provider explicitly:
 
 ```bash
 agent-do security monitor run --config ~/team-security.json \
   --notify-recipient security-team --notify-via slack --cvss-min 7 --include-unscored
-agent-do security monitor schedule --config ~/team-security.json \
-  --notify-recipient security-team --notify-via slack --json
 ```
 
-Notifications contain filtered change counts, assessment/comparison status and
-the local digest path, not raw findings/build logs. Defaults send no notification.
-Delivery is best-effort, not exactly-once; a failed notification makes the monitor
-command incomplete without undoing committed scan evidence. There is no automatic
-notification retry, and `--due` skips do not notify. Schedule export only includes
-the explicit notification arguments; nothing is sent while exporting a job.
-
-## Validation and remaining scope
-
-```bash
-python3 tests/test_security_monitor.py
-```
-
-Tests exercise transitions, failures, alias/version changes, new scopes, removed
-targets, due intervals, locks, failed state writes, config rejection, opt-in
-notifications, cron export and a local Maven/scanner fixture pipeline. They do
-not establish live multi-repository compatibility, actual cron execution, or
-notification delivery on your host. Milestone 4 adds explicit runtime/deployment inventory and opt-in collectors (see below);
-milestone 5 adds remediation/update PRs. Monitoring never automatically updates,
-publishes or deploys a repository.
+Messages contain filtered counts, statuses and the local digest path, not raw
+findings/build logs. Delivery is best-effort, not exactly-once. Failure makes the
+command incomplete without undoing committed evidence; no automatic retry occurs,
+and due skips do not notify. Schedule export includes requested notification
+arguments but sends nothing. Normal provider credentials/approval rules apply.
 
 ## Explicit runtime collectors
 
-Milestone 4 can also save image/rootfs/Kubernetes collector targets in the same
-portfolio as source and imported evidence. See [runtime collection](RUNTIME_COLLECTION.md)
-for every collector parameter, examples, helper prerequisites and coverage limits.
-
 ```bash
 agent-do security monitor init --config ~/team-images.json \
-  --path ~/workspace/bff --resolve maven --image eclipse-temurin:21-jre --json
+  --path ~/workspace/my-service --resolve maven --image eclipse-temurin:21-jre --json
 agent-do security monitor run --config ~/team-images.json \
-  --allow-builds --allow-collectors --json
-agent-do security monitor schedule --config ~/team-images.json \
   --allow-builds --allow-collectors --json
 ```
 
-Init executes no collectors. Run/schedule require explicit `--allow-collectors`;
-missing authorization is a coverage failure, not a resolved vulnerability.
-The exported PATH, Python, helper paths, registry credentials and Kubernetes
-configuration belong to the scan host. Review and regenerate for another machine
-or CI runner. Export installs nothing.
+Init stores selections without executing collectors. Runs/schedule exports require
+`--allow-collectors` separately from build authorization. Missing authorization is
+an incomplete assessment, not a resolved issue. See [collector setup and limits](RUNTIME_COLLECTION.md).
+
+## Validation and remaining scope
+
+The [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md#accepted-scope-and-deferred-validation)
+records tested and deferred paths. Monitoring never automatically updates or deploys
+repositories. Remediation is [planned separately](PLANNED_UPGRADES.md).

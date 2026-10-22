@@ -1,140 +1,92 @@
-# Vulnerability discovery and source dependency scanning
+# Vulnerability discovery and source scanning
 
-For every flag, its defaults, supported commands and example usage, see the
-[complete command and parameter reference](SECURITY_CLI_REFERENCE.md).
-For saved portfolios, recurring jobs and change digests, see
-[portfolio monitoring](PORTFOLIO_MONITORING.md).
+`agent-do security` finds published advisories, scans dependency inventories and
+saves attributable evidence. Use the [CLI reference](SECURITY_CLI_REFERENCE.md)
+for every parameter, default and example. Related workflows:
 
-`agent-do security` finds published advisories and assesses source dependency
-inventories. It supports local directories and GitHub repositories. Ordinary
-file scans write only private caches and reports. The explicit local
-`--resolve maven|gradle` mode executes trusted project build code and permits
-build/cache writes to obtain resolved dependency versions. No deployment or
-automatic dependency upgrade is requested.
+- [JVM resolution](JVM_DEPENDENCY_RESOLUTION.md): effective Maven/Gradle versions.
+- [Repository lists](REPOSITORY_LIST_SCANNING.md) and [monitoring](PORTFOLIO_MONITORING.md): team portfolios and recurring scans.
+- [Runtime evidence](RUNTIME_ASSESSMENT.md) and [collectors](RUNTIME_COLLECTION.md): installed/deployed versions.
+- [Planned upgrades](PLANNED_UPGRADES.md): future remediation; not implemented.
 
 ## Setup
 
-```bash
-agent-do security doctor --json
-```
-
 Install [OSV-Scanner v2](https://google.github.io/osv-scanner/installation/)
-separately for source scans; it is **required** and not bundled with agent-do.
-On macOS with Homebrew:
+separately; it is required for source scans. On macOS:
 
 ```bash
 brew install osv-scanner
 agent-do security doctor --json
 ```
 
-Choose a trusted installed executable with `--scanner PATH`.
-GitHub repository acquisition also requires `gh` and suitable repository access.
-The command never starts an interactive login.
+GitHub acquisition requires authenticated `gh` access. `NVD_API_KEY` and
+`GH_TOKEN`/`GITHUB_TOKEN` are optional for public advisory reads; GitHub API limits
+can still block unauthenticated requests. Doctor checks local prerequisites and
+credential presence without testing network access or authorization.
 
-For local advisory-vector scoring, install the optional maintained CVSS library:
+Optional vector scoring uses the maintained CVSS library:
 
 ```bash
 python3 -m pip install -r tools/agent-security/requirements.txt
 ```
 
-Without this dependency, numeric advisory scores still work, and uncomputed
-vectors remain visible as unscored evidence. A score filter excludes unscored
-records unless `--include-unscored` is supplied. Always inspect the unscored count.
-
-`NVD_API_KEY` is optional for NVD reads. `GH_TOKEN` or `GITHUB_TOKEN` is optional
-for public GitHub advisory reads. Store credentials with `agent-do creds`, using
-its stdin interface. GitHub acquisition uses the installed `gh` authentication.
-Doctor reports presence and local prerequisites, not proven authorization or
-network availability; it performs no network requests.
+Without it, numeric scores still work and uncomputed vectors remain unscored.
+Score filters exclude unscored findings unless `--include-unscored` is supplied.
 
 ## Find published advisories
 
-Combine predefined languages/platforms with repeatable `--target` flags, for
-example `find --target java --target springboot --target angular --target node
---target aks --json`. See [multi-target discovery](MULTI_TARGET_DISCOVERY.md) for
-exact curated coverage, per-query limits, match reasons, and saved-report filters.
-
 ```bash
-# Exact NVD CPE components: vendor and product, not natural-language aliases.
 agent-do security find --vendor oracle --product jdk --cvss-gt 7 --json
-agent-do security find --product cpython --published-after 2026-10-01 --json
-
-# Broad keyword discovery when product identity is not known.
-agent-do security find --query java --cvss-min 7 --json
-
-# GitHub-reviewed package advisories, including advisories without a CVE.
 agent-do security find --ecosystem pypi --package litellm --json
-agent-do security find --ecosystem composer --cvss-min 7 --json
-
-# A particular CVE, or records revised since a date.
+agent-do security find --target java --target springboot --target angular \
+  --target node --target aks --published-after 2026-10-15 --json
 agent-do security find --cve CVE-2021-44228 --json
-agent-do security find --updated-after 2026-10-01 --known-exploited --json
 ```
 
-Source selection defaults to NVD for vendor/product/keyword queries and GitHub
-for ecosystem/package queries; `--source nvd|github` selects explicitly. Package
-discovery requires an ecosystem. `python` and `pypi` normalize to GitHub's `pip`;
-`php` and `packagist` normalize to `composer`. Product identity remains separate:
-the Python interpreter is a product, while LiteLLM is a package. Java JDK
-distributions have distinct CPE identities. `--query java` is a text search,
-not proof that every result affects every Java runtime.
+NVD is the default for vendor/product/keyword queries; GitHub is the default for
+ecosystem/package queries. Package searches require an ecosystem. `pypi`/`python`
+normalize to `pip`, and `php`/`packagist` to `composer`. Interpreter/runtime products
+are separate from packages: searching Python CVEs does not establish exposure to
+LiteLLM or a repository. Keywords and [curated targets](MULTI_TARGET_DISCOVERY.md)
+identify advisory relevance, not confirmed application impact.
 
-Discovery covers records from the selected source, not an exhaustive global
-catalog. GitHub discovery includes reviewed, nonwithdrawn advisories. NVD rejected
-records are omitted. NVD CPE configuration ranges are preserved without turning
-their bounds into inferred fixed versions. Consequently `--fix-available` is
-most useful for package advisory sources that explicitly publish fixes.
-
-`--limit` defaults to 100 **source records examined before local presentation
-filters**. Pagination continues until the source is exhausted or this limit is
-reached. Output reports examined counts, available totals, and truncation;
-increase the limit to broaden the assessed window. A restrictive score filter
-does not mean the rest of the catalog was searched. GitHub supplies no total
-record count for this endpoint. Page sizes respect each provider's API limits.
+Discovery omits rejected NVD and withdrawn GitHub records. It is limited to the
+selected source and criteria. `--limit` defaults to 100 source records examined
+before presentation filters; multi-target limits apply per component query.
+Truncation remains incomplete. NVD filtered date windows are at most 120 days;
+see the [date examples and rules](SECURITY_CLI_REFERENCE.md#search-a-seven-day-or-thirty-day-publication-window).
 
 ## Scan source dependencies
 
 ```bash
 agent-do security scan --path . --json
-agent-do security scan --path ../service --cvss-min 7 --include-unscored --json
-agent-do security scan --repo https://github.com/owner/repo --ref main --json
-agent-do security scan --repo owner/repo --cve CVE-2021-44228 --json
+agent-do security scan --path ~/workspace/my-service --resolve maven --json
+agent-do security scan --repo owner/repo --ref main --json
 agent-do security scan --repos-file ~/team-repos.txt --cvss-min 7 --include-unscored --json
 ```
 
-Keep one GitHub URL or `owner/repo` per line in `team-repos.txt`. See
-[repository-list scanning](REPOSITORY_LIST_SCANNING.md) for JSON refs,
-per-repository coverage and saved batch reports.
+File scans copy recognized manifests/lockfiles into an isolated temporary
+snapshot. They do not execute target scripts or install dependencies. Local
+snapshots include uncommitted files; GitHub refs resolve to immutable commits.
+Reports record inventory fingerprints and available Git evidence. Symlinks,
+nonregular files and truncated remote trees are rejected or reported as gaps.
 
-Local scans include uncommitted dependency files and record Git HEAD/dirty state
-when available. GitHub scans resolve a ref to an immutable commit and fetch
-dependency files from that commit. A content fingerprint identifies the actual
-dependency snapshot. GitHub acquisition rejects truncated trees. Symlinks and
-nonregular dependency files are not followed; coverage reports exclusions.
+Supported file families include JavaScript, Composer, Python, Maven/Gradle, Cargo,
+Go, Ruby, NuGet, Dart and Elixir. Actual extraction depends on OSV-Scanner.
+Unpinned requirements, manifests without resolved inventories, POM-only transitive
+versions and files the scanner did not assess remain unresolved. Nested projects
+are included except dependency/build/cache directories listed in the report.
 
-File-only scans of both target types copy recognized manifests and lockfiles into an isolated
-temporary directory. Repository-provided scanner configuration is not copied,
-so it cannot hide findings. OSV-Scanner v2 runs with an empty global config and
-`--all-packages`; its version, raw JSON evidence, output hash, package inventory,
-and normalized findings are retained. The temporary source copy is removed.
+OSV runs with an empty config and all-package inventory, so repository config
+cannot hide findings. Reports retain scanner version, package inventory, raw JSON
+evidence and normalized findings; the temporary snapshot is removed.
+`--resolve maven|gradle` separately authorizes trusted local build execution and
+build/cache writes. Use the [resolution guide](JVM_DEPENDENCY_RESOLUTION.md) for
+profiles, settings, configurations and dependency paths. Remote scans do not
+execute Maven/Gradle; clone and select a trusted local checkout first.
 
-Recognized inputs include npm/yarn/pnpm/bun, Composer, pinned requirements and
-common Python lockfiles, Maven POMs and Gradle locks, Cargo, Go modules, Ruby,
-NuGet, Dart, and Elixir inventories. Actual extraction depends on the installed
-OSV-Scanner version. A recognized file with no returned package inventory is a
-coverage gap. This deliberately favors visible uncertainty over an empty report.
-
-Unpinned requirements, manifest-only projects, and POM-only transitive inventory
-are marked unresolved. Packages with available version evidence may still yield
-findings. File-only scans do not resolve these projects by installing or building them.
-Nested projects are considered, excluding `.git`, `node_modules`, `.venv`, `venv`,
-`vendor`, `target`, `dist`, `build`, `__pycache__`, and `.agent-do` directories.
-
-A dependency version match does not establish exploitability. Runtime, OS,
-container-image, deployed-artifact, and reachability assessments are outside
-this MVP's source-dependency scope. For example, a Composer lockfile does not
-establish the installed PHP runtime version. A fixed GitHub branch does not
-establish that production has been updated.
+Source findings do not establish installed PHP/Java/Node versions, exploitability,
+or deployment state. Use the runtime workflows for explicit runtime evidence.
 
 ### Dependabot provider integration
 
@@ -142,180 +94,92 @@ establish that production has been updated.
 agent-do security scan --repo owner/repo --dependabot --json
 ```
 
-This optional adapter invokes the existing `agent-do gh alerts` provider proposed
-in [PR #51](https://github.com/ovachiever/agent-do/pull/51). If that provider is not
-installed, the report explicitly marks it unavailable. Its raw alert census is
-attached under `dependabot`, separately scoped to GitHub's default-branch alert
-inventory. It is not merged into commit-specific findings, because equivalence
-to the scanned commit is not established. Disabled alerts and access errors
-remain coverage gaps; neither is counted as zero.
+This optional adapter uses the `gh alerts` provider from
+[PR #51](https://github.com/ovachiever/agent-do/pull/51). If unavailable, coverage
+says so. Alerts stay separately scoped to the default branch; they are not merged
+into commit-specific findings. Access errors and disabled alerts are not zero findings.
 
 ## Filters and saved reports
 
-Local Maven/Gradle projects can opt in to build resolution with
-`scan --path DIR --resolve maven|gradle`. See
-[JVM dependency resolution](JVM_DEPENDENCY_RESOLUTION.md) for wrapper selection,
-profiles/settings, configurations, dependency paths, and build-execution scope.
-
 ```bash
-agent-do security report --latest --cvss-min 7 --include-unscored --json
 agent-do security report --list --json
-agent-do security report --latest-complete --severity critical,high --json
 agent-do security report --file /path/to/report.json --severity critical,high
+agent-do security report --latest-complete --cvss-min 7 --include-unscored --json
 agent-do security scan --path . --kev --json
-agent-do security report --latest --known-exploited --json
 ```
 
-Shared filters include CVE aliases, ecosystem/package, inclusive `--cvss-min`,
-exclusive `--cvss-gt`, comma-separated `--severity`, `--fix-available`, and dates.
-Score filtering uses the maximum available base score, preserving each score's
-version, vector, and source. Severity follows that score when available; otherwise
-it uses the advisory's category or `unknown`. Aliases are merged transitively;
-different installed versions remain separate findings. Evidence paths from
-multiple occurrences are retained. A published fix is not a tested upgrade plan.
+Filters change the displayed view, not saved findings. Reports include total,
+shown, excluded and unscored counts. Scores use the maximum available base score,
+preserving rating sources/vectors; aliases merge transitively while distinct
+installed versions retain their evidence. There is no default severity threshold.
 
-`--fix-available` keeps findings **with** a published fix; it does not remove
-them as already resolved. If all 17 findings have fixes, all 17 remain shown.
+`--fix-available` keeps findings **with** explicitly published fixes. If all 17
+findings have fixes, all 17 remain. A published fix is not a tested upgrade plan;
+NVD range boundaries are not inferred fixed versions.
 
-Dates accept ISO dates/timestamps; a missing timezone means UTC.
-`--published-after` is inclusive, `--published-before` is exclusive, and
-`--updated-after` is inclusive. NVD publication and modification API windows
-must be positive and at most 120 days. When only a publication end is supplied,
-the start is 120 days earlier; when only a start is supplied, the end is request
-time. Without date filters, no 120-day publication window is imposed. The report
-records the request URL.
-For modification queries, the upper boundary is request time. Use explicit
-publication bounds to make historical searches reproducible. GitHub results
-also undergo local date filtering so API-inclusive upper bounds cannot leak in.
+`--kev` enriches using CISA's known-exploited catalog; `--known-exploited` also
+filters. A fetch failure leaves exploitation unknown and coverage incomplete.
+Saved reports need prior enrichment to support that filter.
 
-`--kev` enriches all results with CISA's catalog; `--known-exploited` also
-enriches, then filters. Catalog failures leave exploitation status unknown and
-make the assessment incomplete. Saved reports without enrichment cannot later
-answer an exploitation filter; repeat the assessment with `--kev`.
+Unfiltered JSON is saved under `$AGENT_DO_HOME/security/reports/`, defaulting to
+`~/.agent-do/security/reports/`. Unique filenames preserve earlier assessments.
+`report` reads without network access or changing the evidence:
 
-Every `find`/`scan` saves **unfiltered** JSON under
-`$AGENT_DO_HOME/security/reports/`, defaulting to `~/.agent-do/security/reports/`.
-Reports use schema version 1 and unique filenames; a later failed scan never
-overwrites earlier evidence. `report` reads saved evidence without network
-requests or modifying it. It reports total, shown, excluded, and unscored counts.
+- `--file PATH`: select a specific assessment.
+- `--list`: list timestamps, targets, status, counts, gaps and paths.
+- `--latest`: newest assessment, including explicitly flagged failures.
+- `--latest-complete`: newest complete assessment across **all projects and commands**,
+  possibly older or inventory-only. Check target, scope and timestamp.
 
-`report --latest` includes failed/incomplete assessments and explicitly flags
-them; it never silently replaces a recent failure with older findings. Use
-`report --list` to see timestamps, targets, status, counts, coverage gaps and
-paths for all reports, then `report --file PATH` to choose one. Alternatively,
-`report --latest-complete` explicitly selects the newest complete assessment
-across **all projects and commands**, which may be older or for a different
-project. Always check the target and timestamp. These four selectors are mutually
-exclusive. Listing accepts `--json` but not finding filters.
+| Exit | Meaning |
+| --- | --- |
+| 0 | Requested assessment completed, possibly with vulnerabilities. |
+| 1 | Incomplete: unresolved inventory, truncation, stale data or source/scanner failure. |
+| 2 | Invalid input/state or unreadable/unsupported saved report. |
 
-Execution exit codes:
+Unscored CVSS alone does not cause exit 1. Inspect non-`ok` coverage entries;
+`--include-unscored` changes filtering, not completeness. Zero findings means no
+known matches in the successfully assessed scope, not a general security guarantee.
 
-- `0`: assessment completed within its declared scope, including completed
-  assessments with vulnerability findings.
-- `1`: incomplete assessment, including truncated discovery, stale data,
-  unresolved inventory, source/scanner failures, or missing scanner prerequisites.
-- `2`: invalid command input or unreadable/unsupported saved report.
+## Scanner diagnostics
 
-No matching findings means no known matches in the successfully assessed
-inventory and source window. Review coverage before interpreting that result.
+OSV informational logs are suppressed with `--verbosity=warn`. The full verified
+`source` subcommand/file-name notice is non-blocking; other remaining diagnostics
+stay unclassified and make coverage incomplete. Unknown upstream database
+publication time alone does not trigger a warning. Existing reports keep their
+original status; a new scan creates new evidence.
 
-Unscored CVSS values alone do **not** cause exit 1. If a scan resolves dependencies
-and returns findings but exits incomplete, inspect non-`ok` entries in the JSON
-`coverage` array. Scanner stderr warnings, unassessed inventory and unavailable
-providers can still cause incomplete coverage. `--include-unscored` changes score
-filtering, not assessment completeness.
-
-The scanner's `advisory_data_freshness` field records that upstream publication
-time is unknown on every scan; that field alone does not trigger a warning.
-The scanner runs with `--verbosity=warn`, using OSV's native log-level filtering
-to suppress its informational output, including info messages containing words
-like "error". OSV can also write directly to stderr outside its logger. We
-recognize only the full, verified `source` subcommand/file-name collision notice
-as informational: OSV explicitly confirms it selected the intended subcommand.
-It is recorded under `non_blocking_diagnostics` with coverage impact `none`, and
-does not by itself make a scan incomplete. If any other text remains, severity
-and coverage impact stay unclassified and the scan remains incomplete. Modified
-messages, other command-name notices, mixed unknown diagnostics and scanner
-failures are not silently accepted. Coverage records a reason and diagnostic
-metadata without raw text.
-The report records `scanner.verbosity`. This behavior follows OSV-Scanner's
-[verbosity option](https://github.com/google/osv-scanner/blob/v2.7.0/docs/usage.md#set-verbosity-level)
-and [JSON-mode logging](https://github.com/google/osv-scanner/blob/v2.7.0/internal/cmdlogger/handler.go).
-The [command parser](https://github.com/google/osv-scanner/blob/v2.7.0/cmd/osv-scanner/internal/cmd/helpers.go)
-explains the known notice: it checks command names against files in the working
-directory before scanning. Our original staging directory was named `source`,
-which caused the warning. It is now named `dependency-snapshot` to remove that
-collision; files in your project are not renamed.
-
-Earlier saved reports keep their original assessment status. If a new scan still
-exits incomplete, inspect the actual diagnostic rather than treating every
-warning as benign. Opt in to local capture:
+Capture actual scanner stderr only when troubleshooting:
 
 ```bash
-agent-do security scan --path ~/workspace/map-managed-bff --resolve maven \
-  --include-unscored --scanner-diagnostics ~/private-security-diagnostics --json
+agent-do security scan --path ~/workspace/my-service --resolve maven \
+  --scanner-diagnostics ~/private-security-diagnostics --json
 ```
 
-Raw scanner stderr is saved only when `--scanner-diagnostics DIR` is supplied.
-Files have mode 0600, with unique names so subsequent scans cannot overwrite
-earlier logs. A newly created destination directory has mode 0700. The plain
-output prints its path; JSON records it under `scanner.diagnostics.stderr_file`
-(under each repository record for batch scans). This captures the scan invocation,
-including nonzero failures, not the version probe or Maven/Gradle build logs.
-The JSON report never embeds the raw contents. Files may contain private paths,
-URLs or credentials, so inspect locally and share only redacted relevant lines.
-Capture does not change assessment status or silently accept unknown warnings.
-
-OSV's [exit handling](https://github.com/google/osv-scanner/blob/v2.7.0/cmd/osv-scanner/internal/cmd/run.go)
-can return 1 for findings before checking its logged-error flag. A valid result
-document and exit 1 therefore do not by themselves prove all lookups succeeded.
-The laptop warning has been identified as the known command-name collision above.
-Rerun the scan after updating: if no other coverage gaps remain, it can exit 0
-and be selected by `report --latest-complete`, even when vulnerabilities exist.
-Historical reports keep their original incomplete status; they are not rewritten.
+Capture files are uniquely named, mode 0600, in a newly created mode-0700 directory.
+Their path appears in the report; raw text is never embedded. This captures scanner
+invocations, including failures, not version probes or build logs. Review/redact
+locally before sharing: paths, URLs or credentials may appear. Capture does not
+change coverage classification.
 
 ## Network, cache, and data disclosure
 
-Advisory APIs receive search filters. OSV-Scanner sends package identities and
-versions to OSV; it may contact ecosystem metadata services as part of its
-supported extraction. GitHub acquisition reads the selected repository through
-`gh`. File-only scans do not run local target scripts or package-manager install
-commands. Explicit `--resolve` scans run trusted local Maven/Gradle build code,
-which can contact configured repositories and write project files and caches;
-see the [resolution guide](JVM_DEPENDENCY_RESOLUTION.md).
+Advisory services receive search criteria; OSV receives package identities and
+versions and may contact ecosystem metadata services. `gh` reads the selected
+repository. Explicit build resolution contacts configured repositories and may
+write project files/caches. Private reports contain repository/package identities.
 
-HTTP JSON responses are cached privately for one hour by default. Credentials
-are not saved in the cache; cache identities use credential hashes. `--refresh`
-bypasses fresh entries. Stale fallback requires `--allow-stale`, is explicitly
-marked, and exits incomplete. Receipts record source URL and original fetch time.
-Upstream database publication time is not inferred from request time.
-
-Operator controls include `--timeout`, `--scan-timeout`, `--retries`, `--cache-ttl`,
-`--max-bytes`, and discovery `--limit`. Oversized data is an explicit failure.
-HTTP rate-limit/server errors are retried with backoff; a Retry-After longer than
-the HTTP timeout is surfaced for a later retry. Endpoint redirects are refused
-to avoid forwarding credentials. Credentials and response error bodies are not
-printed. Temporary/private reports can contain repository and package identities.
-
-## Follow-up scope
-
-Local repository lists and sequential batch scans are available through
-`scan --repos-file`; see [repository-list scanning](REPOSITORY_LIST_SCANNING.md).
-Configured portfolios, compatible-scope change reports, due intervals, cron
-export and explicit notification routing are available through `monitor`;
-see [portfolio monitoring](PORTFOLIO_MONITORING.md) for installation and limits.
-Publication date and first detection are distinct, and failed/partial scans do
-not resolve prior findings. [Runtime assessment](RUNTIME_ASSESSMENT.md) now adds
-project hints, explicit local Java probing and imported runtime/deployment CPE
-evidence, including portfolio monitoring. Explicit image/rootfs/Kubernetes collection, Temurin advisories and Trivy vendor/backport
-assessment are described in [runtime collection](RUNTIME_COLLECTION.md). The [planned upgrade feature](PLANNED_UPGRADES.md) covers remediation PRs,
-isolated updates and verification; it is not implemented yet. The optional unrelated
-advisory digest remains separate from repository remediation tasks.
+HTTP responses cache privately for one hour by default, partitioned by credential
+hash without saving credentials. `--refresh` bypasses fresh entries. Stale fallback
+requires `--allow-stale`, is marked and remains incomplete. Receipts record source
+URL/fetch time, not inferred database publication or deployment observation time.
+Timeouts, retries and byte/record limits are operator-controlled; oversized data
+fails explicitly. Advisory API redirects are refused to protect credentials;
+Temurin's narrowly scoped public asset download is described in the collector guide.
 
 ## Validation
 
-See the [milestone 3/4 test checklist](SECURITY_MILESTONE_3_4_TESTING.md) for
-combined automated tests and host checks, including runtime inventory monitoring.
+Use the [acceptance guide](SECURITY_MILESTONE_3_4_TESTING.md) for focused host checks:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_security*.py'
@@ -323,16 +187,7 @@ python3 -m unittest discover -s tests -p 'test_security*.py'
 ./agent-do harness contracts drift --tool security
 ./agent-do harness bounds drift --tool security
 bin/gen-tools-doc --check
-./test.sh
 ```
 
-The security suite is deterministic and offline. It exercises documented source
-shapes and executable scanner doubles, not live database/scanner compatibility.
-Verify a real installed scanner and advisory APIs in a network-enabled checkout
-before relying on production results.
-
-API/scanner references: [NVD CVE API](https://nvd.nist.gov/developers/vulnerabilities),
-[GitHub global advisories](https://docs.github.com/en/rest/security-advisories/global-advisories),
-[OSV output](https://google.github.io/osv-scanner/output/),
-[OSV formats](https://google.github.io/osv-scanner/supported-languages-and-lockfiles/),
-and [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog).
+The suite uses offline fixtures and executable doubles; real upstream/tool
+compatibility is a separate host check. Full repository validation is `./test.sh`.
