@@ -172,7 +172,7 @@ and regenerate it on a different host or CI runner.
 Lifecycle history retains earlier evidence as unverified on collection/registry/
 advisory failure. Changed product/deployment/membership/helper matching scopes may
 create separate baselines; no absence in an incomplete scan resolves an issue.
-Matcher revision 3 corrects unrelated complex-CPE contamination. Earlier matcher
+Matcher revision 4 additionally unifies historical/current CPython identities; revision 3 corrected unrelated complex-CPE contamination. Earlier matcher
 baselines remain unverified rather than being described as patched deployments.
 
 ## Collector parameters

@@ -583,7 +583,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(current['counts']['resolved'], 0)
         self.assertNotEqual(first['targets'][0]['scope'], current['targets'][0]['scope'])
         self.assertEqual(first['targets'][0]['runtime_matcher_schema'], 1)
-        self.assertEqual(current['targets'][0]['runtime_matcher_schema'], 3)
+        self.assertEqual(current['targets'][0]['runtime_matcher_schema'], 4)
 
     def test_unrelated_complex_cpe_does_not_poison_target_branch(self):
         target = component()

@@ -93,6 +93,12 @@ def collectors(parser):
     parser.add_argument('--database-max-age', type=positive, default=86400, help='maximum accepted Trivy vulnerability DB age in seconds')
 
 
+def python_options(parser):
+    parser.add_argument('--local-python', action='store_true', help='explicitly probe a trusted Python interpreter in isolated/no-site mode')
+    parser.add_argument('--python', help='trusted Python executable; requires --local-python (default this agent-do process interpreter)')
+    parser.add_argument('--python-upstream', action='store_true', help='caller verifies this CPython build follows upstream release patch status; otherwise matches remain candidates')
+
+
 def parser():
     p = ArgumentParser(prog="agent-do security", description="Find advisories, scan dependencies, assess explicit runtimes and monitor portfolios. File scans are read-only; --resolve explicitly executes trusted local Maven/Gradle project code and permits build writes.")
     sub = p.add_subparsers(dest="command", required=True)
@@ -135,10 +141,11 @@ def parser():
     runtime.add_argument('--inventory', help='versioned JSON runtime/deployment inventory with exact CPE identities and evidence')
     runtime.add_argument('--temurin-vdr', help='local Adoptium CycloneDX VDR JSON; defaults to digest-verified latest official release')
     collectors(runtime)
+    python_options(runtime)
     runtime.add_argument('--local-java', action='store_true', help='explicitly execute the selected local Java binary to observe vendor and version')
     runtime.add_argument('--java', help='trusted Java executable, used only with --local-java (default installed java)')
     runtime.add_argument('--java-cpe', help='verified distribution CPE identity with wildcard version/update; used only with --local-java')
-    runtime.add_argument('--probe-timeout', type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help='local Java probe timeout in seconds')
+    runtime.add_argument('--probe-timeout', type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help='local Java/Python probe timeout in seconds')
     runtime.add_argument('--inventory-only', action='store_true', help='collect without advisory requests/CVE assessment; explicit image/cluster collectors may contact registries/APIs')
     runtime.add_argument('--limit', type=int, default=1000, help='maximum NVD records examined per runtime component before presentation filters; truncation is explicit')
     r = sub.add_parser("report", help="read a saved unfiltered report and apply presentation filters")
@@ -168,13 +175,15 @@ def parser():
     init.add_argument('--max-bytes', type=int, default=16_777_216)
     init.add_argument('--json', action='store_true')
     collectors(init)
+    python_options(init)
+    init.add_argument("--probe-timeout", type=positive, default=READ_PROBE_TIMEOUT_SECONDS, help="timeout for the configured local Python probe")
     monitor_run = actions.add_parser('run', help='scan configured targets and save an unfiltered change digest')
     common(monitor_run)
     network(monitor_run)
     monitor_run.add_argument('--config', required=True)
     monitor_run.add_argument('--due', action='store_true', help='skip if the configured interval has not elapsed since the last attempt')
     monitor_run.add_argument('--allow-builds', action='store_true', help='explicitly authorize trusted configured local Maven/Gradle build execution')
-    monitor_run.add_argument('--allow-collectors', action='store_true', help='authorize configured Syft/Trivy/kubectl execution for this run')
+    monitor_run.add_argument('--allow-collectors', action='store_true', help='authorize configured Syft/Trivy/kubectl and local Python probe execution for this run')
     monitor_run.add_argument('--runtime-limit', type=int, default=1000, help='maximum NVD records examined per imported runtime component; source dependency scans are unaffected')
     monitor_run.add_argument('--scanner', default='osv-scanner')
     monitor_run.add_argument('--scan-timeout', type=positive, default=300)
@@ -211,8 +220,8 @@ def validate(args):
                 raise ValueError('Invalid Kubernetes context/namespace/selector')
         if args.rootfs and not getattr(args, '_monitor_planned', False) and not Path(args.rootfs).expanduser().is_dir():
             raise ValueError('--rootfs requires an existing explicitly selected directory')
-    if args.command == 'monitor' and args.monitor_command == 'init' and not (args.path or args.repos_file or args.runtime_inventory or args.image or args.rootfs or args.kube_context):
-        raise ValueError('monitor init requires --path, --repos-file, or --runtime-inventory; runtime inventory may accompany either source input')
+    if args.command == 'monitor' and args.monitor_command == 'init' and not (args.path or args.repos_file or args.runtime_inventory or args.image or args.rootfs or args.kube_context or args.local_python):
+        raise ValueError('monitor init requires a source, runtime inventory, --local-python or explicit collector target')
     if args.command == 'monitor' and args.monitor_command in {'run', 'schedule'} and args.notify_via and not args.notify_recipient:
         raise ValueError('--notify-via requires --notify-recipient')
     if args.command == 'report' and args.list:
@@ -231,9 +240,12 @@ def validate(args):
         args.severity = ",".join(values)
     if getattr(args, "published_after", None) and args.published_before and timestamp(args.published_after) >= timestamp(args.published_before):
         raise ValueError("--published-after must precede --published-before")
+    if args.command == 'runtime' or (args.command == 'monitor' and args.monitor_command == 'init'):
+        if (args.python or args.python_upstream) and not args.local_python:
+            raise ValueError('--python and --python-upstream require explicit --local-python')
     if args.command == 'runtime':
-        if not (args.path or args.inventory or args.local_java or args.image or args.rootfs or args.kube_context):
-            raise ValueError('runtime requires --path, --inventory, or --local-java (may be combined)')
+        if not (args.path or args.inventory or args.local_java or args.local_python or args.image or args.rootfs or args.kube_context):
+            raise ValueError('runtime requires --path, --inventory, --local-java, --local-python or explicit collectors (may be combined)')
         if (args.java or args.java_cpe) and not args.local_java:
             raise ValueError('--java and --java-cpe require explicit --local-java')
         if args.java_cpe:
@@ -302,6 +314,7 @@ def doctor(args):
             "temurin_assessment": "available; official Adoptium VDR, network not probed",
             "artifact_collection": "available" if shutil.which('syft') and shutil.which('trivy') else "requires separately installed syft and trivy",
             "kubernetes_collection": "available" if all(shutil.which(tool) for tool in ('syft', 'trivy', 'kubectl')) else "requires syft, trivy and kubectl; explicit context/namespace and registry/RBAC access",
+            "local_python_probe": "available; explicit runtime --local-python, isolated/no-site; CPython upstream version assessment",
             "local_java_probe": "java found; executed only with runtime --local-java" if shutil.which("java") else "requires a trusted Java executable selected with runtime --local-java --java PATH",
             "github_acquisition": "gh found; authentication not probed" if shutil.which("gh") else "requires gh",
             "maven_resolution": "installed mvn found" if shutil.which('mvn') else 'requires executable project mvnw or installed Maven; never probed without opt-in',
@@ -344,7 +357,7 @@ def output(payload, json_mode):
             print('  Comparison: ' + payload['comparison_status'])
             for assessed in payload['targets']:
                 target = assessed['target']
-                print('  Target: ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '')) + ' — ' + assessed['status'])
+                print('  Target: ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '') or target.get('runtime_probe', {}).get('python', '')) + ' — ' + assessed['status'])
             for category, count in payload['counts'].items():
                 print(f"  {category}: {payload.get('shown_counts', payload['counts'])[category]} shown / {count}")
                 for issue in payload['changes'][category]:
@@ -353,7 +366,7 @@ def output(payload, json_mode):
                     representative = max(rows, key=lambda row: row['cvss'] if row['cvss'] is not None else -1)
                     package = representative.get('package') or {}
                     versions = sorted({str((row.get('package') or {}).get('version') or '?') for row in rows})
-                    print('    ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '')) + ': ' + ', '.join(issue['aliases']) + ' — ' + representative['severity'] + ' ' + package.get('name', '') + '@' + ','.join(versions))
+                    print('    ' + (target.get('repo') or target.get('path') or target.get('runtime_inventory', '') or target.get('runtime_probe', {}).get('python', '')) + ': ' + ', '.join(issue['aliases']) + ' — ' + representative['severity'] + ' ' + package.get('name', '') + '@' + ','.join(versions))
                     if representative.get('runtime_match'):
                         print('      Runtime applicability: ' + representative['runtime_match']['component_id'] + ' — ' + representative['runtime_match']['relation'])
                     print('      ' + representative['summary'].replace('\n', ' '))
@@ -417,6 +430,9 @@ def output(payload, json_mode):
         print('  Runtime: ' + component['id'] + ' — ' + component.get('cpe', ':'.join(component.get('java', {}).get(key, '?') for key in ('vendor', 'product', 'version')) if component.get('java') else 'unmapped vendor identity'))
         evidence = component['evidence']
         print('    Evidence: ' + evidence['kind'] + '; observed ' + evidence['observed_at'] + '; ' + evidence['verification'])
+        if component.get('python'):
+            identity = component['python']
+            print('    Python: ' + identity['implementation'] + ' ' + identity['version'] + ' (' + identity['releaselevel'] + '); ' + component['build_provenance'])
         if component.get('properties'):
             print('    Java: ' + component['properties'].get('java.vendor', 'unknown vendor') + ' ' + component['properties'].get('java.runtime.version', component['properties'].get('java.version', '?')))
         if component.get('deployment'):

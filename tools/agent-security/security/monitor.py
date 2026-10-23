@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import uuid
@@ -29,7 +30,7 @@ COLLECT_OPTIONS = {'image', 'rootfs', 'kube_context', 'namespace', 'selector', '
 
 
 def runtime_target(target):
-    return 'runtime_inventory' in target or 'runtime_collect' in target
+    return 'runtime_inventory' in target or 'runtime_collect' in target or 'runtime_probe' in target
 
 
 def fingerprint(value):
@@ -56,10 +57,26 @@ def load_config(filename, max_bytes):
         raise ValueError('Monitor targets must be a nonempty array')
     seen = set()
     for target in value['targets']:
-        if not isinstance(target, dict) or set(target) - {'repo', 'ref', 'path', 'resolve', 'options', 'runtime_inventory', 'runtime_collect'}:
+        if not isinstance(target, dict) or set(target) - {'repo', 'ref', 'path', 'resolve', 'options', 'runtime_inventory', 'runtime_collect', 'runtime_probe'}:
             raise ValueError('Invalid monitor target fields')
-        if sum(key in target for key in ('repo', 'path', 'runtime_inventory', 'runtime_collect')) != 1:
-            raise ValueError('Each monitor target needs exactly one repo, path or runtime_inventory')
+        if sum(key in target for key in ('repo', 'path', 'runtime_inventory', 'runtime_collect', 'runtime_probe')) != 1:
+            raise ValueError('Each monitor target needs exactly one repo, path, runtime_inventory, runtime_collect or runtime_probe')
+        if 'runtime_probe' in target:
+            options = target['runtime_probe']
+            if (set(target) != {'runtime_probe'} or not isinstance(options, dict)
+                    or set(options) != {'python', 'python_upstream', 'probe_timeout'}
+                    or not isinstance(options['python'], str) or not options['python']
+                    or not isinstance(options['python_upstream'], bool)
+                    or isinstance(options['probe_timeout'], bool) or not isinstance(options['probe_timeout'], (int, float))
+                    or not math.isfinite(options['probe_timeout']) or options['probe_timeout'] <= 0):
+                raise ValueError('Invalid runtime_probe target; create it with monitor init --local-python')
+            if '/' in options['python']:
+                options['python'] = str((path.parent / Path(options['python']).expanduser()).absolute())
+            target['_key'] = fingerprint({'runtime_probe': options})
+            if target['_key'] in seen:
+                raise ValueError('Duplicate Python probe target in monitor configuration')
+            seen.add(target['_key'])
+            continue
         if 'runtime_collect' in target:
             options = target['runtime_collect']
             if set(target) != {'runtime_collect'} or not isinstance(options, dict) or set(options) - COLLECT_OPTIONS or not any(options.get(key) for key in ('image', 'rootfs', 'kube_context')):
@@ -156,8 +173,14 @@ def initialize(args):
             if '/' in options.get(key, ''):
                 options[key] = str(Path(options[key]).expanduser().resolve())
         targets.append({'runtime_collect': options})
+    if args.local_python:
+        executable = shutil.which(args.python or sys.executable)
+        if not executable:
+            raise ValueError('Python executable not found; select --python PATH')
+        targets.append({'runtime_probe': {'python': str(Path(executable).absolute()),
+            'python_upstream': args.python_upstream, 'probe_timeout': args.probe_timeout}})
     if not targets:
-        raise ValueError('Monitor initialization requires a source target or runtime inventory')
+        raise ValueError('Monitor initialization requires a source, runtime inventory, collector or local Python target')
     value = {'schema_version': 1, 'monitor_id': uuid.uuid4().hex, 'interval_hours': args.interval_hours, 'targets': targets}
     path = Path(args.config).expanduser().resolve()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -172,8 +195,14 @@ def initialize(args):
 
 
 def scan_arguments(target, args, parse_scan, validate_scan):
-    argv = (['runtime'] if 'runtime_collect' in target else ['runtime', '--inventory', target['runtime_inventory']] if 'runtime_inventory' in target else
+    argv = (['runtime', '--local-python'] if 'runtime_probe' in target else ['runtime'] if 'runtime_collect' in target else ['runtime', '--inventory', target['runtime_inventory']] if 'runtime_inventory' in target else
             ['scan', '--repo', target['repo']] if 'repo' in target else ['scan', '--path', target['path']])
+    for key, setting in target.get('runtime_probe', {}).items():
+        if key == 'python_upstream':
+            if setting:
+                argv.append('--python-upstream')
+        else:
+            argv += ['--' + key.replace('_', '-'), str(setting)]
     for key, value in target.get('runtime_collect', {}).items():
         for item in value if key == 'image' else [value]:
             argv += ['--' + key.replace('_', '-'), str(item)]
@@ -227,10 +256,11 @@ def scope_key(target, report, max_bytes):
     if runtime_target(target):
         descriptor['runtime_inventory'] = target.get('runtime_inventory')
         descriptor['runtime_collect'] = target.get('runtime_collect')
+        descriptor['runtime_probe'] = target.get('runtime_probe')
         descriptor['runtime_matcher_schema'] = report.get('runtime_matcher_schema', RUNTIME_MATCHER_SCHEMA)
         descriptor['runtime_scope'] = []
         for component in report.get('runtime_components', []):
-            parts = cpe_parts(component['cpe']) if component.get('cpe') else [component.get('java', {}).get('vendor', 'unmapped'), component.get('java', {}).get('product', 'java')]
+            parts = cpe_parts(component['cpe']) if component.get('cpe') else [component.get('python', {}).get('implementation', component.get('java', {}).get('vendor', 'unmapped')), 'python' if component.get('python') else component.get('java', {}).get('product', 'java')]
             if component.get('cpe'):
                 parts[5:7] = ['*', '*']
             deployment = component.get('deployment', {}).copy()
@@ -313,11 +343,13 @@ def run_monitor(args, parse_scan, validate_scan, root):
         for target, scan_args in zip(config['targets'], selected):
             is_runtime = runtime_target(target)
             child = new_report('runtime' if is_runtime else 'scan',
-                {'kind': 'runtime_inventory', 'inventory': target.get('runtime_inventory'), 'collection': target.get('runtime_collect')} if is_runtime else
+                {'kind': 'runtime_inventory', 'inventory': target.get('runtime_inventory'), 'collection': target.get('runtime_collect'), 'probe': target.get('runtime_probe')} if is_runtime else
                 {'kind': 'github', 'repository': target['repo']} if 'repo' in target else {'kind': 'local', 'path': target['path']})
             try:
                 if target.get('resolve') and not args.allow_builds:
                     raise ValueError('Local build execution requires monitor run --allow-builds')
+                if 'runtime_probe' in target and not getattr(args, 'allow_collectors', False):
+                    raise ValueError('Local Python probe execution requires monitor run --allow-collectors')
                 if 'runtime_collect' in target and not getattr(args, 'allow_collectors', False):
                     raise ValueError('Runtime collector execution requires monitor run --allow-collectors')
                 if is_runtime:
@@ -326,7 +358,7 @@ def run_monitor(args, parse_scan, validate_scan, root):
                     scan(scan_args, child)
             except (OSError, SourceError, ValueError, KeyError, TypeError) as exc:
                 child['coverage'].append({'source': 'monitor target', 'status': 'error', 'error': str(exc)})
-            identity = {'entry_id': target['_key'], 'repository': target.get('repo', target.get('path', target.get('runtime_inventory', 'runtime collectors'))),
+            identity = {'entry_id': target['_key'], 'repository': target.get('repo', target.get('path', target.get('runtime_inventory', target.get('runtime_probe', {}).get('python', 'runtime collectors')))),
                         'requested_ref': target.get('ref'), 'commit': child['target'].get('commit')}
             for row in child['findings']:
                 row['repository_target'] = identity.copy()
@@ -355,7 +387,7 @@ def run_monitor(args, parse_scan, validate_scan, root):
         for target, child in zip(config['targets'], children):
             key = target['_key']
             active_keys.add(key)
-            label = {k: v for k, v in target.items() if k in {'repo', 'ref', 'path', 'resolve', 'runtime_inventory', 'runtime_collect'}}
+            label = {k: v for k, v in target.items() if k in {'repo', 'ref', 'path', 'resolve', 'runtime_inventory', 'runtime_collect', 'runtime_probe'}}
             history = state['targets'].setdefault(key, {'target': label, 'scopes': {}})
             history['target'] = label
             coverage = shared + [item for item in report['coverage'] if item.get('repository_target', {}).get('entry_id') == key]
@@ -460,7 +492,7 @@ def schedule(args, root):
         argv += ['--notify-via', args.notify_via]
     if any(target.get('resolve') for target in config['targets']) and not args.allow_builds:
         raise ValueError('Scheduling local build resolution requires explicit --allow-builds')
-    if any('runtime_collect' in target for target in config['targets']) and not getattr(args, 'allow_collectors', False):
+    if any('runtime_collect' in target or 'runtime_probe' in target for target in config['targets']) and not getattr(args, 'allow_collectors', False):
         raise ValueError('Scheduling runtime collection requires explicit --allow-collectors')
     command = ' '.join(shlex.quote(item) for item in [
         'env', 'PATH=' + os.environ.get('PATH', ''), 'AGENT_DO_HOME=' + str(home().parent), *argv])

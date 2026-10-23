@@ -48,6 +48,14 @@ Imported runtime and collector selections can accompany a local path or repo lis
 `--path` and `--repos-file` are mutually exclusive. Init accepts one local source
 path; add further heterogeneous targets to the generated config.
 
+## Monitor the Python running agent-do
+
+Add `--local-python` during init, optionally alongside `--path`. The selected
+interpreter is probed afresh each run; init saves its executable selection without
+executing it. Both run and schedule require `--allow-collectors`. See the
+[Python guide](PYTHON_RUNTIME.md#monitor-agent-do-every-four-hours) for the four-hour
+workflow, build provenance and deployment limits.
+
 ## Configuration and scope
 
 Preserve generated `schema_version: 1` and the 32-character `monitor_id`; that ID

@@ -7,6 +7,7 @@ for every parameter, default and example. Related workflows:
 - [Optional cve.now discovery](CVENOW_DISCOVERY.md): public advisory aggregation, no repository uploads.
 - [JVM resolution](JVM_DEPENDENCY_RESOLUTION.md): effective Maven/Gradle versions.
 - [Repository lists](REPOSITORY_LIST_SCANNING.md) and [monitoring](PORTFOLIO_MONITORING.md): team portfolios and recurring scans.
+- [Python interpreter assessment](PYTHON_RUNTIME.md): explicit CPython probing and recurring host checks.
 - [Runtime evidence](RUNTIME_ASSESSMENT.md) and [collectors](RUNTIME_COLLECTION.md): installed/deployed versions.
 - [Planned upgrades](PLANNED_UPGRADES.md): future remediation; not implemented.
 

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
+from .python_runtime import canonical_cpe as canonical_python_cpe, is_cpython, probe as probe_python
 from .model import now, timestamp
 from .scan import run
 from .sources import NVD, SourceError, nvd_row
@@ -39,7 +40,7 @@ def cpe_parts(value):
     return parts
 
 
-RUNTIME_MATCHER_SCHEMA = 3
+RUNTIME_MATCHER_SCHEMA = 4
 
 JAVA_CPE_EXAMPLE = 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*'
 
@@ -97,7 +98,7 @@ def compare(left, right):
 
 def match_component(match, component):
     try:
-        pattern, actual = cpe_parts(match.get('criteria')), cpe_parts(component['cpe'])
+        pattern, actual = canonical_python_cpe(cpe_parts(match.get('criteria'))), canonical_python_cpe(cpe_parts(component['cpe']))
     except (UnsupportedCPE, KeyError):
         return None
     java = actual[4].lower() in {'java_se', 'jdk', 'jre', 'openjdk'}
@@ -153,7 +154,8 @@ def same_product(match, component):
         # ruling out an unrelated vendor/product. Relevant unsupported syntax
         # still remains uncertain in the full matcher.
         pattern = re.split(r'(?<!\\):', value)
-        actual = cpe_parts(component['cpe'])
+        actual = canonical_python_cpe(cpe_parts(component['cpe']))
+        pattern = canonical_python_cpe(pattern) if len(pattern) == 13 else pattern
         if len(pattern) != 13 or pattern[:2] != ['cpe', '2.3']:
             return None
         uncertain = False
@@ -369,6 +371,11 @@ def probe_java(args):
 def assess_component(component, components, args, client, report):
     parts = cpe_parts(component['cpe'])
     params = {'virtualMatchString': ':'.join(parts[:5] + ['*'] * 8), 'startIndex': 0, 'resultsPerPage': min(args.limit, 2000)}
+    if is_cpython(parts):
+        # One bounded namespace query includes both current and historical CPE
+        # product names; the matcher excludes unrelated products independently.
+        params['virtualMatchString'] = 'cpe:2.3:a:python:*:*:*:*:*:*:*:*:*'
+        params['resultsPerPage'] = min(args.limit, 100)
     if args.cve:
         params['cveId'] = args.cve.upper()
     count, unknown, start = 0, False, len(client.receipts)
@@ -390,6 +397,8 @@ def assess_component(component, components, args, client, report):
                     continue
                 # No configurations means no proof of applicability, but still
                 # retain the source's product-query candidate visibly.
+                if component.get('python') and component.get('build_provenance') != 'caller_verified_upstream':
+                    relation = None  # Version alone cannot establish vendor backport status.
                 row = nvd_row(cve)
                 row['package'] = {'ecosystem': 'cpe', 'name': parts[3] + ':' + parts[4], 'version': parts[5], 'runtime_id': component['id']}
                 row['runtime_match'] = {'component_id': component['id'], 'relation': 'inventory_match' if relation is True else 'candidate',
@@ -414,7 +423,8 @@ def assess_runtime(args, client, report):
     report['runtime_matcher_schema'] = RUNTIME_MATCHER_SCHEMA
     report['limitations'] = [
         'Declared compiler targets, toolchains and Docker image tags do not establish an installed or deployed runtime version.',
-        'Local Java is the selected executable on this host, not proof of the JDK used by Maven, a container, or a deployment.',
+        'Local Java/Python are the selected executables on this host, not proof of a project, container or deployment runtime.',
+        'Python assessment covers upstream CPython interpreter/stdlib versions, not PyPI packages, bundled OpenSSL or vendor backports. Unknown build provenance retains candidates; --python-upstream is explicit caller verification, not automatic attestation.',
         'Imported runtime/deployment inventory is user supplied; its age and accuracy are not independently verified.',
         'NVD CPE matches assess only supplied components and configuration prerequisites; exploitability and deployment reachability are not assessed.',
         'Image/rootfs collection uses Syft and Trivy only when explicitly requested. Kubernetes reads pod image IDs, not running processes, writable container layers, host nodes or managed control-plane vulnerabilities. OS backports use Trivy vendor adapters. No remediation is performed.',
@@ -439,6 +449,15 @@ def assess_runtime(args, client, report):
             report['coverage'].append({'source': 'local Java probe', 'status': 'ok'})
         except (OSError, ValueError) as exc:
             report['coverage'].append({'source': 'local Java probe', 'status': 'error', 'error': str(exc)})
+    if args.local_python:
+        try:
+            component = probe_python(args)
+            if any(c['id'] == component['id'] for c in components):
+                raise ValueError('Inventory id local-python is reserved when --local-python is selected')
+            components.append(component)
+            report['coverage'].append({'source': 'local Python probe', 'status': 'ok'})
+        except (OSError, ValueError) as exc:
+            report['coverage'].append({'source': 'local Python probe', 'status': 'error', 'error': str(exc)})
     from .collect import collect
     collect(args, report)
     if len({component['id'] for component in components}) != len(components):
@@ -450,11 +469,14 @@ def assess_runtime(args, client, report):
             report['coverage'].append({'source': 'runtime inventory', 'status': 'missing', 'reason': 'No runtime evidence supplied'})
         return
     if not components and not report.get('artifact_inventory'):
-        report['coverage'].append({'source': 'runtime inventory', 'status': 'missing', 'reason': 'Project declarations cannot identify an installed runtime. Supply --local-java or --inventory PATH.'})
+        report['coverage'].append({'source': 'runtime inventory', 'status': 'missing', 'reason': 'Project declarations cannot identify an installed runtime. Supply --local-java, --local-python or --inventory PATH.'})
     for component in components:
         if component.get('java', {}).get('product') == 'temurin':
             from .temurin import assess
             assess(component, args, client, report)
+        elif component.get('python') and not component.get('cpe'):
+            report['coverage'].append({'source': 'runtime:' + component['id'], 'status': 'missing',
+                'reason': 'Only final CPython releases are mapped. Other implementations and prerelease interpreters need dedicated matching; no CPython inference was made.'})
         elif not component.get('cpe'):
             report['coverage'].append({'source': 'runtime:' + component['id'], 'status': 'missing', 'reason': 'Vendor-specific CPE identity is not mapped. Rerun with an explicitly verified --java-cpe identity; no cross-vendor JDK inference was made.'})
         else:
@@ -469,4 +491,7 @@ def assess_runtime(args, client, report):
                              all(deployment.get(key) for key in ('cluster', 'namespace', 'workload')))
             environment = [other for other in components if other is component or
                            (colocated and other.get('deployment') == deployment)]
+            if component.get('python') and component.get('build_provenance') != 'caller_verified_upstream':
+                report['coverage'].append({'source': 'Python build provenance:' + component['id'], 'status': 'limited',
+                    'reason': 'Vendor backport status is unknown; upstream version matches remain candidates. Use a vendor OS/image scan, or --python-upstream only after verifying the selected build follows upstream CPython releases.'})
             assess_component(component, environment, args, client, report)

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Explicit Python runtime probing (`runtime --local-python`) checks upstream CPython interpreter/stdlib CVEs separately from PyPI dependencies. Historical/current NVD CPE names are matched together; prereleases/PyPy stay unmapped, vendor backports stay uncertain without caller verification. Portfolio init supports a freshly re-probed local interpreter alongside repository scans, with explicit per-run/schedule authorization.
+
 - Optional `security find --source cve-now` reads public aggregated CVE details, paginated catalog entries and bounded technology/ecosystem/KEV feeds. Preserves source/exploitation metadata and optional polling health; never uploads repository inventories or replaces existing scanners.
 
 - Security review fixes preserve combined package/fix filters, enforce scanner/collector output limits during reads, and resolve collector executable paths before changing directories.

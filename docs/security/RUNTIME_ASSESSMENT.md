@@ -6,6 +6,9 @@ patch. Nothing updates or deploys your project. See [collector setup](RUNTIME_CO
 [all parameters](SECURITY_CLI_REFERENCE.md#runtime-explicit-evidence-and-applicability)
 and [accepted/deferred scope](RUNTIME_COLLECTION.md#validation-status).
 
+For CPython interpreter checks and four-hour monitoring, see the
+[Python runtime guide](PYTHON_RUNTIME.md). Python package dependency scans remain separate.
+
 ## Test a local Java project
 
 ```bash

@@ -207,7 +207,7 @@ Resolution does not establish what is packaged, installed or deployed.
 
 See [runtime assessment](RUNTIME_ASSESSMENT.md) for the inventory JSON schema,
 match strength, vendor mappings, deployment labels and assessment limits.
-At least one of path, inventory or local-java is required; they may be combined.
+At least one of path, inventory, local-java, local-python or explicit collectors is required; they may be combined.
 
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |
@@ -216,7 +216,10 @@ At least one of path, inventory or local-java is required; they may be combined.
 | `--local-java` | Explicitly execute a trusted local Java binary to observe vendor/version/VM properties. Default off; does not select a deployed or Maven JDK implicitly. | `agent-do security runtime --path . --local-java --inventory-only --json` |
 | `--java EXECUTABLE` | Requires local-java; default installed java on PATH. Select another trusted Java executable. | `agent-do security runtime --local-java --java /path/to/jdk/bin/java --inventory-only --json` |
 | `--java-cpe CPE` | Requires local-java; caller-verified CPE 2.3 distribution identity with explicit part/vendor/product and wildcard version/update. Oracle Corporation HotSpot on Java 11+ maps to oracle:jdk; older JDK/JRE artifacts require an explicit identity; Eclipse Adoptium uses its separate official Temurin VDR adapter; other distributions need verified identity work and remain unmapped by default. This example is for Oracle Java, not all JDKs. An observed non-Oracle vendor rejects an Oracle Java identity before lookup; format errors include an inline example. | `agent-do security runtime --local-java --java-cpe 'cpe:2.3:a:oracle:jdk:*:*:*:*:*:*:*:*' --json` |
-| `--probe-timeout SECONDS` | Finite positive local Java subprocess timeout, default **15** seconds. | `agent-do security runtime --local-java --probe-timeout 30 --inventory-only --json` |
+| `--local-python` | Explicitly probe the selected Python using `-I -S`; does not execute checkout/site startup modules. Final CPython releases map to upstream NVD identities; PyPy/prereleases remain unmapped. | `agent-do security runtime --local-python --inventory-only --json` |
+| `--python EXECUTABLE` | Requires local-python; defaults to the interpreter executing agent-do. Select the trusted interpreter actually used by your environment. | `agent-do security runtime --local-python --python /path/to/venv/bin/python --json` |
+| `--python-upstream` | Requires local-python; caller verifies the build follows upstream CPython patch status. Without this verification, vendor backports are unknown and version matches remain candidates. | `agent-do security runtime --local-python --python-upstream --json` |
+| `--probe-timeout SECONDS` | Finite positive local Java/Python subprocess timeout, default **15** seconds. | `agent-do security runtime --local-java --probe-timeout 30 --inventory-only --json` |
 | `--inventory-only` | Collect/save evidence without advisory lookup; explicit image/cluster collectors may contact registries/APIs. Rejects advisory score/date/CVE/exploitation filters. | `agent-do security runtime --inventory ~/runtime-inventory.json --inventory-only --json` |
 | `--limit INTEGER` | Positive NVD record bound **per runtime component**, default **1000** before presentation filters. Truncation remains incomplete. | `agent-do security runtime --inventory ~/runtime-inventory.json --limit 2000 --json` |
 
@@ -302,6 +305,10 @@ These verbs remain inside the existing security family. Help is available on
 | `--repos-file PATH` | Initialize targets from a text/JSON GitHub list; mutually exclusive with path; runtime-inventory may accompany it. Copies normalized entries, not a live reference to the list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt` |
 | `--path DIR` | Initialize one local target; mutually exclusive with repos-file; runtime-inventory may accompany it. Relative input becomes an absolute path. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --json` |
 | `--resolve TOOL` | Optional maven/gradle resolution plan; requires path. Does not execute it during initialization. Runs/scheduled jobs need allow-builds. | `agent-do security monitor init --config ~/bff-security.json --path ~/workspace/map-managed-bff --resolve maven` |
+| `--local-python` | Add a local interpreter target, alone or alongside source/other runtime targets. Init saves selection without executing Python. | `agent-do security monitor init --config ~/agent-do-security.json --path /path/to/agent-do --local-python --interval-hours 4 --json` |
+| `--python EXECUTABLE` | With local-python, freeze this trusted interpreter's absolute selection; default agent-do's interpreter. Re-probed on each authorized run. | `agent-do security monitor init --config ~/python-security.json --local-python --python /path/to/venv/bin/python --json` |
+| `--python-upstream` | With local-python, store explicit caller verification of upstream CPython patch status; default off. | `agent-do security monitor init --config ~/upstream-python.json --local-python --python-upstream --json` |
+| `--probe-timeout SECONDS` | Finite positive timeout stored with the Python probe; default **15** seconds. | `agent-do security monitor init --config ~/python-security.json --local-python --probe-timeout 30 --json` |
 | `--runtime-inventory PATH` | Add a runtime inventory target, alone or alongside path or repos-file. Validate inventory without contacting NVD or executing probes. | `agent-do security monitor init --config ~/runtime-monitor.json --runtime-inventory ~/runtime-inventory.json --json` |
 | `--interval-hours INTEGER` | Positive whole hours between due attempts; default **24**. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --interval-hours 12` |
 | `--max-bytes INTEGER` | Positive file bound, default **16777216**, for reading the repository list. | `agent-do security monitor init --config ~/team-security.json --repos-file ~/team-repos.txt --max-bytes 33554432` |
@@ -430,7 +437,8 @@ remediation command, or vulnerability-threshold CI exit mode in this interface.
 `--collect-timeout` (300 seconds) and `--database-max-age` (86400 seconds).
 `runtime --temurin-vdr FILE` selects a local Adoptium vendor document; otherwise
 Temurin uses the digest-checked official public release. Monitor run/schedule
-require `--allow-collectors` for configured collector execution.
+require `--allow-collectors` for configured collectors and local Python probes.
+See [Python runtime coverage](PYTHON_RUNTIME.md) for interpreter versus dependency scope.
 The [collector parameter table](RUNTIME_COLLECTION.md#collector-parameters) explains
 **every flag with an example**, prerequisites, defaults and scope limitations.
 Inventory-only skips advisory requests; explicitly selected image/cluster collectors
