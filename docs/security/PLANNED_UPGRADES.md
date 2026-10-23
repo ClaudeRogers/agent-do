@@ -87,50 +87,12 @@ framework migrations are outside the first delivery. Acceptance needs determinis
 fixtures, existing regressions and one disposable Maven project with a confirmed
 update; unrelated live cluster/portfolio retests are unnecessary for focused fixes.
 
-## Other planned enhancements
+## Optional aggregator follow-ups
 
-### Optional cve.now advisory aggregation
-
-**Planned, not implemented; independent of milestone 5 remediation.** Use
-[cve.now](https://cve.now/) as an optional source for recent CVEs, technology/
-ecosystem browsing and advisory details. Its aggregation and exploitation metadata
-could supplement discovery; it must not become a required service or establish
-repository/runtime exposure. NVD, OSV, GitHub and vendor adapters remain the
-foundation, so removing this adapter leaves existing scans operational.
-
-Implementation approach:
-
-- Add a separate discovery adapter using the documented JSON entries API, with
-  explicit source opt-in for `security find`. Proposed syntax (not available):
-  `agent-do security find --source cve-now --ecosystem maven --published-after
-  2026-10-01 --severity high,critical --json`. Confirm supported upstream filters;
-  apply remaining filters locally without claiming an exhaustive result when
-  pagination, date coverage or ecosystem matching is incomplete.
-- Use only explicitly supplied public CVE IDs, technology/ecosystem selectors and
-  date/filter criteria. Never upload lockfiles, source, manifests, repository URLs,
-  deployment labels or automatically extracted package inventories. Do not invoke
-  `check_stack`, stack uploads or stack-feed endpoints.
-- Prefer JSON HTTP access for the plugin's CLI and scheduled automation: no MCP
-  client or server availability should be required. An optional interactive MCP
-  integration could expose only `list_feed` and `get_vulnerability` through a
-  restricted adapter, after verifying their schemas and current endpoint. Do not
-  enable the full server's tools implicitly.
-- Reuse the bounded HTTP/cache client with an exact HTTPS host/path allowlist,
-  no forwarded GitHub/NVD credentials, bounded retries/timeouts/response sizes,
-  cursor pagination and a record cap. Verify the current API contract before
-  implementation; reject repeated cursors and unexpected response schemas.
-- Normalize records into existing findings, deduplicate CVE/GHSA/OSV aliases and
-  retain aggregator attribution, original advisory links, fetch time and available
-  upstream timestamps. Preserve conflicting source values. Keep EPSS probability,
-  KEV status and cve.now's curated critical category distinct from CVSS severity;
-  label model-generated summaries and honor attribution requirements.
-- Report optional-source outages, stale data and truncation explicitly. Continue
-  available primary-source queries; a failed requested cve.now lookup leaves that
-  discovery scope incomplete, not clean. Do not alter repository scan coverage or
-  resolve monitored findings based on an aggregator failure or disappearance.
-
-Acceptance: offline fixtures for normalization, alias deduplication, filters,
-pagination and source conflicts; assertions that no repository data or credentials
-are transmitted; and outage/removal tests proving existing scans still work.
-One public-CVE smoke lookup can validate the live API. Document source coverage,
-retention boundaries and how to disable/remove the adapter before release.
+cve.now advisory discovery is now implemented separately from remediation; see
+[usage and boundaries](CVENOW_DISCOVERY.md). Further options include public
+GHSA/OSV-ID lookup and external RSS subscriptions. Numeric EPSS thresholds need an
+API that actually supplies probabilities; `epssReached` is only a dated event.
+Scheduled general advisory feeds and restricted interactive MCP access remain
+future work. No lockfile uploads, stack checks or repository-derived queries are
+planned for this adapter.

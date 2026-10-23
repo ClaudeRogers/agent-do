@@ -3773,7 +3773,7 @@ Concurrency: `mixed`
 
 **Capabilities**
 
-- find NVD CVEs by CPE vendor/product or keywords and GitHub advisories by ecosystem/package
+- find NVD CVEs, GitHub advisories, or opt-in cve.now aggregated advisories without repository uploads
 - combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
 - scan isolated dependency-file snapshots with OSV-Scanner v2; file-only mode does not execute target code
 - scan a local text/JSON list of GitHub repositories with per-repository commits, findings, and failure coverage
@@ -3789,7 +3789,7 @@ Concurrency: `mixed`
 
 **Commands**
 
-- `find`: Discover advisories: find [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
+- `find`: Discover advisories: find [--source auto|nvd|github|cve-now] [--technology SLUG] [--feed-filter critical|kev] [--source-status] [--target java --target spring-boot --target angular --target nodejs --target aks | --vendor V --product P | --ecosystem E --package P] [--cvss-min N] [--json]
 - `scan`: Assess dependencies: scan (--path DIR | --repo URL | --repos-file PATH) [--ref REF] [--resolve maven|gradle] [--cvss-min N] [--json]; resolution executes trusted local build code and permits build writes
 - `runtime`: Assess runtime evidence: runtime [--path DIR] [--local-java --java PATH --java-cpe CPE] [--inventory PATH] [--image REF] [--rootfs DIR] [--kube-context CTX --namespace NS] [--inventory-only] [--json]; explicit local probing and collectors execute trusted installed helpers
 - `report`: List or select saved evidence: report [--list | --latest | --latest-complete | --file PATH] [--target NAME ...] [--json]

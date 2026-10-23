@@ -167,6 +167,7 @@ check_output "vector --help" "today" "$AGENT_DO" vector --help
 check_cmd "gh tests" python3 "$SCRIPT_DIR/tests/test_gh.py"
 check_cmd "coderabbit tests" python3 "$SCRIPT_DIR/tests/test_coderabbit.py"
 check_cmd "security vulnerability tests" python3 "$SCRIPT_DIR/tests/test_security.py"
+check_cmd "security cve.now discovery tests" python3 "$SCRIPT_DIR/tests/test_security_cvenow.py"
 check_cmd "security JVM resolution tests" python3 "$SCRIPT_DIR/tests/test_security_resolution.py"
 check_cmd "security multi-target tests" python3 "$SCRIPT_DIR/tests/test_security_targets.py"
 check_cmd "security repository-list tests" python3 "$SCRIPT_DIR/tests/test_security_repositories.py"

@@ -87,7 +87,10 @@ Use `--target`, `--ecosystem`, `--vendor`/`--product`, and explicit date boundar
 | Parameter | Values, default and restrictions | Example |
 | --- | --- | --- |
 | `--target NAME` | **Repeatable.** Canonical names: `java`, `spring-boot`, `angular`, `nodejs`, `aks`. Case-insensitive aliases: `springboot` → `spring-boot`, `node` → `nodejs`. Uses curated queries; duplicate targets do not repeat searches. Cannot combine with vendor/product/query/ecosystem/package selectors or an explicit source other than `auto`. | `agent-do security find --target java --target springboot --target angular --target node --target aks --cvss-min 7 --json` |
-| `--source NAME` | `auto` (default), `nvd`, `github`. auto selects GitHub for ecosystem/package queries and NVD otherwise. Explicit NVD rejects ecosystem/package; explicit GitHub rejects vendor/product/query. | `agent-do security find --source github --ecosystem npm --package @angular/core --json` |
+| `--source NAME` | `auto` (default), `nvd`, `github`, `cve-now` (explicit opt-in only). auto selects GitHub for ecosystem/package queries and NVD otherwise. Explicit NVD rejects ecosystem/package; explicit GitHub rejects vendor/product/query. | `agent-do security find --source github --ecosystem npm --package @angular/core --json` |
+| `--technology SLUG` | cve.now recent-feed selector; requires `--source cve-now`. Examples: `spring`, `log4j`, `node`, `php`, `kubernetes`. Not a repository match; bounded feed coverage remains incomplete. | `agent-do security find --source cve-now --technology spring --limit 10 --json` |
+| `--feed-filter NAME` | cve.now curated `critical` or `kev` feed; requires `--source cve-now`. The curated critical category is distinct from CVSS severity. Cannot accompany direct `--cve` lookup. | `agent-do security find --source cve-now --feed-filter kev --limit 10 --json` |
+| `--source-status` | Include cve.now self-reported polling/history status; requires `--source cve-now`. Unhealthy/unavailable status makes the assessment incomplete without dropping findings. | `agent-do security find --source cve-now --cve CVE-2021-44228 --source-status --json` |
 | `--vendor NAME` | NVD CPE vendor component, e.g. `oracle`. Letters, digits, underscore, dot and hyphen only. Requires NVD/auto; cannot combine with ecosystem/package. No curated vendor alias conversion. | `agent-do security find --vendor oracle --product jdk --cvss-gt 7 --json` |
 | `--product NAME` | NVD CPE product component, e.g. `cpython`. Same syntax/source restrictions as vendor. Can be used without vendor. | `agent-do security find --product cpython --cvss-min 7 --json` |
 | `--query TEXT` | Broad NVD keyword search; quote multiple words. Not an exact product identity. Unsupported with GitHub source or curated targets. | `agent-do security find --query 'java runtime' --cvss-min 7 --json` |
@@ -98,6 +101,9 @@ Target queries and candidate relevance are documented in
 rather than exhaustive; Spring Boot and Angular profiles search selected package
 identities. AKS/Kubernetes advisory candidates do not establish that your cluster
 is affected. `find` does not scan any repository or deployment.
+
+See [cve.now discovery](CVENOW_DISCOVERY.md) for optional aggregation, supported
+selectors, provenance and capped-feed limitations.
 
 ### Search a seven-day or thirty-day publication window
 

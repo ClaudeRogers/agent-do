@@ -38,6 +38,24 @@ class AdoptiumAssetRedirect(urllib.request.HTTPRedirectHandler):
         return urllib.request.Request(newurl, headers={'Accept': 'application/json', 'User-Agent': 'agent-do-security/1'})
 
 
+def cvenow_endpoint(parsed):
+    """Allow public advisory reads only; stack/MCP/upload paths are excluded."""
+    if parsed.hostname != 'cve.now' or parsed.fragment:
+        return False
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if any(len(values) != 1 for values in query.values()):
+        return False
+    if parsed.path == '/api/v1/entries':
+        return not (set(query) - {'cursor'})
+    if re.fullmatch(r'/api/v1/entries/[A-Za-z0-9][A-Za-z0-9_.-]{1,199}', parsed.path):
+        return not parsed.query
+    if parsed.path == '/api/v1/status':
+        return not parsed.query
+    if parsed.path == '/feed':
+        return not (set(query) - {'format', 'tech', 'ecosystem', 'filter'}) and query.get('format') == ['json']
+    return False
+
+
 class Client:
     def __init__(self, args):
         self.args = args
@@ -48,7 +66,7 @@ class Client:
     def get(self, url):
         parsed = urllib.parse.urlsplit(url)
         asset = parsed.hostname == 'github.com' and re_asset_path(parsed.path) and not parsed.query
-        if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or (not asset and parsed.hostname not in {"services.nvd.nist.gov", "api.github.com", "www.cisa.gov"}):
+        if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443) or (not asset and not cvenow_endpoint(parsed) and parsed.hostname not in {"services.nvd.nist.gov", "api.github.com", "www.cisa.gov"}):
             raise SourceError("Unapproved advisory endpoint")
         headers = {"Accept": "application/json", "User-Agent": "agent-do-security/1"}
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "lib"))
 from quantities import READ_PROBE_TIMEOUT_SECONDS
 
+from .cvenow import discover as discover_cvenow, validate_options as validate_cvenow
 from .model import ECOSYSTEMS, merge_findings, present, timestamp
 from .scan import dependabot, repo_name, run, scan
 from .sources import Client, SourceError, discover, enrich_kev
@@ -98,7 +99,10 @@ def parser():
     f = sub.add_parser("find", help="discover published advisories; does not assess repository exposure")
     common(f)
     network(f)
-    f.add_argument("--source", choices=["auto", "nvd", "github"], default="auto")
+    f.add_argument("--source", choices=["auto", "nvd", "github", "cve-now"], default="auto")
+    f.add_argument('--technology', help='cve.now recent-feed technology slug, e.g. spring, log4j, node; requires --source cve-now')
+    f.add_argument('--feed-filter', choices=['critical', 'kev'], help='cve.now curated critical/KEV feed; critical is not a CVSS severity')
+    f.add_argument('--source-status', action='store_true', help='attach cve.now self-reported polling/coverage health to the assessment')
     f.add_argument("--vendor", help="NVD CPE vendor component, such as oracle")
     f.add_argument("--product", help="NVD CPE product component, such as cpython")
     f.add_argument("--query", help="broad NVD keyword search; not an exact product identity")
@@ -239,6 +243,7 @@ def validate(args):
         if args.inventory_only and (args.kev or args.known_exploited or args.cve or args.package or args.cvss_min is not None or args.cvss_gt is not None or args.severity or args.published_after or args.published_before or args.updated_after or args.fix_available or args.include_unscored):
             raise ValueError('--inventory-only does not assess advisories; CVE/score/date/exploitation filters do not apply')
     if args.command == "find":
+        validate_cvenow(args)
         if args.target:
             args.target = list(dict.fromkeys(args.target))
             if args.source != 'auto' or any((args.vendor, args.product, args.query, args.ecosystem, args.package)):
@@ -291,6 +296,7 @@ def doctor(args):
         scanner["v2"] = result.returncode == 0 and bool(re.search(r"(?:version[: ]+|v)2\.", scanner["version"], re.I))
     return {"schema_version": 1, "command": "doctor", "status": "ok" if scanner["v2"] else "incomplete",
             "scanner": scanner, "features": {"advisory_discovery": "available; network not probed",
+            "cvenow_discovery": "optional public-advisory API; explicit find --source cve-now; network not probed",
             "local_scan": "available" if scanner["v2"] else "requires OSV-Scanner v2",
             "runtime_inventory": "available; explicit CPE/Temurin evidence and vendor advisory assessment",
             "temurin_assessment": "available; official Adoptium VDR, network not probed",
@@ -510,7 +516,9 @@ def main(argv=None):
             client = Client(args)
             try:
                 if args.command == "find":
-                    if args.target:
+                    if args.source == "cve-now":
+                        discover_cvenow(args, client, report)
+                    elif args.target:
                         discover_targets(args, client, report)
                     else:
                         discover(args, client, report)

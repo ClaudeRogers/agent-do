@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Optional `security find --source cve-now` reads public aggregated CVE details, paginated catalog entries and bounded technology/ecosystem/KEV feeds. Preserves source/exploitation metadata and optional polling health; never uploads repository inventories or replaces existing scanners.
+
 - Security review fixes preserve combined package/fix filters, enforce scanner/collector output limits during reads, and resolve collector executable paths before changing directories.
 
 - New `agent-do security` family for NVD/GitHub advisory discovery, multi-platform searches, CVSS/severity/date filters, optional CISA KEV and saved unfiltered reports. See `docs/security/README.md` and `docs/security/SECURITY_CLI_REFERENCE.md`.
