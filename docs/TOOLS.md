@@ -3773,7 +3773,7 @@ Concurrency: `mixed`
 
 **Capabilities**
 
-- find NVD CVEs, GitHub advisories, or opt-in cve.now aggregated advisories without repository uploads
+- prefer cve.now for compatible advisory discovery with NVD/GitHub fallback; no repository uploads
 - combine curated Java, Spring Boot, Angular, Node.js, and AKS searches with per-query coverage and target-match provenance
 - scan isolated dependency-file snapshots with OSV-Scanner v2; file-only mode does not execute target code
 - scan a local text/JSON list of GitHub repositories with per-repository commits, findings, and failure coverage

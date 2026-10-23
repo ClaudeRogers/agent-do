@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools' / 'agent-security'))
-from security.cli import main, parser, validate
+from security.cli import main, output, parser, validate
 from security.cvenow import BASE, discover, entry_row
 from security.model import merge_findings, now
 from security.sources import Client, NoRedirect, SourceError
@@ -240,12 +240,122 @@ class CveNowTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate(parser().parse_args(['find', *option]))
 
-    def test_default_discovery_never_contacts_cvenow(self):
+    def test_explicit_nvd_discovery_never_contacts_cvenow(self):
         c = FakeClient({'vulnerabilities': [], 'totalResults': 0})
         out = io.StringIO()
         with patch('security.cli.Client', return_value=c), contextlib.redirect_stdout(out):
-            self.assertEqual(main(['find', '--cve', 'CVE-2026-10001', '--json']), 0)
+            self.assertEqual(main(['find', '--source', 'nvd', '--cve', 'CVE-2026-10001', '--json']), 0)
         self.assertEqual(urllib.parse.urlsplit(c.urls[0]).hostname, 'services.nvd.nist.gov')
+
+    def auto_cli(self, client, *argv):
+        output = io.StringIO()
+        with patch('security.cli.Client', return_value=client), contextlib.redirect_stdout(output):
+            code = main(['find', *argv, '--json'])
+        return code, json.loads(output.getvalue())
+
+    def test_auto_prefers_aggregator_when_direct_lookup_succeeds(self):
+        c = FakeClient(entry())
+        code, r = self.auto_cli(c, '--cve', 'CVE-2026-10001')
+        self.assertEqual(code, 0)
+        self.assertEqual(c.urls, [BASE + '/api/v1/entries/CVE-2026-10001'])
+        self.assertEqual(r['target']['source'], 'cve-now')
+        self.assertTrue(r['source_attempts'][0]['selected'])
+
+    def test_auto_lookup_outage_falls_back_to_nvd_with_visible_attempt(self):
+        c = FakeClient(SourceError('Advisory HTTP 503'), {'vulnerabilities': [], 'totalResults': 0})
+        code, r = self.auto_cli(c, '--cve', 'CVE-2026-10001')
+        self.assertEqual(code, 0)
+        self.assertEqual(urllib.parse.urlsplit(c.urls[1]).hostname, 'services.nvd.nist.gov')
+        self.assertIn('cveId=CVE-2026-10001', c.urls[1])
+        self.assertEqual(r['target']['source'], 'nvd')
+        self.assertEqual(r['source_attempts'][0]['coverage'][0]['error'], 'Advisory HTTP 503')
+        self.assertFalse(r['source_attempts'][0]['selected'])
+        self.assertEqual(r['coverage'][0]['source'], 'nvd')
+        self.assertIn('cve.now failed', r['notes'][0])
+
+    def test_auto_ecosystem_outage_preserves_github_query_and_filters(self):
+        c = FakeClient(SourceError('offline'), [])
+        code, r = self.auto_cli(c, '--ecosystem', 'python', '--package', 'example', '--published-after', '2026-10-01')
+        self.assertEqual(code, 0)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(c.urls[1]).query)
+        self.assertEqual(query['ecosystem'], ['pip'])
+        self.assertEqual(query['affects'], ['example'])
+        self.assertEqual(query['published'], ['2026-10-01..*'])
+        self.assertEqual(r['target']['source'], 'github')
+
+    def test_auto_healthy_limited_feed_does_not_become_complete_or_retry(self):
+        c = FakeClient({'items': [{'id': 'CVE-2026-10001'}]}, entry())
+        code, r = self.auto_cli(c, '--ecosystem', 'maven')
+        self.assertEqual(code, 1)
+        self.assertEqual(r['coverage'][0]['status'], 'limited')
+        self.assertEqual(len(c.urls), 2)
+        self.assertEqual(len(r['source_attempts']), 1)
+
+    def test_auto_partial_aggregator_findings_survive_failed_fallback(self):
+        c = FakeClient({'entries': [{'id': 'CVE-2026-10001'}, {'id': 'CVE-2026-10002'}], 'nextCursor': None},
+                       entry(), SourceError('detail timeout'), SourceError('NVD timeout'))
+        code, r = self.auto_cli(c)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(r['findings']), 1)
+        self.assertEqual(r['findings'][0]['discovery_attempt']['status'], 'unverified_preferred_source')
+        self.assertEqual(r['coverage'][0]['error'], 'NVD timeout')
+        self.assertEqual(len(read_report(r['saved_report'])['source_attempts']), 2)
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text):
+            output(r, False)
+        self.assertIn('unverified partial cve.now', text.getvalue())
+
+    def test_auto_fallback_keeps_partial_rows_and_alias_deduplicates(self):
+        nvd = {'id': 'CVE-2026-10001', 'descriptions': [{'lang':'en','value':'NVD fixture'}],
+               'published':'2026-10-01T00:00:00Z','configurations':[]}
+        c = FakeClient({'entries': [{'id': 'CVE-2026-10001'}, {'id': 'CVE-2026-10002'}], 'nextCursor': None},
+                       entry(), SourceError('detail timeout'), {'totalResults':1,'vulnerabilities':[{'cve':nvd}]})
+        code, r = self.auto_cli(c)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(r['findings']), 1)
+        self.assertEqual({x['name'] for x in r['findings'][0]['sources']}, {'cve.now','NVD'})
+
+    def test_auto_stale_attempt_does_not_contaminate_fresh_fallback_receipts(self):
+        class StaleClient(FakeClient):
+            def get(self, url):
+                result = super().get(url)
+                self.receipts[-1]['stale'] = url.startswith(BASE)
+                return result
+        c = StaleClient(entry(), {'vulnerabilities': [], 'totalResults': 0})
+        code, r = self.auto_cli(c, '--cve','CVE-2026-10001','--allow-stale')
+        self.assertEqual(code, 0)
+        self.assertEqual(r['source_attempts'][0]['status'], 'stale')
+        self.assertTrue(all(not x['stale'] for x in r['coverage'][0]['receipts']))
+
+    def test_auto_fallback_truncation_still_returns_incomplete(self):
+        nvd = {'id': 'CVE-2026-10001', 'descriptions': [{'lang':'en','value':'fixture'}], 'configurations':[]}
+        c = FakeClient(SourceError('offline'), {'vulnerabilities': [{'cve':nvd}], 'totalResults': 2})
+        code, r = self.auto_cli(c, '--limit','1')
+        self.assertEqual(code, 1)
+        self.assertEqual(r['coverage'][0]['status'], 'truncated')
+
+    def test_auto_unsupported_aggregator_ecosystem_keeps_github_route(self):
+        c = FakeClient([])
+        code, r = self.auto_cli(c, '--ecosystem', 'swift')
+        self.assertEqual(code, 0)
+        self.assertEqual(urllib.parse.urlsplit(c.urls[0]).hostname, 'api.github.com')
+        self.assertNotIn('source_attempts', r)
+
+    def test_explicit_aggregator_outage_does_not_fall_back(self):
+        c = FakeClient(SourceError('offline'))
+        code, r = self.cli(c, '--cve','CVE-2026-10001')
+        self.assertEqual(code,1)
+        self.assertEqual(len(c.urls),1)
+        self.assertEqual(r['coverage'][0]['source'],'cve.now')
+
+    def test_auto_nvd_only_criteria_skip_aggregator(self):
+        for options in (['--vendor','oracle'], ['--product','jdk'], ['--query','python interpreter']):
+            with self.subTest(options=options):
+                c = FakeClient({'vulnerabilities': [], 'totalResults': 0})
+                code, r = self.auto_cli(c,*options)
+                self.assertEqual(code,0)
+                self.assertEqual(urllib.parse.urlsplit(c.urls[0]).hostname,'services.nvd.nist.gov')
+                self.assertNotIn('source_attempts',r)
 
     def test_http_allowlist_blocks_upload_stack_mcp_arbitrary_hosts_and_queries(self):
         client = Client(self.args())

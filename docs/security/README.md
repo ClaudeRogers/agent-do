@@ -4,7 +4,7 @@
 saves attributable evidence. Use the [CLI reference](SECURITY_CLI_REFERENCE.md)
 for every parameter, default and example. Related workflows:
 
-- [Optional cve.now discovery](CVENOW_DISCOVERY.md): public advisory aggregation, no repository uploads.
+- [Advisory source selection](CVENOW_DISCOVERY.md): cve.now-first discovery with NVD/GitHub fallback, no repository uploads.
 - [JVM resolution](JVM_DEPENDENCY_RESOLUTION.md): effective Maven/Gradle versions.
 - [Repository lists](REPOSITORY_LIST_SCANNING.md) and [monitoring](PORTFOLIO_MONITORING.md): team portfolios and recurring scans.
 - [Python interpreter assessment](PYTHON_RUNTIME.md): explicit CPython probing and recurring host checks.

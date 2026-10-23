@@ -77,7 +77,7 @@ class SecurityTests(unittest.TestCase):
 
     def test_dispatch_does_not_hide_programming_errors(self):
         cases = [
-            ('security.cli.discover', ['find', '--vendor', 'oracle', '--product', 'jdk']),
+            ('security.cli.discover', ['find', '--source', 'nvd', '--vendor', 'oracle', '--product', 'jdk']),
             ('security.cli.assess_runtime', ['runtime', '--local-java', '--inventory-only']),
         ]
         for target, argv in cases:
@@ -89,7 +89,7 @@ class SecurityTests(unittest.TestCase):
 
     def test_dispatch_keeps_expected_failures_as_incomplete_reports(self):
         cases = [
-            ('security.cli.discover', ['find', '--vendor', 'oracle', '--product', 'jdk']),
+            ('security.cli.discover', ['find', '--source', 'nvd', '--vendor', 'oracle', '--product', 'jdk']),
             ('security.cli.assess_runtime', ['runtime', '--local-java', '--inventory-only']),
         ]
         for target, argv in cases:
@@ -606,7 +606,7 @@ raise SystemExit(EXIT_CODE)
             report["findings"] = [advisory()]
             report["coverage"] = [{"source": "NVD", "status": "ok", "receipts": [{"stale": True}]}]
         with patch("security.cli.discover", discovery):
-            code, data = self.cli("find", "--json")
+            code, data = self.cli("find", "--source", "nvd", "--json")
         self.assertEqual(code, 1)
         self.assertEqual(data["coverage"][0]["status"], "stale")
         self.assertEqual(data["summary"]["total"], 1)
@@ -616,7 +616,7 @@ raise SystemExit(EXIT_CODE)
             report["findings"] = [advisory()]
             raise SourceError("rate limited on page 2")
         with patch("security.cli.discover", discovery):
-            code, data = self.cli("find", "--json")
+            code, data = self.cli("find", "--source", "nvd", "--json")
         self.assertEqual(code, 1)
         self.assertEqual(data["summary"]["total"], 1)
         self.assertEqual(read_report(data["saved_report"])["status"], "incomplete")

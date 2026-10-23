@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import hashlib
 import os
 import re
@@ -259,6 +260,65 @@ def discover(args, client, report):
                                "truncated": truncated, "limit": args.limit,
                                "receipts": client.receipts[:]})
     return rows
+
+
+def discover_auto(args, client, report):
+    """Prefer public aggregation only where the original query can fall back.
+
+    Explicit sources and NVD-only criteria retain their original semantics.
+    A limited feed is a successful but incomplete response, not an outage.
+    """
+    if args.source != 'auto' or args.vendor or args.product or args.query:
+        return discover(args, client, report)
+    from .cvenow import discover as aggregated, ECOSYSTEMS as aggregator_ecosystems
+    if args.ecosystem and ecosystem(args.ecosystem) not in aggregator_ecosystems:
+        return discover(args, client, report)
+    from .store import new_report
+
+    selected = copy.copy(args)
+    selected.source = 'cve-now'
+    coverage_start = len(report['coverage'])
+    try:
+        aggregated(selected, client, report)
+    except (SourceError, OSError, ValueError) as exc:
+        report['coverage'].append({'source': 'cve.now', 'status': 'error', 'error': str(exc)})
+    preferred = report['coverage'][coverage_start:]
+    failed = any(c['status'] == 'error' for c in preferred)
+    stale = any(c.get('stale') or any(r.get('stale') for r in c.get('receipts', [])) for c in preferred)
+    report['target']['requested_source'] = 'auto'
+    report['source_attempts'] = [{'source': 'cve-now', 'selected': not (failed or stale),
+                                  'status': 'error' if failed else 'stale' if stale else preferred[0]['status'],
+                                  'coverage': copy.deepcopy(preferred)}]
+    if not (failed or stale):
+        return report['findings']
+
+    fallback = 'github' if args.ecosystem or args.package else 'nvd'
+    report['notes'].append('Automatic discovery: cve.now failed or returned stale data; using ' + fallback +
+                           '. Any partial aggregator findings are retained with source-attempt evidence; coverage describes the selected fallback source.')
+    for row in report['findings']:
+        row['discovery_attempt'] = {'source': 'cve-now', 'status': 'unverified_preferred_source'}
+    # Failure diagnostics remain in source_attempts rather than being represented
+    # as failed coverage of a source that was successfully replaced. Fallback
+    # errors/truncation/staleness still make the selected assessment incomplete.
+    del report['coverage'][coverage_start:]
+    selected.source = fallback
+    child = new_report('find', {})
+    receipt_start = len(client.receipts)
+    try:
+        discover(selected, client, child)
+    except (SourceError, OSError, ValueError) as exc:
+        child['coverage'].append({'source': fallback, 'status': 'error', 'error': str(exc)})
+    for item in child['coverage']:
+        # Legacy discover() records all client receipts. Do not attach the stale
+        # preferred attempt to fresh fallback coverage, or recovery stays stale.
+        item['receipts'] = client.receipts[receipt_start:]
+    report['findings'].extend(child['findings'])
+    report['coverage'].extend(child['coverage'])
+    report['notes'].extend(child['notes'])
+    report['limitations'] = list(dict.fromkeys(report['limitations'] + child['limitations']))
+    report['target'] = {**child['target'], 'requested_source': 'auto', 'preferred_source': 'cve-now'}
+    report['source_attempts'].append({'source': fallback, 'selected': True, 'status': child['coverage'][-1]['status'], 'coverage': copy.deepcopy(child['coverage'])})
+    return report['findings']
 
 
 def enrich_kev(client, report):

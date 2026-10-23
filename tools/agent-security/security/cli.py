@@ -18,7 +18,7 @@ from quantities import READ_PROBE_TIMEOUT_SECONDS
 from .cvenow import discover as discover_cvenow, validate_options as validate_cvenow
 from .model import ECOSYSTEMS, merge_findings, present, timestamp
 from .scan import dependabot, repo_name, run, scan
-from .sources import Client, SourceError, discover, enrich_kev
+from .sources import Client, SourceError, discover, discover_auto, enrich_kev
 from .store import finish, latest_report, list_reports, new_report, read_report
 from .targets import PROFILES, canonical_target, discover_targets
 from .repositories import load_repositories, scan_repositories
@@ -308,7 +308,7 @@ def doctor(args):
         scanner["v2"] = result.returncode == 0 and bool(re.search(r"(?:version[: ]+|v)2\.", scanner["version"], re.I))
     return {"schema_version": 1, "command": "doctor", "status": "ok" if scanner["v2"] else "incomplete",
             "scanner": scanner, "features": {"advisory_discovery": "available; network not probed",
-            "cvenow_discovery": "optional public-advisory API; explicit find --source cve-now; network not probed",
+            "cvenow_discovery": "preferred for compatible auto discovery; NVD/GitHub fallback; network not probed",
             "local_scan": "available" if scanner["v2"] else "requires OSV-Scanner v2",
             "runtime_inventory": "available; explicit CPE/Temurin evidence and vendor advisory assessment",
             "temurin_assessment": "available; official Adoptium VDR, network not probed",
@@ -438,6 +438,8 @@ def output(payload, json_mode):
         if component.get('deployment'):
             print('    Deployment: ' + json.dumps(component['deployment'], sort_keys=True))
     for row in payload["findings"]:
+        if row.get('discovery_attempt'):
+            print('  Advisory source: unverified partial cve.now result retained after failover')
         if row.get('runtime_match'):
             print('  Runtime applicability: ' + row['runtime_match']['component_id'] + ' — ' + row['runtime_match']['relation'])
         package = row.get("package") or {}
@@ -536,6 +538,8 @@ def main(argv=None):
                         discover_cvenow(args, client, report)
                     elif args.target:
                         discover_targets(args, client, report)
+                    elif args.source == 'auto':
+                        discover_auto(args, client, report)
                     else:
                         discover(args, client, report)
                 elif batch_target:

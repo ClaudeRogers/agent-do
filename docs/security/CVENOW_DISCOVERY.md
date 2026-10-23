@@ -1,16 +1,52 @@
-# Optional cve.now advisory discovery
+# Advisory discovery with cve.now and fallback
 
-`find --source cve-now` reads public advisory data from [cve.now](https://cve.now/).
-It complements NVD/GitHub discovery; `auto`, repository scanning and runtime/vendor
-assessment remain unchanged. No MCP installation, account or API key is needed.
+`find` defaults to `--source auto`, preferring public advisory data from
+[cve.now](https://cve.now/) for CVE lookup, global catalog browsing and supported
+ecosystem/package queries. Errors (including missing entries or schema failures)
+and stale responses fall back to NVD for CVE/global queries or GitHub for
+ecosystem/package queries. This preference is not a claim of independently
+measured uptime or greater completeness. No MCP installation, account or API key
+is needed. Repository and runtime/vendor assessment keep their existing sources.
 The plugin never uploads lockfiles, source, repository URLs or deployment inventory
 to this service. Only public IDs and feed selectors/cursors are sent via GET.
+
+## Source selection
+
+| Query | Automatic route |
+| --- | --- |
+| `find --cve CVE-…` or no criteria | cve.now → NVD on error/stale response |
+| Supported `--ecosystem` / `--package` | cve.now recent feed → GitHub on error/stale response |
+| NVD `--vendor`, `--product`, `--query` | NVD directly; no aggregator query |
+| Curated `--target` searches | Existing per-target NVD/GitHub queries |
+| Ecosystem unsupported by cve.now | GitHub directly |
+
+Pin `--source nvd`, `--source github` or `--source cve-now` to disable automatic
+fallback and query that provider only. Technology, curated-feed and status flags
+remain specific to explicit `--source cve-now`; silently substituting a broad
+keyword search would change their scope. A healthy **limited/truncated feed is
+not an outage**: it remains incomplete and does not trigger fallback. Pin NVD or
+GitHub for historical discovery rather than expecting capped recent feeds to cover
+an arbitrary date window.
+
+Reports save `source_attempts`, including failed/stale preferred coverage and
+receipts, plus the selected source in `target`. Recovery is noted in text output.
+A complete fallback assessment can complete the selected source scope even though
+the preferred service failed; its diagnostic remains visible. Partial aggregator
+findings are retained with `discovery_attempt.status: unverified_preferred_source`
+unless reconfirmed/merged from fallback evidence. Both-source failures, fallback
+truncation and stale fallback data stay incomplete. `--limit` applies per source
+attempt, so recovery can examine additional records. No completeness claim spans
+all upstream databases.
 
 ## Commands
 
 ```bash
-# Public CVE detail, with original description, aliases, affected ranges and sources.
+# Prefer cve.now, with NVD fallback if it fails or returns stale data.
+agent-do security find --cve CVE-2021-44228 --json
+
+# Pin a provider to disable automatic fallback.
 agent-do security find --source cve-now --cve CVE-2021-44228 --json
+agent-do security find --source nvd --cve CVE-2021-44228 --json
 
 # Attach the service's polling and historical-coverage metadata.
 agent-do security find --source cve-now --cve CVE-2021-44228 --source-status --json
@@ -75,8 +111,9 @@ performed by this command. Conflicting upstream values remain available in evide
 status response is not independent proof that every upstream advisory is fresh.
 HTTP reads reject redirects and upload/stack/MCP paths and never forward GitHub or
 NVD credentials. Cached/stale data and failures use the existing explicit coverage
-rules. If cve.now disappears, default discovery and existing repository/runtime
-scans continue to work; this optional source reports its own failure.
+rules. If cve.now disappears, compatible automatic discovery falls back to its
+primary source, and existing repository/runtime scans continue unchanged.
+Explicitly pinned cve.now queries report their own failure.
 
 ## Additional API opportunities
 

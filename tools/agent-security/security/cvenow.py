@@ -116,7 +116,7 @@ def discover(args, client, report):
     report['target'] = {'kind': 'advisory_query', 'source': 'cve-now', 'technology': args.technology,
                         'ecosystem': args.ecosystem, 'feed_filter': args.feed_filter, 'cve': args.cve}
     report['limitations'] += ['Published advisory discovery only; no repository/runtime exposure is established.',
-                              'cve.now is optional; default NVD/GitHub discovery and OSV/vendor scans are unchanged.',
+                              'cve.now is replaceable; explicit NVD/GitHub discovery and OSV/vendor scans remain available.',
                               'Only public advisory selectors/IDs are sent; no lockfiles or repository inventories are uploaded.',
                               'Date/package/score filters apply locally to examined records; capped results are not exhaustive.']
     feed = bool(args.technology or args.ecosystem or args.feed_filter)
